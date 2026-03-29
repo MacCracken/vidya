@@ -21,7 +21,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
 
     # Rust
     if [[ -f "$topic_dir/rust.rs" ]]; then
-        if rustc --edition 2024 "$topic_dir/rust.rs" -o /tmp/vidya_test 2>/tmp/vidya_err && /tmp/vidya_test 2>/tmp/vidya_err; then
+        if rustc --edition 2024 "$topic_dir/rust.rs" -o /tmp/vidya_test_$$ 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
             echo "  ✓ Rust"
             PASS=$((PASS + 1))
         else
@@ -29,7 +29,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
             ERRORS+=("$topic/rust.rs")
             FAIL=$((FAIL + 1))
         fi
-        rm -f /tmp/vidya_test /tmp/vidya_err
+        rm -f /tmp/vidya_test_$$ /tmp/vidya_err
     fi
 
     # Python
@@ -47,7 +47,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
 
     # C
     if [[ -f "$topic_dir/c.c" ]]; then
-        if gcc -std=c11 -Wall -Werror "$topic_dir/c.c" -o /tmp/vidya_test 2>/tmp/vidya_err && /tmp/vidya_test 2>/tmp/vidya_err; then
+        if gcc -std=c11 -Wall -Werror "$topic_dir/c.c" -o /tmp/vidya_test_$$ 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
             echo "  ✓ C"
             PASS=$((PASS + 1))
         else
@@ -55,7 +55,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
             ERRORS+=("$topic/c.c")
             FAIL=$((FAIL + 1))
         fi
-        rm -f /tmp/vidya_test /tmp/vidya_err
+        rm -f /tmp/vidya_test_$$ /tmp/vidya_err
     fi
 
     # Go

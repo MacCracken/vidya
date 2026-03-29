@@ -37,7 +37,7 @@ fn load_all_content() {
 
 #[test]
 fn load_concept_missing_toml() {
-    let topic_dir = Path::new("content/concurrency");
+    let topic_dir = Path::new("content/nonexistent_topic");
     let result = load_concept(topic_dir);
     assert!(result.is_err(), "should fail without concept.toml");
 }

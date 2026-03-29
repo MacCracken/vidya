@@ -29,18 +29,17 @@ pub struct ValidationResult {
 ///
 /// Returns the shell command template to compile/run a source file.
 /// `{file}` is replaced with the actual file path.
+/// `{out}` is replaced with a unique temporary output path.
 #[must_use]
 pub fn validation_command(lang: Language) -> Option<&'static str> {
     match lang {
-        Language::Rust => Some("rustc --edition 2024 {file} -o /tmp/vidya_test && /tmp/vidya_test"),
+        Language::Rust => Some("rustc --edition 2024 {file} -o {out} && {out}"),
         Language::Python => Some("python3 -c \"exec(open('{file}').read())\""),
-        Language::C => {
-            Some("gcc -std=c11 -Wall -Werror {file} -o /tmp/vidya_test && /tmp/vidya_test")
-        }
+        Language::C => Some("gcc -std=c11 -Wall -Werror {file} -o {out} && {out}"),
         Language::Go => Some("go run {file}"),
         Language::TypeScript => Some("bun run {file}"),
         Language::Shell => Some("bash -n {file}"),
-        Language::Zig => Some("zig build-exe {file} -o /tmp/vidya_test && /tmp/vidya_test"),
+        Language::Zig => Some("zig build-exe {file} -o {out} && {out}"),
     }
 }
 
@@ -62,13 +61,19 @@ pub fn run_validation(concept_id: &str, language: Language, file_path: &Path) ->
     };
 
     let file_str = file_path.display().to_string();
-    let cmd = cmd_template.replace("{file}", &file_str);
+    let out_path = format!("/tmp/vidya_test_{}_{}", concept_id, std::process::id());
+    let cmd = cmd_template
+        .replace("{file}", &file_str)
+        .replace("{out}", &out_path);
 
     let result = std::process::Command::new("sh")
         .args(["-c", &cmd])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output();
+
+    // Clean up compiled binary
+    let _ = std::fs::remove_file(&out_path);
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
