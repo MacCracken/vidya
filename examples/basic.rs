@@ -76,7 +76,9 @@ fn main() {
     }
 
     // Gotchas
-    let concept = registry.get("string_basics").unwrap();
+    let concept = registry
+        .get("string_basics")
+        .expect("string_basics concept should be registered");
     println!("\nGotchas:");
     for g in &concept.gotchas {
         println!("  ⚠ {}: {}", g.title, g.explanation);

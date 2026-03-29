@@ -19,8 +19,11 @@ pub struct Comparison {
 /// One language's implementation in a comparison.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComparedExample {
+    /// The programming language of this implementation.
     pub language: Language,
+    /// The source code of the example.
     pub code: String,
+    /// Human-readable explanation of the approach.
     pub explanation: String,
 }
 

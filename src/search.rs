@@ -95,6 +95,7 @@ fn score_concept(concept: &Concept, query: &SearchQuery) -> Option<SearchResult>
     if let Some(text) = &query.text {
         let lower = text.to_lowercase();
         let tokens: Vec<&str> = lower.split_whitespace().collect();
+        let score_before_text = score;
 
         for token in &tokens {
             if concept.id.to_lowercase().contains(token) {
@@ -113,8 +114,8 @@ fn score_concept(concept: &Concept, query: &SearchQuery) -> Option<SearchResult>
             }
         }
 
-        // No match at all — filter out
-        if score == 0.0 {
+        // Text was provided but didn't match anything — filter out
+        if score == score_before_text {
             return None;
         }
     }
@@ -208,6 +209,37 @@ mod tests {
         let reg = make_registry();
         let results = search(&reg, &SearchQuery::text("quantum"));
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_text_with_tags_no_text_match() {
+        let reg = make_registry();
+        // "text" tag matches "strings", but "quantum" text matches nothing
+        let q = SearchQuery {
+            text: Some("quantum".into()),
+            language: None,
+            tags: vec!["text".into()],
+            limit: None,
+        };
+        let results = search(&reg, &q);
+        assert!(
+            results.is_empty(),
+            "should not match when text doesn't match"
+        );
+    }
+
+    #[test]
+    fn search_text_with_tags_both_match() {
+        let reg = make_registry();
+        let q = SearchQuery {
+            text: Some("string".into()),
+            language: None,
+            tags: vec!["text".into()],
+            limit: None,
+        };
+        let results = search(&reg, &q);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "strings");
     }
 
     #[test]
