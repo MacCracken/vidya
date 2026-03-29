@@ -1,19 +1,28 @@
 use criterion::{Criterion, criterion_group, criterion_main};
+use std::path::Path;
+use vidya::compare::compare;
+use vidya::loader::load_all;
 use vidya::search::search;
-use vidya::{Registry, SearchQuery};
+use vidya::{Language, Registry, SearchQuery};
 
-fn bench_search_text(c: &mut Criterion) {
-    let reg = Registry::new();
-    let query = SearchQuery::text("string");
-    c.bench_function("search_text_empty_registry", |b| {
+/// Load the real content directory for realistic benchmarks.
+fn loaded_registry() -> Registry {
+    load_all(Path::new("content")).expect("content directory should load")
+}
+
+// ── Registry operations ────────────────────────────────────────────
+
+fn bench_registry_get_hit(c: &mut Criterion) {
+    let reg = loaded_registry();
+    c.bench_function("registry_get_hit", |b| {
         b.iter(|| {
-            std::hint::black_box(search(&reg, &query));
+            std::hint::black_box(reg.get("strings"));
         });
     });
 }
 
-fn bench_registry_lookup(c: &mut Criterion) {
-    let reg = Registry::new();
+fn bench_registry_get_miss(c: &mut Criterion) {
+    let reg = loaded_registry();
     c.bench_function("registry_get_miss", |b| {
         b.iter(|| {
             std::hint::black_box(reg.get("nonexistent"));
@@ -21,5 +30,135 @@ fn bench_registry_lookup(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_search_text, bench_registry_lookup);
+fn bench_registry_list(c: &mut Criterion) {
+    let reg = loaded_registry();
+    c.bench_function("registry_list", |b| {
+        b.iter(|| {
+            std::hint::black_box(reg.list());
+        });
+    });
+}
+
+fn bench_registry_by_topic(c: &mut Criterion) {
+    let reg = loaded_registry();
+    c.bench_function("registry_by_topic", |b| {
+        b.iter(|| {
+            std::hint::black_box(reg.by_topic(&vidya::Topic::DataTypes));
+        });
+    });
+}
+
+// ── Search operations ──────────────────────────────────────────────
+
+fn bench_search_text_hit(c: &mut Criterion) {
+    let reg = loaded_registry();
+    let query = SearchQuery::text("string");
+    c.bench_function("search_text_hit", |b| {
+        b.iter(|| {
+            std::hint::black_box(search(&reg, &query));
+        });
+    });
+}
+
+fn bench_search_text_miss(c: &mut Criterion) {
+    let reg = loaded_registry();
+    let query = SearchQuery::text("quantum_entanglement");
+    c.bench_function("search_text_miss", |b| {
+        b.iter(|| {
+            std::hint::black_box(search(&reg, &query));
+        });
+    });
+}
+
+fn bench_search_tag(c: &mut Criterion) {
+    let reg = loaded_registry();
+    let query = SearchQuery::tagged(vec!["concurrency".into()]);
+    c.bench_function("search_tag", |b| {
+        b.iter(|| {
+            std::hint::black_box(search(&reg, &query));
+        });
+    });
+}
+
+fn bench_search_text_with_language(c: &mut Criterion) {
+    let reg = loaded_registry();
+    let mut query = SearchQuery::text("error");
+    query.language = Some(Language::Rust);
+    c.bench_function("search_text_with_language_filter", |b| {
+        b.iter(|| {
+            std::hint::black_box(search(&reg, &query));
+        });
+    });
+}
+
+fn bench_search_broad(c: &mut Criterion) {
+    let reg = loaded_registry();
+    // Empty query returns everything
+    let query = SearchQuery {
+        text: None,
+        language: None,
+        tags: vec![],
+        limit: None,
+    };
+    c.bench_function("search_broad_all", |b| {
+        b.iter(|| {
+            std::hint::black_box(search(&reg, &query));
+        });
+    });
+}
+
+// ── Compare operations ─────────────────────────────────────────────
+
+fn bench_compare_two_languages(c: &mut Criterion) {
+    let reg = loaded_registry();
+    c.bench_function("compare_two_languages", |b| {
+        b.iter(|| {
+            let _ = std::hint::black_box(compare(
+                &reg,
+                "strings",
+                &[Language::Rust, Language::Python],
+            ));
+        });
+    });
+}
+
+// ── Loader operations ──────────────────────────────────────────────
+
+fn bench_load_all(c: &mut Criterion) {
+    c.bench_function("load_all_content", |b| {
+        b.iter(|| {
+            std::hint::black_box(load_all(Path::new("content")).unwrap());
+        });
+    });
+}
+
+fn bench_load_single_concept(c: &mut Criterion) {
+    c.bench_function("load_single_concept", |b| {
+        b.iter(|| {
+            std::hint::black_box(
+                vidya::loader::load_concept(Path::new("content/strings")).unwrap(),
+            );
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    // Registry
+    bench_registry_get_hit,
+    bench_registry_get_miss,
+    bench_registry_list,
+    bench_registry_by_topic,
+    // Search
+    bench_search_text_hit,
+    bench_search_text_miss,
+    bench_search_tag,
+    bench_search_text_with_language,
+    bench_search_broad,
+    // Compare
+    bench_compare_two_languages,
+    // Loader
+    bench_load_all,
+    bench_load_single_concept,
+);
 criterion_main!(benches);

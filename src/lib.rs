@@ -56,6 +56,9 @@ pub mod validate;
 #[cfg(feature = "logging")]
 pub mod logging;
 
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
 // ── Core types ─────────────────────────────────────────────────────────────
 pub use concept::{BestPractice, Concept, Example, Gotcha, PerformanceNote, Topic};
 pub use error::{Result, VidyaError};

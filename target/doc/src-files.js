@@ -1,2 +1,2 @@
-createSrcSidebar('[["vidya",["",[],["compare.rs","concept.rs","error.rs","language.rs","lib.rs","loader.rs","logging.rs","registry.rs","search.rs","validate.rs"]]],["vidya",["",[],["compare.rs","concept.rs","error.rs","language.rs","lib.rs","logging.rs","registry.rs","search.rs","validate.rs"]]]]');
-//{"start":19,"fragment_lengths":[144,133]}
+createSrcSidebar('[["vidya",["",[],["compare.rs","concept.rs","error.rs","language.rs","lib.rs","loader.rs","logging.rs","mcp.rs","registry.rs","search.rs","validate.rs"]]],["vidya",["",[],["compare.rs","concept.rs","error.rs","language.rs","lib.rs","loader.rs","logging.rs","registry.rs","search.rs","validate.rs"]]],["vidya",["",[],["compare.rs","concept.rs","error.rs","language.rs","lib.rs","logging.rs","registry.rs","search.rs","validate.rs"]]]]');
+//{"start":19,"fragment_lengths":[153,145,133]}

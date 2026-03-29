@@ -40,6 +40,27 @@ impl SearchQuery {
             limit: None,
         }
     }
+
+    /// Filter results to concepts that have an example in this language.
+    #[must_use]
+    pub fn with_language(mut self, lang: Language) -> Self {
+        self.language = Some(lang);
+        self
+    }
+
+    /// Limit the number of results returned.
+    #[must_use]
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Add required tags (all must match).
+    #[must_use]
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
 }
 
 /// A search result with relevance score.
@@ -97,19 +118,37 @@ fn score_concept(concept: &Concept, query: &SearchQuery) -> Option<SearchResult>
         let tokens: Vec<&str> = lower.split_whitespace().collect();
         let score_before_text = score;
 
+        let id_lower = concept.id.to_lowercase();
+        let title_lower = concept.title.to_lowercase();
+        let desc_lower = concept.description.to_lowercase();
+
         for token in &tokens {
-            if concept.id.to_lowercase().contains(token) {
-                score += 3.0; // ID match is strongest
+            // Exact ID match is the strongest signal
+            if id_lower == *token {
+                score += 5.0;
+            } else if id_lower.contains(token) {
+                score += 3.0;
             }
-            if concept.title.to_lowercase().contains(token) {
+
+            // Title: exact match bonus, then substring
+            if title_lower == *token {
+                score += 4.0;
+            } else if title_lower.contains(token) {
                 score += 2.0;
             }
-            if concept.description.to_lowercase().contains(token) {
+
+            // Description match
+            if desc_lower.contains(token) {
                 score += 1.0;
             }
+
+            // Tag match — exact tag match is stronger than substring
             for tag in &concept.tags {
-                if tag.to_lowercase().contains(token) {
-                    score += 1.5;
+                let tag_lower = tag.to_lowercase();
+                if tag_lower == *token {
+                    score += 2.0;
+                } else if tag_lower.contains(token) {
+                    score += 1.0;
                 }
             }
         }
@@ -250,5 +289,50 @@ mod tests {
         q.limit = Some(1);
         let results = search(&reg, &q);
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_exact_id_ranks_highest() {
+        let reg = make_registry();
+        // "strings" is an exact ID match — should score higher than substring
+        let results = search(&reg, &SearchQuery::text("strings"));
+        assert_eq!(results[0].id, "strings");
+        assert!(results[0].score >= 5.0); // exact ID match bonus
+    }
+
+    #[test]
+    fn builder_with_language() {
+        let reg = make_registry();
+        let q = SearchQuery::text("string").with_language(Language::Rust);
+        let results = search(&reg, &q);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "strings");
+    }
+
+    #[test]
+    fn builder_with_limit() {
+        let reg = make_registry();
+        let _q = SearchQuery::text("").with_limit(1);
+        // Empty text with limit won't match anything (text is empty string, no tokens)
+        // Use a broad query instead
+        let q = SearchQuery {
+            text: None,
+            language: None,
+            tags: vec![],
+            limit: Some(1),
+        };
+        let results = search(&reg, &q);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn builder_chaining() {
+        let reg = make_registry();
+        let q = SearchQuery::text("string")
+            .with_language(Language::Rust)
+            .with_limit(5);
+        let results = search(&reg, &q);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "strings");
     }
 }
