@@ -23,6 +23,7 @@
 //! - [`concept`] — Core types: `Concept`, `Topic`, `Example`, `BestPractice`
 //! - [`language`] — Supported languages and their metadata
 //! - [`registry`] — In-memory concept registry, loaded from content directory
+//! - [`loader`] — Content directory loader (TOML → Registry)
 //! - [`search`] — Full-text and tag-based search across concepts
 //! - [`compare`] — Side-by-side cross-language comparison
 //! - [`validate`] — Compile/run verification of examples
@@ -47,6 +48,7 @@ pub mod compare;
 pub mod concept;
 pub mod error;
 pub mod language;
+pub mod loader;
 pub mod registry;
 pub mod search;
 pub mod validate;

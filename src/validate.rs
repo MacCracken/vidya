@@ -5,7 +5,10 @@
 //! content directory is correct.
 
 use crate::language::Language;
+use crate::registry::Registry;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::time::Instant;
 
 /// Result of validating a single example.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +42,101 @@ pub fn validation_command(lang: Language) -> Option<&'static str> {
         Language::Shell => Some("bash -n {file}"),
         Language::Zig => Some("zig build-exe {file} -o /tmp/vidya_test && /tmp/vidya_test"),
     }
+}
+
+/// Run validation for a single source file.
+///
+/// Executes the language-appropriate compile/run command and captures
+/// the result. Returns a [`ValidationResult`] indicating pass/fail.
+pub fn run_validation(concept_id: &str, language: Language, file_path: &Path) -> ValidationResult {
+    let start = Instant::now();
+
+    let Some(cmd_template) = validation_command(language) else {
+        return ValidationResult {
+            concept_id: concept_id.to_string(),
+            language,
+            passed: false,
+            error: Some("no validation command for this language".into()),
+            duration_ms: 0,
+        };
+    };
+
+    let file_str = file_path.display().to_string();
+    let cmd = cmd_template.replace("{file}", &file_str);
+
+    let result = std::process::Command::new("sh")
+        .args(["-c", &cmd])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(output) => {
+            if output.status.success() {
+                ValidationResult {
+                    concept_id: concept_id.to_string(),
+                    language,
+                    passed: true,
+                    error: None,
+                    duration_ms,
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let msg = if stderr.is_empty() {
+                    stdout.into_owned()
+                } else {
+                    stderr.into_owned()
+                };
+                ValidationResult {
+                    concept_id: concept_id.to_string(),
+                    language,
+                    passed: false,
+                    error: Some(msg),
+                    duration_ms,
+                }
+            }
+        }
+        Err(e) => ValidationResult {
+            concept_id: concept_id.to_string(),
+            language,
+            passed: false,
+            error: Some(format!("failed to execute command: {e}")),
+            duration_ms,
+        },
+    }
+}
+
+/// Validate all examples in a registry against their source files.
+///
+/// `content_dir` is the root content directory (e.g. `content/`).
+/// Each concept's examples are validated using their `source_path` field.
+pub fn validate_all(registry: &Registry, content_dir: &Path) -> Vec<ValidationResult> {
+    let mut results = Vec::new();
+
+    for concept in registry.list() {
+        for (lang, example) in &concept.examples {
+            let Some(ref source_path) = example.source_path else {
+                continue;
+            };
+            let file_path = content_dir.join(source_path);
+            if !file_path.exists() {
+                results.push(ValidationResult {
+                    concept_id: concept.id.clone(),
+                    language: *lang,
+                    passed: false,
+                    error: Some(format!("source file not found: {}", file_path.display())),
+                    duration_ms: 0,
+                });
+                continue;
+            }
+            results.push(run_validation(&concept.id, *lang, &file_path));
+        }
+    }
+
+    results
 }
 
 #[cfg(test)]

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["compare","concept","error","language","logging","registry","search","validate"]};
+window.SIDEBAR_ITEMS = {"mod":["compare","concept","error","language","loader","logging","registry","search","validate"]};
