@@ -10,7 +10,7 @@ use std::collections::HashMap;
 /// The concept registry — holds all programming concepts in memory.
 ///
 /// Build programmatically with [`Registry::register`], or load from
-/// a content directory (future: content loader module).
+/// a content directory with [`crate::loader::load_all`].
 pub struct Registry {
     concepts: HashMap<String, Concept>,
 }
