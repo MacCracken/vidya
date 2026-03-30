@@ -37,7 +37,7 @@ pub fn validation_command(lang: Language) -> Option<&'static str> {
         Language::Python => Some("python3 -c \"exec(open('{file}').read())\""),
         Language::C => Some("gcc -std=c11 -Wall -Werror {file} -o {out} && {out}"),
         Language::Go => Some("go run {file}"),
-        Language::TypeScript => Some("bun run {file}"),
+        Language::TypeScript => Some("npx tsx {file}"),
         Language::Shell => Some("bash -n {file}"),
         Language::Zig => Some("zig build-exe {file} -o {out} && {out}"),
     }

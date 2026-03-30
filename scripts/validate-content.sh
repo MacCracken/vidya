@@ -73,7 +73,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
 
     # TypeScript
     if [[ -f "$topic_dir/typescript.ts" ]]; then
-        if bun run "$topic_dir/typescript.ts" 2>/tmp/vidya_err; then
+        if npx tsx "$topic_dir/typescript.ts" 2>/tmp/vidya_err; then
             echo "  ✓ TypeScript"
             PASS=$((PASS + 1))
         else
