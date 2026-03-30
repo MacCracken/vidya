@@ -39,7 +39,7 @@ pub fn validation_command(lang: Language) -> Option<&'static str> {
         Language::Go => Some("go run {file}"),
         Language::TypeScript => Some("npx tsx {file}"),
         Language::Shell => Some("bash -n {file}"),
-        Language::Zig => Some("zig build-exe {file} -o {out} && {out}"),
+        Language::Zig => Some("zig build-exe {file} -femit-bin={out} && {out}"),
         Language::AsmX86_64 => {
             Some("as --64 {file} -o {out}.o && ld {out}.o -o {out} && {out} ; rm -f {out}.o")
         }

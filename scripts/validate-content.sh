@@ -97,6 +97,19 @@ for topic_dir in "$CONTENT_DIR"/*/; do
         rm -f /tmp/vidya_err
     fi
 
+    # Zig
+    if [[ -f "$topic_dir/zig.zig" ]]; then
+        if zig build-exe "$topic_dir/zig.zig" -femit-bin=/tmp/vidya_test_$$ 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
+            echo "  ✓ Zig"
+            PASS=$((PASS + 1))
+        else
+            echo "  ✗ Zig: $(cat /tmp/vidya_err)"
+            ERRORS+=("$topic/zig.zig")
+            FAIL=$((FAIL + 1))
+        fi
+        rm -f /tmp/vidya_test_$$ /tmp/vidya_err
+    fi
+
     # x86_64 Assembly
     if [[ -f "$topic_dir/asm_x86_64.s" ]]; then
         if as --64 "$topic_dir/asm_x86_64.s" -o /tmp/vidya_test_$$.o 2>/tmp/vidya_err && ld /tmp/vidya_test_$$.o -o /tmp/vidya_test_$$ 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
