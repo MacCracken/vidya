@@ -68,7 +68,7 @@ impl Language {
 
     /// Filename stem for content files (e.g. "rust", "python", "asm_x86_64").
     ///
-    /// Combined with [`extension()`] to form the full filename.
+    /// Combined with [`Self::extension()`] to form the full filename.
     #[must_use]
     pub const fn file_stem(&self) -> &'static str {
         match self {
