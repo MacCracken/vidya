@@ -62,7 +62,7 @@ fn bench_search_text_hit(c: &mut Criterion) {
 
 fn bench_search_text_miss(c: &mut Criterion) {
     let reg = loaded_registry();
-    let query = SearchQuery::text("quantum_entanglement");
+    let query = SearchQuery::text("nonexistent_xyzzy_term");
     c.bench_function("search_text_miss", |b| {
         b.iter(|| {
             std::hint::black_box(search(&reg, &query));
@@ -107,6 +107,26 @@ fn bench_search_broad(c: &mut Criterion) {
     });
 }
 
+fn bench_search_quantum(c: &mut Criterion) {
+    let reg = loaded_registry();
+    let query = SearchQuery::text("quantum");
+    c.bench_function("search_quantum", |b| {
+        b.iter(|| {
+            std::hint::black_box(search(&reg, &query));
+        });
+    });
+}
+
+fn bench_search_multi_tag(c: &mut Criterion) {
+    let reg = loaded_registry();
+    let query = SearchQuery::tagged(vec!["security".into(), "validation".into()]);
+    c.bench_function("search_multi_tag", |b| {
+        b.iter(|| {
+            std::hint::black_box(search(&reg, &query));
+        });
+    });
+}
+
 // ── Compare operations ─────────────────────────────────────────────
 
 fn bench_compare_two_languages(c: &mut Criterion) {
@@ -118,6 +138,27 @@ fn bench_compare_two_languages(c: &mut Criterion) {
                 "strings",
                 &[Language::Rust, Language::Python],
             ));
+        });
+    });
+}
+
+fn bench_compare_all_languages(c: &mut Criterion) {
+    let reg = loaded_registry();
+    let all_langs = [
+        Language::Rust,
+        Language::Python,
+        Language::C,
+        Language::Go,
+        Language::TypeScript,
+        Language::Shell,
+        Language::Zig,
+        Language::AsmX86_64,
+        Language::AsmAarch64,
+        Language::OpenQASM,
+    ];
+    c.bench_function("compare_all_languages", |b| {
+        b.iter(|| {
+            let _ = std::hint::black_box(compare(&reg, "strings", &all_langs));
         });
     });
 }
@@ -155,8 +196,11 @@ criterion_group!(
     bench_search_tag,
     bench_search_text_with_language,
     bench_search_broad,
+    bench_search_quantum,
+    bench_search_multi_tag,
     // Compare
     bench_compare_two_languages,
+    bench_compare_all_languages,
     // Loader
     bench_load_all,
     bench_load_single_concept,
