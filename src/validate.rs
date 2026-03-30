@@ -35,10 +35,10 @@ pub fn validation_command(lang: Language) -> Option<&'static str> {
     match lang {
         Language::Rust => Some("rustc --edition 2024 {file} -o {out} && {out}"),
         Language::Python => Some("python3 -c \"exec(open('{file}').read())\""),
-        Language::C => Some("gcc -std=c11 -Wall -Werror {file} -o {out} && {out}"),
+        Language::C => Some("gcc -std=c17 -Wall -Werror {file} -o {out} -lm -lpthread && {out}"),
         Language::Go => Some("go run {file}"),
         Language::TypeScript => Some("npx tsx {file}"),
-        Language::Shell => Some("bash -n {file}"),
+        Language::Shell => Some("bash {file}"),
         Language::Zig => Some("zig build-exe {file} -femit-bin={out} && {out}"),
         Language::AsmX86_64 => {
             Some("as --64 {file} -o {out}.o && ld {out}.o -o {out} && {out} ; rm -f {out}.o")

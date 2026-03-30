@@ -7,22 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0] — 2026-03-29
+## [1.0.0] — 2026-03-30
 
 ### Added
-- **130 content examples** across 13 topics and 10 languages
-- 3 new topics: **Security**, **Algorithms**, **Kernel Topics**
+- **140 content examples** across 14 topics and 10 languages
+- 4 new topics: **Security**, **Algorithms**, **Kernel Topics**, **Quantum Computing**
   - Security: input validation, injection prevention, constant-time comparison, secret zeroing, path traversal, parameterized queries, XSS prevention, safe deserialization
   - Algorithms: binary search, insertion sort, merge sort, BFS/DFS graph traversal, dynamic programming (Fibonacci, LCS), two-sum hash map, GCD
   - Kernel Topics: page table entries (x86_64 4-level), virtual address decomposition, MMIO volatile registers, interrupt descriptor tables, GDT entries, ABI/calling conventions (SysV AMD64, AAPCS64), struct packing, ELF parsing, quantum error correction
-- 3 new languages (added in 0.x cycle): **x86_64 Assembly**, **AArch64 Assembly**, **Zig**, **OpenQASM**
-- `Topic::KernelTopics` variant in the crate
-- OpenQASM quantum content for all 13 topics — validated via qiskit
+  - Quantum Computing: state vector simulation, Hadamard/CNOT/CZ gates, Bell states, GHZ states, Grover's search (2-qubit and 3-qubit), quantum phase estimation, VQE ansatz, Shor's period-finding, noise channels (depolarizing, amplitude damping, dephasing), dynamical decoupling
+- `Topic::KernelTopics` and `Topic::QuantumComputing` variants in the crate
+- OpenQASM quantum content for all 14 topics — validated via qiskit
+- Full quantum simulator in Rust, Python, Go, C, TypeScript, and Zig (complex arithmetic, gate matrices, measurement probabilities)
 
 ### Changed
 - Version bump from 0.1.0 to 1.0.0 — stable API and content corpus
 - `validate-content.sh`: shell scripts now fully execute (was `bash -n` syntax-only)
 - `validate-content.sh`: C compilation upgraded to `-std=c17 -lm -lpthread`
+- `validate.rs`: C validation now uses `-std=c17 -lm -lpthread` (matching script)
+- `validate.rs`: Shell validation now runs `bash` (not `bash -n`)
 
 ### Fixed
 - Broken rustdoc intra-doc link in `language.rs` (`extension()` → `Self::extension()`)

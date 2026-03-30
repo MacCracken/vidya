@@ -36,6 +36,8 @@ pub enum Topic {
     Security,
     /// Kernel and systems programming (interrupts, page tables, bootloaders, MMIO, ABIs)
     KernelTopics,
+    /// Quantum computing algorithms and concepts (Grover's, Shor's, VQE, noise models)
+    QuantumComputing,
 }
 
 impl std::fmt::Display for Topic {
@@ -53,6 +55,7 @@ impl std::fmt::Display for Topic {
             Self::Performance => f.write_str("Performance"),
             Self::Security => f.write_str("Security"),
             Self::KernelTopics => f.write_str("Kernel Topics"),
+            Self::QuantumComputing => f.write_str("Quantum Computing"),
         }
     }
 }
