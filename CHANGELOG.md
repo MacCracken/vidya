@@ -7,14 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- **Design Patterns** topic: builder, strategy, observer, state machine, RAII/cleanup, dependency injection, factory — all 10 languages
-- Total: **150 content examples** across 15 topics and 10 languages
-- 4 new benchmarks: `search_quantum`, `search_multi_tag`, `compare_all_languages` + fixed `search_text_miss` to use truly nonexistent term
-
 ## [1.0.0] — 2026-03-30
 
 ### Added
+- **Design Patterns** topic: builder, strategy, observer, state machine, RAII/cleanup, dependency injection, factory — all 10 languages
+- Total: **150 content examples** across 15 topics and 10 languages
+- Native OpenQASM 2.0 validation via `openqasm` crate (feature: `openqasm`) — no Python/qiskit dependency needed
+- `openqasm` added to `full` feature set
+- `test_qasm` example for standalone QASM validation
+- 4 new benchmarks: `search_quantum`, `search_multi_tag`, `compare_all_languages` + fixed `search_text_miss`
+
+### Changed
+- Updated `basic.rs` example to demonstrate full 15-topic corpus (load, search, compare, browse)
+- Updated README.md with 15 topics, 10 languages, feature flags, validation instructions
+- Updated architecture docs and content format spec for all languages
+- `validate.rs`: OpenQASM uses native Rust parser when `openqasm` feature is enabled, falls back to Python/qiskit otherwise
 - **140 content examples** across 14 topics and 10 languages
 - 4 new topics: **Security**, **Algorithms**, **Kernel Topics**, **Quantum Computing**
   - Security: input validation, injection prevention, constant-time comparison, secret zeroing, path traversal, parameterized queries, XSS prevention, safe deserialization

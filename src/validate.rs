@@ -46,9 +46,60 @@ pub fn validation_command(lang: Language) -> Option<&'static str> {
         Language::AsmAarch64 => Some(
             "aarch64-linux-gnu-as {file} -o {out}.o && aarch64-linux-gnu-ld {out}.o -o {out} && qemu-aarch64 {out} ; rm -f {out}.o",
         ),
+        #[cfg(feature = "openqasm")]
+        Language::OpenQASM => None, // validated natively via validate_qasm_native()
+        #[cfg(not(feature = "openqasm"))]
         Language::OpenQASM => Some(
             "QASM_PY=$(if [ -f .venv/bin/python3 ]; then echo .venv/bin/python3; else echo python3; fi) && $QASM_PY -c \"from qiskit import qasm2; import os; qc = qasm2.load('{file}', include_path=[os.path.dirname('{file}') + '/..']); print(f'valid: {{qc.num_qubits}}q depth={{qc.depth()}}')\"",
         ),
+    }
+}
+
+/// Validate an OpenQASM file using the native Rust parser.
+///
+/// Parses the file and checks for syntax/semantic errors without
+/// requiring Python or qiskit.
+#[cfg(feature = "openqasm")]
+fn validate_qasm_native(concept_id: &str, file_path: &Path) -> ValidationResult {
+    use openqasm::{GenericError, Parser, SourceCache};
+
+    let start = Instant::now();
+    let source = match std::fs::read_to_string(file_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return ValidationResult {
+                concept_id: concept_id.to_string(),
+                language: Language::OpenQASM,
+                passed: false,
+                error: Some(format!("failed to read file: {e}")),
+                duration_ms: 0,
+            };
+        }
+    };
+
+    // Use parent of parent as include path (content/)
+    let include_dir = file_path.parent().and_then(|p| p.parent());
+
+    let mut cache = SourceCache::new();
+    let mut parser = Parser::new(&mut cache);
+    parser.parse_source(source, include_dir);
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    match parser.done().to_errors() {
+        Ok(_prog) => ValidationResult {
+            concept_id: concept_id.to_string(),
+            language: Language::OpenQASM,
+            passed: true,
+            error: None,
+            duration_ms,
+        },
+        Err(errors) => ValidationResult {
+            concept_id: concept_id.to_string(),
+            language: Language::OpenQASM,
+            passed: false,
+            error: Some(format!("{} parse errors", errors.errors.len())),
+            duration_ms,
+        },
     }
 }
 
@@ -56,8 +107,16 @@ pub fn validation_command(lang: Language) -> Option<&'static str> {
 ///
 /// Executes the language-appropriate compile/run command and captures
 /// the result. Returns a [`ValidationResult`] indicating pass/fail.
+/// OpenQASM files are validated natively when the `openqasm` feature
+/// is enabled.
 pub fn run_validation(concept_id: &str, language: Language, file_path: &Path) -> ValidationResult {
     let start = Instant::now();
+
+    // Native QASM validation when feature is enabled
+    #[cfg(feature = "openqasm")]
+    if language == Language::OpenQASM {
+        return validate_qasm_native(concept_id, file_path);
+    }
 
     let Some(cmd_template) = validation_command(language) else {
         return ValidationResult {
@@ -160,6 +219,16 @@ mod tests {
     #[test]
     fn validation_commands_exist() {
         for lang in Language::all() {
+            // With openqasm feature: native validation, no shell command
+            // Without: falls back to Python/qiskit shell command
+            #[cfg(feature = "openqasm")]
+            if *lang == Language::OpenQASM {
+                assert!(
+                    validation_command(*lang).is_none(),
+                    "OpenQASM should use native validation, not a shell command"
+                );
+                continue;
+            }
             assert!(
                 validation_command(*lang).is_some(),
                 "missing validation command for {lang}"

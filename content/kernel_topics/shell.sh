@@ -124,7 +124,7 @@ assert_eq "$(irq_dispatch 0)" "handled: #DE" "dispatch #DE"
 assert_eq "$(irq_dispatch 14)" "handled: #PF" "dispatch #PF"
 assert_eq "$(irq_dispatch 32)" "handled: timer" "dispatch timer"
 
-if irq_dispatch 255 2>/dev/null; then
+if irq_dispatch 255 >/dev/null 2>&1; then
     echo "FAIL: vector 255 should be unhandled" >&2
     exit 1
 fi

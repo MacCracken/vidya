@@ -6,15 +6,17 @@ Each topic lives in its own directory under `content/`:
 
 ```
 content/{topic}/
-├── concept.toml     # Required: structured metadata (parsed by loader)
-├── concept.md       # Optional: human-readable documentation
-├── rust.rs          # Language implementation (one per language)
-├── python.py
-├── c.c
-├── go.go
-├── typescript.ts
-├── shell.sh
-└── zig.zig
+├── concept.toml       # Required: structured metadata (parsed by loader)
+├── rust.rs            # Rust implementation
+├── python.py          # Python implementation
+├── c.c                # C implementation
+├── go.go              # Go implementation
+├── typescript.ts      # TypeScript implementation
+├── shell.sh           # Shell (Bash) implementation
+├── zig.zig            # Zig implementation
+├── asm_x86_64.s       # x86_64 Assembly implementation
+├── asm_aarch64.s      # AArch64 Assembly implementation
+└── openqasm.qasm      # OpenQASM 2.0 quantum circuit
 ```
 
 ## concept.toml
@@ -41,7 +43,7 @@ Machine-readable metadata. This is the source of truth for the `Concept` struct.
 
 ### Topic Values
 
-`DataTypes`, `Concurrency`, `ErrorHandling`, `MemoryManagement`, `InputOutput`, `Testing`, `Algorithms`, `Patterns`, `TypeSystems`, `Performance`, `Security`
+`DataTypes`, `Concurrency`, `ErrorHandling`, `MemoryManagement`, `InputOutput`, `Testing`, `Algorithms`, `Patterns`, `TypeSystems`, `Performance`, `Security`, `KernelTopics`, `QuantumComputing`
 
 ### Entry Formats
 
@@ -74,13 +76,29 @@ language = "Rust"  # Optional: omit for universal notes
 
 ## Language Files
 
-Named `{language}.{extension}` (e.g. `rust.rs`, `python.py`).
+Named by language (`rust.rs`, `python.py`, `asm_x86_64.s`, `openqasm.qasm`, etc.).
 
 Requirements:
 - Must compile/run successfully with the validation command
 - Leading comments are extracted as the `explanation` field
 - Should demonstrate all concepts described in `concept.toml`
-- Must be self-contained (no external dependencies beyond std lib)
+- Must be self-contained (no external dependencies beyond stdlib)
+- Must end by printing "All {topic} examples passed." (except OpenQASM)
+
+### Language-Specific Notes
+
+| Language | Compiler/Runner | Flags |
+|----------|----------------|-------|
+| Rust | `rustc --edition 2024` | |
+| Python | `python3` | |
+| C | `gcc -std=c17 -Wall -Werror` | `-lm -lpthread` |
+| Go | `go run` | |
+| TypeScript | `npx tsx` | |
+| Shell | `bash` | `set -euo pipefail` |
+| Zig | `zig build-exe` or `zig run` | Zig 0.15 |
+| x86_64 ASM | `as --64` + `ld` | Intel syntax (`.intel_syntax noprefix`) |
+| AArch64 ASM | `aarch64-linux-gnu-as` + `ld` | Cross-compiled, run via `qemu-aarch64` |
+| OpenQASM | Native Rust parser or `qiskit` | `OPENQASM 2.0; include "qelib1.inc";` |
 
 ### Explanation Extraction
 
@@ -94,9 +112,10 @@ The loader reads consecutive comment lines from the top of the file as the expla
 fn main() { }                     ← stops here
 ```
 
-## concept.md
+### OpenQASM Notes
 
-Optional human-readable documentation. **Not parsed by the loader** — exists for:
-- Humans reading the content directory directly
-- AI training on the corpus
-- Extended prose that doesn't fit in TOML fields
+- Use `OPENQASM 2.0` (not 3.0)
+- Include `qelib1.inc` from the content directory
+- Do NOT use `swap` or `cp` gates directly — the qiskit parser doesn't support them. Decompose:
+  - `swap a, b` → `cx a,b; cx b,a; cx a,b;`
+  - `cp(θ) a, b` → `cu1(θ) a, b;`

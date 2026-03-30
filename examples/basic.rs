@@ -1,92 +1,94 @@
-use std::collections::HashMap;
+// Basic usage of the Vidya crate.
+//
+// Demonstrates loading content, searching, comparing across languages,
+// and browsing best practices/gotchas/performance notes.
+//
+// Run: cargo run --example basic
+
+use std::path::Path;
 use vidya::compare::compare;
+use vidya::loader::load_all;
 use vidya::search::search;
-use vidya::{
-    BestPractice, Concept, Example, Gotcha, Language, PerformanceNote, Registry, SearchQuery, Topic,
-};
+use vidya::{Language, SearchQuery, Topic};
 
 fn main() {
-    // Build a registry with one concept
-    let mut registry = Registry::new();
+    // ── Load the content corpus ───────────────────────────────────────
+    let registry = load_all(Path::new("content")).expect("content directory should load");
 
-    let mut examples = HashMap::new();
-    examples.insert(
-        Language::Rust,
-        Example {
-            language: Language::Rust,
-            code: r#"let s = String::from("hello");"#.into(),
-            explanation: "Owned heap-allocated UTF-8 string.".into(),
-            source_path: Some("strings/rust.rs".into()),
-        },
-    );
-    examples.insert(
-        Language::Python,
-        Example {
-            language: Language::Python,
-            code: r#"s = "hello""#.into(),
-            explanation: "Immutable string literal.".into(),
-            source_path: Some("strings/python.py".into()),
-        },
-    );
+    println!("Loaded {} concepts:", registry.list().len());
+    for concept in registry.list() {
+        let langs: Vec<_> = concept.examples.keys().map(|l| l.to_string()).collect();
+        println!("  {} — {} languages", concept.id, langs.len());
+    }
 
-    registry.register(Concept {
-        id: "string_basics".into(),
-        title: "String Basics".into(),
-        topic: Topic::DataTypes,
-        description: "Creating and using strings.".into(),
-        best_practices: vec![BestPractice {
-            title: "Borrow when you can".into(),
-            explanation: "Accept &str, return String.".into(),
-            language: Some(Language::Rust),
-        }],
-        gotchas: vec![Gotcha {
-            title: "String indexing".into(),
-            explanation: "Rust strings cannot be indexed by byte position.".into(),
-            bad_example: Some(r#"let c = s[0];"#.into()),
-            good_example: Some(r#"let c = s.chars().nth(0);"#.into()),
-            language: Some(Language::Rust),
-        }],
-        performance_notes: vec![PerformanceNote {
-            title: "write! over format!".into(),
-            explanation: "Avoids allocation on hot paths.".into(),
-            evidence: Some("~40% fewer allocations".into()),
-            language: Some(Language::Rust),
-        }],
-        tags: vec!["strings".into(), "text".into(), "utf-8".into()],
-        examples,
-    });
-
-    // Search
-    let results = search(&registry, &SearchQuery::text("string"));
-    println!("Search results for 'string':");
+    // ── Search ────────────────────────────────────────────────────────
+    println!("\nSearch for 'quantum':");
+    let results = search(&registry, &SearchQuery::text("quantum"));
     for r in &results {
         println!("  {} (score: {:.1})", r.title, r.score);
     }
 
-    // Compare
-    let cmp = compare(
+    // Search with tag filter
+    println!("\nSearch tag 'security':");
+    let results = search(&registry, &SearchQuery::tagged(vec!["security".into()]));
+    for r in &results {
+        println!("  {} (score: {:.1})", r.title, r.score);
+    }
+
+    // Search with language filter
+    let mut query = SearchQuery::text("error");
+    query.language = Some(Language::Rust);
+    println!("\nSearch 'error' (Rust only):");
+    let results = search(&registry, &query);
+    for r in &results {
+        println!("  {} (score: {:.1})", r.title, r.score);
+    }
+
+    // ── Compare across languages ──────────────────────────────────────
+    println!("\nCompare 'algorithms' — Rust vs Python vs Go:");
+    if let Ok(cmp) = compare(
         &registry,
-        "string_basics",
-        &[Language::Rust, Language::Python],
-    )
-    .unwrap();
-    println!("\nComparison: {}", cmp.concept_title);
-    for impl_ in &cmp.implementations {
-        println!("  {} → {}", impl_.language, impl_.code);
+        "algorithms",
+        &[Language::Rust, Language::Python, Language::Go],
+    ) {
+        println!("  Concept: {}", cmp.concept_title);
+        for impl_ in &cmp.implementations {
+            println!("  {} — {} chars of code", impl_.language, impl_.code.len());
+        }
     }
 
-    // Gotchas
-    let concept = registry
-        .get("string_basics")
-        .expect("string_basics concept should be registered");
-    println!("\nGotchas:");
-    for g in &concept.gotchas {
-        println!("  ⚠ {}: {}", g.title, g.explanation);
+    // ── Browse by topic ───────────────────────────────────────────────
+    println!("\nKernel Topics:");
+    for concept in registry.by_topic(&Topic::KernelTopics) {
+        println!("  {}: {}", concept.title, concept.description);
+        println!("    Best practices: {}", concept.best_practices.len());
+        println!("    Gotchas: {}", concept.gotchas.len());
+        println!("    Performance notes: {}", concept.performance_notes.len());
     }
 
-    // Performance notes
-    println!("\nPerformance:");
-    for p in &concept.performance_notes {
-        println!("  ⚡ {}: {}", p.title, p.explanation);
+    // ── Gotchas deep dive ─────────────────────────────────────────────
+    if let Some(concept) = registry.get("security") {
+        println!("\nSecurity gotchas:");
+        for g in &concept.gotchas {
+            println!("  ⚠ {}", g.title);
+            println!("    {}", g.explanation);
+            if let Some(ref bad) = g.bad_example {
+                println!("    BAD:  {bad}");
+            }
+            if let Some(ref good) = g.good_example {
+                println!("    GOOD: {good}");
+            }
+        }
+    }
+
+    // ── Performance notes ─────────────────────────────────────────────
+    if let Some(concept) = registry.get("quantum_computing") {
+        println!("\nQuantum computing performance notes:");
+        for p in &concept.performance_notes {
+            println!("  ⚡ {}", p.title);
+            if let Some(ref ev) = p.evidence {
+                println!("    Evidence: {ev}");
+            }
+        }
     }
 }
