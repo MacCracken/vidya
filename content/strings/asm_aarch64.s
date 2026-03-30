@@ -71,15 +71,15 @@ _start:
     b.ne    fail
 
     // ── Character case conversion ──────────────────────────────────
-    // Lowercase to uppercase: clear bit 5 (AND with 0xDF)
+    // Lowercase to uppercase: clear bit 5
     mov     w0, #'a'
-    and     w0, w0, #0xDF
+    bic     w0, w0, #0x20       // clear bit 5: 'a' -> 'A'
     cmp     w0, #'A'
     b.ne    fail
 
-    // Uppercase to lowercase: set bit 5 (OR with 0x20)
+    // Uppercase to lowercase: set bit 5
     mov     w0, #'A'
-    orr     w0, w0, #0x20
+    orr     w0, w0, #0x20       // set bit 5: 'A' -> 'a'
     cmp     w0, #'a'
     b.ne    fail
 
