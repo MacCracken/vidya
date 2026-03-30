@@ -142,12 +142,8 @@ fn discover_examples(topic_dir: &Path, concept_id: &str) -> Result<HashMap<Langu
     let mut examples = HashMap::new();
 
     for lang in Language::all() {
-        // Try filename patterns: "rust.rs", "python.py", etc.
-        let filename = format!(
-            "{}.{}",
-            lang.display_name().to_lowercase(),
-            lang.extension()
-        );
+        // Try filename patterns: "rust.rs", "python.py", "asm_x86_64.s", etc.
+        let filename = format!("{}.{}", lang.file_stem(), lang.extension());
         let file_path = topic_dir.join(&filename);
 
         if file_path.exists() {

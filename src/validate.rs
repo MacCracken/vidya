@@ -40,6 +40,12 @@ pub fn validation_command(lang: Language) -> Option<&'static str> {
         Language::TypeScript => Some("npx tsx {file}"),
         Language::Shell => Some("bash -n {file}"),
         Language::Zig => Some("zig build-exe {file} -o {out} && {out}"),
+        Language::AsmX86_64 => {
+            Some("as --64 {file} -o {out}.o && ld {out}.o -o {out} && {out} ; rm -f {out}.o")
+        }
+        Language::AsmAarch64 => Some(
+            "aarch64-linux-gnu-as {file} -o {out}.o && aarch64-linux-gnu-ld {out}.o -o {out} && qemu-aarch64 {out} ; rm -f {out}.o",
+        ),
     }
 }
 

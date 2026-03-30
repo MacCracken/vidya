@@ -97,6 +97,32 @@ for topic_dir in "$CONTENT_DIR"/*/; do
         rm -f /tmp/vidya_err
     fi
 
+    # x86_64 Assembly
+    if [[ -f "$topic_dir/asm_x86_64.s" ]]; then
+        if as --64 "$topic_dir/asm_x86_64.s" -o /tmp/vidya_test_$$.o 2>/tmp/vidya_err && ld /tmp/vidya_test_$$.o -o /tmp/vidya_test_$$ 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
+            echo "  ✓ x86_64 Assembly"
+            PASS=$((PASS + 1))
+        else
+            echo "  ✗ x86_64 Assembly: $(cat /tmp/vidya_err)"
+            ERRORS+=("$topic/asm_x86_64.s")
+            FAIL=$((FAIL + 1))
+        fi
+        rm -f /tmp/vidya_test_$$ /tmp/vidya_test_$$.o /tmp/vidya_err
+    fi
+
+    # AArch64 Assembly
+    if [[ -f "$topic_dir/asm_aarch64.s" ]]; then
+        if aarch64-linux-gnu-as "$topic_dir/asm_aarch64.s" -o /tmp/vidya_test_$$.o 2>/tmp/vidya_err && aarch64-linux-gnu-ld /tmp/vidya_test_$$.o -o /tmp/vidya_test_$$ 2>/tmp/vidya_err && qemu-aarch64 /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
+            echo "  ✓ AArch64 Assembly"
+            PASS=$((PASS + 1))
+        else
+            echo "  ✗ AArch64 Assembly: $(cat /tmp/vidya_err)"
+            ERRORS+=("$topic/asm_aarch64.s")
+            FAIL=$((FAIL + 1))
+        fi
+        rm -f /tmp/vidya_test_$$ /tmp/vidya_test_$$.o /tmp/vidya_err
+    fi
+
     echo ""
 done
 

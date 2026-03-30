@@ -23,6 +23,10 @@ pub enum Language {
     Shell,
     /// Zig (`.zig`) — compiled, systems programming
     Zig,
+    /// x86_64 Assembly (`.s`) — GNU as syntax, 64-bit x86
+    AsmX86_64,
+    /// AArch64 Assembly (`.s`) — GNU as syntax, 64-bit ARM
+    AsmAarch64,
 }
 
 impl Language {
@@ -37,6 +41,8 @@ impl Language {
             Self::TypeScript => "ts",
             Self::Shell => "sh",
             Self::Zig => "zig",
+            Self::AsmX86_64 => "s",
+            Self::AsmAarch64 => "s",
         }
     }
 
@@ -51,6 +57,26 @@ impl Language {
             Self::TypeScript => "TypeScript",
             Self::Shell => "Shell",
             Self::Zig => "Zig",
+            Self::AsmX86_64 => "x86_64 Assembly",
+            Self::AsmAarch64 => "AArch64 Assembly",
+        }
+    }
+
+    /// Filename stem for content files (e.g. "rust", "python", "asm_x86_64").
+    ///
+    /// Combined with [`extension()`] to form the full filename.
+    #[must_use]
+    pub const fn file_stem(&self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Python => "python",
+            Self::C => "c",
+            Self::Go => "go",
+            Self::TypeScript => "typescript",
+            Self::Shell => "shell",
+            Self::Zig => "zig",
+            Self::AsmX86_64 => "asm_x86_64",
+            Self::AsmAarch64 => "asm_aarch64",
         }
     }
 
@@ -60,6 +86,7 @@ impl Language {
         match self {
             Self::Rust | Self::C | Self::Go | Self::TypeScript | Self::Zig => "//",
             Self::Python | Self::Shell => "#",
+            Self::AsmX86_64 | Self::AsmAarch64 => "#",
         }
     }
 
@@ -74,6 +101,8 @@ impl Language {
             Self::TypeScript,
             Self::Shell,
             Self::Zig,
+            Self::AsmX86_64,
+            Self::AsmAarch64,
         ]
     }
 
@@ -88,6 +117,8 @@ impl Language {
             "typescript" | "ts" => Some(Self::TypeScript),
             "shell" | "sh" | "bash" | "zsh" => Some(Self::Shell),
             "zig" => Some(Self::Zig),
+            "asm_x86_64" | "x86_64" | "x86-64" | "amd64" => Some(Self::AsmX86_64),
+            "asm_aarch64" | "aarch64" | "arm64" => Some(Self::AsmAarch64),
             _ => None,
         }
     }
@@ -106,7 +137,7 @@ mod tests {
     #[test]
     fn all_languages() {
         let all = Language::all();
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 9);
     }
 
     #[test]
