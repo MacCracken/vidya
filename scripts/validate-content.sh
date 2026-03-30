@@ -97,19 +97,17 @@ for topic_dir in "$CONTENT_DIR"/*/; do
         rm -f /tmp/vidya_err
     fi
 
-    # OpenQASM (via Qiskit in venv)
-    if [[ -f "$topic_dir/openqasm.py" ]]; then
-        # Use venv python if available, otherwise system python
+    # OpenQASM (.qasm files, validated via qiskit parser)
+    if [[ -f "$topic_dir/openqasm.qasm" ]]; then
         QASM_PYTHON="python3"
         if [[ -f ".venv/bin/python3" ]]; then
             QASM_PYTHON=".venv/bin/python3"
         fi
-        if $QASM_PYTHON "$topic_dir/openqasm.py" 2>/tmp/vidya_err; then
-            echo "  ✓ OpenQASM"
+        if $QASM_PYTHON -c "from qiskit import qasm2; qc = qasm2.load('$topic_dir/openqasm.qasm', include_path=['$CONTENT_DIR']); print(f'  ✓ OpenQASM ({qc.num_qubits}q, depth {qc.depth()})')" 2>/tmp/vidya_err; then
             PASS=$((PASS + 1))
         else
             echo "  ✗ OpenQASM: $(cat /tmp/vidya_err)"
-            ERRORS+=("$topic/openqasm.py")
+            ERRORS+=("$topic/openqasm.qasm")
             FAIL=$((FAIL + 1))
         fi
         rm -f /tmp/vidya_err

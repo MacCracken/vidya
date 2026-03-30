@@ -47,7 +47,7 @@ pub fn validation_command(lang: Language) -> Option<&'static str> {
             "aarch64-linux-gnu-as {file} -o {out}.o && aarch64-linux-gnu-ld {out}.o -o {out} && qemu-aarch64 {out} ; rm -f {out}.o",
         ),
         Language::OpenQASM => Some(
-            "if [ -f .venv/bin/python3 ]; then .venv/bin/python3 {file}; else python3 {file}; fi",
+            "QASM_PY=$(if [ -f .venv/bin/python3 ]; then echo .venv/bin/python3; else echo python3; fi) && $QASM_PY -c \"from qiskit import qasm2; import os; qc = qasm2.load('{file}', include_path=[os.path.dirname('{file}') + '/..']); print(f'valid: {{qc.num_qubits}}q depth={{qc.depth()}}')\"",
         ),
     }
 }

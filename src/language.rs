@@ -27,7 +27,7 @@ pub enum Language {
     AsmX86_64,
     /// AArch64 Assembly (`.s`) — GNU as syntax, 64-bit ARM
     AsmAarch64,
-    /// OpenQASM (`.py`) — quantum circuit assembly via Qiskit
+    /// OpenQASM (`.qasm`) — quantum circuit assembly language
     OpenQASM,
 }
 
@@ -45,7 +45,7 @@ impl Language {
             Self::Zig => "zig",
             Self::AsmX86_64 => "s",
             Self::AsmAarch64 => "s",
-            Self::OpenQASM => "py",
+            Self::OpenQASM => "qasm",
         }
     }
 
@@ -92,7 +92,7 @@ impl Language {
             Self::Rust | Self::C | Self::Go | Self::TypeScript | Self::Zig => "//",
             Self::Python | Self::Shell => "#",
             Self::AsmX86_64 | Self::AsmAarch64 => "#",
-            Self::OpenQASM => "#",
+            Self::OpenQASM => "//",
         }
     }
 
