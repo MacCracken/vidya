@@ -23,4 +23,9 @@ sed -i "s/^## \[Unreleased\]/## [Unreleased]\n\n## [${NEW_VERSION}] — ${DATE}/
 # 5. Regenerate lockfile
 cd "$REPO_ROOT" && cargo generate-lockfile 2>/dev/null
 
-echo "Bumped to ${NEW_VERSION} (${DATE}). Tag and push."
+echo "Bumped to ${NEW_VERSION} (${DATE})."
+echo ""
+echo "To release:"
+echo "  git add -A && git commit -m 'release: v${NEW_VERSION}'"
+echo "  git tag v${NEW_VERSION}"
+echo "  git push origin main --tags"
