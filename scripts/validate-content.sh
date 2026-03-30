@@ -47,7 +47,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
 
     # C
     if [[ -f "$topic_dir/c.c" ]]; then
-        if gcc -std=c11 -Wall -Werror "$topic_dir/c.c" -o /tmp/vidya_test_$$ 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
+        if gcc -std=c17 -Wall -Werror "$topic_dir/c.c" -o /tmp/vidya_test_$$ -lm -lpthread 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
             echo "  ✓ C"
             PASS=$((PASS + 1))
         else
@@ -86,8 +86,8 @@ for topic_dir in "$CONTENT_DIR"/*/; do
 
     # Shell
     if [[ -f "$topic_dir/shell.sh" ]]; then
-        if bash -n "$topic_dir/shell.sh" 2>/tmp/vidya_err; then
-            echo "  ✓ Shell (syntax check)"
+        if bash "$topic_dir/shell.sh" 2>/tmp/vidya_err; then
+            echo "  ✓ Shell"
             PASS=$((PASS + 1))
         else
             echo "  ✗ Shell: $(cat /tmp/vidya_err)"
