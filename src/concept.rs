@@ -34,6 +34,8 @@ pub enum Topic {
     Performance,
     /// Security practices
     Security,
+    /// Kernel and systems programming (interrupts, page tables, bootloaders, MMIO, ABIs)
+    KernelTopics,
 }
 
 impl std::fmt::Display for Topic {
@@ -50,6 +52,7 @@ impl std::fmt::Display for Topic {
             Self::TypeSystems => f.write_str("Type Systems"),
             Self::Performance => f.write_str("Performance"),
             Self::Security => f.write_str("Security"),
+            Self::KernelTopics => f.write_str("Kernel Topics"),
         }
     }
 }

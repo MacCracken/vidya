@@ -1,0 +1,75 @@
+id = "kernel_topics"
+title = "Kernel Topics"
+topic = "KernelTopics"
+description = "Systems programming at the hardware boundary — interrupts, page tables, MMIO, bootloaders, and calling conventions (ABIs). The primitives that operating systems are built from."
+tags = ["kernel", "interrupts", "page-tables", "mmio", "bootloader", "abi", "calling-convention", "virtual-memory", "trap", "exception", "idt", "gdt", "syscall"]
+
+[[best_practices]]
+title = "Use volatile for MMIO registers"
+explanation = "MMIO registers have side effects on read/write. Without volatile, the compiler may reorder, combine, or eliminate accesses — breaking hardware communication."
+
+[[best_practices]]
+title = "Keep interrupt handlers short"
+explanation = "Interrupts preempt everything. A slow handler increases latency for all other interrupts. Do the minimum (acknowledge, enqueue work), then return. Process in a bottom-half or deferred context."
+
+[[best_practices]]
+title = "Validate page table entries before use"
+explanation = "A page table entry with the present bit clear means 'not mapped.' Dereferencing it causes a page fault. Always check the present/valid bit before extracting the physical address."
+
+[[best_practices]]
+title = "Respect the ABI — don't clobber callee-saved registers"
+explanation = "The calling convention defines which registers a function may freely use (caller-saved) and which must be preserved (callee-saved). Violating this silently corrupts the caller's state."
+
+[[best_practices]]
+title = "Identity-map early boot memory"
+explanation = "When enabling paging, the instruction pointer still holds a physical address. If the current code isn't identity-mapped (virtual == physical), enabling paging causes an immediate fault."
+
+[[gotchas]]
+title = "Compiler reordering MMIO accesses"
+explanation = "Without volatile or memory barriers, the compiler assumes memory accesses have no side effects and may reorder them. Two writes to different MMIO registers in the wrong order can crash hardware."
+bad_example = "*status_reg = 0; *data_reg = payload;  // compiler may reorder"
+good_example = "write_volatile(status_reg, 0); barrier(); write_volatile(data_reg, payload);"
+
+[[gotchas]]
+title = "Forgetting to acknowledge an interrupt"
+explanation = "Many interrupt controllers (PIC, APIC, GIC) mask further interrupts until the handler sends an End-Of-Interrupt (EOI). Forgetting EOI means that interrupt never fires again."
+bad_example = "fn timer_handler() { update_tick(); }  // no EOI!"
+good_example = "fn timer_handler() { update_tick(); apic_eoi(); }"
+
+[[gotchas]]
+title = "Recursive page fault"
+explanation = "If the page fault handler itself touches unmapped memory, you get a double fault. If the double fault handler faults, you get a triple fault — which reboots the machine."
+bad_example = "Page fault handler allocates memory from a paged heap"
+good_example = "Page fault handler uses only pre-mapped, pinned memory"
+
+[[gotchas]]
+title = "Misaligned MMIO access"
+explanation = "Many hardware registers require naturally aligned access (4-byte register at 4-byte boundary). Misaligned access may silently read wrong data or cause a bus error."
+bad_example = "*(uint32_t*)0x40001001 = val;  // misaligned: addr not 4-byte aligned"
+good_example = "*(volatile uint32_t*)0x40001000 = val;  // aligned"
+
+[[gotchas]]
+title = "Stack overflow in interrupt context"
+explanation = "Interrupt handlers run on a separate (often small) stack. Deep call chains or large stack allocations in handlers overflow it, corrupting memory silently."
+bad_example = "void irq_handler() { char buf[4096]; process(buf); }"
+good_example = "void irq_handler() { enqueue_work(); }  // minimal stack use"
+
+[[performance_notes]]
+title = "TLB misses dominate page table walk cost"
+explanation = "A page table walk requires 4 memory accesses (4-level paging). The TLB caches recent translations, reducing this to ~1 cycle. TLB misses cost 10-100 cycles."
+evidence = "TLB hit: ~1 cycle. TLB miss with 4-level walk: ~40-100 cycles on modern x86"
+
+[[performance_notes]]
+title = "Huge pages reduce TLB pressure"
+explanation = "A single 2MB huge page replaces 512 regular 4KB pages in the TLB. For large contiguous allocations, huge pages can reduce TLB misses dramatically."
+evidence = "Linear scan of 1GB: 4KB pages ~12ms, 2MB huge pages ~8ms — 33% faster from TLB alone"
+
+[[performance_notes]]
+title = "Interrupt coalescing reduces overhead"
+explanation = "Each interrupt has overhead: save/restore registers, cache pollution, pipeline flush. High-rate devices (NICs) benefit from coalescing multiple events into one interrupt."
+evidence = "10Gbps NIC: per-packet interrupts = 14M IRQ/sec (100% CPU). Coalesced: ~50K IRQ/sec (<5% CPU)"
+
+[[performance_notes]]
+title = "MMIO is uncacheable — every access hits the bus"
+explanation = "MMIO regions are mapped as uncacheable (UC). Each read/write goes to the device, taking hundreds of nanoseconds. Batch operations and minimize MMIO round-trips."
+evidence = "MMIO register read: ~100-500ns. Cached memory read: ~1-4ns. 100x difference."
