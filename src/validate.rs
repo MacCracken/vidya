@@ -46,6 +46,9 @@ pub fn validation_command(lang: Language) -> Option<&'static str> {
         Language::AsmAarch64 => Some(
             "aarch64-linux-gnu-as {file} -o {out}.o && aarch64-linux-gnu-ld {out}.o -o {out} && qemu-aarch64 {out} ; rm -f {out}.o",
         ),
+        Language::OpenQASM => Some(
+            "if [ -f .venv/bin/python3 ]; then .venv/bin/python3 {file}; else python3 {file}; fi",
+        ),
     }
 }
 

@@ -27,6 +27,8 @@ pub enum Language {
     AsmX86_64,
     /// AArch64 Assembly (`.s`) — GNU as syntax, 64-bit ARM
     AsmAarch64,
+    /// OpenQASM (`.py`) — quantum circuit assembly via Qiskit
+    OpenQASM,
 }
 
 impl Language {
@@ -43,6 +45,7 @@ impl Language {
             Self::Zig => "zig",
             Self::AsmX86_64 => "s",
             Self::AsmAarch64 => "s",
+            Self::OpenQASM => "py",
         }
     }
 
@@ -59,6 +62,7 @@ impl Language {
             Self::Zig => "Zig",
             Self::AsmX86_64 => "x86_64 Assembly",
             Self::AsmAarch64 => "AArch64 Assembly",
+            Self::OpenQASM => "OpenQASM",
         }
     }
 
@@ -77,6 +81,7 @@ impl Language {
             Self::Zig => "zig",
             Self::AsmX86_64 => "asm_x86_64",
             Self::AsmAarch64 => "asm_aarch64",
+            Self::OpenQASM => "openqasm",
         }
     }
 
@@ -87,6 +92,7 @@ impl Language {
             Self::Rust | Self::C | Self::Go | Self::TypeScript | Self::Zig => "//",
             Self::Python | Self::Shell => "#",
             Self::AsmX86_64 | Self::AsmAarch64 => "#",
+            Self::OpenQASM => "#",
         }
     }
 
@@ -103,6 +109,7 @@ impl Language {
             Self::Zig,
             Self::AsmX86_64,
             Self::AsmAarch64,
+            Self::OpenQASM,
         ]
     }
 
@@ -119,6 +126,7 @@ impl Language {
             "zig" => Some(Self::Zig),
             "asm_x86_64" | "x86_64" | "x86-64" | "amd64" => Some(Self::AsmX86_64),
             "asm_aarch64" | "aarch64" | "arm64" => Some(Self::AsmAarch64),
+            "openqasm" | "qasm" | "quantum" => Some(Self::OpenQASM),
             _ => None,
         }
     }
@@ -137,7 +145,7 @@ mod tests {
     #[test]
     fn all_languages() {
         let all = Language::all();
-        assert_eq!(all.len(), 9);
+        assert_eq!(all.len(), 10);
     }
 
     #[test]

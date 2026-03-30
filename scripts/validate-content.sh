@@ -97,6 +97,24 @@ for topic_dir in "$CONTENT_DIR"/*/; do
         rm -f /tmp/vidya_err
     fi
 
+    # OpenQASM (via Qiskit in venv)
+    if [[ -f "$topic_dir/openqasm.py" ]]; then
+        # Use venv python if available, otherwise system python
+        QASM_PYTHON="python3"
+        if [[ -f ".venv/bin/python3" ]]; then
+            QASM_PYTHON=".venv/bin/python3"
+        fi
+        if $QASM_PYTHON "$topic_dir/openqasm.py" 2>/tmp/vidya_err; then
+            echo "  ✓ OpenQASM"
+            PASS=$((PASS + 1))
+        else
+            echo "  ✗ OpenQASM: $(cat /tmp/vidya_err)"
+            ERRORS+=("$topic/openqasm.py")
+            FAIL=$((FAIL + 1))
+        fi
+        rm -f /tmp/vidya_err
+    fi
+
     # Zig
     if [[ -f "$topic_dir/zig.zig" ]]; then
         if zig build-exe "$topic_dir/zig.zig" -femit-bin=/tmp/vidya_test_$$ 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
