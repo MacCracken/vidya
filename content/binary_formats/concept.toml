@@ -1,0 +1,111 @@
+id = "binary_formats"
+title = "Binary Formats"
+topic = "BinaryFormats"
+description = "Executable binary structure — ELF, headers, segments, and how code gets from source to running process. The bridge between compiler output and the operating system's loader."
+tags = ["elf", "binary", "executable", "linker", "loader", "segment", "header", "static-linking", "dynamic-linking", "entry-point", "virtual-address"]
+
+[[best_practices]]
+title = "Start with minimal ELF — no sections needed"
+explanation = "A valid ELF executable only needs an ELF header (64 bytes) and one program header (56 bytes). Section headers, symbol tables, and string tables are optional. The kernel only reads program headers to load segments. Total overhead: 120 bytes."
+
+[[best_practices]]
+title = "Use PT_LOAD with PF_R|PF_X for code"
+explanation = "The simplest executable has one PT_LOAD segment marked readable and executable (flags = 5). The kernel maps this segment into memory at the specified virtual address. No separate data segment needed for small programs."
+
+[[best_practices]]
+title = "Align segments to page boundaries"
+explanation = "The kernel maps segments at page-aligned addresses. If p_align is not a power of 2, or p_vaddr is not aligned to p_align, the kernel rejects the binary. Use p_align = 0x1000 (4KB) for x86_64."
+
+[[best_practices]]
+title = "Use static linking for bootstrap tools"
+explanation = "A statically linked binary has no runtime dependencies — no libc, no ld-linux.so, no shared libraries. This is essential for bootstrap tools and kernel code. Static ELF binaries are self-contained and portable across Linux systems."
+
+[[best_practices]]
+title = "Put entry point in the ELF header, not a symbol"
+explanation = "The ELF e_entry field is a virtual address, not a symbol name. The kernel jumps directly to this address. You don't need _start in the symbol table — you just need the address in e_entry to point at valid code."
+
+[[gotchas]]
+title = "Wrong ELF class for the architecture"
+explanation = "ELF has two classes: ELFCLASS32 (32-bit) and ELFCLASS64 (64-bit). The kernel rejects a 32-bit ELF on a 64-bit-only system. The ELF class must match the architecture you're targeting."
+bad_example = "e_ident[4] = 1 (ELFCLASS32) on an x86_64 system"
+good_example = "e_ident[4] = 2 (ELFCLASS64) for x86_64"
+
+[[gotchas]]
+title = "Entry point outside mapped segment"
+explanation = "e_entry must be a virtual address within a PT_LOAD segment. If the entry point is outside any loaded segment, the kernel delivers a segfault immediately on exec. Common when the base address or code offset calculation is wrong."
+bad_example = "e_entry = 0x400000 but code starts at 0x400078 (120 bytes of headers)"
+good_example = "e_entry = 0x400078 (BASE_ADDR + ELF_HEADER_SIZE + PHDR_SIZE)"
+
+[[gotchas]]
+title = "Forgetting little-endian encoding"
+explanation = "x86_64 ELF uses little-endian byte order (ELFDATA2LSB). All multi-byte fields in headers must be written in little-endian. A big-endian entry point value causes a jump to a nonsensical address."
+bad_example = "Entry point 0x400078 written as [0x00, 0x40, 0x00, 0x78] (big-endian)"
+good_example = "Entry point 0x400078 written as [0x78, 0x00, 0x40, 0x00, ...] (little-endian via to_le_bytes)"
+
+[[gotchas]]
+title = "p_memsz < p_filesz causes kernel rejection"
+explanation = "p_memsz is the memory size (including BSS), p_filesz is the file size. p_memsz must be >= p_filesz. The kernel zero-fills the difference (BSS segment). If p_memsz < p_filesz, the binary is invalid."
+bad_example = "p_filesz = 1000, p_memsz = 500"
+good_example = "p_filesz = 1000, p_memsz = 1000 (or larger for BSS)"
+
+[[gotchas]]
+title = "RBP/R13 as memory base in x86_64 encoding"
+explanation = "In x86_64 ModR/M encoding, mod=00 with rm=101 (RBP) means RIP-relative addressing, not [RBP]. To encode [RBP], use mod=01 with a displacement of 0. Same applies to R13. This is a hardware encoding quirk that trips up every assembler author."
+bad_example = "modrm(0b00, reg, 5) — means RIP-relative, not [RBP]"
+good_example = "modrm(0b01, reg, 5) + disp8(0x00) — means [RBP+0], effectively [RBP]"
+
+[[gotchas]]
+title = "RSP/R12 as memory base needs SIB byte"
+explanation = "In x86_64 encoding, rm=100 (RSP) in ModR/M signals 'SIB byte follows' rather than '[RSP]'. To encode [RSP], emit ModR/M with rm=100 followed by SIB byte 0x24 (scale=0, index=RSP/none, base=RSP)."
+bad_example = "modrm(0b00, reg, 4) with no SIB — means 'read SIB', not [RSP]"
+good_example = "modrm(0b00, reg, 4) + SIB(0x24) — means [RSP]"
+
+[[best_practices]]
+title = "Embed the ELF template as constant data"
+explanation = "For a compiler that generates ELF binaries, embed the 120-byte header as constant data (15 qwords) and copy it to the output buffer with a qword memcpy. Then patch only the fields that change: p_filesz, p_memsz, and optionally e_entry. This avoids reconstructing the header byte-by-byte every time."
+
+[[gotchas]]
+title = "Qword memcpy overwrites adjacent data"
+explanation = "When your only memory store is 8 bytes wide (mov [reg], reg), a 'memcpy' copies 8 bytes at a time. If your source or destination isn't qword-aligned, you'll overwrite adjacent data. Solution: align all data structures to 8-byte boundaries and pad sizes to multiples of 8. A 22-byte codegen output gets padded to 24 bytes (3 qwords) with nop instructions."
+bad_example = "Byte-by-byte copy with 8-byte stores — each store clobbers the next 7 bytes"
+good_example = "Pad codebuf to 24 bytes (add 2 nop bytes), copy as 3 qwords"
+
+[[gotchas]]
+title = "Compiler-generated ELF must match the host format exactly"
+explanation = "When a compiler emits ELF binaries, every byte of the header must be correct. One wrong byte in e_ident, a swapped field order, or a misaligned program header makes the binary silently fail. The kernel's ELF loader has zero tolerance for format errors — it either works or segfaults with no diagnostic."
+bad_example = "Guessing the ELF header layout from documentation"
+good_example = "Generate the template programmatically from a known-working implementation, verify with readelf -h"
+
+[[performance_notes]]
+title = "Compiler-generated binaries can be constant-size"
+explanation = "When a compiler evaluates all expressions at compile time (no runtime codegen), every generated binary has the same structure: load result, exit. The output is always exactly 144 bytes (120 header + 24 code). This means the ELF template's p_filesz/p_memsz don't even need patching — they can be baked into the template."
+evidence = "Cyrius stage1a generates 144-byte binaries regardless of input complexity. 'var x = 42;' and 'var a = 2; var b = 3; var c = a * b + a + b;' both produce 144 bytes."
+
+[[best_practices]]
+title = "Use RWX for bootstrap — add W when generated code needs runtime data"
+explanation = "When generated programs store variables in their own segment (no separate data segment, no brk), change p_flags from 5 (R+X) to 7 (R+W+X). This lets the code write to memory addresses after the code section within the same PT_LOAD segment. Insecure for production, perfect for bootstrap compilers where simplicity trumps hardening."
+
+[[best_practices]]
+title = "Place runtime variables after code in the generated binary"
+explanation = "The simplest variable layout: variables live at fixed addresses immediately after the code, within the same segment. Variable i is at address BASE + HEADERS + code_size_aligned + i*8. The compiler doesn't know code_size during codegen, so use a fixup table to patch addresses afterward. Zero-fill the variable slots in the output binary."
+
+[[gotchas]]
+title = "p_memsz must account for runtime data beyond p_filesz"
+explanation = "If generated programs store variables after the code, p_memsz must be large enough to cover both code and variable slots. If p_memsz equals p_filesz exactly and variables extend beyond it, writes to variable addresses cause segfaults. Add at least var_count * 8 bytes to p_memsz, or add an extra page for safety."
+bad_example = "p_filesz = p_memsz = code_size + 120 — no room for runtime variables"
+good_example = "p_memsz = p_filesz + var_count * 8 + 4096 (extra page for stack/alignment)"
+
+[[performance_notes]]
+title = "Minimal ELF binary is 120 bytes + code"
+explanation = "The absolute minimum ELF64 executable is 120 bytes of headers (64 ELF + 56 program header) plus the machine code. A 'hello world' via syscalls is ~200 bytes total. Compare to a C hello world linked with glibc: ~16KB."
+evidence = "Cyrius seed 'Hello, Cyrius!' binary: 199 bytes total (79 bytes code + 120 bytes headers). Equivalent C with gcc -static: ~800KB."
+
+[[performance_notes]]
+title = "Direct syscalls eliminate libc overhead"
+explanation = "Programs that use Linux syscalls directly (via the syscall instruction) avoid libc's wrapper overhead. For bootstrap tools and kernel-adjacent code, this saves both binary size and startup time."
+evidence = "syscall instruction: 2 bytes (0x0F 0x05). libc write() wrapper: function call overhead + PLT indirection + GOT lookup for dynamic linking."
+
+[[performance_notes]]
+title = "Two-pass assembly enables single-allocation output"
+explanation = "A two-pass assembler knows exact sizes after pass 1, so pass 2 can pre-allocate the output buffer in one shot. No reallocation, no backpatching. This is O(n) in input size with minimal allocation overhead."
+evidence = "Cyrius seed assembles 10,000 instructions in 5.7ms (13 MB/s throughput). Tokenizer dominates at ~5ms; encoding is ~0.3ms."

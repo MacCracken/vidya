@@ -1,0 +1,161 @@
+id = "compiler_bootstrapping"
+title = "Compiler Bootstrapping"
+topic = "CompilerBootstrapping"
+description = "How compilers build themselves — the bootstrap chain from seed to self-hosting. Covers multi-stage compilation, cross-compilation, and the trust problem. Every self-hosting compiler must solve the chicken-and-egg: you need a compiler to compile the compiler."
+tags = ["compiler", "bootstrapping", "self-hosting", "cross-compilation", "stage0", "stage1", "seed", "trust", "toolchain"]
+
+[[best_practices]]
+title = "Keep the seed small and auditable"
+explanation = "The seed compiler (stage 0) is the root of trust. It should be small enough for a human to read and verify. Thompson's 'Reflections on Trusting Trust' shows why: a malicious seed can inject backdoors that self-replicate through all future compiler generations."
+
+[[best_practices]]
+title = "Use a two-pass assembler for the seed"
+explanation = "A two-pass assembler (pass 1: collect labels, pass 2: emit code) is the simplest correct approach for a seed. Single-pass requires backpatching and is more complex. Two-pass keeps the seed auditable."
+
+[[best_practices]]
+title = "Each stage should only compile the next stage's subset"
+explanation = "Stage 0 doesn't need to compile the full language — just enough to build stage 1. Stage 1 compiles a richer subset. This keeps each stage small and focused. Early C bootstrapped this way: assembly → B → C."
+
+[[best_practices]]
+title = "Test each stage by comparing outputs"
+explanation = "A correctly bootstrapped compiler should produce identical output when compiled by stage N and stage N+1. If stage 2 compiles itself and produces a binary identical to what stage 1 produced, the bootstrap is stable."
+
+[[best_practices]]
+title = "Minimize external dependencies in the bootstrap chain"
+explanation = "Every external tool in the bootstrap chain (cmake, ninja, python) is a trust dependency. A sovereign toolchain minimizes these. Rust's bootstrap requires Python + a pre-built beta compiler — this is a dependency you can eliminate with a self-hosting seed."
+
+[[gotchas]]
+title = "Downloading a binary compiler is not building from source"
+explanation = "Rust's x.py downloads a pre-built beta rustc to compile the real compiler. This means 'building from source' actually means 'building from source + a binary someone else built.' For a sovereign toolchain, the seed must be auditable, not downloaded."
+bad_example = "x.py downloads beta rustc from CI, uses it to build stage 1"
+good_example = "Hand-written assembly seed → stage 0 → stage 1 → self-hosting"
+
+[[gotchas]]
+title = "Nested submodules make bootstrapping fragile"
+explanation = "Rust's repo has 12+ submodules (cargo, LLVM, gcc, docs). Each must be initialized separately. A missing or stale submodule breaks the build silently. Monorepos avoid this entirely."
+bad_example = "git submodule update --init --recursive (pulls 12+ repos, any can fail)"
+good_example = "Single repository with all components (compiler, stdlib, package manager)"
+
+[[gotchas]]
+title = "Cross-compilation stage confusion"
+explanation = "In a multi-stage bootstrap, it's easy to confuse which compiler compiled which binary. Stage 0 (the seed) compiles stage 1. Stage 1 compiles stage 2. Using the wrong stage compiler produces subtly wrong binaries."
+bad_example = "Building the stdlib with stage 0 instead of stage 1"
+good_example = "Clear stage labeling: stage0/bin/rustc, stage1/bin/rustc, stage2/bin/rustc"
+
+[[gotchas]]
+title = "Python as a bootstrap dependency"
+explanation = "Using Python for build orchestration (like Rust's x.py) adds a large, version-sensitive dependency to the toolchain. Python 2/3 differences, missing packages, and version mismatches are common build failures."
+bad_example = "Build system requires Python 3.8+ with specific packages installed"
+good_example = "Build system written in the language itself, or in portable shell"
+
+[[best_practices]]
+title = "Use brk for heap in no-libc compilers"
+explanation = "When writing a compiler with no libc (pure syscalls), use the brk syscall to allocate heap memory. Call brk(0) to get the current break, then brk(current + size) to extend. Store the base in a dedicated register (e.g., r15) and use fixed offsets for each data structure. This gives you a simple, predictable memory layout with zero dependencies."
+
+[[best_practices]]
+title = "Compile-time evaluation before runtime codegen"
+explanation = "If your language has no control flow yet (just expressions and assignments), evaluate everything at compile time. The compiler becomes an interpreter that emits a trivial exit-with-result program. This lets you build and test the lexer/parser infrastructure without the complexity of register allocation or instruction selection. Add runtime codegen only when control flow demands it."
+
+[[best_practices]]
+title = "Use qword-aligned slots when you lack byte-store instructions"
+explanation = "If your assembler only has 64-bit memory operations (mov [reg], reg stores 8 bytes), store all data in 8-byte-aligned slots. Token types, variable values, everything gets a full qword. Wastes memory but avoids byte-level store complexity. For reading individual bytes from input, load a qword and mask with AND 0xFF."
+
+[[gotchas]]
+title = "Recursive descent works in assembly — use push/pop"
+explanation = "Recursive descent parsing seems impossible in assembly, but it works naturally with push/pop. Each parse function saves its working registers on entry and restores before return. The call stack handles recursion. The key insight: you don't need stack frames or [rbp+offset] — just push the registers you need to preserve."
+bad_example = "Trying to implement parsing with a manual state machine and goto"
+good_example = "parse_expr calls parse_term, which calls parse_factor, using push/pop to save r8 across recursive calls"
+
+[[gotchas]]
+title = "imul and idiv clobber rdx"
+explanation = "x86_64 imul reg multiplies rax by reg, putting the 128-bit result in rdx:rax. idiv reg divides rdx:rax by reg. If you forget to zero rdx before idiv, you divide a garbage 128-bit number and get wrong results or a divide exception. Always xor rdx, rdx before idiv for unsigned semantics."
+bad_example = "imul rcx; ... idiv rbx  # rdx still has high bits from imul"
+good_example = "imul rcx; mov r8, rax; ... xor rdx, rdx; idiv rbx"
+
+[[gotchas]]
+title = "String comparison needs null terminators in a qword world"
+explanation = "When all memory stores are 8-byte qwords, a 3-character identifier like 'var' gets stored as 8 bytes. The remaining bytes are whatever was in memory. String comparison must stop at null bytes, not after a fixed length. Store null terminators explicitly after each identifier, and compare byte-by-byte with masking."
+bad_example = "Comparing two identifiers by loading qwords and comparing — 'var\\0xxxx' != 'var\\0yyyy'"
+good_example = "Byte-by-byte comparison with AND 0xFF masking, stopping when either byte is 0"
+
+[[gotchas]]
+title = "stdin pipe closes after all data is read"
+explanation = "When piping source code to a compiler via echo | ./compiler, the read syscall returns the full input in one call (for small inputs). The compiler must track exactly how many bytes were read (the return value of read) and not scan past that boundary. Null bytes in the heap past the input are not guaranteed to be zero."
+bad_example = "Scanning input until a null byte — heap memory after input may not be zeroed"
+good_example = "Store read() return value in r12, check cursor against r12 in the lexer loop"
+
+[[performance_notes]]
+title = "A compiler in assembly can be tiny"
+explanation = "A complete compiler with runtime codegen, if/while, variables, and all arithmetic fits in ~1600 lines of assembly and assembles to ~5KB. The generated programs range from 184-384 bytes depending on complexity. No language runtime, no standard library, no linker — pure syscalls."
+evidence = "Cyrius stage1b: 1661 lines .cyr assembly, 5051-byte binary, 32/32 tests. Generated binaries: 184 bytes (literal) to 384 bytes (nested if-in-while). Stage1a (compile-time only): 800 lines, 2642 bytes, 14/14 tests."
+
+[[performance_notes]]
+title = "brk is fast for single-allocation patterns"
+explanation = "For a compiler that allocates all its memory once at startup, brk is faster than mmap because it extends the existing data segment with no page table manipulation. A single brk call allocating 32KB takes <1 microsecond."
+evidence = "Stage1a brk(0) + brk(+32K): two syscalls, total ~200ns. Enough for tokenizer buffers, parse tables, variable storage, and output buffer."
+
+[[best_practices]]
+title = "Use a fixup table for forward references"
+explanation = "When a compiler emits code, variable addresses depend on total code size — which isn't known until codegen finishes. Emit placeholder addresses (zeros), record each placeholder's offset and variable index in a fixup table, then walk the table after codegen to patch in the real addresses. This is the same technique linkers use for relocations, applied at the single-file level."
+
+[[best_practices]]
+title = "Transition from interpreter to compiler incrementally"
+explanation = "Build the lexer and parser as a compile-time interpreter first (stage 1a), then convert it to a code emitter (stage 1b). The parser structure stays identical — recursive descent with the same grammar. Only the leaf actions change: instead of computing values, they emit instruction bytes. This lets you test the parsing infrastructure independently before tackling codegen."
+
+[[best_practices]]
+title = "Use the stack for expression temporaries in generated code"
+explanation = "When generating code for nested expressions like (a + b) * (c - d), use push/pop to save intermediate results. The left operand is evaluated into rax and pushed. The right operand is evaluated into rax. Then pop the left into rcx and apply the operator. This naturally handles arbitrary nesting without register allocation."
+
+[[gotchas]]
+title = "Forward jump patching must use read-modify-write"
+explanation = "When patching a 4-byte rel32 in a conditional jump, a naive 8-byte store (mov [addr], val) overwrites the 4 bytes after the jump — which is the start of the body code. You must read the existing qword, mask in the low 4 bytes of the rel32, and write back. This is the #1 bug when building a compiler with only qword memory operations."
+bad_example = "mov [patch_addr], rel32_value  # overwrites 4 bytes of following code"
+good_example = "load qword at patch_addr; clear low 32 bits; OR in rel32; store back"
+
+[[gotchas]]
+title = "Condition inversion for if/while jumps"
+explanation = "An 'if (a == b) { body }' must jump PAST the body when the condition is FALSE. So '==' emits jne (jump if NOT equal), '<' emits jge, '>' emits jle, and so on. Getting the inversion wrong means the body executes when it shouldn't and vice versa. Every comparison operator maps to its logical opposite in the jump instruction."
+bad_example = "if (x == 1) emits je (jumps INTO body when true, falls through when false)"
+good_example = "if (x == 1) emits jne to skip body (falls INTO body when true, jumps past when false)"
+
+[[gotchas]]
+title = "While loops need two jumps — forward and backward"
+explanation = "A while loop has a condition check at the top with a forward jump to exit (patched after body), plus an unconditional backward jump at the bottom to re-check the condition. The backward jump's rel32 is negative (the target is before the current position). The forward jump uses the same patching mechanism as if statements."
+bad_example = "Only emitting the forward conditional jump — the loop body executes once then falls through"
+good_example = "Forward jcc to EXIT after condition; body code; backward jmp to LOOP_TOP; EXIT: (patch forward jcc here)"
+
+[[gotchas]]
+title = "The 'last variable' exit convention matters for control flow"
+explanation = "If your language exits with the last assigned variable's value, control flow complicates things. Assignments inside while/if bodies update the 'last assigned' tracker, but after the block ends, you want the outer scope's variable. Save and restore the last-variable tracker around control flow blocks, like saving callee-saved registers."
+bad_example = "while loop body assigns to counter variable; program exits with counter instead of result"
+good_example = "Save last_var_idx before while body, restore after — exit value reflects outer scope"
+
+[[performance_notes]]
+title = "Runtime codegen doubles compiler size but enables real programs"
+explanation = "Adding runtime codegen (if/while/variables) roughly doubles the compiler binary size compared to compile-time evaluation, but enables programs that actually compute at runtime. The tradeoff is worth it — a 5KB compiler that generates real programs vs a 2.5KB compiler that can only evaluate constants."
+evidence = "Cyrius stage1a (compile-time eval): 2642 bytes, 800 lines. Stage1b (runtime codegen with if/while): 5051 bytes, 1661 lines. Stage1b computes factorial, sums, and nested loops."
+
+[[performance_notes]]
+title = "Sub-millisecond compilation for bootstrap compilers"
+explanation = "A 5KB compiler written in assembly compiles programs in ~500 microseconds — dominated by process startup (fork+exec+brk), not by compilation itself. Generated programs execute in ~360 microseconds, also dominated by kernel overhead. At these sizes, the compiler and its output are faster than the OS can spawn them."
+evidence = "Stage1b compile times: 499-607us per program. Execute times: 354-548us. The factorial program (5 vars, while loop, multiplication) compiles in 513us and runs in 367us. Process fork+exec alone accounts for ~300us."
+
+[[performance_notes]]
+title = "Generated binary size scales linearly with statement count"
+explanation = "Each variable declaration emits ~23 bytes (mov rax imm64 + mov rcx imm64 + mov [rcx] rax), each arithmetic op emits ~7 bytes (push + op + pop), each if/while emits ~20 bytes of condition + jump overhead. A program's binary size is predictable from its statement count."
+evidence = "Stage1b: literal=184B, arithmetic=216B, 3 vars=288B, if=264B, while+2vars=344B, nested if-in-while=384B. Roughly 20-30 bytes per statement."
+
+[[performance_notes]]
+title = "CI-built LLVM saves 50+ minutes"
+explanation = "Building LLVM from source takes 30-90 minutes. Using a pre-built LLVM from CI reduces a full rustc build from ~60 minutes to ~5 minutes. The tradeoff is trusting someone else's binary."
+evidence = "Rust bootstrap with CI LLVM: 5:19. Without: estimated 60+ minutes on 16 cores."
+
+[[performance_notes]]
+title = "Shallow clones reduce bootstrap setup time 10x"
+explanation = "A full clone of rust-lang/rust is multiple GB. With --depth 1, the initial clone is much smaller. Nested submodules (cargo, LLVM) also benefit from shallow cloning."
+evidence = "Full rust-lang/rust clone: ~2GB. Shallow clone: ~200MB. Cargo submodule: ~50MB shallow vs ~500MB full."
+
+[[performance_notes]]
+title = "Stage 1 is sufficient for most development"
+explanation = "Stage 2 (compiler compiled by itself) is needed for release builds but not for development. Stage 1 (compiled by the beta) is functionally identical for testing. Building only stage 1 halves build time."
+evidence = "Stage 1 build: ~5 minutes. Full stage 2 build: ~10-15 minutes. Stage 1 is sufficient for cargo, tests, and development."
