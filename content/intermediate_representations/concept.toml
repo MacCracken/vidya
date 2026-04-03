@@ -1,0 +1,70 @@
+id = "intermediate_representations"
+title = "Intermediate Representations"
+topic = "IntermediateRepresentations"
+description = "The internal languages compilers use between parsing and code generation. IRs decouple the frontend (parsing) from the backend (codegen), enabling M×N language-target combinations with M+N implementations. Key forms: SSA (Static Single Assignment) for optimization, CFGs (Control Flow Graphs) for analysis, basic blocks for scheduling. Understanding IR is understanding how compilers think."
+tags = ["SSA", "CFG", "basic-block", "phi-node", "IR", "intermediate-representation", "three-address-code", "dominator", "def-use", "use-def", "liveness", "data-flow", "LLVM-IR", "MIR"]
+
+[[best_practices]]
+title = "Use SSA form for optimization passes"
+explanation = "In SSA (Static Single Assignment), every variable is assigned exactly once. When control flow merges, phi nodes select which definition to use. This makes def-use chains explicit: you can trivially find all uses of a value by looking at the single definition. Dead code elimination, constant propagation, and common subexpression elimination are all simpler in SSA because there's no aliasing of names."
+
+[[best_practices]]
+title = "Build a CFG before doing any analysis"
+explanation = "A Control Flow Graph has basic blocks as nodes and branches as edges. Every analysis (liveness, dominance, reaching definitions) operates on the CFG. Building the CFG is straightforward: scan instructions for labels (block starts) and branches (block ends). Each block is a maximal sequence of non-branching instructions. The CFG is the foundation — build it first, analyze second."
+
+[[best_practices]]
+title = "Keep basic blocks maximal"
+explanation = "A basic block has one entry point (the first instruction) and one exit point (a branch or return). No branches in the middle, no jumps to the middle. This invariant means you can analyze each block as a straight-line sequence — data flow within a block is trivial. Only inter-block flow needs the CFG."
+
+[[best_practices]]
+title = "Use dominance for SSA construction"
+explanation = "Node A dominates node B if every path from the entry to B goes through A. The dominance frontier of A is the set of nodes where A's dominance ends — exactly where phi nodes are needed. Constructing SSA: 1) build dominator tree, 2) compute dominance frontiers, 3) insert phi nodes at frontiers, 4) rename variables to unique versions."
+
+[[best_practices]]
+title = "Design the IR for your optimization needs"
+explanation = "If you only need basic optimizations (constant folding, dead code), a simple three-address code (x = y op z) suffices. If you need serious optimization, use SSA with phi nodes. If you need to reason about memory, add explicit load/store instructions with aliasing information. Don't over-engineer: Cyrius's stage 1 doesn't need SSA — that's for stage 2/3 when optimization matters."
+
+[[gotchas]]
+title = "Phi nodes don't execute — they're a notational convenience"
+explanation = "A phi node 'x3 = phi(x1, x2)' means: if control came from block A, x3 gets x1's value; from block B, x3 gets x2's value. But there's no actual phi instruction in machine code. During SSA destruction (before codegen), phi nodes become copies on each incoming edge. Understanding this is critical for implementing SSA correctly."
+bad_example = "Trying to lower phi nodes as conditional moves — wrong semantics for 3+ predecessors"
+good_example = "Insert copies: in block A, add 'x3 = x1' before the branch; in block B, add 'x3 = x2'"
+
+[[gotchas]]
+title = "Critical edges block phi node destruction"
+explanation = "A critical edge goes from a block with multiple successors to a block with multiple predecessors. You can't insert phi-copies on a critical edge because there's no block to put them in. The fix: split the critical edge by inserting an empty block. Most SSA algorithms require this."
+bad_example = "Block A branches to B or C; B also has another predecessor. Copy for phi in B goes where?"
+good_example = "Insert empty block D on A→B edge. A branches to D or C. D falls through to B. Phi-copy goes in D."
+
+[[gotchas]]
+title = "Liveness analysis must be computed backward"
+explanation = "A variable is live at a point if it's used later before being redefined. This is a backward data-flow problem: start from uses and propagate backward through the CFG. Computing it forward gives wrong results because you don't know if a definition is 'dead' until you've seen all future uses."
+bad_example = "Forward pass: 'x = 5' — is x live? Don't know yet, haven't seen uses"
+good_example = "Backward pass: 'print(x)' makes x live; propagate backward to its definition"
+
+[[gotchas]]
+title = "Loop-carried dependencies need careful phi placement"
+explanation = "In a loop, a variable assigned inside the loop body and used in the loop header needs a phi: one input from before the loop (initial value), one from the loop body (updated value). Missing this phi means the loop always uses the initial value."
+bad_example = "while (i < n): i used from initial definition, not from i = i + 1 at bottom of loop"
+good_example = "i2 = phi(i_init from preheader, i_updated from loop body)"
+
+[[gotchas]]
+title = "SSA doesn't model memory — you still need alias analysis"
+explanation = "SSA tracks register-like values perfectly, but memory operations (loads and stores) aren't directly in SSA form. Two stores to the same pointer alias; loads must see the right store. Solutions: memory SSA (assign versions to memory locations), or explicit load/store with alias sets. Without this, the compiler can't optimize across memory operations."
+bad_example = "Treating *p and *q as independent because they have different SSA names — they might alias"
+good_example = "Memory SSA: store1 = MemoryDef(store0); load1 = MemoryUse(store1) — tracks dependencies"
+
+[[performance_notes]]
+title = "SSA construction is nearly linear time"
+explanation = "The Cytron et al. algorithm constructs SSA in O(n × α(n)) time (where α is the inverse Ackermann function — effectively constant). Dominance computation is O(n) with the Lengauer-Tarjan algorithm. For a compiler processing millions of instructions, SSA construction is not the bottleneck."
+evidence = "LLVM processes ~1M IR instructions/second during SSA construction. For a 100K-line program (~500K IR instructions), SSA construction takes ~0.5 seconds. Optimization passes take 10-100x longer."
+
+[[performance_notes]]
+title = "Constant folding in SSA is a single pass"
+explanation = "In SSA, if all inputs to an operation are constants, the result is a constant. You propagate this through the def-use chain in one pass. Without SSA, you'd need iterative data-flow analysis to handle redefinitions. SSA makes this O(n) instead of O(n²)."
+evidence = "Sparse conditional constant propagation (SCCP) in SSA: one pass over the def-use graph. In non-SSA form: iterative analysis with O(d) iterations where d is the loop nesting depth."
+
+[[performance_notes]]
+title = "Three-address code is faster to construct than SSA"
+explanation = "If you only need basic optimizations (constant folding, dead code elimination, peephole), three-address code (x = y op z) is simpler and faster to build than SSA. No dominator trees, no phi nodes, no renaming. For a bootstrap compiler, three-address code is the sweet spot."
+evidence = "Three-address code construction: one AST walk, O(n). SSA construction: dominator tree + frontier computation + phi insertion + renaming = 4 passes, ~4x slower. For a bootstrap compiler doing zero optimization, even three-address code is overkill."

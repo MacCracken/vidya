@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **18 new topics** covering compiler internals, systems programming, language design, and low-level fundamentals:
+  - Compiler internals: `lexing_and_parsing`, `code_generation`, `intermediate_representations`, `linking_and_loading`, `optimization_passes`
+  - Systems programming: `syscalls_and_abi`, `virtual_memory`, `interrupt_handling`, `process_and_scheduling`, `filesystems`
+  - Language design: `ownership_and_borrowing`, `trait_and_typeclass_systems`, `macro_systems`, `module_systems`
+  - High-value additions: `instruction_encoding`, `elf_and_executable_formats`, `allocators`, `boot_and_startup`
+- 18 new `Topic` enum variants with Display implementations
+- Rust implementations for all 18 new topics (concept.toml + rust.rs each)
+- Total: **33 topics**, 173+ content examples across 10 languages
+
 ## [1.0.0] — 2026-03-30
 
 ### Added

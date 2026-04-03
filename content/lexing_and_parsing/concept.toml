@@ -1,0 +1,85 @@
+id = "lexing_and_parsing"
+title = "Lexing and Parsing"
+topic = "LexingAndParsing"
+description = "Turning source text into structured representations — the front end of every compiler, interpreter, and language tool. Lexing (tokenization) breaks character streams into meaningful tokens. Parsing arranges tokens into trees according to grammar rules. Every language tool starts here."
+tags = ["lexer", "parser", "tokenizer", "recursive-descent", "precedence-climbing", "parser-combinator", "AST", "grammar", "token", "scanner", "Pratt-parsing", "PEG", "LL", "LR", "LALR", "shift-reduce"]
+
+[[best_practices]]
+title = "Separate lexing from parsing"
+explanation = "Lexing converts characters to tokens (handling whitespace, comments, string escapes). Parsing converts tokens to trees (handling grammar rules). Mixing them creates unmaintainable code. The lexer should be a simple state machine or DFA that the parser calls via next_token(). This separation also lets you swap lexers (hand-written vs generated) without touching the parser."
+
+[[best_practices]]
+title = "Use recursive descent for hand-written parsers"
+explanation = "Recursive descent maps grammar rules directly to functions: one function per non-terminal, one call per rule reference. The code reads like the grammar. It handles left-recursive grammars with precedence climbing (Pratt parsing). Parser generators (yacc, ANTLR) add build complexity and make error messages harder to customize. Every major production compiler (GCC, Clang, rustc, Go, V8) uses hand-written recursive descent."
+
+[[best_practices]]
+title = "Use Pratt parsing for expressions"
+explanation = "Pratt parsing (operator precedence parsing) handles infix, prefix, and postfix operators with a single loop and a binding power table. Each operator has a left and right binding power. The parser recurses when the right binding power exceeds the current minimum. This naturally handles precedence (+ vs *), associativity (left vs right), and mixed prefix/infix operators (- as negate vs subtract). It replaces the cascade of parse_additive/parse_multiplicative/parse_unary functions."
+
+[[best_practices]]
+title = "Make the lexer produce spans, not just token types"
+explanation = "Every token should carry its byte offset (start, end) in the source. This costs almost nothing at lex time but enables precise error messages, IDE go-to-definition, syntax highlighting, and source maps. Store the source text once, let tokens point into it with byte ranges. Don't copy token text into strings — use &str slices or interned symbols."
+
+[[best_practices]]
+title = "Peek-based token lookahead, not stream rewinding"
+explanation = "A recursive descent parser needs at most 1-2 tokens of lookahead. Implement this with peek() that returns the next token without consuming it, and advance() that consumes and returns. Never rewind the token stream — it makes the parser non-linear and hides ambiguity bugs. If you need more than 2 tokens of lookahead, refactor the grammar."
+
+[[best_practices]]
+title = "Report errors with source context, not just line numbers"
+explanation = "Show the offending line with a caret pointing at the error location. Include what was expected vs what was found. Accumulate multiple errors instead of stopping at the first one (panic-mode recovery: skip tokens until a synchronization point like ';' or '}', then resume parsing)."
+
+[[gotchas]]
+title = "Left recursion crashes recursive descent parsers"
+explanation = "A grammar rule like 'expr → expr + term' directly translates to parse_expr() calling parse_expr() — infinite recursion. The fix is left-recursion elimination: rewrite as 'expr → term ((+ | -) term)*' using a loop instead of recursion. Pratt parsing handles this naturally because the loop replaces the left-recursive call."
+bad_example = "fn parse_expr() { let left = parse_expr(); expect('+'); let right = parse_term(); }"
+good_example = "fn parse_expr() { let mut left = parse_term(); while peek() == '+' { advance(); let right = parse_term(); left = BinOp(left, '+', right); } }"
+
+[[gotchas]]
+title = "Greedy tokenization breaks on multi-character operators"
+explanation = "A greedy lexer matching '<' will emit LessThan when it sees '<<' (shift-left) or '<=' (less-or-equal). The lexer must check the next character before committing. The rule: always try the longest match first. Check for '<<=' before '<<' before '<='  before '<'."
+bad_example = "match c { '<' => Token::Lt } // misses <=, <<, <<="
+good_example = "match (c, peek) { ('<', '<') => ..., ('<', '=') => ..., ('<', _) => Token::Lt }"
+
+[[gotchas]]
+title = "String escapes in the lexer are a parsing problem"
+explanation = "Strings look simple ('read until closing quote') but escape sequences make them a mini-parser. You need to handle \\n, \\t, \\\\, \\\", \\0, \\xNN, \\u{NNNN}, and unterminated strings. A common bug: forgetting that \\\\ inside a string means a literal backslash, so the next character is NOT an escape."
+bad_example = "Scanning until '\"' — breaks on escaped quotes: \"hello \\\"world\\\"\""
+good_example = "Loop: if char == '\\\\' { skip next char (escape) } else if char == '\"' { break }"
+
+[[gotchas]]
+title = "Unicode identifiers break byte-indexed lexers"
+explanation = "If the lexer advances by bytes but the language allows Unicode identifiers (Rust, Python 3, Java), a multi-byte UTF-8 character spans multiple byte positions. Byte-based peek() might see the middle of a character. Solution: advance by char but track byte offsets for spans."
+bad_example = "let c = source.as_bytes()[pos]; // might be a UTF-8 continuation byte"
+good_example = "let c = source[pos..].chars().next().unwrap(); pos += c.len_utf8();"
+
+[[gotchas]]
+title = "Operator precedence errors produce valid but wrong ASTs"
+explanation = "If * and + have the same precedence, '2 + 3 * 4' parses as '(2 + 3) * 4 = 20' instead of '2 + (3 * 4) = 14'. The AST is well-formed — every node is valid — but the computation is wrong. These bugs are silent. Test with expressions where different precedence levels produce different results."
+bad_example = "All binary operators call the same parse function at the same level"
+good_example = "Binding power table: '+' → (1,2), '*' → (3,4), giving * higher precedence than +"
+
+[[gotchas]]
+title = "Newline handling varies between languages"
+explanation = "Some languages use newlines as statement terminators (Go, Python). Others ignore them (C, Java). Some use them contextually (JavaScript's ASI). The lexer must know which mode it's in. A Go lexer inserts implicit semicolons after certain tokens. A Python lexer tracks indentation levels. Getting newline semantics wrong produces cascading parse errors."
+bad_example = "Always skipping newlines as whitespace — breaks Go/Python semantics"
+good_example = "Lexer mode flag: if newline-sensitive, emit Newline tokens; parser decides if they matter"
+
+[[performance_notes]]
+title = "Hand-written lexers are 5-10x faster than regex-based ones"
+explanation = "A hand-written DFA lexer processes one character per iteration with a switch/match statement. Regex engines have interpretation overhead, backtracking, and memory allocation for captures. For a compiler that runs millions of times, lexer speed matters."
+evidence = "ripgrep's hand-tuned DFA: ~5 GB/s throughput. Python's re module on the same input: ~500 MB/s. rustc's hand-written lexer: ~200 MB/s of Rust source (including string interning and span tracking)."
+
+[[performance_notes]]
+title = "String interning eliminates redundant allocations"
+explanation = "Source code reuses identifiers heavily ('self' appears thousands of times in a Rust file). Without interning, each occurrence allocates a new String. An interner stores each unique string once and hands out cheap integer IDs. Comparison becomes integer comparison instead of string comparison."
+evidence = "rustc's symbol interner: ~30% fewer allocations during parsing. Lookup is O(1) after first insertion. Memory savings: a 100K-line file might have 50K identifier tokens but only 3K unique strings."
+
+[[performance_notes]]
+title = "Arena allocation for AST nodes eliminates per-node overhead"
+explanation = "AST nodes are created during parsing and freed together after compilation. A bump allocator (arena) allocates nodes sequentially with no per-node overhead. Deallocation is instant: reset the bump pointer. This is 10-50x faster than individual heap allocations."
+evidence = "rustc uses a typed arena for AST nodes. GCC uses obstacks (similar concept). Measured allocation speedup: ~20x vs malloc/free for small, short-lived objects. Memory fragmentation: zero (contiguous allocation)."
+
+[[performance_notes]]
+title = "Lookup tables beat branching for character classification"
+explanation = "Checking if a character is an identifier start/continuation with chains of comparisons (is_alpha || c == '_' || is_digit) generates branches. A 256-byte lookup table indexed by byte value gives branch-free classification. The table fits in 4 cache lines."
+evidence = "Table lookup: 1 cycle (memory load, likely cached). Branch chain for 6 categories: 3-6 cycles with branch misprediction. rustc and V8 both use classification tables for their lexers."

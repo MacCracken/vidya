@@ -42,6 +42,42 @@ pub enum Topic {
     CompilerBootstrapping,
     /// Binary formats and executable structure (ELF, PE, Mach-O, linking)
     BinaryFormats,
+    /// Lexing and parsing (tokenizers, recursive descent, precedence climbing, parser combinators)
+    LexingAndParsing,
+    /// Intermediate representations (SSA, CFG, basic blocks, phi nodes)
+    IntermediateRepresentations,
+    /// Code generation (instruction selection, register allocation, calling conventions)
+    CodeGeneration,
+    /// Linking and loading (symbol resolution, relocations, dynamic linking, GOT/PLT)
+    LinkingAndLoading,
+    /// Optimization passes (dead code elimination, constant folding, inlining, loop unrolling)
+    OptimizationPasses,
+    /// Syscalls and ABI (Linux syscall interface, System V AMD64 ABI, calling conventions)
+    SyscallsAndAbi,
+    /// Virtual memory (page tables, TLB, mmap, memory-mapped I/O)
+    VirtualMemory,
+    /// Interrupt handling (IDT, exception handlers, IRQ routing, context switching)
+    InterruptHandling,
+    /// Process and scheduling (task structs, context switch mechanics, scheduler algorithms)
+    ProcessAndScheduling,
+    /// Filesystems (VFS layer, inode structures, block devices)
+    Filesystems,
+    /// Ownership and borrowing (move semantics, lifetime analysis, borrow checking algorithms)
+    OwnershipAndBorrowing,
+    /// Trait and typeclass systems (monomorphization vs vtables, coherence, associated types)
+    TraitAndTypeclassSystems,
+    /// Macro systems (hygiene, procedural vs declarative, compile-time evaluation)
+    MacroSystems,
+    /// Module systems (namespacing, visibility, separate compilation, incremental builds)
+    ModuleSystems,
+    /// Instruction encoding (x86_64 encoding rules, ModR/M, SIB, VEX/EVEX)
+    InstructionEncoding,
+    /// ELF and executable formats (sections, DWARF debug info, relocatable objects)
+    ElfAndExecutableFormats,
+    /// Allocators (bump, arena, slab, buddy allocation strategies)
+    Allocators,
+    /// Boot and startup (multiboot, UEFI handoff, early init, GDT/IDT setup)
+    BootAndStartup,
 }
 
 impl std::fmt::Display for Topic {
@@ -62,6 +98,24 @@ impl std::fmt::Display for Topic {
             Self::QuantumComputing => f.write_str("Quantum Computing"),
             Self::CompilerBootstrapping => f.write_str("Compiler Bootstrapping"),
             Self::BinaryFormats => f.write_str("Binary Formats"),
+            Self::LexingAndParsing => f.write_str("Lexing and Parsing"),
+            Self::IntermediateRepresentations => f.write_str("Intermediate Representations"),
+            Self::CodeGeneration => f.write_str("Code Generation"),
+            Self::LinkingAndLoading => f.write_str("Linking and Loading"),
+            Self::OptimizationPasses => f.write_str("Optimization Passes"),
+            Self::SyscallsAndAbi => f.write_str("Syscalls and ABI"),
+            Self::VirtualMemory => f.write_str("Virtual Memory"),
+            Self::InterruptHandling => f.write_str("Interrupt Handling"),
+            Self::ProcessAndScheduling => f.write_str("Process and Scheduling"),
+            Self::Filesystems => f.write_str("Filesystems"),
+            Self::OwnershipAndBorrowing => f.write_str("Ownership and Borrowing"),
+            Self::TraitAndTypeclassSystems => f.write_str("Trait and Typeclass Systems"),
+            Self::MacroSystems => f.write_str("Macro Systems"),
+            Self::ModuleSystems => f.write_str("Module Systems"),
+            Self::InstructionEncoding => f.write_str("Instruction Encoding"),
+            Self::ElfAndExecutableFormats => f.write_str("ELF and Executable Formats"),
+            Self::Allocators => f.write_str("Allocators"),
+            Self::BootAndStartup => f.write_str("Boot and Startup"),
         }
     }
 }
@@ -264,6 +318,127 @@ mod tests {
     fn topic_display() {
         assert_eq!(Topic::DataTypes.to_string(), "Data Types");
         assert_eq!(Topic::ErrorHandling.to_string(), "Error Handling");
+    }
+
+    #[test]
+    fn topic_display_compiler_topics() {
+        assert_eq!(Topic::LexingAndParsing.to_string(), "Lexing and Parsing");
+        assert_eq!(
+            Topic::IntermediateRepresentations.to_string(),
+            "Intermediate Representations"
+        );
+        assert_eq!(Topic::CodeGeneration.to_string(), "Code Generation");
+        assert_eq!(Topic::LinkingAndLoading.to_string(), "Linking and Loading");
+        assert_eq!(Topic::OptimizationPasses.to_string(), "Optimization Passes");
+    }
+
+    #[test]
+    fn topic_display_systems_topics() {
+        assert_eq!(Topic::SyscallsAndAbi.to_string(), "Syscalls and ABI");
+        assert_eq!(Topic::VirtualMemory.to_string(), "Virtual Memory");
+        assert_eq!(Topic::InterruptHandling.to_string(), "Interrupt Handling");
+        assert_eq!(
+            Topic::ProcessAndScheduling.to_string(),
+            "Process and Scheduling"
+        );
+        assert_eq!(Topic::Filesystems.to_string(), "Filesystems");
+    }
+
+    #[test]
+    fn topic_display_language_design_topics() {
+        assert_eq!(
+            Topic::OwnershipAndBorrowing.to_string(),
+            "Ownership and Borrowing"
+        );
+        assert_eq!(
+            Topic::TraitAndTypeclassSystems.to_string(),
+            "Trait and Typeclass Systems"
+        );
+        assert_eq!(Topic::MacroSystems.to_string(), "Macro Systems");
+        assert_eq!(Topic::ModuleSystems.to_string(), "Module Systems");
+    }
+
+    #[test]
+    fn topic_display_high_value_topics() {
+        assert_eq!(
+            Topic::InstructionEncoding.to_string(),
+            "Instruction Encoding"
+        );
+        assert_eq!(
+            Topic::ElfAndExecutableFormats.to_string(),
+            "ELF and Executable Formats"
+        );
+        assert_eq!(Topic::Allocators.to_string(), "Allocators");
+        assert_eq!(Topic::BootAndStartup.to_string(), "Boot and Startup");
+    }
+
+    #[test]
+    fn topic_serde_roundtrip_all_variants() {
+        let topics = [
+            Topic::DataTypes,
+            Topic::Concurrency,
+            Topic::ErrorHandling,
+            Topic::MemoryManagement,
+            Topic::InputOutput,
+            Topic::Testing,
+            Topic::Algorithms,
+            Topic::Patterns,
+            Topic::TypeSystems,
+            Topic::Performance,
+            Topic::Security,
+            Topic::KernelTopics,
+            Topic::QuantumComputing,
+            Topic::CompilerBootstrapping,
+            Topic::BinaryFormats,
+            Topic::LexingAndParsing,
+            Topic::IntermediateRepresentations,
+            Topic::CodeGeneration,
+            Topic::LinkingAndLoading,
+            Topic::OptimizationPasses,
+            Topic::SyscallsAndAbi,
+            Topic::VirtualMemory,
+            Topic::InterruptHandling,
+            Topic::ProcessAndScheduling,
+            Topic::Filesystems,
+            Topic::OwnershipAndBorrowing,
+            Topic::TraitAndTypeclassSystems,
+            Topic::MacroSystems,
+            Topic::ModuleSystems,
+            Topic::InstructionEncoding,
+            Topic::ElfAndExecutableFormats,
+            Topic::Allocators,
+            Topic::BootAndStartup,
+        ];
+
+        for topic in &topics {
+            let json = serde_json::to_string(topic).unwrap();
+            let decoded: Topic = serde_json::from_str(&json).unwrap();
+            assert_eq!(topic, &decoded, "serde roundtrip failed for {}", topic);
+        }
+    }
+
+    #[test]
+    fn topic_display_is_nonempty_for_all() {
+        let topics = [
+            Topic::DataTypes,
+            Topic::LexingAndParsing,
+            Topic::CodeGeneration,
+            Topic::SyscallsAndAbi,
+            Topic::Allocators,
+            Topic::BootAndStartup,
+            Topic::Filesystems,
+            Topic::MacroSystems,
+        ];
+        for topic in &topics {
+            let display = topic.to_string();
+            assert!(!display.is_empty(), "{:?} has empty display", topic);
+            // Display should not be the debug representation
+            assert!(
+                !display.contains("Topic::"),
+                "{:?} display looks like Debug",
+                topic
+            );
+        }
     }
 
     #[test]

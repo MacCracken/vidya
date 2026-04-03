@@ -1,0 +1,70 @@
+id = "allocators"
+title = "Allocators"
+topic = "Allocators"
+description = "Memory allocation strategies beyond malloc/free — purpose-built allocators for specific usage patterns. Bump allocators for arena-style batch allocation, slab allocators for fixed-size objects, buddy allocators for power-of-two splitting, and pool allocators for object reuse. Understanding allocators is essential for writing compilers (AST nodes), kernels (page frames), and high-performance systems."
+tags = ["allocator", "arena", "bump", "slab", "buddy", "pool", "memory", "malloc", "free", "fragmentation", "alignment", "page-allocator"]
+
+[[best_practices]]
+title = "Use bump allocation for batch-allocate, batch-free patterns"
+explanation = "A bump allocator maintains a pointer that advances with each allocation. Deallocation is either impossible (arena) or happens all at once (reset the pointer). This gives O(1) allocation with zero fragmentation and zero per-object overhead. Perfect for compiler passes (allocate AST nodes, free them all after the pass), request handling (allocate per-request, free at response), and parsing."
+
+[[best_practices]]
+title = "Use slab allocation for fixed-size objects"
+explanation = "A slab allocator pre-allocates chunks of memory divided into fixed-size slots. Allocation picks a free slot (O(1) with a free list). Deallocation returns the slot to the free list (O(1)). No fragmentation because all objects are the same size. The Linux kernel uses slab allocation for task_struct, inode, dentry — all fixed-size, frequently allocated kernel objects."
+
+[[best_practices]]
+title = "Align allocations to the required boundary"
+explanation = "Every allocation must be aligned to the type's alignment requirement. For x86_64: 1 for u8, 2 for u16, 4 for u32/f32, 8 for u64/f64/pointers, 16 for SSE types. A bump allocator aligns by rounding up: ptr = (ptr + align - 1) & !(align - 1). Misaligned access on x86_64 works but is slower; on ARM/RISC-V it faults."
+
+[[best_practices]]
+title = "Use buddy allocation for power-of-two block sizes"
+explanation = "The buddy system divides memory into power-of-two blocks. To allocate size N, find the smallest power-of-two block >= N. If none available, split a larger block in half (creating two 'buddies'). To free, merge with the buddy if it's also free (coalescing). This gives O(log n) allocation and deallocation with bounded fragmentation. Used by Linux for page frame allocation."
+
+[[best_practices]]
+title = "Pool allocators for objects with identical lifetimes"
+explanation = "A pool pre-allocates a fixed number of objects. Allocation takes from the pool (O(1)), deallocation returns to it (O(1)). No system calls, no fragmentation. Use pools for connection objects, thread stacks, packet buffers — anything where the maximum count is known and all objects have similar lifetimes."
+
+[[gotchas]]
+title = "Bump allocators can't free individual objects"
+explanation = "A bump allocator only moves forward. You can't free a single object in the middle — the memory stays allocated until the entire arena is reset. If you need to free objects individually during the arena's lifetime, you need a different allocator (slab, free list, or general-purpose)."
+bad_example = "let node = arena.alloc(Node::new()); arena.free(node);  // not possible"
+good_example = "let arena = Arena::new(); /* allocate many nodes */ arena.reset();  // free all at once"
+
+[[gotchas]]
+title = "Buddy allocation wastes up to 50% memory (internal fragmentation)"
+explanation = "If you request 33 bytes, the buddy allocator gives you 64 bytes (next power of two). The 31 unused bytes are wasted. For allocations that don't align with power-of-two sizes, buddy allocation has poor utilization. Slab allocation is better for fixed-size objects."
+bad_example = "Allocating 100-byte objects with a buddy allocator: each gets 128 bytes, 28% waste"
+good_example = "Allocating 100-byte objects with a slab allocator: each gets exactly 100 bytes (+ alignment padding)"
+
+[[gotchas]]
+title = "Free list corruption is a security vulnerability"
+explanation = "Slab and pool allocators store the free list pointer inside the free slot itself (the memory is unused, so the pointer costs nothing). But a use-after-free or buffer overflow can corrupt the free list pointer, causing the next allocation to return an attacker-controlled address. Modern allocators randomize free lists and validate pointers."
+bad_example = "Free slot: [next_free_ptr | garbage]. Buffer overflow writes into next_free_ptr."
+good_example = "Encrypt free list pointers with a random key: stored = ptr ^ key. Validates on deallocation."
+
+[[gotchas]]
+title = "mmap is not free — it's a syscall with TLB costs"
+explanation = "Each mmap call creates a new VMA (Virtual Memory Area) in the kernel. Many small mmaps fragment the address space and slow down page table walks. Use mmap for large allocations (>= 128KB, like glibc does) and brk/slab for small ones. Returning memory to the OS with munmap also has TLB shootdown costs."
+bad_example = "mmap(4096) for every small allocation — thousands of VMAs, slow fork/exec"
+good_example = "mmap(2MB) once, sub-allocate with bump/slab. Return large blocks with munmap when done."
+
+[[gotchas]]
+title = "Forgetting to handle alignment in bump allocators"
+explanation = "A naive bump allocator increments the pointer by the allocation size: ptr += size. But if size is 3 and the next allocation needs 8-byte alignment, the returned pointer is misaligned. Always round up to the required alignment before returning the pointer."
+bad_example = "alloc(3) returns 0x1000; alloc::<u64>(8) returns 0x1003 — misaligned for u64"
+good_example = "alloc(3) returns 0x1000; next ptr = 0x1003; align to 8 → 0x1008; alloc::<u64>(8) returns 0x1008"
+
+[[performance_notes]]
+title = "Bump allocation is 10-50x faster than malloc"
+explanation = "malloc maintains free lists, coalesces blocks, and handles fragmentation — all O(1) amortized but with significant constant factors. Bump allocation is a pointer increment and an alignment round-up. For allocation-heavy workloads (compilers, parsers), bump allocators dominate."
+evidence = "Benchmark: allocating 1M 64-byte objects. malloc (glibc): ~45 ns/alloc. Bump allocator: ~2 ns/alloc. 22x faster. jemalloc: ~25 ns/alloc. Bump + batch free: effectively 0 ns for deallocation."
+
+[[performance_notes]]
+title = "Slab allocation has near-zero fragmentation for fixed-size objects"
+explanation = "Because all slots in a slab are the same size, there's no external fragmentation (no unusable gaps between allocations). Internal fragmentation is minimal (only alignment padding). This is why the Linux kernel uses slab for every frequently-allocated kernel object."
+evidence = "Linux kernel slab statistics (typical server): task_struct slab 98% utilization, inode slab 97%, dentry slab 96%. Compare to general-purpose malloc: typical utilization 70-85% due to fragmentation."
+
+[[performance_notes]]
+title = "Buddy system coalescing is O(log n) but rarely needed"
+explanation = "When freeing a block, the buddy system checks if the buddy is also free and merges them. This cascades up: two 4KB buddies become 8KB, two 8KB buddies become 16KB, etc. Each merge is O(1) but there can be log2(max_size) merges. In practice, buddies are rarely both free simultaneously, so most frees are O(1)."
+evidence = "Linux page allocator (buddy system): average free time ~50 ns. Worst case (full cascade from 4KB to 4MB): ~200 ns. The common case dominates."

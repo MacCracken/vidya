@@ -16,7 +16,7 @@ Vidya is a curated, tested, multi-language programming reference for the AGNOS e
 - **Gotchas** — Common mistakes with bad/good examples. What NOT to do and what to do instead
 - **Performance Notes** — Optimization discoveries with evidence (benchmarks, complexity analysis)
 - **Multi-Language** — Same concept implemented in 10 languages: Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 Assembly, AArch64 Assembly, OpenQASM
-- **Tested** — Every code example compiles and runs. CI validates all 150 implementations
+- **Tested** — Every code example compiles and runs. CI validates all implementations
 - **Queryable** — Search, compare across languages, filter by topic or tag
 
 ## Quick Start
@@ -27,7 +27,7 @@ use vidya::loader::load_all;
 use vidya::search::search;
 use vidya::{Language, SearchQuery};
 
-// Load all 15 topics from the content directory
+// Load all 33 topics from the content directory
 let registry = load_all(Path::new("content")).unwrap();
 
 // Search for concepts
@@ -66,6 +66,26 @@ for gotcha in &concept.gotchas {
 | `kernel_topics` | Page tables, interrupts, MMIO, ABIs, bootloaders |
 | `quantum_computing` | Grover's, Shor's, VQE, noise models, entanglement |
 | `design_patterns` | Builder, strategy, observer, RAII, factory, DI |
+| `compiler_bootstrapping` | Self-hosting, multi-stage compilation, seed compilers |
+| `binary_formats` | ELF headers, segments, entry points, minimal binaries |
+| `lexing_and_parsing` | Tokenizers, recursive descent, Pratt parsing, grammars |
+| `code_generation` | Instruction selection, register allocation, stack codegen |
+| `intermediate_representations` | SSA, CFG, basic blocks, phi nodes, data flow |
+| `optimization_passes` | DCE, constant folding, inlining, strength reduction |
+| `linking_and_loading` | Symbol resolution, relocations, GOT/PLT, dynamic linking |
+| `syscalls_and_abi` | Linux syscalls, System V AMD64 ABI, calling conventions |
+| `instruction_encoding` | x86_64 ModR/M, SIB, REX prefixes, machine code bytes |
+| `elf_and_executable_formats` | Sections, DWARF, symbol tables, relocatable objects |
+| `allocators` | Bump, arena, slab, buddy allocation strategies |
+| `virtual_memory` | Page tables, TLB, mmap, demand paging, huge pages |
+| `interrupt_handling` | IDT, exception handlers, IRQ routing, ISR patterns |
+| `process_and_scheduling` | Task structs, context switching, CFS, runqueues |
+| `filesystems` | VFS, inodes, dentries, block allocation, journaling |
+| `ownership_and_borrowing` | Move semantics, lifetimes, borrow checking algorithms |
+| `trait_and_typeclass_systems` | Monomorphization, vtables, coherence, associated types |
+| `macro_systems` | Hygiene, declarative vs procedural, compile-time codegen |
+| `module_systems` | Namespacing, visibility, separate compilation, imports |
+| `boot_and_startup` | UEFI, multiboot, GDT/IDT setup, long mode transition |
 
 ## Languages
 
@@ -95,7 +115,7 @@ for gotcha in &concept.gotchas {
 ## Validation
 
 ```bash
-# Validate all 150 content examples
+# Validate all content examples
 ./scripts/validate-content.sh
 
 # Validate via Rust crate (with native QASM support)

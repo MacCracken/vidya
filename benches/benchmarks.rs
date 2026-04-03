@@ -163,6 +163,80 @@ fn bench_compare_all_languages(c: &mut Criterion) {
     });
 }
 
+// ── Search operations (new topics) ────────────────────────────────
+
+fn bench_search_compiler_text(c: &mut Criterion) {
+    let reg = loaded_registry();
+    let query = SearchQuery::text("parser");
+    c.bench_function("search_compiler_text", |b| {
+        b.iter(|| {
+            std::hint::black_box(search(&reg, &query));
+        });
+    });
+}
+
+fn bench_search_syscall_tag(c: &mut Criterion) {
+    let reg = loaded_registry();
+    let query = SearchQuery::tagged(vec!["syscall".into()]);
+    c.bench_function("search_syscall_tag", |b| {
+        b.iter(|| {
+            std::hint::black_box(search(&reg, &query));
+        });
+    });
+}
+
+fn bench_search_ssa_tag(c: &mut Criterion) {
+    let reg = loaded_registry();
+    let query = SearchQuery::tagged(vec!["SSA".into()]);
+    c.bench_function("search_ssa_tag", |b| {
+        b.iter(|| {
+            std::hint::black_box(search(&reg, &query));
+        });
+    });
+}
+
+fn bench_search_allocator_with_language(c: &mut Criterion) {
+    let reg = loaded_registry();
+    let mut query = SearchQuery::text("allocator");
+    query.language = Some(Language::Rust);
+    c.bench_function("search_allocator_rust_filter", |b| {
+        b.iter(|| {
+            std::hint::black_box(search(&reg, &query));
+        });
+    });
+}
+
+// ── Registry operations (new topics) ─────────────────────────────
+
+fn bench_registry_by_topic_compiler(c: &mut Criterion) {
+    let reg = loaded_registry();
+    c.bench_function("registry_by_topic_compiler", |b| {
+        b.iter(|| {
+            std::hint::black_box(reg.by_topic(&vidya::Topic::LexingAndParsing));
+        });
+    });
+}
+
+fn bench_registry_get_new_topic(c: &mut Criterion) {
+    let reg = loaded_registry();
+    c.bench_function("registry_get_new_topic", |b| {
+        b.iter(|| {
+            std::hint::black_box(reg.get("intermediate_representations"));
+        });
+    });
+}
+
+// ── Compare operations (new topics) ──────────────────────────────
+
+fn bench_compare_new_topic(c: &mut Criterion) {
+    let reg = loaded_registry();
+    c.bench_function("compare_new_topic_rust_only", |b| {
+        b.iter(|| {
+            let _ = std::hint::black_box(compare(&reg, "lexing_and_parsing", &[Language::Rust]));
+        });
+    });
+}
+
 // ── Loader operations ──────────────────────────────────────────────
 
 fn bench_load_all(c: &mut Criterion) {
@@ -183,6 +257,16 @@ fn bench_load_single_concept(c: &mut Criterion) {
     });
 }
 
+fn bench_load_new_concept(c: &mut Criterion) {
+    c.bench_function("load_new_concept_lexing", |b| {
+        b.iter(|| {
+            std::hint::black_box(
+                vidya::loader::load_concept(Path::new("content/lexing_and_parsing")).unwrap(),
+            );
+        });
+    });
+}
+
 criterion_group!(
     benches,
     // Registry
@@ -190,6 +274,8 @@ criterion_group!(
     bench_registry_get_miss,
     bench_registry_list,
     bench_registry_by_topic,
+    bench_registry_by_topic_compiler,
+    bench_registry_get_new_topic,
     // Search
     bench_search_text_hit,
     bench_search_text_miss,
@@ -198,11 +284,17 @@ criterion_group!(
     bench_search_broad,
     bench_search_quantum,
     bench_search_multi_tag,
+    bench_search_compiler_text,
+    bench_search_syscall_tag,
+    bench_search_ssa_tag,
+    bench_search_allocator_with_language,
     // Compare
     bench_compare_two_languages,
     bench_compare_all_languages,
+    bench_compare_new_topic,
     // Loader
     bench_load_all,
     bench_load_single_concept,
+    bench_load_new_concept,
 );
 criterion_main!(benches);

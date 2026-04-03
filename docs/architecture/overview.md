@@ -7,7 +7,7 @@ Vidya has two complementary layers:
 ```
 ┌─────────────────────────────────────────────────┐
 │  Content Layer (content/)                       │
-│  150 source files across 15 topics × 10 langs  │
+│  173+ source files across 33 topics × 10 langs  │
 │  Human-readable, AI-trainable, CI-tested        │
 └─────────────┬───────────────────────────────────┘
               │ loader module

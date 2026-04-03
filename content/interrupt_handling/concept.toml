@@ -1,0 +1,70 @@
+id = "interrupt_handling"
+title = "Interrupt Handling"
+topic = "InterruptHandling"
+description = "How the CPU responds to hardware events and software exceptions. Interrupts preempt the current execution, save state, and transfer control to a handler. On x86_64: the IDT (Interrupt Descriptor Table) maps interrupt vectors to handlers, the LAPIC/IOAPIC routes hardware IRQs, and exception handlers deal with faults (page fault, divide-by-zero, general protection). This is the foundation of preemptive multitasking and hardware interaction."
+tags = ["IDT", "interrupt", "exception", "IRQ", "LAPIC", "IOAPIC", "ISR", "context-switch", "trap", "fault", "NMI", "PIC", "APIC", "vector", "interrupt-frame"]
+
+[[best_practices]]
+title = "Set up the IDT before enabling interrupts"
+explanation = "The IDT must have valid entries for all expected interrupt vectors before the CPU receives any interrupt. An unhandled interrupt with no IDT entry causes a double fault. A double fault with no handler causes a triple fault (immediate reset). At minimum: set up handlers for exceptions 0-31, the double fault handler (#8), and a default handler for everything else."
+
+[[best_practices]]
+title = "Save all registers in the interrupt handler prologue"
+explanation = "An interrupt can fire between any two instructions. The handler must save all registers it uses, or it will corrupt the interrupted code's state. On x86_64: the CPU pushes SS, RSP, RFLAGS, CS, RIP automatically. The handler must push the error code (if any), all general-purpose registers, and segment registers. Restore them in reverse order before IRETQ."
+
+[[best_practices]]
+title = "Use the IST (Interrupt Stack Table) for critical handlers"
+explanation = "The TSS (Task State Segment) has 7 IST entries, each pointing to a separate stack. IDT entries can specify an IST index, causing the CPU to switch to that stack before calling the handler. Use this for double fault (#8) and NMI — these can fire even when the current stack is corrupted."
+
+[[best_practices]]
+title = "Acknowledge interrupts in the handler"
+explanation = "For hardware interrupts routed through the APIC, the handler must send an EOI (End of Interrupt) to the LAPIC before returning. Without EOI, the APIC won't deliver the next interrupt of the same or lower priority. For the legacy PIC (8259), send EOI to port 0x20 (and 0xA0 for IRQs 8-15)."
+
+[[best_practices]]
+title = "Keep interrupt handlers short"
+explanation = "Interrupts block lower-priority interrupts. A long handler increases interrupt latency. The pattern: save state, acknowledge the hardware, queue work for a bottom-half/workqueue, restore state, return. Do the minimum in the ISR, defer complex work to a schedulable context."
+
+[[gotchas]]
+title = "Interrupt handlers must not use the red zone"
+explanation = "Leaf functions in System V AMD64 ABI can use 128 bytes below RSP without adjusting RSP (the red zone). An interrupt handler that pushes to the stack will clobber any red zone data from the interrupted function. Kernel code must be compiled with -mno-red-zone to prevent the compiler from using the red zone."
+bad_example = "Kernel compiled without -mno-red-zone: leaf function uses [rsp-8]; interrupt clobbers it"
+good_example = "All kernel code compiled with -mno-red-zone; interrupt handler's stack usage is safe"
+
+[[gotchas]]
+title = "Exception error codes are inconsistent"
+explanation = "Some x86_64 exceptions push an error code onto the stack, some don't. #PF (14) pushes an error code, #DE (0, divide error) doesn't. If your handler assumes a uniform stack layout, it will read the wrong values for half the exceptions. Handle this by pushing a dummy error code (0) for exceptions that don't push one."
+bad_example = "Uniform handler: pop error_code for every exception — #DE handler reads RIP as error code"
+good_example = "Exception 0 stub: push 0 (dummy error code); jmp common_handler. Exception 14 stub: (error code already pushed); jmp common_handler"
+
+[[gotchas]]
+title = "Double fault means 'exception during exception handling'"
+explanation = "A double fault (#8) fires when an exception occurs while the CPU is trying to deliver another exception. Common causes: invalid IDT entry for the first exception, or stack overflow in the exception handler. If the double fault handler itself faults, you get a triple fault (CPU reset). Use IST for the double fault handler so it has a guaranteed-good stack."
+bad_example = "Stack overflow in page fault handler → double fault → double fault handler uses same stack → triple fault"
+good_example = "Double fault handler on IST[0] with its own dedicated stack — always has a valid stack"
+
+[[gotchas]]
+title = "IRETQ is not RET"
+explanation = "Returning from an interrupt handler requires IRETQ, which pops RIP, CS, RFLAGS, RSP, and SS from the stack (in that order). Using RET instead only pops RIP and leaves the interrupt context active. The CPU will still be at the interrupt's privilege level with the wrong flags."
+bad_example = "Interrupt handler ends with 'ret' — CS/SS/RFLAGS not restored, privilege level wrong"
+good_example = "Interrupt handler ends with 'iretq' after restoring all registers and popping error code"
+
+[[gotchas]]
+title = "Masking interrupts for too long causes lost events"
+explanation = "CLI (clear interrupt flag) prevents all maskable interrupts. If interrupts are masked too long, hardware events pile up. Most interrupt controllers have a small buffer (LAPIC has one pending bit per vector). If the same interrupt fires twice while masked, the second is lost."
+bad_example = "CLI; lengthy_operation(); STI;  // hardware timer interrupts lost, time drift"
+good_example = "CLI; critical_section_with_minimal_work(); STI; lengthy_operation_with_interrupts_enabled();"
+
+[[performance_notes]]
+title = "Interrupt delivery takes 100-300 cycles"
+explanation = "When an interrupt fires, the CPU: checks privilege level, loads IST stack (if specified), pushes SS/RSP/RFLAGS/CS/RIP, loads handler from IDT, flushes pipeline. This costs 100-300 cycles on modern x86_64, not counting the handler's own work."
+evidence = "Bare metal measurement: interrupt entry (push regs) + empty handler + IRETQ ≈ 200-400 cycles on Zen 3. Compare: function call ≈ 3-5 cycles. Interrupts are 50-100x more expensive than calls."
+
+[[performance_notes]]
+title = "MSI (Message Signaled Interrupts) avoid shared IRQ lines"
+explanation = "Legacy PCI devices share IRQ lines, requiring each handler to check if its device actually interrupted. MSI writes a unique message to a specific address, allowing the LAPIC to route directly to the right handler. No sharing, no checking, lower latency."
+evidence = "Shared IRQ handling: check device status register (~100 ns per device on the line). MSI: direct delivery, no check needed. For NVMe with MSI-X: ~1us total interrupt latency. With shared IRQ: ~5us."
+
+[[performance_notes]]
+title = "Polling beats interrupts for high-throughput I/O"
+explanation = "At high packet rates (>100K packets/sec), the interrupt overhead dominates. DPDK and io_uring use polling (busy-wait) instead: check the completion queue in a tight loop. No interrupt overhead, no context switch. The tradeoff: polling wastes CPU when idle."
+evidence = "Network stack: 1M packets/sec with interrupts: ~30% CPU in interrupt handlers. Same rate with DPDK polling: ~10% CPU total, 3x throughput. Below 10K packets/sec, interrupts are more efficient (polling wastes CPU)."

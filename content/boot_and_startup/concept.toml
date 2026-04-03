@@ -1,0 +1,70 @@
+id = "boot_and_startup"
+title = "Boot and Startup"
+topic = "BootAndStartup"
+description = "How a computer goes from power-on to running an operating system. The firmware (BIOS/UEFI) initializes hardware, finds a bootloader, and transfers control. The bootloader loads the kernel, sets up initial page tables, and jumps to kernel entry. Early kernel init sets up the GDT, IDT, memory management, and device drivers before starting the first process. Every decision in early boot is constrained by what hardware state exists at that point."
+tags = ["boot", "UEFI", "BIOS", "multiboot", "GDT", "IDT", "bootloader", "kernel-entry", "real-mode", "protected-mode", "long-mode", "page-tables", "early-init", "firmware"]
+
+[[best_practices]]
+title = "Use UEFI for modern systems, Multiboot2 for compatibility"
+explanation = "UEFI provides a rich pre-boot environment: filesystem access, memory map, framebuffer, networking. The bootloader is a PE executable on the EFI System Partition. Multiboot2 (used by GRUB) provides a simpler protocol: the bootloader loads the kernel ELF, passes a boot info struct with memory map and command line. Choose UEFI for real hardware, Multiboot2 for QEMU development."
+
+[[best_practices]]
+title = "Get the memory map from firmware before anything else"
+explanation = "The firmware knows which physical memory regions are usable (RAM), reserved (MMIO, ACPI), or claimed by firmware. This memory map is only available before exiting boot services (UEFI) or from the Multiboot2 boot info. Save it immediately — it's the foundation for the physical memory allocator. Accessing reserved memory causes hardware faults."
+
+[[best_practices]]
+title = "Set up a GDT before entering long mode"
+explanation = "x86_64 requires a valid GDT (Global Descriptor Table) with at least a kernel code segment (64-bit, DPL=0), kernel data segment, user code segment (DPL=3), and user data segment. The GDT entries are mostly ignored in long mode (flat model), but the segment selectors must exist. Also add a TSS descriptor for interrupt stack switching."
+
+[[best_practices]]
+title = "Identity-map the boot code region"
+explanation = "When enabling paging, the code currently executing must be mapped at its current address (identity mapping). Otherwise, the next instruction fetch after writing CR3 faults because the instruction pointer isn't in any mapped page. Map the first few MB identity, set up higher-half kernel mappings, enable paging, jump to the higher-half address, then unmap the identity region."
+
+[[best_practices]]
+title = "Use a serial port for early debug output"
+explanation = "Before the framebuffer driver works, before the kernel has a console — the only reliable output is the serial port (0x3F8 on x86). Writing a byte to the serial port is 3 outb instructions. QEMU can redirect serial to stdout with -serial stdio. Every kernel developer's first debug tool."
+
+[[gotchas]]
+title = "UEFI gives you virtual addresses, not physical"
+explanation = "UEFI boot services run with paging enabled. The addresses you see are virtual. When you exit boot services and set up your own page tables, you must use the physical addresses from the memory map. The UEFI memory map includes both virtual and physical addresses for each region."
+bad_example = "Using UEFI-returned pointers directly after exiting boot services — they're virtual, paging changed"
+good_example = "Convert all UEFI pointers to physical addresses before exiting boot services"
+
+[[gotchas]]
+title = "Multiboot2 starts you in 32-bit protected mode"
+explanation = "GRUB's Multiboot2 protocol delivers the kernel in 32-bit protected mode with paging disabled, A20 enabled, and a flat 4GB address space. You must transition to 64-bit long mode yourself: set up page tables, enable PAE, set EFER.LME, enable paging, load a 64-bit GDT, and far-jump to 64-bit code. Getting any step wrong triple-faults."
+bad_example = "Trying to use 64-bit instructions immediately after Multiboot2 entry — still in 32-bit mode"
+good_example = "32-bit stub: set up page tables → enable PAE (CR4.PAE) → set EFER.LME → enable paging (CR0.PG) → load GDT → far jmp to 64-bit code"
+
+[[gotchas]]
+title = "The stack is not set up for you"
+explanation = "At kernel entry, the stack pointer may be at an arbitrary location or not set up at all. Before calling any functions (including Rust code), set RSP to a known-good location. Allocate a static boot stack in the kernel's .bss section (e.g., 64KB) and set RSP to its top. Forgetting this causes silent stack corruption."
+bad_example = "Calling a Rust function from the entry point without setting RSP — uses whatever garbage was in RSP"
+good_example = ".section .bss; boot_stack: .space 65536; .section .text; lea rsp, [boot_stack + 65536]"
+
+[[gotchas]]
+title = "BSS must be zeroed before using Rust static variables"
+explanation = "Rust assumes static mut variables start at zero. The .bss section should be zero-filled, but the bootloader may not do this. The kernel's early init must memset the .bss section to zero before calling any Rust code. Use the linker symbols __bss_start and __bss_end to find the range."
+bad_example = "Rust static mut counter starts at random value because BSS wasn't zeroed"
+good_example = "Early init: for addr in __bss_start..__bss_end { *addr = 0; } then call kernel_main()"
+
+[[gotchas]]
+title = "PIC (Programmable Interrupt Controller) fires spurious interrupts"
+explanation = "The legacy 8259 PIC may fire spurious interrupts (especially IRQ 7 and IRQ 15) during initialization. If your IDT isn't ready, these cause double faults. Remap the PIC to vectors 32-47 and mask all IRQs before setting up the IDT. Better: disable the legacy PIC entirely and use the APIC."
+bad_example = "Setting up IDT without remapping PIC — timer interrupt fires as exception 0 (divide error)"
+good_example = "Remap PIC: IRQ 0-7 → vectors 32-39, IRQ 8-15 → vectors 40-47. Mask all. Then set up IDT."
+
+[[performance_notes]]
+title = "UEFI boot is 2-10 seconds, BIOS is 5-30 seconds"
+explanation = "UEFI initializes hardware in parallel and has a simpler firmware structure. BIOS boot probes hardware sequentially (POST), loads a 512-byte MBR, chains through boot stages. Modern UEFI boot to kernel entry: 2-5 seconds. Legacy BIOS: 5-30 seconds."
+evidence = "ThinkPad with UEFI: power-on to kernel entry in 3.2 seconds. Same machine in legacy BIOS mode: 12 seconds. Server with full POST: 30-60 seconds."
+
+[[performance_notes]]
+title = "Early identity mapping can use 2MB huge pages"
+explanation = "For the initial boot page tables, use 2MB huge pages instead of 4KB pages. This requires fewer page table entries (512 entries cover 1GB) and fewer page faults during early init. The kernel's permanent page tables can use 4KB pages for fine-grained mapping."
+evidence = "Mapping 4GB with 4KB pages: 1048576 PTEs across 2048 page tables. With 2MB pages: 2048 PDEs in 4 page tables. 512x fewer page table entries. Setup time: ~1ms vs ~100ms."
+
+[[performance_notes]]
+title = "Serial port output is slow — batch for production"
+explanation = "Each character to the serial port requires polling the UART status register. At 115200 baud, one character takes ~87 microseconds. A 100-character debug message takes ~9ms. In production, use a ring buffer and DMA, or disable serial output entirely. For early debug, the speed is acceptable."
+evidence = "Serial at 115200 baud: 11520 chars/second ≈ 87us/char. Printing 'Booting kernel...' (16 chars): 1.4ms. Printing full memory map (2000 chars): 174ms. Compare: VGA text mode write: ~100ns/char."

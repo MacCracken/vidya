@@ -1,0 +1,76 @@
+id = "instruction_encoding"
+title = "Instruction Encoding"
+topic = "InstructionEncoding"
+description = "How assembly mnemonics become machine code bytes. On x86_64: legacy prefixes, REX prefix (for 64-bit operands and extended registers), opcode bytes, ModR/M (addressing modes), SIB (scaled index), displacement, and immediate values. VEX/EVEX prefixes for AVX/AVX-512. Understanding encoding is essential for writing assemblers, JIT compilers, and binary analysis tools."
+tags = ["x86_64", "encoding", "ModRM", "SIB", "REX", "VEX", "EVEX", "opcode", "prefix", "displacement", "immediate", "instruction-format", "machine-code"]
+
+[[best_practices]]
+title = "Learn the ModR/M byte first — it's the key to x86 encoding"
+explanation = "The ModR/M byte has three fields: mod (2 bits, addressing mode), reg (3 bits, register operand or opcode extension), r/m (3 bits, register or memory operand). mod=11 means register-register. mod=00/01/10 means memory with 0/1/4-byte displacement. The reg field is the source/destination register. Everything else in x86 encoding follows from understanding ModR/M."
+
+[[best_practices]]
+title = "Use REX.W for all 64-bit operations"
+explanation = "The REX prefix (0x40-0x4F) enables 64-bit operand size (W bit), extended registers R8-R15 (R bit), and extended SIB/ModR/M fields (X, B bits). REX.W (0x48) is the most common prefix — add it before any instruction that operates on 64-bit values. Without it, operations default to 32-bit even in 64-bit mode."
+
+[[best_practices]]
+title = "Use the two-operand form of IMUL to avoid RDX clobber"
+explanation = "One-operand IMUL (0xF7 /5) multiplies RAX by the operand and stores the 128-bit result in RDX:RAX. Two-operand IMUL (0x0F 0xAF /r) multiplies dst by src and stores the low 64 bits in dst, leaving RDX untouched. Three-operand IMUL (0x69 or 0x6B) multiplies src by an immediate into dst. Always prefer multi-operand forms unless you need the high bits."
+
+[[best_practices]]
+title = "Emit the smallest encoding when multiple exist"
+explanation = "Many x86 instructions have multiple encodings. ADD EAX, imm32 has a short form (0x05 + imm32, 5 bytes) and a long form (0x81 /0 + ModR/M + imm32, 6 bytes). MOV RAX, imm64 can sometimes use the shorter MOV EAX, imm32 (zero-extends to 64 bits). Shorter encodings improve I-cache utilization and decode bandwidth. A good assembler picks the shortest valid encoding."
+
+[[best_practices]]
+title = "Use RIP-relative addressing for position-independent code"
+explanation = "In 64-bit mode, ModR/M with mod=00, r/m=101 (what would be [RBP]) means RIP-relative addressing instead. This is the standard way to access global data in PIC: 'mov rax, [rip + offset]'. The displacement is relative to the next instruction's address. Use this for all global data references in shared libraries and PIE executables."
+
+[[gotchas]]
+title = "RBP and R13 need special encoding as memory base"
+explanation = "In ModR/M, mod=00 with r/m=101 means RIP-relative, not [RBP]. To encode [RBP], use mod=01 with a displacement of 0x00 (adds one byte). Same for R13 (which has the same 3-bit encoding as RBP in the extended register space). This hardware quirk trips up every assembler author."
+bad_example = "ModR/M(0b00, reg, 0b101) — encodes RIP-relative, not [RBP]"
+good_example = "ModR/M(0b01, reg, 0b101) + disp8(0x00) — encodes [RBP+0], i.e., [RBP]"
+
+[[gotchas]]
+title = "RSP and R12 as base register require a SIB byte"
+explanation = "In ModR/M, r/m=100 means 'SIB byte follows' instead of [RSP]. To encode [RSP], emit ModR/M with r/m=100 followed by SIB byte 0x24 (base=RSP, index=none, scale=1). Same for R12. Without the SIB byte, the CPU reads the next byte as SIB regardless."
+bad_example = "ModR/M(0b00, reg, 0b100) without SIB — CPU reads next opcode byte as SIB"
+good_example = "ModR/M(0b00, reg, 0b100) + SIB(0x24) — correctly encodes [RSP]"
+
+[[gotchas]]
+title = "REX prefix must immediately precede the opcode"
+explanation = "The REX prefix must come after legacy prefixes (66, 67, F2, F3, lock) but immediately before the opcode. A REX prefix followed by another prefix is invalid. Also, some instructions (like PUSH/POP with register encoding in the opcode byte) require REX.B to access R8-R15."
+bad_example = "0x48 0x66 0x89 ... — REX then legacy prefix, wrong order"
+good_example = "0x66 0x48 0x89 ... — legacy prefix then REX then opcode"
+
+[[gotchas]]
+title = "Sign-extended immediates change encoding size"
+explanation = "Many instructions have a 'sign-extended imm8' form that's shorter than imm32. ADD r/m64, imm8 (0x83 /0) uses 1 byte for values -128 to +127 instead of 4 bytes. But the assembler must verify the immediate fits in 8 bits signed. Using imm32 when imm8 suffices wastes 3 bytes per instruction."
+bad_example = "add rax, 1 encoded as 48 81 C0 01 00 00 00 (7 bytes with imm32)"
+good_example = "add rax, 1 encoded as 48 83 C0 01 (4 bytes with sign-extended imm8)"
+
+[[gotchas]]
+title = "VEX prefix replaces REX for AVX instructions"
+explanation = "AVX instructions use VEX (2 or 3 byte) or EVEX (4 byte) prefixes instead of REX + legacy prefixes. A VEX prefix encodes the REX bits, operand size, and opcode map in a compact format. You cannot use REX with VEX — they're mutually exclusive. This means AVX code needs a completely different encoding path."
+bad_example = "REX.W + VEX + opcode — illegal, REX and VEX cannot coexist"
+good_example = "VEX.W1 + opcode — VEX encodes the W bit internally"
+
+[[gotchas]]
+title = "CALL and JMP rel32 are relative to the NEXT instruction"
+explanation = "The rel32 displacement in CALL (0xE8) and JMP (0xE9) is added to RIP after the instruction is fetched — i.e., RIP points to the byte AFTER the rel32 field. To jump to address T from a CALL at address A: rel32 = T - (A + 5). Forgetting the +5 (instruction length) puts you 5 bytes off."
+bad_example = "rel32 = target - call_address — off by 5 bytes"
+good_example = "rel32 = target - (call_address + 5) — correct, accounts for instruction size"
+
+[[performance_notes]]
+title = "Shorter instructions decode faster on modern CPUs"
+explanation = "x86_64 CPUs decode 16-32 bytes of instructions per cycle. Shorter encodings mean more instructions per decode window. A tight loop with 4-byte instructions decodes 4-8 instructions/cycle. The same loop with 7-byte instructions decodes only 2-4. This directly impacts IPC (instructions per cycle)."
+evidence = "Intel Zen 4: 32-byte fetch window, 6 instructions/cycle decode. A loop of ADD reg,imm8 (4 bytes each): 8 per fetch. Same with ADD reg,imm32 (7 bytes each): 4 per fetch. 2x decode throughput difference."
+
+[[performance_notes]]
+title = "LEA is free arithmetic — one instruction, no flags, no memory"
+explanation = "LEA (load effective address) computes address arithmetic without touching memory or flags. 'lea rax, [rbx + rcx*4 + 8]' computes rbx + rcx*4 + 8 in one cycle. This replaces 2-3 arithmetic instructions and doesn't affect condition flags (useful when you need to preserve them)."
+evidence = "lea rax, [rbx + rcx*8]: 1 cycle, no flags. Equivalent: mov rax, rcx; shl rax, 3; add rax, rbx = 3 instructions, 3 cycles, clobbers flags."
+
+[[performance_notes]]
+title = "SIB byte adds zero latency"
+explanation = "The SIB (Scale-Index-Base) byte enables [base + index*scale + disp] addressing in one instruction. Despite the extra decode byte, SIB-encoded memory operands have the same latency as simple [reg] operands on modern CPUs. The AGU (Address Generation Unit) handles the multiply-add in parallel."
+evidence = "mov rax, [rbx]: 4 cycle latency. mov rax, [rbx + rcx*8 + 16]: also 4 cycle latency. The SIB computation is free."

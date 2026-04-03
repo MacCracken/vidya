@@ -1,0 +1,70 @@
+id = "process_and_scheduling"
+title = "Process and Scheduling"
+topic = "ProcessAndScheduling"
+description = "How operating systems manage running programs and share the CPU between them. A process is an instance of a running program with its own address space, open files, and execution state. The scheduler decides which process runs next, balancing fairness, throughput, and latency. Context switching saves one process's state and loads another's. This is the heart of a multitasking OS."
+tags = ["process", "thread", "scheduler", "context-switch", "task-struct", "PCB", "CFS", "priority", "preemption", "time-slice", "runqueue", "nice", "fork", "exec", "wait"]
+
+[[best_practices]]
+title = "Keep the task struct minimal"
+explanation = "The task struct (process control block) holds everything the kernel needs to manage a process: saved registers, page table pointer (CR3), kernel stack pointer, PID, state (running/ready/blocked), open file descriptors, signal handlers. Keep it fixed-size where possible. Linux's task_struct is ~6KB — larger than ideal, but decades of evolution."
+
+[[best_practices]]
+title = "Context switch by saving/restoring callee-saved registers only"
+explanation = "The context switch function is called (not interrupted), so the calling convention already saves caller-saved registers on the caller's stack. The switch function only needs to save callee-saved registers (RBX, RBP, R12-R15 on x86_64), swap the stack pointer, and restore the new task's callee-saved registers. This minimizes the switch cost to ~6 register saves/restores + stack swap."
+
+[[best_practices]]
+title = "Use a per-CPU runqueue"
+explanation = "A single global runqueue becomes a contention bottleneck on multicore systems. Instead, give each CPU its own runqueue. The scheduler picks from the local queue (no lock needed). A separate load balancer periodically migrates tasks between CPUs to maintain fairness. Linux CFS uses per-CPU red-black trees."
+
+[[best_practices]]
+title = "Separate kernel and user stacks"
+explanation = "Each process needs two stacks: a user-space stack (grows downward from user memory) and a kernel stack (used when the process enters the kernel via syscall or interrupt). The kernel stack must be in kernel memory so other processes can't corrupt it. On x86_64, TSS.RSP0 holds the kernel stack pointer for ring 0 transitions."
+
+[[best_practices]]
+title = "Use voluntary preemption for latency-sensitive systems"
+explanation = "Cooperative scheduling (yield-only) is simple but lets CPU-bound processes starve others. Full preemption (interrupt any kernel code) is complex and requires careful locking. Voluntary preemption (insert preemption points at well-defined locations — scheduler checks on syscall return, interrupt return, and explicit yield points) is the practical middle ground."
+
+[[gotchas]]
+title = "Fork copies page tables, not pages (copy-on-write)"
+explanation = "fork() doesn't copy the entire address space — it marks all pages read-only in both parent and child, with COW (copy-on-write) flags. The first write triggers a page fault that copies just that page. But fork() must still copy the page table structures themselves, and the overhead grows with address space size. This is why vfork() exists — it shares the address space entirely."
+bad_example = "Assuming fork() is O(1) for a process with 10GB of mapped memory — page table copy is O(n pages)"
+good_example = "Use posix_spawn or vfork+exec for launching new programs — avoids copying page tables"
+
+[[gotchas]]
+title = "Priority inversion blocks high-priority tasks"
+explanation = "If a low-priority task holds a lock and a high-priority task waits for it, the high-priority task is effectively running at the low-priority level. Worse: a medium-priority task can preempt the low-priority task, blocking the high-priority task indefinitely. Solution: priority inheritance — temporarily boost the lock holder's priority to the waiter's priority."
+bad_example = "High-priority task waits for mutex; medium-priority task preempts lock holder; deadlock-like behavior"
+good_example = "Priority inheritance: lock holder's priority boosted to high until it releases the lock"
+
+[[gotchas]]
+title = "Context switch must update CR3 for address space switch"
+explanation = "Switching between threads in the same process only requires register swapping. Switching between processes also requires loading the new process's page table pointer into CR3. This flushes the TLB (except PCID-tagged entries), adding significant cost. PCID (Process Context ID) tags TLB entries per-process, avoiding full flushes."
+bad_example = "Context switch without updating CR3: new process accesses old process's memory"
+good_example = "if (next->mm != current->mm) { write_cr3(next->mm->pgd); } // only flush when needed"
+
+[[gotchas]]
+title = "Forgetting to save/restore FPU/SSE state"
+explanation = "x86_64 has 16 XMM/YMM registers for floating-point and SIMD. These must be saved and restored on context switch if either process uses them. Saving 512 bytes of FPU state on every switch is expensive. Solution: lazy FPU switching — set the TS flag, trap on first FPU use, save/restore only then. Linux switched to eager FPU saving in 4.2 (simpler, and modern CPUs make it fast)."
+bad_example = "Context switch without saving XMM registers: process B's float computation corrupts process A's results"
+good_example = "XSAVE/XRSTOR in context switch path — saves all extended state (FPU, SSE, AVX)"
+
+[[gotchas]]
+title = "Spinlocks in scheduler code cause deadlocks"
+explanation = "If the scheduler holds a spinlock and gets preempted, the next process may try to acquire the same lock — deadlock. Scheduler code must disable preemption while holding locks (spin_lock_irqsave in Linux). This is why kernel preemption adds complexity: every lock acquisition must consider whether it's safe to be preempted."
+bad_example = "Scheduler acquires runqueue lock; timer interrupt preempts; new context tries to acquire same lock"
+good_example = "spin_lock_irqsave(&rq->lock) — disables interrupts + preemption while holding the lock"
+
+[[performance_notes]]
+title = "Context switch costs 1-5 microseconds"
+explanation = "A minimal context switch (save/restore 6 registers + swap stack) takes ~200 cycles. Adding CR3 switch + TLB flush + FPU save: ~1000-3000 cycles. The indirect cost (cache/TLB pollution) can add 5000+ cycles as the new process warms up caches."
+evidence = "Linux context switch: ~1.5 us with TLB flush, ~0.5 us same-mm thread switch. Cache warmup after switch: 5-50 us depending on working set size. Total effective cost: often 10-100x the raw switch time."
+
+[[performance_notes]]
+title = "CFS achieves O(log n) scheduling decisions"
+explanation = "Linux's Completely Fair Scheduler (CFS) uses a red-black tree keyed by virtual runtime (vruntime). The leftmost node (smallest vruntime) is the next task to run. Insert and remove are O(log n). For typical systems with 100-1000 runnable tasks, this is effectively O(1)."
+evidence = "CFS schedule() latency: ~0.5 us for 100 tasks, ~1 us for 1000 tasks. Compare: O(n) scheduler (scan all tasks): ~10 us for 1000 tasks."
+
+[[performance_notes]]
+title = "PCID eliminates TLB flush on context switch"
+explanation = "Without PCID, every CR3 write flushes the entire TLB. With PCID, each process gets a 12-bit tag, and TLB entries are preserved across switches. Only entries with the old PCID are ignored. This saves 1000-5000 cycles per context switch."
+evidence = "Context switch without PCID: ~2 us (includes TLB warmup). With PCID: ~0.8 us. PCID is supported on Intel Westmere+ and AMD Zen+. Linux enables it automatically when available."

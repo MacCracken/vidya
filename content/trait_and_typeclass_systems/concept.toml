@@ -1,0 +1,80 @@
+id = "trait_and_typeclass_systems"
+title = "Trait and Typeclass Systems"
+topic = "TraitAndTypeclassSystems"
+description = "Bounded polymorphism through traits (Rust), typeclasses (Haskell), protocols (Swift/Elixir), and interfaces (Go). The language-design decisions: monomorphization vs vtable dispatch, coherence rules that prevent overlapping implementations, associated types vs type parameters, and object safety constraints that determine what can be type-erased."
+tags = ["traits", "typeclasses", "monomorphization", "vtable", "coherence", "orphan-rule", "associated-types", "higher-kinded-types", "type-erasure", "object-safety", "dispatch", "polymorphism", "protocols", "interfaces"]
+
+[[best_practices]]
+title = "Default to monomorphization, offer dynamic dispatch as an opt-in"
+explanation = "Monomorphization (generating a specialized copy of each generic function per concrete type) produces code identical to hand-written specializations — no indirection, full inlining. Rust's impl Trait and C++ templates do this. Dynamic dispatch (vtables) should be available but not the default, because it inhibits inlining and adds a pointer indirection per call. Languages that default to vtables (Java, C#) pay a permanent performance tax on every interface call."
+
+[[best_practices]]
+title = "Enforce coherence with an orphan rule"
+explanation = "Without coherence rules, two crates can both impl Trait for Type, and linking them produces ambiguity or silent behavioral differences depending on which impl the compiler picks. The orphan rule (at least one of the trait or the type must be local to the crate defining the impl) prevents this. Haskell's typeclass system had coherence problems for decades before backpack and the 'avoid orphan instances' convention. Rust enforced it from day one. The cost is reduced flexibility (newtype wrappers are needed sometimes), but the payoff is global unambiguity."
+
+[[best_practices]]
+title = "Use associated types instead of type parameters when there is exactly one natural choice"
+explanation = "Iterator has type Item as an associated type, not Iterator<Item>. This means a type can only implement Iterator once (with one Item), which simplifies inference and error messages. If you used a type parameter, Vec<i32> could implement Iterator<i32> and Iterator<String> simultaneously, making every call ambiguous without annotation. Rule of thumb: if the implementor determines the type, use an associated type. If the caller determines the type, use a type parameter."
+
+[[best_practices]]
+title = "Define object safety rules explicitly"
+explanation = "A trait is object-safe (can be used as dyn Trait) only if its methods can be dispatched through a vtable. This means: no methods with Self in argument or return position (the vtable doesn't know the concrete size), no generic methods (can't put infinite monomorphized copies in a finite vtable), and the trait must not require Sized. Defining these rules explicitly in the language spec prevents confusing errors when users try to make trait objects from non-object-safe traits."
+
+[[best_practices]]
+title = "Support supertraits for composing constraints"
+explanation = "trait Error: Display + Debug means every Error implementation must also implement Display and Debug. This lets code accepting dyn Error call Display and Debug methods without additional bounds. Supertraits compose cleanly: the vtable for dyn Error includes the vtables for Display and Debug. Without supertraits, users must write verbose multi-trait bounds everywhere, and trait objects can only access one trait's methods."
+
+[[best_practices]]
+title = "Provide blanket impls for automatic trait forwarding"
+explanation = "impl<T: Display> ToString for T allows any Display type to automatically get ToString. This is a blanket implementation — it covers all types satisfying a bound. Blanket impls reduce boilerplate dramatically but interact with coherence: adding a new blanket impl can break downstream code if it overlaps with an existing impl. Languages should support blanket impls but warn about the coherence implications."
+
+[[gotchas]]
+title = "Monomorphization causes code bloat with many type instantiations"
+explanation = "Each unique type parameter combination generates a new copy of the function. A generic function called with 50 different types produces 50 copies in the binary. This increases binary size, instruction cache pressure, and compile times. The standard mitigation is to factor non-generic inner functions: the generic wrapper handles type-specific logic, then delegates to a concrete inner function for the bulk of the work."
+bad_example = "fn process<T: Serialize>(items: &[T]) { /* 200 lines of logic using T only for serialize() */ }"
+good_example = "fn process<T: Serialize>(items: &[T]) { let bytes: Vec<Vec<u8>> = items.iter().map(|i| serialize(i)).collect(); process_bytes(&bytes); } fn process_bytes(data: &[Vec<u8>]) { /* 200 lines, monomorphized once */ }"
+
+[[gotchas]]
+title = "Trait objects cannot include generic methods"
+explanation = "A trait with fn convert<U>(&self) -> U cannot be made into dyn Trait because the vtable would need an entry for every possible U — an infinite table. The compiler rejects this. If you need dynamic dispatch with type conversion, use associated types or accept a concrete type instead of a generic parameter."
+bad_example = "trait Converter { fn convert<U>(&self) -> U; } // cannot be used as dyn Converter"
+good_example = "trait Converter { type Output; fn convert(&self) -> Self::Output; } // object-safe with associated type"
+
+[[gotchas]]
+title = "The orphan rule forces newtype wrappers for external trait + external type"
+explanation = "You cannot impl serde::Serialize for chrono::DateTime in your crate because neither the trait nor the type is yours. The workaround is a newtype: struct MyDateTime(chrono::DateTime). This is zero-cost at runtime but adds syntactic friction. Some languages (Scala, Kotlin) use implicit conversions or extension methods instead, trading coherence safety for ergonomics."
+bad_example = "impl fmt::Display for Vec<MyType> { ... } // orphan rule violation: Vec is external"
+good_example = "struct DisplayVec(Vec<MyType>); impl fmt::Display for DisplayVec { ... } // newtype wrapper"
+
+[[gotchas]]
+title = "Returning impl Trait from divergent branches requires boxing"
+explanation = "fn get_processor(fast: bool) -> impl Process can only return one concrete type. If the true branch returns FastProc and the false branch returns SlowProc, the compiler rejects it because impl Trait means 'one specific type, just hidden.' You must use Box<dyn Process> when the concrete type varies at runtime."
+bad_example = "fn get(fast: bool) -> impl Process { if fast { FastProc } else { SlowProc } } // error: different types"
+good_example = "fn get(fast: bool) -> Box<dyn Process> { if fast { Box::new(FastProc) } else { Box::new(SlowProc) } }"
+
+[[gotchas]]
+title = "Higher-kinded types are missing from most trait systems"
+explanation = "Haskell's Functor class requires kind * -> *: class Functor f where fmap :: (a -> b) -> f a -> f b. Rust traits cannot abstract over type constructors — you can't write trait Functor for Vec, Option, Result generically. Workarounds include associated types with generic associated types (GATs), but they don't fully replace HKTs. This limits generic programming over container shapes."
+bad_example = "trait Functor<F> { fn map<A, B>(fa: F<A>, f: fn(A) -> B) -> F<B>; } // F<A> is not valid Rust syntax"
+good_example = "trait Functor { type Inner<T>; fn map<A, B>(self, f: impl Fn(A) -> B) -> Self::Inner<B> where Self: Functor<Inner<A> = Self>; } // GATs approximate HKTs"
+
+[[gotchas]]
+title = "Adding a trait method with a default impl can silently change behavior"
+explanation = "If you add fn new_method(&self) -> i32 { 0 } to an existing trait, all implementors silently get the default. If a downstream type happens to have its own method with the same name (not from the trait), the trait method shadows it in trait-generic contexts. This is a semver hazard. Haskell has the same issue with typeclass default methods."
+bad_example = "// v1: trait Processor { fn process(&self); } // v2: trait Processor { fn process(&self); fn priority(&self) -> i32 { 0 } } // downstream type already had fn priority() -> i32 { 5 }"
+good_example = "// Add new methods as separate traits, or gate behind a feature flag, or use #[non_exhaustive]-style warnings in documentation"
+
+[[performance_notes]]
+title = "Monomorphized dispatch is 5-10x faster than vtable dispatch in tight loops"
+explanation = "Monomorphized calls are direct and inlinable — the compiler sees through the abstraction completely. Vtable dispatch requires loading the vtable pointer, loading the function pointer from the vtable, then an indirect call. The indirect call itself costs ~2-5ns, but the real cost is that the CPU branch predictor and the optimizer cannot inline across the indirection, preventing loop unrolling, vectorization, and constant propagation."
+evidence = "Benchmark: summing 1M elements via trait method. Monomorphized (impl Trait): 0.48ms. Dynamic dispatch (dyn Trait): 3.2ms. The 6.7x difference is primarily from lost inlining and vectorization, not just the indirect call overhead."
+
+[[performance_notes]]
+title = "Vtable layout affects cache performance"
+explanation = "A vtable is a static array of function pointers. For a trait with N methods, the vtable is N * 8 bytes (on 64-bit). A dyn Trait pointer is a fat pointer: (data_ptr, vtable_ptr) = 16 bytes instead of 8. When iterating over Vec<Box<dyn Trait>>, each call chases two pointers: one to the object, one to the vtable. If objects are scattered in memory, this causes cache misses. Storing objects contiguously (arena allocation) and using a single shared vtable pointer helps."
+evidence = "Iterating 10K dyn Trait objects allocated individually: ~45us (cache misses on every object). Same objects in an arena with contiguous layout: ~12us. 3.7x improvement from cache locality alone."
+
+[[performance_notes]]
+title = "Type erasure has a fixed overhead per call, not per object"
+explanation = "Creating a Box<dyn Trait> costs one heap allocation (for the object) plus storing a fat pointer. After construction, the per-call overhead is the vtable indirection (~2-5ns). This means type erasure is cheap for objects called rarely but expensive for objects called in hot loops. The design heuristic: use dyn Trait at API boundaries (called once per request) and monomorphization inside hot paths (called millions of times)."
+evidence = "HTTP handler dispatch via dyn Handler: 3ns overhead on a 50us request = 0.006% cost, negligible. Inner loop numeric computation via dyn Compute: 3ns overhead on a 2ns operation = 150% cost, unacceptable."

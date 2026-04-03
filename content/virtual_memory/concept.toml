@@ -1,0 +1,66 @@
+id = "virtual_memory"
+title = "Virtual Memory"
+topic = "VirtualMemory"
+description = "The abstraction that gives every process its own flat address space. The MMU (Memory Management Unit) translates virtual addresses to physical addresses using page tables. The kernel manages these mappings: allocating physical frames, handling page faults, and protecting memory regions. Virtual memory enables process isolation, memory-mapped I/O, shared libraries, copy-on-write fork, and demand paging."
+tags = ["page-table", "TLB", "mmap", "page-fault", "virtual-address", "physical-address", "MMU", "PTE", "demand-paging", "copy-on-write", "ASLR", "huge-pages", "swap"]
+
+[[best_practices]]
+title = "Use 4-level page tables on x86_64"
+explanation = "x86_64 uses a 4-level radix tree: PML4 → PDPT → PD → PT → Physical page. Each level uses 9 bits of the virtual address (total 48 bits = 256 TB virtual space). Each page table is one 4KB page containing 512 entries. The CR3 register points to the PML4. For a kernel, you build these tables entry by entry."
+
+[[best_practices]]
+title = "Map kernel memory into every process's page tables"
+explanation = "The kernel needs to run in any process context (syscalls, interrupts). The standard approach: map the kernel into the upper half of every process's virtual address space (above 0xFFFF800000000000 on x86_64). User space gets the lower half. This is the higher-half kernel design. KPTI (Kernel Page Table Isolation) adds a second set of page tables for Meltdown mitigation."
+
+[[best_practices]]
+title = "Use demand paging for efficient memory use"
+explanation = "Don't allocate physical frames until the process actually accesses the page. When mmap creates a mapping, the PTE is marked not-present. The first access triggers a page fault. The fault handler allocates a physical frame, fills it (from file or zero), and resumes the process. This means a 1GB mmap costs near-zero memory until pages are touched."
+
+[[best_practices]]
+title = "Flush TLB entries when changing page table mappings"
+explanation = "The TLB caches virtual-to-physical translations. If you change a PTE without flushing the TLB, the CPU uses the stale cached translation. On x86_64: INVLPG flushes a single page, writing CR3 flushes the entire TLB. On SMP, you must send IPI (inter-processor interrupt) TLB shootdowns to other cores."
+
+[[gotchas]]
+title = "Forgetting to set the Present bit in page table entries"
+explanation = "A PTE with bit 0 (Present) clear causes a page fault on access, regardless of other bits. When building page tables manually, every valid entry at every level must have the Present bit set. A missing Present bit in a PML4E means the entire 512GB region is unmapped."
+bad_example = "PML4E = address_of_pdpt  // forgot to OR in 0x1 (Present)"
+good_example = "PML4E = address_of_pdpt | 0x3  // Present + Writable"
+
+[[gotchas]]
+title = "Page table addresses must be physical, not virtual"
+explanation = "The MMU reads page tables using physical addresses. If you store a virtual address in a PML4 entry, the MMU interprets it as a physical address and reads garbage (or causes a fault). All page table entries contain physical frame addresses. In a kernel with identity mapping, virtual == physical for kernel memory, but don't rely on this for user pages."
+bad_example = "PML4E = virtual_addr_of_pdpt | flags  // MMU reads from wrong physical location"
+good_example = "PML4E = virt_to_phys(pdpt_ptr) | flags  // convert to physical first"
+
+[[gotchas]]
+title = "Huge pages must be aligned to their size"
+explanation = "A 2MB huge page must be at a 2MB-aligned physical address (low 21 bits zero). A 1GB huge page must be at 1GB alignment. Using a misaligned address with the huge page bit set causes a fault. The kernel page allocator must return suitably-aligned frames."
+bad_example = "Map a 2MB huge page at physical address 0x100000 (1MB aligned, not 2MB aligned)"
+good_example = "Map a 2MB huge page at physical address 0x200000 (2MB aligned)"
+
+[[gotchas]]
+title = "TLB shootdowns are expensive on multicore"
+explanation = "When one core modifies a page table, all other cores that might have the old mapping cached in their TLB must be notified via inter-processor interrupt (IPI). The initiating core sends the IPI and waits for acknowledgment. Each TLB shootdown costs 1000-10000 cycles depending on core count. Batch page table modifications to reduce shootdowns."
+bad_example = "Unmapping 1000 pages one at a time: 1000 TLB shootdowns"
+good_example = "Batch unmap: modify all 1000 PTEs, then one TLB shootdown"
+
+[[gotchas]]
+title = "Write-protect + copy-on-write requires careful fault handling"
+explanation = "COW fork marks all pages as read-only in both parent and child. On write, the page fault handler must: check that the page was writable before COW (stored in a flag bit), allocate a new frame, copy the old page, update the PTE to point at the new frame with write permission, and decrement the old frame's reference count. Getting any step wrong causes corruption or security holes."
+bad_example = "COW fault handler updates PTE but forgets to copy the page data — both processes share modified page"
+good_example = "Allocate new frame → copy 4KB → update PTE → flush TLB → decrement refcount on old frame"
+
+[[performance_notes]]
+title = "TLB misses cost 10-100 cycles per access"
+explanation = "A TLB hit resolves virtual→physical in 1 cycle. A TLB miss triggers a page table walk (4 memory accesses for 4 levels). Each memory access is ~4 cycles if the page table is in cache, ~100+ cycles if not. For data-intensive workloads, TLB misses can dominate performance."
+evidence = "TLB hit: 1 cycle. L1-cached page walk: ~16 cycles (4 levels × 4 cycles). DRAM page walk: ~400 cycles (4 × 100 cycles). Huge pages reduce TLB misses: 2MB pages cover 512x more memory per TLB entry."
+
+[[performance_notes]]
+title = "Huge pages reduce TLB pressure by 512x"
+explanation = "A 2MB huge page covers the same memory as 512 regular 4KB pages but uses only one TLB entry. For workloads with large working sets (databases, scientific computing), huge pages can improve performance by 10-30% by reducing TLB misses."
+evidence = "Database workload (64GB working set): 4KB pages: ~15% of cycles in TLB misses. 2MB huge pages: ~2% of cycles in TLB misses. 1GB huge pages: <1%. Net throughput improvement: 10-25%."
+
+[[performance_notes]]
+title = "mmap is O(1) but page faults are expensive"
+explanation = "The mmap syscall just creates a VMA descriptor — O(1). But the first access to each page triggers a page fault: ~1000 cycles for a minor fault (page exists in cache), ~10000+ cycles for a major fault (must read from disk). For latency-sensitive code, prefault pages with MAP_POPULATE or mlock."
+evidence = "mmap(1GB): ~500ns. First access to each page: ~1us (minor fault, 1M faults for 1GB). With MAP_POPULATE: mmap takes ~100ms but no subsequent faults. Total access time: MAP_POPULATE wins for sequential access patterns."

@@ -1,0 +1,80 @@
+id = "code_generation"
+title = "Code Generation"
+topic = "CodeGeneration"
+description = "Turning intermediate or high-level representations into executable machine code. The compiler backend: instruction selection (choosing which machine instructions implement each operation), register allocation (mapping virtual registers to physical ones), and calling convention compliance (so generated code interoperates with other code). This is where the abstract becomes concrete."
+tags = ["codegen", "instruction-selection", "register-allocation", "calling-convention", "backend", "machine-code", "stack-frame", "spilling", "tile", "pattern-matching", "maximal-munch", "linear-scan", "graph-coloring"]
+
+[[best_practices]]
+title = "Start with a naive stack-based codegen, optimize later"
+explanation = "The simplest correct codegen pushes every intermediate result to the stack and pops operands before each operation. This is 'stack machine' codegen — no register allocation needed. It produces terrible code but is trivially correct. Once it works, add register allocation as a separate pass. Every compiler should be able to fall back to stack codegen for debugging."
+
+[[best_practices]]
+title = "Use maximal munch for instruction selection"
+explanation = "Maximal munch (greedy tiling) walks the IR tree bottom-up, matching the largest possible subtree to a single machine instruction. Example: 'add(load(addr), reg)' can be a single x86 ADD with a memory operand instead of separate LOAD + ADD. Larger tiles produce fewer instructions. Start with single-node tiles (one IR node = one instruction), then add multi-node tiles for common patterns."
+
+[[best_practices]]
+title = "Separate virtual registers from physical registers"
+explanation = "During code generation, use unlimited virtual registers (v0, v1, v2, ...). A separate register allocation pass maps virtuals to physical registers (rax, rcx, ...). This separation lets codegen ignore register pressure and lets reg alloc work as a standalone pass. Spill code (storing registers to stack when you run out) is inserted during reg alloc, not during codegen."
+
+[[best_practices]]
+title = "Emit a proper stack frame prologue/epilogue"
+explanation = "Every function needs: push rbp; mov rbp, rsp; sub rsp, N (prologue) and mov rsp, rbp; pop rbp; ret (epilogue). N is the stack frame size — space for locals, spilled registers, and callee arguments. RSP must be 16-byte aligned before any CALL instruction (System V AMD64 ABI). Forgetting alignment causes segfaults in called functions that use SSE."
+
+[[best_practices]]
+title = "Handle calling conventions explicitly"
+explanation = "System V AMD64: args in rdi, rsi, rdx, rcx, r8, r9 (integers), xmm0-xmm7 (floats). Return value in rax. Caller-saved: rax, rcx, rdx, rsi, rdi, r8-r11. Callee-saved: rbx, rbp, r12-r15. Windows x64 is different: rcx, rdx, r8, r9 for args, 32-byte shadow space required. Getting this wrong produces code that corrupts registers across function calls."
+
+[[best_practices]]
+title = "Use a fixup table for forward references"
+explanation = "When emitting code linearly, forward jumps (if/else, loops) reference addresses not yet known. Emit a placeholder (zero), record it in a fixup table (patch_offset, target_label), and resolve all fixups after the function is complete. This is the same technique linkers use for relocations, applied within a single compilation unit."
+
+[[gotchas]]
+title = "Forgetting caller-saved register preservation across calls"
+explanation = "If you have a value in rax and emit a CALL instruction, rax is destroyed (it's caller-saved). The codegen must save caller-saved registers that are live across calls — either by moving them to callee-saved registers or spilling to the stack. Register allocation should model CALL instructions as clobbering all caller-saved registers."
+bad_example = "mov rax, [var_x]; call print_int; add rax, 1  // rax was destroyed by call"
+good_example = "mov rax, [var_x]; push rax; call print_int; pop rax; add rax, 1"
+
+[[gotchas]]
+title = "Stack alignment violations cause silent crashes"
+explanation = "System V AMD64 requires RSP to be 16-byte aligned at the point of a CALL instruction. After CALL pushes the 8-byte return address, RSP is 16-byte aligned inside the callee (which pushes RBP for another 8 bytes, making it 16-aligned again). If the caller's RSP isn't aligned before CALL, SSE instructions in the callee will segfault."
+bad_example = "push rax; call func  // RSP was 16-aligned, push made it 8-aligned, CALL breaks"
+good_example = "sub rsp, 8; push rax; call func  // extra 8 bytes restores alignment"
+
+[[gotchas]]
+title = "Signed vs unsigned division are different instructions"
+explanation = "x86_64 has IDIV (signed) and DIV (unsigned). They use the same operand encoding but produce different results for negative numbers. The dividend is in RDX:RAX — you must sign-extend RAX into RDX with CQO before IDIV, or zero-extend with XOR RDX,RDX before DIV. Using the wrong extension produces garbage results."
+bad_example = "xor rdx, rdx; idiv rcx  // zero-extended instead of sign-extended, wrong for negative dividends"
+good_example = "cqo; idiv rcx  // sign-extends rax into rdx:rax, correct for signed division"
+
+[[gotchas]]
+title = "Register allocation graph coloring is NP-complete"
+explanation = "Optimal register allocation (minimizing spills) is NP-complete. Production compilers use heuristics: linear scan (fast, used by JITs like V8 and HotSpot), iterated register coalescing (better quality, used by GCC/LLVM), or simple graph coloring with heuristic simplification. For a bootstrap compiler, linear scan or even 'spill everything' is fine."
+bad_example = "Trying to implement optimal register allocation for a bootstrap compiler"
+good_example = "Linear scan: sort live intervals by start point, assign registers greedily, spill the interval with the furthest next use"
+
+[[gotchas]]
+title = "imul clobbers RDX"
+explanation = "The x86_64 one-operand IMUL (imul reg) multiplies RAX by the operand and stores the 128-bit result in RDX:RAX. If you had a value in RDX, it's gone. The two-operand form (imul dst, src) and three-operand form (imul dst, src, imm) only store the low 64 bits in dst and don't touch RDX. Use the multi-operand forms when you don't need the high bits."
+bad_example = "mov rdx, [important_value]; imul rcx  // rdx destroyed"
+good_example = "imul rax, rcx  // only writes rax, rdx preserved"
+
+[[gotchas]]
+title = "LEA is not a memory access"
+explanation = "LEA (load effective address) computes an address but does NOT read memory. It's the compiler's Swiss army knife for arithmetic: lea rax, [rbx + rcx*4 + 8] computes rbx + rcx*4 + 8 in one instruction without touching memory. Confusing LEA with MOV (which actually reads memory) causes segfaults or wrong values."
+bad_example = "Using MOV to compute address arithmetic — triggers actual memory read"
+good_example = "lea rax, [rbx + rcx*8]  // computes address, no memory access"
+
+[[performance_notes]]
+title = "Stack-based codegen is 2-5x slower than register-allocated code"
+explanation = "Stack codegen pushes/pops for every operation, causing many memory accesses. Register-allocated code keeps hot values in registers. The speedup depends on register pressure — tight loops with few variables see the biggest improvement."
+evidence = "A tight loop incrementing a counter: stack codegen ~2.1 ns/iter (push/pop on every iteration), linear scan reg alloc ~0.7 ns/iter (counter stays in register), ~3x improvement."
+
+[[performance_notes]]
+title = "Linear scan register allocation is O(n) and good enough"
+explanation = "Linear scan sorts live intervals by start point and greedily assigns registers. It's one pass over the intervals, O(n log n) with sorting. Graph coloring is O(n²) or worse. For JIT compilers where compilation time matters, linear scan is the standard choice. Code quality is within 5-10% of graph coloring for most programs."
+evidence = "V8 TurboFan uses linear scan. HotSpot C1 uses linear scan. LLVM uses a variant of linear scan for -O1. Graph coloring (LLVM -O2) improves runtime by ~5% but takes 2-3x longer to compile."
+
+[[performance_notes]]
+title = "Instruction selection quality matters more than register allocation"
+explanation = "Choosing the right x86 instructions (using LEA for address math, CMOV for branchless conditionals, memory operands to fuse load+op) reduces instruction count. Fewer instructions means less register pressure, which makes register allocation easier. Good instruction selection can eliminate the need for spilling entirely in many functions."
+evidence = "A simple array sum: naive selection (separate load + add) = 3 instructions/element. Fused (add with memory operand) = 1 instruction/element. 3x fewer instructions, 2x faster, zero spills vs 2 spills."

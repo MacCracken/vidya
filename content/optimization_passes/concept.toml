@@ -1,0 +1,70 @@
+id = "optimization_passes"
+title = "Optimization Passes"
+topic = "OptimizationPasses"
+description = "Compiler transformations that make programs faster or smaller without changing their behavior. Each pass operates on the IR, analyzing patterns and replacing them with more efficient equivalents. Key passes: dead code elimination (remove unused computations), constant folding (evaluate compile-time constants), inlining (replace calls with body), loop unrolling (reduce branch overhead). Passes compose: the output of one feeds the next."
+tags = ["optimization", "DCE", "constant-folding", "inlining", "loop-unrolling", "CSE", "LICM", "peephole", "strength-reduction", "dead-code", "pass-manager", "fixed-point"]
+
+[[best_practices]]
+title = "Order passes for maximum effect"
+explanation = "Constant folding produces dead code. Dead code elimination enables more inlining. Inlining enables more constant folding. The canonical order: 1) simplify (constant fold, strength reduce), 2) inline, 3) simplify again (new folding opportunities), 4) eliminate (DCE, unreachable code), 5) loop optimize (unroll, LICM). Run multiple iterations until no changes occur (fixed point)."
+
+[[best_practices]]
+title = "Dead code elimination is the highest-value pass"
+explanation = "DCE removes instructions whose results are never used. In SSA form, this is trivial: if a definition has no uses, delete it. Repeat until no more deletions. This one pass cleans up after every other optimization, removes unused function arguments, and eliminates code guarded by constant false conditions. Implement DCE first."
+
+[[best_practices]]
+title = "Constant folding is the simplest optimization"
+explanation = "If all operands of an instruction are constants, compute the result at compile time and replace the instruction with the constant. 'x = 3 + 4' becomes 'x = 7'. Extend to constant propagation: if x = 7, replace all uses of x with 7, then fold those. In SSA form, this is a single forward pass over the def-use chain."
+
+[[best_practices]]
+title = "Peephole optimization for the last mile"
+explanation = "Peephole optimization scans a small window (2-5 instructions) looking for patterns that can be replaced with shorter/faster sequences. Examples: 'mov rax, rbx; mov rbx, rax' → delete second mov. 'imul rax, 2' → 'shl rax, 1'. 'add rax, 0' → delete. These patterns emerge after register allocation and are target-specific."
+
+[[best_practices]]
+title = "Loop-invariant code motion (LICM) before unrolling"
+explanation = "Move computations that don't change across loop iterations out of the loop body. 'for i in 0..n { x = a * b; use(x + i) }' → 'x = a * b; for i in 0..n { use(x + i) }'. This reduces the work per iteration. Do LICM before loop unrolling — unrolling duplicates the loop body, and you want the hoisted version."
+
+[[gotchas]]
+title = "Premature optimization can change program semantics"
+explanation = "Optimizations must preserve observable behavior. Reordering memory accesses can break concurrent programs. Folding floating-point operations can change results (FP isn't associative). Dead code elimination can remove side effects if the analysis doesn't track them. Always define what 'observable' means for your language before writing optimizations."
+bad_example = "Folding 'a + b + c' to 'a + (b + c)' — different FP results due to rounding"
+good_example = "Only fold when the operation is associative (integer arithmetic), or when the user opts in (-ffast-math)"
+
+[[gotchas]]
+title = "Inlining can increase code size exponentially"
+explanation = "If function A calls B and C, and B and C each call D, inlining D into both B and C doubles D's code. If A is also inlined into multiple callers, D is duplicated exponentially. Use heuristics: inline small functions (< 20 instructions), hot functions (profiled), and functions called once. Never inline recursive functions naively."
+bad_example = "Inline everything: 100-line function called from 50 sites → 5000 lines of duplicated code"
+good_example = "Inline only functions under a cost threshold, single-call-site functions, and profile-hot functions"
+
+[[gotchas]]
+title = "Loop unrolling increases register pressure"
+explanation = "Unrolling a loop 4x means 4x the live variables in the loop body. If the unrolled body exceeds available registers, the register allocator spills to stack, potentially making the unrolled version slower than the original. Unroll only when register pressure permits."
+bad_example = "Unrolling 8x a loop body that uses 6 registers — 48 live ranges, massive spilling"
+good_example = "Unroll 2x when the body uses few registers; the CPU's out-of-order execution handles the rest"
+
+[[gotchas]]
+title = "Strength reduction can introduce new dependencies"
+explanation = "Replacing 'i * 4' with 'i << 2' is safe. But replacing 'i * stride' with an induction variable '(sum += stride)' inside a loop introduces a loop-carried dependency — each iteration depends on the previous. If stride is truly loop-invariant, this is fine. If stride can change, the transformation is incorrect."
+bad_example = "Replacing arr[i * stride] with pointer increment when stride is modified inside the loop"
+good_example = "Verifying stride is loop-invariant before converting multiplication to addition"
+
+[[gotchas]]
+title = "CSE must respect side effects and aliasing"
+explanation = "Common Subexpression Elimination replaces 'a + b; ... ; a + b' with a single computation. But if 'a' or 'b' could have changed between the two uses (via a store, function call, or alias), the second computation might produce a different result. CSE is only valid when the operands haven't been modified."
+bad_example = "CSE across a function call: 'x = a + b; foo(); y = a + b' — foo() might modify a via pointer"
+good_example = "CSE within a basic block with no stores to a or b between the two expressions"
+
+[[performance_notes]]
+title = "Constant folding alone recovers 5-15% of compile-time evaluation"
+explanation = "Many real programs contain expressions that are constant at compile time: array sizes, flag checks, configuration values. Constant folding propagates these, eliminating branches and simplifying loop bounds. Combined with dead code elimination, this removes 5-15% of instructions in typical programs."
+evidence = "LLVM: enabling constant propagation alone reduces instruction count by ~8% on SPEC benchmarks. Adding SCCP (sparse conditional constant propagation, which also eliminates unreachable branches): ~12%."
+
+[[performance_notes]]
+title = "Inlining is the most impactful single optimization"
+explanation = "Inlining eliminates call overhead (push args, call, return) and enables other optimizations: the inlined body can be constant-folded with the caller's arguments, dead paths eliminated, and memory accesses combined. Without inlining, most other optimizations are limited to single-function scope."
+evidence = "LLVM: inlining alone improves SPEC runtime by ~15-25%. Compare: constant folding alone ~5%, loop optimizations alone ~5-10%. Inlining is the enabler — it creates opportunities for everything else."
+
+[[performance_notes]]
+title = "Loop unrolling reduces branch overhead by 2-4x"
+explanation = "Each loop iteration has a branch (the back-edge test). On modern CPUs, branches are predicted well, but the prediction table has limited capacity. Unrolling reduces branches per logical iteration and enables SIMD vectorization. Typical unroll factor: 4-8x."
+evidence = "Simple loop summing an array: 1x (no unroll) = 1.2 ns/elem. 4x unroll = 0.7 ns/elem. 8x unroll with autovectorization = 0.2 ns/elem. Diminishing returns past 8x due to code cache pressure."

@@ -1,0 +1,70 @@
+id = "filesystems"
+title = "Filesystems"
+topic = "Filesystems"
+description = "How operating systems organize persistent data on disk. The VFS (Virtual File System) layer provides a uniform interface (open, read, write, close) regardless of the underlying filesystem (ext4, btrfs, FAT32). Below VFS: inodes track file metadata, directory entries map names to inodes, and block allocation manages disk space. Understanding filesystems is essential for kernel development and systems programming."
+tags = ["VFS", "inode", "directory", "block-device", "ext4", "FAT32", "superblock", "journal", "dentry", "file-descriptor", "page-cache", "mount", "fstat"]
+
+[[best_practices]]
+title = "Understand the inode/dentry split"
+explanation = "An inode contains file metadata (size, permissions, timestamps, block pointers) but NOT the filename. A directory entry (dentry) maps a filename to an inode number. This split enables hard links: multiple names pointing to the same inode. When you ls -l, the kernel reads the directory's dentries, then looks up each inode for metadata."
+
+[[best_practices]]
+title = "Use the VFS abstraction for filesystem-agnostic code"
+explanation = "The VFS defines function pointer tables: super_operations (mount/unmount/sync), inode_operations (create/lookup/link), file_operations (read/write/seek/mmap). Each filesystem implements these. User-space code calls the same syscalls regardless of filesystem type. New filesystems only need to fill in these vtables."
+
+[[best_practices]]
+title = "Buffer writes through the page cache"
+explanation = "The kernel's page cache buffers both reads and writes. write() copies data to the page cache and returns immediately (writeback). The kernel flushes dirty pages to disk asynchronously. This makes write() fast (~100ns) compared to direct disk I/O (~1ms). Use fsync() to force data to disk when durability matters."
+
+[[best_practices]]
+title = "Use block groups to reduce seek time"
+explanation = "ext4 divides the disk into block groups. Each group has its own inode table and block bitmap. When creating a file, ext4 allocates its inode and data blocks in the same group, keeping related data close together on disk. This reduces seek time on HDDs and improves locality on SSDs."
+
+[[best_practices]]
+title = "Journal metadata for crash consistency"
+explanation = "Without journaling, a crash during a multi-block update (create file: allocate inode, write directory entry, allocate blocks) can leave the filesystem inconsistent. A journal records the planned changes before executing them. On crash recovery, replay the journal. ext4 journals metadata by default; optionally journals data too (slower but safer)."
+
+[[gotchas]]
+title = "File descriptors are per-process; files are per-system"
+explanation = "An open() creates a file descriptor (per-process integer) pointing to an open file description (kernel-wide, tracks offset and mode) pointing to an inode. Two processes opening the same file get independent offsets. fork() shares the same open file description (and offset) between parent and child. dup() creates a new fd pointing to the same description."
+bad_example = "Assuming fork()'d child has independent file offsets — both share the parent's offset"
+good_example = "After fork(), each process should seek independently or use O_APPEND for safe concurrent writes"
+
+[[gotchas]]
+title = "Deleting an open file doesn't free space until close"
+explanation = "unlink() removes the directory entry (dentry) but the inode persists as long as any process has it open. The space is freed only when the last file descriptor closes. This is how /tmp cleanup works: delete the file immediately, keep writing to the fd, space reclaimed on exit."
+bad_example = "rm large_file.log while the server is still writing to it — disk space not freed"
+good_example = "Truncate the file (> large_file.log) instead of deleting — same inode, reclaims space immediately"
+
+[[gotchas]]
+title = "rename() is atomic on the same filesystem only"
+explanation = "rename() within the same filesystem is guaranteed atomic by POSIX — it updates directory entries without an intermediate state. But rename() across filesystems is NOT atomic: it requires copy + delete, which can fail partway. This is why temporary files should be on the same filesystem as the target."
+bad_example = "Write temp file to /tmp, rename to /data/config — crosses filesystem boundary, not atomic"
+good_example = "Write temp file to /data/.config.tmp, rename to /data/config — same filesystem, atomic"
+
+[[gotchas]]
+title = "ext4 pre-allocates blocks, making new files appear larger than expected"
+explanation = "ext4 uses delayed allocation: it reserves space in the block bitmap but doesn't write blocks until writeback. stat() shows the allocated size, which may be larger than the actual data written. Also, ext4 pre-allocates beyond the current write to reduce fragmentation. This is why 'du' and 'ls -l' show different sizes."
+bad_example = "Checking st_blocks * 512 to determine actual file content size"
+good_example = "Use st_size for logical file size, st_blocks * 512 for disk usage"
+
+[[gotchas]]
+title = "fsync() on the file isn't enough — fsync the directory too"
+explanation = "fsync(fd) flushes the file's data and metadata to disk. But the directory entry pointing to the file is stored in the directory's data blocks. If you create a new file and fsync it but not the directory, a crash can lose the directory entry even though the file data is on disk. fsync() the parent directory after creating/renaming files."
+bad_example = "Create file, write data, fsync(file_fd) — crash loses the directory entry"
+good_example = "Create file, write data, fsync(file_fd), open(parent_dir), fsync(dir_fd)"
+
+[[performance_notes]]
+title = "Page cache makes repeated reads free"
+explanation = "The first read of a file block goes to disk (~1ms for HDD, ~50us for SSD). The block stays in the page cache. Subsequent reads hit the cache (~100ns). For read-heavy workloads, the page cache eliminates 90%+ of disk I/O."
+evidence = "4KB read from page cache: ~100ns. From SSD: ~50,000ns. From HDD: ~5,000,000ns. Cache hit rates on typical servers: 95-99%."
+
+[[performance_notes]]
+title = "O_DIRECT bypasses the page cache for database workloads"
+explanation = "Databases manage their own caching (buffer pool). The page cache is redundant — it doubles memory usage without benefit. O_DIRECT reads/writes bypass the page cache, going directly to the block device. This saves memory and avoids double-caching. The tradeoff: O_DIRECT requires aligned buffers and loses readahead."
+evidence = "Database workload: O_DIRECT + custom buffer pool: 64GB effective cache. Without O_DIRECT: 32GB page cache + 32GB buffer pool = 32GB effective (half wasted on duplicates)."
+
+[[performance_notes]]
+title = "Directory lookup is O(1) with htree"
+explanation = "ext4 uses hash trees (htree) for large directories. Directory lookup hashes the filename and walks a B-tree, giving O(1) amortized lookup regardless of directory size. Without htree (ext2), directory lookup is O(n) — scanning all entries linearly."
+evidence = "ext4 htree: lookup in directory with 100K files: ~5us. ext2 linear scan: ~500us. xfs B+tree: ~3us."

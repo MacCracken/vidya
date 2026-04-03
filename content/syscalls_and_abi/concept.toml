@@ -1,0 +1,76 @@
+id = "syscalls_and_abi"
+title = "Syscalls and ABI"
+topic = "SyscallsAndAbi"
+description = "The hardware/software boundary — how user-space code requests kernel services and how compiled functions call each other. Syscalls are the kernel API (read, write, mmap, exit). The ABI (Application Binary Interface) defines register usage, stack layout, calling conventions, and data alignment so separately compiled code can interoperate. If you're writing a compiler or kernel, this is non-negotiable knowledge."
+tags = ["syscall", "abi", "calling-convention", "system-v", "amd64", "linux", "registers", "stack-frame", "cdecl", "fastcall", "red-zone", "vdso", "sysenter", "int-0x80"]
+
+[[best_practices]]
+title = "Use the syscall instruction on x86_64 Linux"
+explanation = "The modern Linux syscall interface on x86_64 uses the SYSCALL instruction (0x0F 0x05). Syscall number goes in RAX. Arguments in RDI, RSI, RDX, R10, R8, R9 (note: R10, not RCX — the kernel uses RCX to save RIP). Return value in RAX. Negative return values in the range [-4095, -1] indicate errors (negate to get errno). This is the only syscall mechanism you should use on 64-bit Linux."
+
+[[best_practices]]
+title = "Know the essential syscalls for bootstrap tools"
+explanation = "A no-libc compiler needs exactly these syscalls: read(0, buf, count) = 0, write(1, buf, count) = 1, exit(code) = 60, brk(addr) = 12, open(path, flags, mode) = 2, close(fd) = 3. That's 6 syscalls to build a fully functional compiler. mmap (9) is useful for larger allocations but brk is simpler for single-allocation patterns."
+
+[[best_practices]]
+title = "Follow System V AMD64 ABI for function calls"
+explanation = "Integer/pointer arguments: RDI, RSI, RDX, RCX, R8, R9 (in that order). Float arguments: XMM0-XMM7. Return value: RAX (integer), XMM0 (float). Caller-saved (volatile): RAX, RCX, RDX, RSI, RDI, R8-R11, XMM0-XMM15. Callee-saved (non-volatile): RBX, RBP, R12-R15. Stack must be 16-byte aligned before CALL. This convention is used by Linux, macOS, FreeBSD, and all BSDs."
+
+[[best_practices]]
+title = "Use callee-saved registers for long-lived values"
+explanation = "In a compiler with no libc, you control all the code — but if you ever call external functions or plan to, keep long-lived values in callee-saved registers (RBX, R12-R15). These survive function calls. Use caller-saved registers (RAX, RCX, RDX) for temporaries. This convention also helps when bootstrapping: stage N+1 can call stage N functions safely."
+
+[[best_practices]]
+title = "Check syscall return values"
+explanation = "Linux syscalls return negative values on error (not -1 like libc). The error code is the negated errno: if read() returns -13, errno is EACCES (13). Always check if RAX is negative after a syscall. For write(), the return value might be less than the requested count (short write) — you must loop."
+
+[[gotchas]]
+title = "SYSCALL clobbers RCX and R11"
+explanation = "The SYSCALL instruction saves RIP in RCX and RFLAGS in R11 before entering the kernel. Both registers are destroyed from user-space's perspective. This is why syscall arguments use R10 instead of RCX (unlike function calls which use RCX for the 4th argument). If you have values in RCX or R11, save them before SYSCALL."
+bad_example = "mov rcx, [important]; syscall  // rcx is now the old RIP, not your value"
+good_example = "mov r10, rcx; syscall  // r10 is the syscall's 4th arg register"
+
+[[gotchas]]
+title = "int 0x80 uses 32-bit ABI even on 64-bit systems"
+explanation = "The legacy INT 0x80 syscall interface uses 32-bit register conventions (EBX, ECX, EDX for args) and 32-bit syscall numbers, even when executed in 64-bit mode. It truncates arguments to 32 bits. Never use INT 0x80 on x86_64 — use SYSCALL. INT 0x80 exists only for compatibility with ancient 32-bit binaries."
+bad_example = "mov eax, 4; mov ebx, 1; int 0x80  // 32-bit write syscall, truncates addresses"
+good_example = "mov rax, 1; mov rdi, 1; syscall  // 64-bit write syscall"
+
+[[gotchas]]
+title = "The red zone exists and you must not clobber it"
+explanation = "System V AMD64 ABI defines a 128-byte 'red zone' below RSP that leaf functions (functions that don't call other functions) can use without adjusting RSP. Signal handlers and interrupts must not clobber this zone. If you're writing a kernel, you must either disable the red zone (-mno-red-zone in GCC/Clang) or save 128 bytes below RSP before handling interrupts."
+bad_example = "Kernel interrupt handler pushes to [rsp-8] — clobbers user-space red zone data"
+good_example = "Kernel code compiled with -mno-red-zone; interrupt handler subtracts 128 from rsp first"
+
+[[gotchas]]
+title = "Struct return values use hidden first argument"
+explanation = "When a function returns a struct larger than 16 bytes, the caller allocates stack space and passes a pointer to it as a hidden first argument in RDI. All other arguments shift right by one register. The callee writes the return value through this pointer and returns the pointer in RAX. This means the 'first argument' in the source code is actually in RSI."
+bad_example = "fn big_struct() -> [u8; 32] called as result = big_struct() — where does result go?"
+good_example = "Caller: sub rsp, 32; lea rdi, [rsp]; call big_struct  // RDI = hidden return pointer"
+
+[[gotchas]]
+title = "Variadic functions require AL = number of vector args"
+explanation = "System V AMD64 ABI requires that AL contain the number of XMM registers used for variable arguments before calling a variadic function (like printf). If AL is wrong, the callee may read garbage from XMM registers. For calls with no float args, XOR EAX, EAX before CALL."
+bad_example = "call printf  // AL has random value, printf reads garbage XMM registers"
+good_example = "xor eax, eax; call printf  // AL = 0, no vector args"
+
+[[gotchas]]
+title = "Stack alignment after CALL is 16n+8, not 16n"
+explanation = "Before CALL, RSP must be 16-byte aligned. CALL pushes an 8-byte return address, so inside the called function RSP is 16n+8. The callee's PUSH RBP restores 16-byte alignment. If you skip the frame pointer (omit-frame-pointer optimization), you must still ensure 16-byte alignment before any CALL inside the function."
+bad_example = "Function entry: RSP = 0x...8. Call SSE function without adjusting — segfault"
+good_example = "Function entry: RSP = 0x...8. PUSH RBP makes RSP = 0x...0 (16-aligned). Now safe to use SSE."
+
+[[performance_notes]]
+title = "SYSCALL costs ~100-300 cycles"
+explanation = "A syscall transitions from user mode to kernel mode (privilege level change, TLB flush on some CPUs, spectre mitigations). Even a trivial syscall like getpid() costs ~100 cycles. A function call costs ~3-5 cycles. Minimize syscall count on hot paths — buffer writes, batch reads."
+evidence = "getpid() via syscall: ~100 cycles (modern x86_64 with KPTI). write(fd, buf, 1) called per byte: ~300 cycles each. Buffered write of 4096 bytes in one call: ~600 cycles total. Unbuffered is 4096x slower."
+
+[[performance_notes]]
+title = "vDSO eliminates kernel transitions for time-related syscalls"
+explanation = "Linux maps a virtual dynamic shared object (vDSO) into every process. It contains user-space implementations of clock_gettime, gettimeofday, and time — these read kernel-maintained memory-mapped data without entering the kernel. libc automatically uses vDSO when available."
+evidence = "clock_gettime via syscall: ~300 cycles. Via vDSO: ~20 cycles. 15x faster. gettimeofday: similar improvement."
+
+[[performance_notes]]
+title = "Register-based calling convention is faster than stack-based"
+explanation = "System V AMD64 passes the first 6 integer args in registers, avoiding memory accesses. The old i386 cdecl convention pushed all arguments on the stack. For functions with ≤6 args (the vast majority), the 64-bit convention eliminates all argument memory traffic."
+evidence = "Function with 3 integer args: AMD64 = 0 memory accesses for args, i386 cdecl = 3 pushes + 3 reads = 6 memory accesses. At ~4 cycles per memory access, that's ~24 cycles saved per call."

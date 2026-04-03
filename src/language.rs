@@ -187,4 +187,61 @@ mod tests {
         let decoded: Language = serde_json::from_str(&json).unwrap();
         assert_eq!(lang, decoded);
     }
+
+    #[test]
+    fn serde_roundtrip_all_languages() {
+        for lang in Language::all() {
+            let json = serde_json::to_string(lang).unwrap();
+            let decoded: Language = serde_json::from_str(&json).unwrap();
+            assert_eq!(*lang, decoded, "serde roundtrip failed for {}", lang);
+        }
+    }
+
+    #[test]
+    fn file_stem_extension_consistency() {
+        // Every language should produce a valid filename from stem + extension
+        for lang in Language::all() {
+            let filename = format!("{}.{}", lang.file_stem(), lang.extension());
+            assert!(
+                !filename.is_empty(),
+                "{} has empty filename",
+                lang.display_name()
+            );
+            // stem should not contain dots
+            assert!(
+                !lang.file_stem().contains('.'),
+                "{} file_stem contains dot",
+                lang.display_name()
+            );
+        }
+    }
+
+    #[test]
+    fn from_str_loose_asm_variants() {
+        assert_eq!(
+            Language::from_str_loose("x86_64"),
+            Some(Language::AsmX86_64)
+        );
+        assert_eq!(Language::from_str_loose("amd64"), Some(Language::AsmX86_64));
+        assert_eq!(
+            Language::from_str_loose("aarch64"),
+            Some(Language::AsmAarch64)
+        );
+        assert_eq!(
+            Language::from_str_loose("arm64"),
+            Some(Language::AsmAarch64)
+        );
+        assert_eq!(
+            Language::from_str_loose("openqasm"),
+            Some(Language::OpenQASM)
+        );
+        assert_eq!(Language::from_str_loose("qasm"), Some(Language::OpenQASM));
+    }
+
+    #[test]
+    fn display_name_is_nonempty() {
+        for lang in Language::all() {
+            assert!(!lang.display_name().is_empty());
+        }
+    }
 }

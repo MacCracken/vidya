@@ -1,0 +1,76 @@
+id = "elf_and_executable_formats"
+title = "ELF and Executable Formats"
+topic = "ElfAndExecutableFormats"
+description = "Deep dive into ELF (Executable and Linkable Format) — the binary format used by Linux, BSDs, and most Unix-like systems. Beyond the basics of headers and segments: section types, symbol tables, string tables, DWARF debug info, relocatable objects, dynamic linking structures, and the difference between what the linker sees (sections) and what the loader sees (segments). Extends binary_formats with the detail needed to write a linker or debugger."
+tags = ["ELF", "section", "segment", "DWARF", "symbol-table", "string-table", "relocation", "dynamic", "SHT", "PT", "note", "eh-frame", "debug-info", "objdump", "readelf"]
+
+[[best_practices]]
+title = "Understand the section vs segment duality"
+explanation = "Sections (.text, .data, .bss) are the linker's view — they organize code and data by type for combining and relocating. Segments (PT_LOAD) are the loader's view — they describe memory mappings with permissions. The section-to-segment mapping table (in the program header) tells the loader which sections go into which segments. A stripped binary has no section headers — only segments matter for execution."
+
+[[best_practices]]
+title = "Read the section header string table first"
+explanation = "Section headers contain name offsets, not names. The names are in the .shstrtab section (pointed to by e_shstrndx). To find any section by name, first locate .shstrtab, then search section headers by resolving their name strings. This is the first thing readelf does."
+
+[[best_practices]]
+title = "Use .note sections for build metadata"
+explanation = "ELF .note sections carry structured metadata: build-id (a hash identifying the binary), ABI version, GNU properties (feature flags like IBT/SHSTK for CET). Tools like debuginfod use the build-id to find debug symbols. Add notes with ld --build-id."
+
+[[best_practices]]
+title = "Keep .eh_frame for stack unwinding"
+explanation = ".eh_frame contains DWARF CFI (Call Frame Information) — instructions for unwinding the stack at any point. This enables exceptions, panic=unwind, and debugger backtraces. Without .eh_frame, stack traces show only the current frame. It's read-only and typically 2-5% of binary size."
+
+[[best_practices]]
+title = "Use relocatable objects (.o) as the compilation unit"
+explanation = "A .o file is an ELF with section headers, symbol table, and relocations, but no program headers (it's not executable). The linker combines multiple .o files: merges same-named sections, resolves symbols, applies relocations, and emits an executable. Understanding .o files is essential for writing a linker."
+
+[[gotchas]]
+title = "Section headers are optional for execution"
+explanation = "The kernel's ELF loader only reads the ELF header and program headers. Section headers are used by the linker and tools (readelf, objdump, GDB) but are not needed to run the binary. strip -s removes section headers entirely. This means a stripped binary is harder to analyze but runs identically."
+bad_example = "Relying on section headers to find .text in a stripped binary — they're gone"
+good_example = "Use program headers (PT_LOAD) to find executable segments in stripped binaries"
+
+[[gotchas]]
+title = "Multiple PT_LOAD segments with different permissions"
+explanation = "A typical executable has two PT_LOAD segments: one R+X (code) and one R+W (data). The gap between them may be mapped but inaccessible (guard page). Assuming all loaded memory is contiguous or has the same permissions causes incorrect memory analysis."
+bad_example = "Treating all PT_LOAD memory as one continuous block"
+good_example = "Parse each PT_LOAD separately: check p_flags for R/W/X permissions per segment"
+
+[[gotchas]]
+title = ".bss has zero file size but non-zero memory size"
+explanation = "The .bss section (uninitialized data) takes no space in the file (SHT_NOBITS). The corresponding PT_LOAD segment has p_memsz > p_filesz — the kernel zero-fills the difference. If your tool reads p_filesz bytes and stops, it misses the entire BSS."
+bad_example = "Reading p_filesz bytes from the data segment and assuming that's all the data"
+good_example = "After reading p_filesz bytes, zero-fill p_memsz - p_filesz bytes for BSS"
+
+[[gotchas]]
+title = "DWARF debug info is in sections, not segments"
+explanation = "Debug info (.debug_info, .debug_line, .debug_abbrev, etc.) lives in sections that are NOT part of any PT_LOAD segment. They're not loaded into memory at runtime — tools read them directly from the file. Stripping removes these sections. Using debug info requires reading the file, not memory."
+bad_example = "Trying to find debug info in the process's memory — it's not mapped"
+good_example = "Open the ELF file on disk, read .debug_* sections directly"
+
+[[gotchas]]
+title = "Dynamic section pointers are virtual addresses, not file offsets"
+explanation = "The .dynamic section contains entries like DT_STRTAB (string table address). These are virtual addresses, not file offsets. To read them from the file, convert virtual address to file offset using the PT_LOAD segment mapping. At runtime, the dynamic linker reads these directly from memory."
+bad_example = "Using DT_STRTAB value as a file offset — reading from the wrong location"
+good_example = "For each PT_LOAD: if vaddr <= target < vaddr + memsz, file_offset = target - vaddr + p_offset"
+
+[[gotchas]]
+title = "e_entry is a virtual address, not a file offset"
+explanation = "The ELF entry point (e_entry) is the virtual address where execution starts. It's NOT an offset into the file. To find the entry point's code in the file, use the same vaddr-to-file-offset conversion via PT_LOAD segments. For position-independent executables (PIE), e_entry is relative to the load base."
+bad_example = "Seeking to e_entry in the file to read the first instruction"
+good_example = "Convert e_entry to file offset: find PT_LOAD containing e_entry, compute offset"
+
+[[performance_notes]]
+title = "Stripping saves 10-30% of binary size"
+explanation = "Section headers, symbol tables (.symtab), string tables (.strtab), and debug info (.debug_*) can account for 10-70% of the binary depending on debug level. strip -s removes everything the loader doesn't need. For deployment, always strip."
+evidence = "Typical Rust binary: 5MB debug, 1.5MB release, 800KB stripped. C binary with -g: 200KB, stripped: 20KB. Debug info alone: often 50-80% of total file size."
+
+[[performance_notes]]
+title = "split-debuginfo puts DWARF in a separate file"
+explanation = "Instead of stripping debug info entirely, split it into a .dwp or .dSYM file. The main binary stays small (deployed), and the debug file is available for debuggers. GDB finds the debug file via build-id or .gnu_debuglink section."
+evidence = "Firefox: 300MB with debug info, 80MB stripped + 250MB debug file. Deployment saves 220MB. gdb uses build-id to automatically find the debug file."
+
+[[performance_notes]]
+title = "Huge page alignment increases binary size for speed"
+explanation = "Aligning PT_LOAD segments to huge page boundaries (2MB instead of 4KB) allows the kernel to use huge pages for text segments. This reduces TLB misses for large binaries. The cost: up to 2MB of padding between segments. ld -z max-page-size=0x200000 enables this."
+evidence = "Large binary (100MB text): 4KB alignment, 15% TLB miss rate in hot loop. 2MB alignment, huge pages: 2% TLB miss rate. Binary size increase: ~2MB padding. Net: 10-20% throughput improvement for TLB-bound workloads."

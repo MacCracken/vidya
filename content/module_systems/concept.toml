@@ -1,0 +1,85 @@
+id = "module_systems"
+title = "Module Systems"
+topic = "ModuleSystems"
+description = "How languages partition code into namespaces, control visibility, and enable separate compilation — the architectural backbone that determines build speed, encapsulation, and dependency management."
+tags = ["modules", "namespaces", "visibility", "separate-compilation", "incremental-builds", "imports", "exports", "access-control", "dependency-resolution"]
+
+[[best_practices]]
+title = "Separate interface from implementation"
+explanation = "A module's public interface should be extractable without reading its body. This enables separate compilation: dependents only need the interface (types, signatures, constants), not the implementation. OCaml .mli files, C headers, and Rust's pub items all follow this pattern. If changing a private function forces recompilation of dependents, your module boundary is leaking."
+
+[[best_practices]]
+title = "Make visibility the default restriction, not the exception"
+explanation = "Default-private visibility (Rust, Java) produces better encapsulation than default-public (Python, Go packages). When adding an item requires an explicit pub/export to expose it, internal refactoring stays internal. Languages that default to public force developers to remember underscore conventions or annotation discipline."
+
+[[best_practices]]
+title = "Use re-exports to create stable public facades"
+explanation = "Re-exports (Rust's pub use, TypeScript's export { x } from) let you reorganize internal module structure without breaking downstream users. The public API is a curated surface defined at the crate/package root, decoupled from the file layout. This is essential for libraries: internal module paths change, public paths must not."
+
+[[best_practices]]
+title = "Design the module graph to be a DAG"
+explanation = "Circular module dependencies prevent separate compilation and make incremental builds impossible. A directed acyclic graph of modules lets the compiler process leaves first, cache their results, and skip unchanged subtrees. Languages that allow circular imports (Python, TypeScript) pay for it with deferred resolution, runtime errors, and unpredictable initialization order."
+
+[[best_practices]]
+title = "Namespace granularity should match compilation units"
+explanation = "When a module is also the unit of separate compilation, changing one module only recompiles that module and its dependents. If modules are finer-grained than compilation units (e.g., multiple modules per file), you lose incremental precision. If coarser (one module spans many files), you recompile too much. Rust's one-crate-per-compilation-unit and Go's one-package-per-directory get this right."
+
+[[best_practices]]
+title = "Encode dependency edges in the module declaration"
+explanation = "Explicit imports (use, import, require) create a machine-readable dependency graph. The compiler uses this for build ordering, incremental invalidation, and dead code elimination. Implicit name lookup (C++ ADL, some macro systems) hides dependencies and defeats these optimizations."
+
+[[gotchas]]
+title = "Glob imports destroy traceability"
+explanation = "Wildcard imports (use foo::*, from bar import *, import pkg.*) dump an unknown set of names into scope. Adding a new public item to the source module can silently shadow or conflict with names in the importing module. This breaks incremental compilation heuristics too — the compiler can't know which names were actually used."
+bad_example = "use std::collections::*; // HashMap, BTreeMap, HashSet all in scope — which ones are used?"
+good_example = "use std::collections::{HashMap, BTreeSet}; // explicit, auditable, tool-friendly"
+
+[[gotchas]]
+title = "Circular module dependencies cause initialization order bugs"
+explanation = "When module A imports B and B imports A, the language must either reject the cycle (Rust, Go) or execute one module's top-level code before the other is fully initialized (Python, JavaScript). In the latter case, the partially-initialized module exposes None/undefined values. This is a runtime failure that no type system catches."
+bad_example = "# a.py: from b import helper  /  # b.py: from a import config  →  ImportError or None at runtime"
+good_example = "Extract shared definitions into a third module c.py that both a and b import — breaks the cycle"
+
+[[gotchas]]
+title = "Path-based module resolution is filesystem-dependent"
+explanation = "Languages that map module paths to filesystem paths (Python, Rust mod declarations, Go) tie compilation to directory layout. Case-insensitive filesystems (macOS default) silently merge modules that differ only in case. Symlinks create phantom duplicates. Network filesystems add latency per module lookup."
+bad_example = "mod Utils; mod utils; // same file on case-insensitive FS, two different modules on Linux"
+good_example = "Enforce lowercase-only module names in the compiler or linter — eliminates platform-dependent behavior"
+
+[[gotchas]]
+title = "Re-exports can accidentally stabilize internal types"
+explanation = "A pub use that re-exports an internal type makes that type part of the public API. Downstream code can depend on it, and removing the re-export becomes a breaking change. This is especially dangerous with glob re-exports (pub use internal::*) where new internal items automatically become public."
+bad_example = "pub use crate::internal::*; // every new internal type is auto-published"
+good_example = "pub use crate::internal::{PublicType, PublicTrait}; // curated, intentional surface"
+
+[[gotchas]]
+title = "Visibility modifiers don't control all access paths"
+explanation = "In Rust, a struct with private fields can still have its private data accessed through unsafe code, transmute, or by modules in the same crate. In Java, reflection bypasses all access control. Visibility is an API contract for correct usage, not a security boundary. Treat it as documentation of intent, not as enforcement against adversaries."
+bad_example = "Relying on private fields to protect secrets in the same address space"
+good_example = "Use visibility for API design; use process isolation or encryption for actual security boundaries"
+
+[[gotchas]]
+title = "Inline modules blur the boundary between namespacing and compilation"
+explanation = "Languages that support inline module definitions (Rust mod {} blocks, TypeScript namespaces) let you namespace without a separate file. But inline modules are compiled as part of their parent — they don't enable separate compilation. Using them for large subsystems defeats incremental builds."
+bad_example = "A 5000-line file with mod parser { ... } mod codegen { ... } — all recompiled together"
+good_example = "mod parser; mod codegen; // separate files, separate compilation possible"
+
+[[performance_notes]]
+title = "Incremental compilation depends on stable module interfaces"
+explanation = "An incremental compiler caches compilation results keyed on module interface hashes. If a module's public interface doesn't change, dependents skip recompilation. But if the interface representation includes too much (e.g., function bodies for inlining), small edits invalidate the cache and trigger cascading rebuilds."
+evidence = "Rust incremental: changing a private function body in a leaf crate recompiles only that crate (~1-3s). Changing a public type signature cascades through all dependents — a 200-crate workspace can go from 2s to 45s+ on a signature change."
+
+[[performance_notes]]
+title = "Separate compilation trades peak throughput for parallelism"
+explanation = "Whole-program compilation (like Go pre-1.20, or a C unity build) sees all code at once, enabling global optimizations. Separate compilation sacrifices this for parallelism and caching — N modules compile on N cores. The net effect is faster wall-clock builds despite each module missing cross-module inlining opportunities."
+evidence = "C++ unity build: 1 TU, 120s single-core. Separate compilation: 60 TUs, 180s total CPU, 12s wall-clock on 16 cores. LTO can recover some cross-module optimization at link time (+10-30s)."
+
+[[performance_notes]]
+title = "Import resolution dominates compilation of small modules"
+explanation = "For modules with minimal code, the time spent resolving imports (reading interface files, deserializing type information, checking version compatibility) can exceed actual code generation time. Languages with heavy import machinery (Python's finder/loader chain, Java's classpath scanning) are especially vulnerable."
+evidence = "Python import of an empty module: ~1-5ms (finder chain + bytecode check + loader). Rust use of a small crate: ~10-50ms (deserialize .rmeta, resolve names). For a 10-line module generating <1ms of code, import overhead dominates."
+
+[[performance_notes]]
+title = "Module-level caching requires deterministic compilation"
+explanation = "To cache a module's output, the compiler must produce identical results for identical inputs. Non-determinism (timestamps in output, pointer-address-dependent hashing, random iteration order) breaks caching. If a module's output differs between runs despite no source changes, every downstream module rebuilds unnecessarily."
+evidence = "Go achieved reproducible builds early by design — same source always produces same binary. Rust's incremental cache hit rate dropped significantly before they fixed HashMap iteration order in query results (2019-2020). Non-deterministic output causes O(N) cache misses in an N-module project."

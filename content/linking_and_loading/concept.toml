@@ -1,0 +1,76 @@
+id = "linking_and_loading"
+title = "Linking and Loading"
+topic = "LinkingAndLoading"
+description = "How separate compilation units become a running process. The linker resolves symbol references between object files, applies relocations to patch addresses, and produces executables or shared libraries. The loader (kernel + dynamic linker) maps the executable into memory, resolves dynamic symbols, and transfers control to the entry point. This is the bridge between compilation and execution."
+tags = ["linker", "loader", "symbol", "relocation", "GOT", "PLT", "dynamic-linking", "static-linking", "object-file", "shared-library", "ld", "ld-linux", "lazy-binding", "symbol-resolution", "weak-symbol"]
+
+[[best_practices]]
+title = "Understand the two-pass linker model"
+explanation = "Pass 1: scan all object files and shared libraries, collect symbol definitions and references, build a global symbol table. Pass 2: for each relocation entry, look up the target symbol's address and patch the instruction. This is conceptually the same as a two-pass assembler — collect, then resolve."
+
+[[best_practices]]
+title = "Use static linking for bootstrap and embedded"
+explanation = "Static linking resolves all symbols at link time and embeds all code into one binary. No runtime dependencies, no symbol resolution overhead, no version conflicts. The binary is self-contained and portable. The cost is larger binary size and no sharing between processes. For bootstrap tools and kernels, static linking is the only option."
+
+[[best_practices]]
+title = "Know the relocation types you'll encounter"
+explanation = "R_X86_64_64: absolute 64-bit address. R_X86_64_PC32: 32-bit PC-relative (used in call/jmp instructions). R_X86_64_PLT32: call through PLT for external functions. R_X86_64_GOTPCRELX: load from GOT for external data. Most relocations in typical code are PC32 and PLT32. Understanding these is essential for writing linkers or debugging link errors."
+
+[[best_practices]]
+title = "Prefer position-independent code (PIC) for shared libraries"
+explanation = "PIC accesses global data through the GOT (Global Offset Table) and calls external functions through the PLT (Procedure Linkage Table). The code doesn't need patching when loaded at different addresses — only the GOT entries change. This allows the code pages to be shared between processes and enables ASLR."
+
+[[best_practices]]
+title = "Separate code and data into distinct sections"
+explanation = "Put code in .text (read+execute), initialized data in .data (read+write), read-only data in .rodata (read-only), uninitialized data in .bss (read+write, zero-filled, takes no space in the file). The linker groups same-named sections from all objects. The loader maps sections with appropriate permissions. .bss saves disk space for large zero-initialized arrays."
+
+[[gotchas]]
+title = "Undefined symbol errors happen at link time, not compile time"
+explanation = "Each compilation unit is compiled independently. A call to an undefined function compiles successfully — the compiler emits a relocation. The linker fails when it can't find the definition. This means typos in function names, missing libraries, and wrong link order all produce linker errors, not compiler errors."
+bad_example = "gcc -c foo.c (compiles fine); gcc foo.o (linker error: undefined reference to 'bar')"
+good_example = "gcc foo.o bar.o -o program (both objects provided, all symbols resolve)"
+
+[[gotchas]]
+title = "Library order matters for static linking"
+explanation = "The traditional Unix linker processes files left-to-right. When it encounters an archive (.a), it only pulls in objects that resolve currently-undefined symbols. If library A depends on library B, A must come before B on the command line. If there's a circular dependency, you need --start-group / --end-group to iterate."
+bad_example = "gcc main.o -lm -lfoo  // if libfoo uses libm, libm symbols aren't pulled in"
+good_example = "gcc main.o -lfoo -lm  // libfoo first, then libm resolves libfoo's references"
+
+[[gotchas]]
+title = "GOT/PLT indirection means first calls are slow"
+explanation = "With lazy binding (default), the first call through the PLT invokes the dynamic linker to resolve the symbol and patch the GOT. Subsequent calls jump directly through the patched GOT entry. The first call costs ~1000 cycles (symbol lookup + GOT write). LD_BIND_NOW=1 or -z now forces all symbols to be resolved at load time, making startup slower but eliminating first-call latency."
+bad_example = "Latency-sensitive code on first call to a shared library function — unexpected 1000-cycle stall"
+good_example = "Link with -z now for latency-sensitive binaries, or use static linking"
+
+[[gotchas]]
+title = "RELRO protects the GOT but requires explicit opt-in"
+explanation = "The GOT is writable by default (the dynamic linker patches it). An attacker who can overwrite GOT entries can redirect function calls. Partial RELRO (-z relro) makes the GOT read-only after relocation. Full RELRO (-z relro -z now) resolves everything at load time and marks the entire GOT read-only. Most distros enable full RELRO by default."
+bad_example = "Linking without RELRO: GOT is writable, exploitable via GOT overwrite"
+good_example = "gcc -Wl,-z,relro,-z,now -o binary  // full RELRO, GOT becomes read-only"
+
+[[gotchas]]
+title = "Symbol interposition changes program behavior silently"
+explanation = "If a shared library defines 'malloc' and libc defines 'malloc', the dynamic linker uses the first one it finds (in load order). LD_PRELOAD can override any symbol. This is how tools like valgrind and jemalloc work, but it also means a rogue shared library can silently replace any function. -Bsymbolic prevents interposition within a library."
+bad_example = "Library A calls its own strlen, but LD_PRELOAD provides a buggy strlen — A breaks"
+good_example = "Library A linked with -Bsymbolic: internal calls go directly, not through PLT"
+
+[[gotchas]]
+title = "TLS (Thread-Local Storage) adds significant linker complexity"
+explanation = "Thread-local variables (__thread in C, thread_local in C++) need per-thread storage. The linker and runtime must coordinate TLS blocks, and there are 4 different TLS models (local-exec, initial-exec, local-dynamic, general-dynamic) with different performance/flexibility tradeoffs. Using the wrong model causes link errors or runtime crashes."
+bad_example = "Using general-dynamic TLS model for a variable that's always in the main executable — unnecessary PLT calls"
+good_example = "-ftls-model=local-exec for variables known to be in the executable (no shared library)"
+
+[[performance_notes]]
+title = "Static linking eliminates PLT/GOT overhead entirely"
+explanation = "Static calls are direct: CALL rel32, 1 instruction, ~3 cycles. Dynamic calls go through PLT → GOT → target: 2-3 instructions, ~10-15 cycles (after first call). For tight loops calling library functions, static linking can be 3-5x faster per call."
+evidence = "Benchmark: calling strlen in a tight loop. Static: 3.1 ns/call. Dynamic (after warmup): 4.8 ns/call. Dynamic (first call): ~1500 ns."
+
+[[performance_notes]]
+title = "Link-time optimization (LTO) crosses compilation unit boundaries"
+explanation = "Without LTO, the linker only resolves symbols — it doesn't optimize. With LTO, the linker receives IR (not machine code) from each object file and runs the optimizer across all compilation units. This enables cross-module inlining, dead code elimination, and interprocedural optimization. The cost is much longer link times."
+evidence = "Firefox with LTO: ~5% faster runtime, 10-15% smaller binary. Link time: 2-3x longer. rustc with LTO (thin): ~10% faster generated code, 50% longer compile time."
+
+[[performance_notes]]
+title = "Lazy binding amortizes startup cost but hurts first-call latency"
+explanation = "Lazy binding defers symbol resolution until first use. A program with 1000 dynamic symbols but only using 100 at startup resolves 100 instead of 1000. But each first call to an unresolved symbol incurs ~1000 cycles. For interactive applications, LD_BIND_NOW is often better (resolve all at startup, no surprises later)."
+evidence = "Large application: lazy binding startup 50ms, first-call stalls scattered through execution. LD_BIND_NOW startup 120ms, but zero first-call latency after. Total wall time often similar."
