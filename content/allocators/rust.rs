@@ -187,14 +187,13 @@ impl BuddyAllocator {
 
     fn order_for_size(&self, size: usize) -> usize {
         let blocks_needed = (size + self.min_block - 1) / self.min_block;
-        let order = if blocks_needed <= 1 {
+        // Order = log2(next_power_of_two(blocks_needed))
+        // e.g. 1 block → order 0, 2 blocks → order 1, 3-4 blocks → order 2
+        if blocks_needed <= 1 {
             0
         } else {
-            (blocks_needed - 1).next_power_of_two().trailing_zeros() as usize + 1
-        };
-        // Clamp: use next power of two's order
-        let adjusted = blocks_needed.next_power_of_two().trailing_zeros() as usize;
-        adjusted
+            blocks_needed.next_power_of_two().trailing_zeros() as usize
+        }
     }
 
     fn alloc(&mut self, size: usize) -> Option<usize> {

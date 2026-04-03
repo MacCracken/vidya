@@ -37,7 +37,6 @@ enum Op {
     Add,
     Sub,
     Mul,
-    Shl,
 }
 
 impl fmt::Display for Op {
@@ -46,7 +45,6 @@ impl fmt::Display for Op {
             Op::Add => write!(f, "+"),
             Op::Sub => write!(f, "-"),
             Op::Mul => write!(f, "*"),
-            Op::Shl => write!(f, "<<"),
         }
     }
 }
@@ -93,7 +91,6 @@ fn constant_fold(prog: &mut Program) -> usize {
                         Op::Add => l + r,
                         Op::Sub => l - r,
                         Op::Mul => l * r,
-                        Op::Shl => l << r,
                     };
                     constants.insert(*dst, result);
                     *inst = Inst::Const { dst: *dst, value: result };
@@ -198,17 +195,13 @@ fn strength_reduction(prog: &mut Program) -> usize {
 
     for inst in &mut prog.instructions {
         if let Inst::BinOp { dst, op: Op::Mul, lhs, rhs } = inst {
-            // Multiply by power of 2 → shift left
-            if let Some(&val) = constants.get(rhs) {
+            // Multiply by power of 2 where both operands are constants → fold to shift result
+            if let (Some(&l), Some(&val)) = (constants.get(lhs), constants.get(rhs)) {
                 if val > 0 && (val as u64).is_power_of_two() {
-                    let shift = val.trailing_zeros() as i64;
-                    // Create a const for the shift amount and change to Shl
-                    *inst = Inst::BinOp {
-                        dst: *dst,
-                        op: Op::Shl,
-                        lhs: *lhs,
-                        rhs: *rhs, // reuse the register, we'll fold it later
-                    };
+                    let shift = val.trailing_zeros();
+                    let result = l << shift;
+                    constants.insert(*dst, result);
+                    *inst = Inst::Const { dst: *dst, value: result };
                     reduced += 1;
                 }
             }

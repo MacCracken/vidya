@@ -140,9 +140,11 @@ struct ExceptionInfo {
 
 #[derive(Debug, Clone, Copy)]
 enum ExceptionType {
-    Fault,  // restartable — RIP points to the faulting instruction
-    Trap,   // RIP points to the NEXT instruction
-    Abort,  // unrecoverable
+    Fault,      // restartable — RIP points to the faulting instruction
+    Trap,       // RIP points to the NEXT instruction
+    Abort,      // unrecoverable
+    Interrupt,  // externally triggered (NMI)
+    FaultTrap,  // either fault or trap depending on cause (#DB)
 }
 
 impl fmt::Display for ExceptionType {
@@ -151,14 +153,16 @@ impl fmt::Display for ExceptionType {
             ExceptionType::Fault => write!(f, "fault"),
             ExceptionType::Trap => write!(f, "trap"),
             ExceptionType::Abort => write!(f, "abort"),
+            ExceptionType::Interrupt => write!(f, "interrupt"),
+            ExceptionType::FaultTrap => write!(f, "fault/trap"),
         }
     }
 }
 
 const EXCEPTIONS: &[ExceptionInfo] = &[
     ExceptionInfo { vector: 0,  name: "Divide Error (#DE)",             has_error_code: false, exception_type: ExceptionType::Fault },
-    ExceptionInfo { vector: 1,  name: "Debug (#DB)",                    has_error_code: false, exception_type: ExceptionType::Fault },
-    ExceptionInfo { vector: 2,  name: "NMI",                           has_error_code: false, exception_type: ExceptionType::Trap },
+    ExceptionInfo { vector: 1,  name: "Debug (#DB)",                    has_error_code: false, exception_type: ExceptionType::FaultTrap },
+    ExceptionInfo { vector: 2,  name: "NMI",                           has_error_code: false, exception_type: ExceptionType::Interrupt },
     ExceptionInfo { vector: 3,  name: "Breakpoint (#BP)",              has_error_code: false, exception_type: ExceptionType::Trap },
     ExceptionInfo { vector: 4,  name: "Overflow (#OF)",                has_error_code: false, exception_type: ExceptionType::Trap },
     ExceptionInfo { vector: 5,  name: "Bound Range (#BR)",             has_error_code: false, exception_type: ExceptionType::Fault },

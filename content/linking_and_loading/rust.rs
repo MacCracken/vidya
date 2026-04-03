@@ -56,6 +56,8 @@ struct Relocation {
 enum RelocType {
     /// Absolute 64-bit address (R_X86_64_64)
     Abs64,
+    /// Absolute 32-bit address (R_X86_64_32S) — for disp32 in SIB addressing
+    Abs32,
     /// PC-relative 32-bit (R_X86_64_PC32) — for CALL/JMP
     Pc32,
 }
@@ -64,6 +66,7 @@ impl fmt::Display for RelocType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RelocType::Abs64 => write!(f, "R_X86_64_64"),
+            RelocType::Abs32 => write!(f, "R_X86_64_32S"),
             RelocType::Pc32 => write!(f, "R_X86_64_PC32"),
         }
     }
@@ -232,6 +235,13 @@ impl Linker {
                         output[patch_file_offset..patch_file_offset + 8]
                             .copy_from_slice(&bytes);
                     }
+                    RelocType::Abs32 => {
+                        // 32-bit absolute (sign-extended) — for disp32 fields
+                        let value = (sym_addr as i64 + reloc.addend) as i32;
+                        let bytes = value.to_le_bytes();
+                        output[patch_file_offset..patch_file_offset + 4]
+                            .copy_from_slice(&bytes);
+                    }
                     RelocType::Pc32 => {
                         // PC-relative: target - (patch_address + 4)
                         let patch_addr = sec_base + reloc.offset;
@@ -294,7 +304,7 @@ fn make_demo_objects() -> Vec<ObjectFile> {
                 0x48, 0xC7, 0xC6, 0x20, 0x00, 0x00, 0x00,
                 // call add_numbers (rel32 placeholder = 0x00000000)
                 0xE8, 0x00, 0x00, 0x00, 0x00,
-                // mov [GLOBAL_BASE], rax (abs64 placeholder = 0x0000000000000000)
+                // mov [GLOBAL_BASE], rax (disp32 placeholder = 0x00000000)
                 0x48, 0x89, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
                 // ret
                 0xC3,
@@ -334,9 +344,9 @@ fn make_demo_objects() -> Vec<ObjectFile> {
             },
             Relocation {
                 section: ".text".to_string(),
-                offset: 22, // offset of the abs address in MOV
+                offset: 23, // offset of the disp32 field in MOV [disp32], RAX
                 symbol: "GLOBAL_BASE".to_string(),
-                reloc_type: RelocType::Abs64,
+                reloc_type: RelocType::Abs32,
                 addend: 0,
             },
         ],
