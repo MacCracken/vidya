@@ -87,7 +87,7 @@ good_example = "Store read() return value in r12, check cursor against r12 in th
 [[performance_notes]]
 title = "A compiler in assembly can be tiny"
 explanation = "A complete compiler with bitwise operators, shifts, modulo, hex literals, comments, functions, syscalls, string literals, arrays, byte-level I/O, and full control flow fits in ~4000 lines of assembly and assembles to ~12KB. Generated programs support user-defined functions with up to 6 parameters, local variables, forward calls, and full System V AMD64 calling convention — enough to write an assembler in itself. No language runtime, no standard library, no linker — pure syscalls."
-evidence = "Cyrius bootstrap chain: stage1a (872 lines, 2641B, compile-time eval) -> stage1b (1725 lines, 5235B, if/else/while) -> stage1c (2470 lines, 7581B, syscalls + I/O) -> stage1d (3664 lines, 11187B, functions + stack frames) -> stage1e (3986 lines, 12344B, bitwise ops + self-hosting capacity). Each stage adds ~50% lines and ~50% binary size for a major capability tier. The full 5-stage chain totals 378 tests."
+evidence = "Cyrius bootstrap chain: stage1a (872 lines, 2641B, compile-time eval) -> stage1b (1725 lines, 5235B, if/else/while) -> stage1c (2470 lines, 7581B, syscalls + I/O) -> stage1d (3664 lines, 11187B, functions + stack frames) -> stage1e (3986 lines, 12344B, bitwise ops) -> stage1f (3986 lines, 12344B, token scaling) -> asm.cyr (1128 lines, self-hosting assembler). The full 7-stage chain achieves bootstrap closure with 11 byte-exact matches."
 
 [[performance_notes]]
 title = "brk is fast for single-allocation patterns"
@@ -226,6 +226,18 @@ explanation = "C has 15 precedence levels. A bootstrap compiler needs just 2-3: 
 bad_example = "Implementing 15 precedence levels with 15 parse functions for a bootstrap compiler — thousands of lines of assembly for marginal benefit"
 good_example = "Two levels: parse_term handles * / % << >>, parse_expr handles + - & | ^. Use parentheses when needed."
 
+[[gotchas]]
+title = "Duplicate var names in a function silently create separate stack slots"
+explanation = "In a bootstrap compiler with flat function scoping, declaring `var val = 0` inside an if block and then `var val = 0` again later in the same function creates TWO separate stack slots both named `val`. The compiler allocates slots for all `var` declarations encountered during parsing, regardless of whether the runtime path reaches them. References to `val` after the second declaration use the second slot — but the first slot still occupies stack space and may hold stale data from previous iterations. This causes subtle corruption when the compiler's local variable lookup returns the wrong slot for nested scopes."
+bad_example = "fn parse(S) { if (is_hex) { var val = hex_parse(); return val; } var val = dec_parse(); return val; } — two 'val' slots, second may see garbage"
+good_example = "fn parse_hex(S) { var val = ...; return val; } fn parse_dec(S) { var val = ...; return val; } fn parse(S) { if (is_hex) { return parse_hex(S); } return parse_dec(S); } — separate functions, no name collision"
+
+[[gotchas]]
+title = "Functions cannot reference globals declared after them in a bootstrap compiler"
+explanation = "In a bootstrap compiler where the parser processes all fn definitions before any top-level var statements, functions cannot reference global variables because those variables don't exist yet during function body parsing. The workaround is to allocate all state in a heap block (via brk) and pass the heap pointer as the first parameter to every function. Functions read/write state through load8/store8 at fixed offsets from this pointer — the same pattern the bootstrap compiler itself uses (r15 + offset). This is verbose but systematic and avoids the ordering constraint entirely."
+bad_example = "var CP = 0; fn emit(b) { store8(&CODE + CP, b); CP = CP + 1; } — CP is undefined when emit is parsed"
+good_example = "fn emit(S, b) { var cp = L64(S + 8); store8(S + 256 + cp, b); S64(S + 8, cp + 1); } var S = brk_alloc(); emit(S, 0x90);"
+
 [[performance_notes]]
 title = "Bitwise operators are the cheapest language addition"
 explanation = "Each bitwise operator (AND, OR, XOR, SHL, SHR, NOT) is a single 3-byte x86_64 instruction. The full implementation cost per operator is: one 12-line emit helper (~30 bytes of seed code), plus 5-7 lines of parser dispatch. Adding all 7 operators (including modulo) costs ~320 lines of assembly and ~830 bytes of binary — less than a single if/else control flow implementation."
@@ -235,3 +247,27 @@ evidence = "Stage1e adds % & | ^ ~ << >> (7 operators) plus hex literals, commen
 title = "Capacity scaling is nearly free in binary size"
 explanation = "Scaling a compiler's internal buffers from 4KB to 64KB (16x) only changes the immediate operands in existing instructions — no new code paths, no new logic, just different numbers in 'add rsi, 0xNNNN' instructions. The binary size impact is dominated by new 5-byte hex immediates vs old 2-byte hex immediates (e.g., 0x29000 vs 0x2C00), adding ~3 bytes per offset reference."
 evidence = "Stage1e scales input (4KB→64KB), tokens (128→4096), codebuf (4KB→64KB), output (6KB→128KB), vars (64→256), functions (32→128). The brk allocation grows from 40KB to 448KB. All this changes only immediate values — zero new instructions. The binary grows by ~40 bytes from longer immediates."
+
+[[best_practices]]
+title = "Byte-exact comparison is the gold standard for assembler correctness"
+explanation = "When writing a self-hosting assembler, the strongest test is assembling the same file with both the reference assembler (seed) and the new assembler, then comparing output bytes. If they match exactly, every instruction encoding, label offset, displacement size, SIB byte, and ELF header field is correct. A single wrong bit in any of these produces a different binary. Build your test suite around this: assemble progressively larger programs, from 3-instruction exit programs to multi-thousand-line compilers."
+
+[[best_practices]]
+title = "Pass heap state as first parameter when functions can't see globals"
+explanation = "In a bootstrap language where all fn definitions must precede var declarations, functions cannot reference global variables. The workaround is to allocate all mutable state in a single heap block (via brk) and pass the block's base address as the first parameter to every function. State fields live at fixed offsets: L64(S + 8) for code position, S64(S + 16, val) for parse cursor, etc. This mirrors how the bootstrap compiler itself uses r15 + offsets — the same pattern at a higher abstraction level. It costs one parameter slot per function but gives uniform, predictable state access."
+
+[[gotchas]]
+title = "Return value -1 vs 0 for try-parse functions in a language without exceptions"
+explanation = "In a language without exceptions or option types, a 'try' function (like try-parse-register) must signal failure through its return value. Using 0 for failure is dangerous when 0 is a valid result (rax = register code 0). Using -1 (0 - 1) for failure is safe because register codes are 0-15 and instruction sizes are always positive. But the CALLER must check with `if (result < 0)` (signed comparison), not `if (result == 0)`. Getting this wrong means register rax (code 0) is treated as 'not a register', causing the parser to take the wrong path and silently produce corrupt output."
+bad_example = "fn try_reg() { ... return 0; } fn handle() { var r = try_reg(); if (r == 0) { /* immediate path */ } } — rax (code 0) takes the immediate path"
+good_example = "fn try_reg() { ... return 0 - 1; } fn handle() { var r = try_reg(); if (r < 0) { /* not a register */ } } — only -1 takes the non-register path"
+
+[[performance_notes]]
+title = "A self-hosting assembler fits in 1128 lines of bootstrap language"
+explanation = "A complete two-pass x86_64 assembler supporting 43 mnemonics (enough to assemble a 4000-line compiler) fits in ~1100 lines of a minimal language with only variables, functions, if/else, while, and byte-level memory access. The assembler uses packed 64-bit word comparison for mnemonic dispatch (same pattern as the bootstrap compiler's keyword matching), heap-based state passed to every function, and a single reusable memory operand encoder for all memory-accessing instructions. It produces byte-identical output to the Rust reference implementation for all test cases."
+evidence = "Cyrius asm.cyr: 1128 lines, 43 mnemonics, compiled by stage1f (12344-byte compiler). Produces byte-exact matches for 11 test programs including stage1a (2641B), stage1b (5235B), stage1c (7581B), stage1d (11187B), stage1e (12344B), and stage1f (12344B). Bootstrap closure verified: seed→stage1f→asm→stage1f_v2 byte-identical."
+
+[[performance_notes]]
+title = "The bootstrap loop closes at ~12KB"
+explanation = "The minimum viable self-hosting bootstrap requires a compiler that can compile the assembler that can assemble the compiler. In Cyrius, this loop closes at 12,344 bytes: the stage1f compiler (12344B) compiles asm.cyr (1128 lines) into an assembler binary, and that assembler produces a byte-identical copy of stage1f when given stage1f.cyr as input. The entire bootstrap chain from bare assembly to self-hosting closure spans 7 stages (seed + 1a through 1f) totaling ~20,000 lines of source code."
+evidence = "Cyrius bootstrap closure: seed (Rust, 2076 lines) → stage1f.cyr (3986 lines assembly) → stage1f (12344B binary) → asm.cyr (1128 lines high-level) → asm (19688B binary) → stage1f_v2 (12344B, byte-identical to seed output). Total source: seed(2076) + stages(3986*6≈24000) + asm(1128) ≈ 27,000 lines."

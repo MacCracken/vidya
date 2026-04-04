@@ -82,6 +82,32 @@ title = "LEA is free arithmetic — one instruction, no flags, no memory"
 explanation = "LEA (load effective address) computes address arithmetic without touching memory or flags. 'lea rax, [rbx + rcx*4 + 8]' computes rbx + rcx*4 + 8 in one cycle. This replaces 2-3 arithmetic instructions and doesn't affect condition flags (useful when you need to preserve them)."
 evidence = "lea rax, [rbx + rcx*8]: 1 cycle, no flags. Equivalent: mov rax, rcx; shl rax, 3; add rax, rbx = 3 instructions, 3 cycles, clobbers flags."
 
+[[gotchas]]
+title = "ModR/M.reg is an opcode extension for single-operand instructions, not a register"
+explanation = "For instructions like ADD r/m64, imm32 (0x81), the ModR/M.reg field selects WHICH ALU operation, not a register: /0=ADD, /1=OR, /2=ADC, /3=SBB, /4=AND, /5=SUB, /6=XOR, /7=CMP. The destination register goes in ModR/M.rm (with mod=11 for register mode). Similarly, unary instructions use 0xF7 with extensions: /2=NOT, /3=NEG, /4=MUL, /5=IMUL, /6=DIV, /7=IDIV. And INC/DEC use 0xFF with /0=INC, /1=DEC. Getting the extension field wrong means the CPU executes a completely different operation — ADD instead of SUB, or MUL instead of NOT."
+bad_example = "Encoding 'sub rax, 42' as REX.W 81 C0 2A — ModR/M.reg=0 means ADD, not SUB"
+good_example = "Encoding 'sub rax, 42' as REX.W 81 E8 2A — ModR/M(11, /5, rax) where /5 selects SUB"
+
+[[gotchas]]
+title = "Instruction size must be computable without encoding — essential for two-pass assemblers"
+explanation = "A two-pass assembler computes all label offsets in pass 1, then encodes in pass 2. Pass 1 needs the exact byte size of every instruction WITHOUT producing the actual bytes. Most sizes are fixed (mov reg,imm64 = 10, syscall = 2, jcc = 6), but memory operands have variable sizes: [reg] is 0 extra bytes, [reg+disp8] is 1 extra, [reg+disp32] is 4 extra — PLUS RSP/R12 add 1 for SIB, and RBP/R13 add 1 for forced disp8. The size function must handle every combination: base_size + (base_reg==4||base_reg==12 ? 1 : 0) + disp_bytes(disp, base_reg). If pass 1 sizes disagree with pass 2 encoding sizes by even one byte, every label after the mismatch is wrong and every jump target is off."
+bad_example = "Forgetting RSP needs SIB in size computation — pass 1 says 3 bytes, pass 2 emits 4, all labels after this point are off by 1"
+good_example = "fn mem_extra(base, disp): if base&7==4: +1 (SIB); if disp==0 && base&7!=5: +0; elif -128<=disp<=127: +1; else: +4; if base&7==5 && disp==0: force +1 (disp8)"
+
+[[gotchas]]
+title = "movb, movzx, and movsx are three different encodings for byte access"
+explanation = "Byte memory operations have three distinct instruction forms that are easy to confuse: (1) movb/mov byte [mem], reg (opcode 0x88) stores the low byte of a register — does NOT use REX.W, but DOES need a REX prefix (even 0x40) if the source register is SPL/BPL/SIL/DIL (codes 4-7). (2) movzx reg, byte [mem] (opcode 0x0F 0xB6) loads a byte and zero-extends to 64 bits — uses REX.W and has a two-byte opcode with the 0x0F escape. (3) movsx reg, byte [mem] (opcode 0x0F 0xBE) loads a byte and sign-extends. All three use the same ModR/M encoding for the memory operand, but their opcode structure, REX requirements, and operand direction differ. Mixing them up produces silent data corruption: movb where you meant movzx stores instead of loads, movsx where you meant movzx sign-extends 0x80 to 0xFFFFFFFFFFFFFF80 instead of 0x80."
+bad_example = "movzx rax, byte [rcx] encoded as 48 88 01 — this is movb [rcx], al (store, not load!)"
+good_example = "movzx rax, byte [rcx] = 48 0F B6 01 (REX.W + 0F escape + B6 + ModR/M). movb [rcx], al = 88 01 (no REX.W, opcode 88)"
+
+[[best_practices]]
+title = "Build a memory operand encoder as a single reusable function"
+explanation = "Every memory-accessing instruction (mov, add, cmp, lea, movzx, movb) uses the same ModR/M + optional SIB + optional displacement encoding for its memory operand. The only things that change are the opcode bytes and which field is reg vs r/m. Write one function encode_mem_modrm(reg_field, base_reg, displacement) that returns the ModR/M byte, optional SIB, and optional displacement bytes. Then every memory instruction calls this function with its specific reg_field. This eliminates the #1 source of assembler bugs: inconsistent handling of RSP/RBP special cases across different instructions."
+
+[[best_practices]]
+title = "Use a dispatch table pattern for ALU instruction encoding"
+explanation = "The x86 ALU instructions (ADD, OR, ADC, SBB, AND, SUB, XOR, CMP) share identical encoding formats — they differ only in the opcode byte (reg,reg form) and the ModR/M extension digit (reg,imm form). ADD reg,reg = 0x01, SUB = 0x29, AND = 0x21, XOR = 0x31, CMP = 0x39, OR = 0x09. For reg,imm32: all use 0x81 with extensions /0=ADD, /1=OR, /4=AND, /5=SUB, /6=XOR, /7=CMP. Encode this as two helper functions — alu_reg_reg(opcode, dst, src) and alu_reg_imm(extension, dst, imm) — rather than eight separate encoders."
+
 [[performance_notes]]
 title = "SIB byte adds zero latency"
 explanation = "The SIB (Scale-Index-Base) byte enables [base + index*scale + disp] addressing in one instruction. Despite the extra decode byte, SIB-encoded memory operands have the same latency as simple [reg] operands on modern CPUs. The AGU (Address Generation Unit) handles the multiply-add in parallel."
