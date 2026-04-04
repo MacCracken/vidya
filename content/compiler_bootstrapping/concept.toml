@@ -58,7 +58,7 @@ explanation = "If your language has no control flow yet (just expressions and as
 
 [[best_practices]]
 title = "Use qword-aligned slots when you lack byte-store instructions"
-explanation = "If your assembler only has 64-bit memory operations (mov [reg], reg stores 8 bytes), store all data in 8-byte-aligned slots. Token types, variable values, everything gets a full qword. Wastes memory but avoids byte-level store complexity. For reading individual bytes from input, load a qword and mask with AND 0xFF."
+explanation = "If your assembler only has 64-bit memory operations (mov [reg], reg stores 8 bytes), store all data in 8-byte-aligned slots. Token types, variable values, everything gets a full qword. Wastes memory but avoids byte-level store complexity. For reading individual bytes from input, load a qword and mask with AND 0xFF. Once the assembler supports byte stores (movb) and byte loads (movzx), transition to byte-level operations for I/O buffers and string data — but keep qword slots for token tables and variable metadata where alignment matters."
 
 [[gotchas]]
 title = "Recursive descent works in assembly — use push/pop"
@@ -86,8 +86,8 @@ good_example = "Store read() return value in r12, check cursor against r12 in th
 
 [[performance_notes]]
 title = "A compiler in assembly can be tiny"
-explanation = "A complete compiler with runtime codegen, if/while, variables, and all arithmetic fits in ~1600 lines of assembly and assembles to ~5KB. The generated programs range from 184-384 bytes depending on complexity. No language runtime, no standard library, no linker — pure syscalls."
-evidence = "Cyrius stage1b: 1661 lines .cyr assembly, 5051-byte binary, 32/32 tests. Generated binaries: 184 bytes (literal) to 384 bytes (nested if-in-while). Stage1a (compile-time only): 800 lines, 2642 bytes, 14/14 tests."
+explanation = "A complete compiler with syscalls, string literals, arrays, byte-level I/O, and full control flow fits in ~2500 lines of assembly and assembles to ~7.5KB. Generated programs can read stdin, write stdout, and manipulate byte buffers — enough to build the next compiler stage. No language runtime, no standard library, no linker — pure syscalls."
+evidence = "Cyrius stage1c: 2469 lines .cyr assembly, 7581-byte binary, 21/21 tests (syscall, strings, arrays, load8/store8, &var, if/else/while). Stage1b (control flow only): 1700 lines, 5235 bytes, 39/39 tests. Stage1a (compile-time eval): 872 lines, 2641 bytes, 16/16 tests. Each stage roughly doubles in capability and size."
 
 [[performance_notes]]
 title = "brk is fast for single-allocation patterns"
@@ -125,6 +125,24 @@ bad_example = "Only emitting the forward conditional jump — the loop body exec
 good_example = "Forward jcc to EXIT after condition; body code; backward jmp to LOOP_TOP; EXIT: (patch forward jcc here)"
 
 [[gotchas]]
+title = "If/else needs TWO forward jumps — one conditional, one unconditional"
+explanation = "An 'if (cond) { A } else { B }' requires two forward jumps: (1) a conditional jump past the if-body to the else-body (inverted condition, same as plain if), and (2) an unconditional jmp at the end of the if-body to skip the else-body. Both must be patched after their target code is emitted. The unconditional jump is what distinguishes if/else from plain if — without it, the if-body falls through into the else-body."
+bad_example = "if-body falls through into else-body because there's no jmp to skip it"
+good_example = "jcc ELSE after condition; if-body; jmp END; ELSE: else-body; END: (patch both jumps)"
+
+[[gotchas]]
+title = "Fix a bug in one stage, check all stages"
+explanation = "In a multi-stage bootstrap, each stage is typically built by copying and extending the previous stage's code. If you find a bug (like using xor rdx,rdx instead of cqo before idiv), the same bug likely exists in every stage that shares that lineage. After fixing stage1b's signed division, stage1a had the identical bug. Always grep all stages when you find a correctness issue."
+bad_example = "Fix idiv bug in stage1b, ship it, discover stage1a has the same bug weeks later"
+good_example = "Fix idiv bug in stage1b, immediately grep stage1a for the same pattern, fix both"
+
+[[gotchas]]
+title = "String literals and variables need different fixup types"
+explanation = "When a compiler generates binaries with both variables and string literals, both need address fixups — but they live at different offsets in the data section. Variables are interleaved by declaration order with cumulative sizing. String literals are appended after all variables. The fixup table needs a type field to distinguish them: type-0 fixups compute addresses from variable offsets, type-1 fixups compute addresses from string offsets past the variable area. Encoding the type in the high bits of the fixup entry (e.g., bit 56) avoids growing the fixup entry size."
+bad_example = "Single fixup type — string addresses computed as variable addresses, land in the wrong place"
+good_example = "Fixup entry = (codebuf_offset, type_bits | index). Type 0: var addr = base + cumulative_size. Type 1: str addr = base + total_var_bytes + string_offset."
+
+[[gotchas]]
 title = "The 'last variable' exit convention matters for control flow"
 explanation = "If your language exits with the last assigned variable's value, control flow complicates things. Assignments inside while/if bodies update the 'last assigned' tracker, but after the block ends, you want the outer scope's variable. Save and restore the last-variable tracker around control flow blocks, like saving callee-saved registers."
 bad_example = "while loop body assigns to counter variable; program exits with counter instead of result"
@@ -132,8 +150,8 @@ good_example = "Save last_var_idx before while body, restore after — exit valu
 
 [[performance_notes]]
 title = "Runtime codegen doubles compiler size but enables real programs"
-explanation = "Adding runtime codegen (if/while/variables) roughly doubles the compiler binary size compared to compile-time evaluation, but enables programs that actually compute at runtime. The tradeoff is worth it — a 5KB compiler that generates real programs vs a 2.5KB compiler that can only evaluate constants."
-evidence = "Cyrius stage1a (compile-time eval): 2642 bytes, 800 lines. Stage1b (runtime codegen with if/while): 5051 bytes, 1661 lines. Stage1b computes factorial, sums, and nested loops."
+explanation = "Adding runtime codegen (if/else/while/variables) roughly doubles the compiler binary size compared to compile-time evaluation, but enables programs that actually compute at runtime. The tradeoff is worth it — a 5KB compiler that generates real programs vs a 2.6KB compiler that can only evaluate constants."
+evidence = "Cyrius stage1a (compile-time eval): 2641 bytes, 872 lines. Stage1b (control flow): 5235 bytes, 1700 lines. Stage1c (syscalls + I/O): 7581 bytes, 2469 lines. Each stage adds ~50% binary size for a major capability tier."
 
 [[performance_notes]]
 title = "Sub-millisecond compilation for bootstrap compilers"

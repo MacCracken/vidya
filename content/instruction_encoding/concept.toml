@@ -37,6 +37,12 @@ bad_example = "ModR/M(0b00, reg, 0b100) without SIB — CPU reads next opcode by
 good_example = "ModR/M(0b00, reg, 0b100) + SIB(0x24) — correctly encodes [RSP]"
 
 [[gotchas]]
+title = "Byte operations need REX for registers 4-7 (sil/dil/spl/bpl)"
+explanation = "In 64-bit mode, byte operations (movb, setcc) on registers RSI(6), RDI(7), RSP(4), RBP(5) access the NEW byte registers (sil, dil, spl, bpl) only if a REX prefix is present. Without REX, the CPU interprets reg=4-7 as the LEGACY byte registers ah, ch, dh, bh instead. So 'movb [rcx], rsi' needs a REX prefix (0x40) even though no W/R/B bits are set — the mere presence of REX switches from legacy to new byte register encoding. This catches every assembler author who thinks 'no extended registers means no REX needed.'"
+bad_example = "mov byte [rcx], sil encoded as 88 31 — CPU sees this as mov [rcx], dh (wrong register)"
+good_example = "mov byte [rcx], sil encoded as 40 88 31 — REX prefix selects sil instead of dh"
+
+[[gotchas]]
 title = "REX prefix must immediately precede the opcode"
 explanation = "The REX prefix must come after legacy prefixes (66, 67, F2, F3, lock) but immediately before the opcode. A REX prefix followed by another prefix is invalid. Also, some instructions (like PUSH/POP with register encoding in the opcode byte) require REX.B to access R8-R15."
 bad_example = "0x48 0x66 0x89 ... — REX then legacy prefix, wrong order"
@@ -53,6 +59,12 @@ title = "VEX prefix replaces REX for AVX instructions"
 explanation = "AVX instructions use VEX (2 or 3 byte) or EVEX (4 byte) prefixes instead of REX + legacy prefixes. A VEX prefix encodes the REX bits, operand size, and opcode map in a compact format. You cannot use REX with VEX — they're mutually exclusive. This means AVX code needs a completely different encoding path."
 bad_example = "REX.W + VEX + opcode — illegal, REX and VEX cannot coexist"
 good_example = "VEX.W1 + opcode — VEX encodes the W bit internally"
+
+[[gotchas]]
+title = "Displacement addressing (disp8/disp32) replaces manual base+offset arithmetic"
+explanation = "Without displacement addressing, accessing [r15 + 0x100] requires three instructions: mov rsi, r15; add rsi, 0x100; mov rax, [rsi] (20+ bytes). With displacement, it's one instruction: mov rax, [r15 + 0x100] (7 bytes with disp32). For small offsets (-128..127), disp8 is even better: mov rax, [rbp - 8] is 4 bytes. The assembler must choose disp8 vs disp32 based on offset magnitude. This is the single biggest code size improvement when adding displacement support to a bootstrap assembler — stack frame access drops from 3 instructions to 1."
+bad_example = "mov rsi, r15; add rsi, 8; mov rax, [rsi]  // 20 bytes for a simple stack read"
+good_example = "mov rax, [r15 + 8]  // 4 bytes (REX + opcode + ModR/M(mod=01) + disp8)"
 
 [[gotchas]]
 title = "CALL and JMP rel32 are relative to the NEXT instruction"

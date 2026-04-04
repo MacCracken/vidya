@@ -114,14 +114,14 @@ fn load_all_new_topics() {
     }
 }
 
-/// The registry should have all 33 topics after loading.
+/// The registry should have all 35 topics after loading.
 #[test]
-fn load_all_has_33_topics() {
+fn load_all_has_35_topics() {
     let registry = load_all(Path::new("content")).expect("should load content");
     let ids = registry.list_ids();
     assert!(
-        ids.len() >= 33,
-        "expected at least 33 topics, got {}",
+        ids.len() >= 35,
+        "expected at least 35 topics, got {}",
         ids.len()
     );
 }
