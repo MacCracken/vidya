@@ -86,8 +86,8 @@ good_example = "Store read() return value in r12, check cursor against r12 in th
 
 [[performance_notes]]
 title = "A compiler in assembly can be tiny"
-explanation = "A complete compiler with functions, syscalls, string literals, arrays, byte-level I/O, and full control flow fits in ~3700 lines of assembly and assembles to ~11KB. Generated programs support user-defined functions with up to 6 parameters, local variables, forward calls, and full System V AMD64 calling convention — enough to write a compiler in itself. No language runtime, no standard library, no linker — pure syscalls."
-evidence = "Cyrius bootstrap chain: stage1a (872 lines, 2641B, compile-time eval) -> stage1b (1725 lines, 5235B, if/else/while) -> stage1c (2470 lines, 7581B, syscalls + I/O) -> stage1d (3664 lines, 11187B, functions + stack frames). Each stage adds ~50% lines and ~50% binary size for a major capability tier. The full 4-stage chain totals 148 tests."
+explanation = "A complete compiler with bitwise operators, shifts, modulo, hex literals, comments, functions, syscalls, string literals, arrays, byte-level I/O, and full control flow fits in ~4000 lines of assembly and assembles to ~12KB. Generated programs support user-defined functions with up to 6 parameters, local variables, forward calls, and full System V AMD64 calling convention — enough to write an assembler in itself. No language runtime, no standard library, no linker — pure syscalls."
+evidence = "Cyrius bootstrap chain: stage1a (872 lines, 2641B, compile-time eval) -> stage1b (1725 lines, 5235B, if/else/while) -> stage1c (2470 lines, 7581B, syscalls + I/O) -> stage1d (3664 lines, 11187B, functions + stack frames) -> stage1e (3986 lines, 12344B, bitwise ops + self-hosting capacity). Each stage adds ~50% lines and ~50% binary size for a major capability tier. The full 5-stage chain totals 378 tests."
 
 [[performance_notes]]
 title = "brk is fast for single-allocation patterns"
@@ -162,8 +162,8 @@ good_example = "mov [r15 + SCRATCH_OFFSET], frame_size_patch; ... parse body ...
 
 [[performance_notes]]
 title = "Each compiler stage adds ~50% size for a major capability tier"
-explanation = "A bootstrap compiler grows predictably: each stage adds one capability tier (control flow, I/O, functions) and increases binary size by roughly 50%. The growth is sublinear because infrastructure code (lexer, parser framework, ELF emitter) is shared across stages. Functions are the most expensive addition (~50% more code than I/O) because they require stack frame management, calling convention compliance, and a separate variable scoping mechanism."
-evidence = "Cyrius stage1a: 2641B (eval). Stage1b: 5235B (+98%, control flow). Stage1c: 7581B (+45%, syscalls/I/O). Stage1d: 11187B (+48%, functions). The function stage is proportionally larger because it adds stack frames, parameter passing (6 System V registers), forward call fixups, and local variable scoping — all new infrastructure."
+explanation = "A bootstrap compiler grows predictably: each stage adds one capability tier (control flow, I/O, functions, bitwise ops) and increases binary size by roughly 50%. The growth is sublinear because infrastructure code (lexer, parser framework, ELF emitter) is shared across stages. Functions are the most expensive addition (~50% more code than I/O) because they require stack frame management, calling convention compliance, and a separate variable scoping mechanism. Capacity scaling (larger buffers) is nearly free in binary size because it only changes immediate constants, not code."
+evidence = "Cyrius stage1a: 2641B (eval). Stage1b: 5235B (+98%, control flow). Stage1c: 7581B (+45%, syscalls/I/O). Stage1d: 11187B (+48%, functions). Stage1e: 12344B (+10%, bitwise ops + 16x capacity scaling). The bitwise/shift stage is the cheapest because each operator is a single 3-byte x86 instruction — the emit helper + parser dispatch costs ~30 bytes each. Capacity scaling (4KB→64KB buffers) changes only immediate operands in existing code, adding zero new instructions."
 
 [[performance_notes]]
 title = "Sub-millisecond compilation for bootstrap compilers"
@@ -189,3 +189,49 @@ evidence = "Full rust-lang/rust clone: ~2GB. Shallow clone: ~200MB. Cargo submod
 title = "Stage 1 is sufficient for most development"
 explanation = "Stage 2 (compiler compiled by itself) is needed for release builds but not for development. Stage 1 (compiled by the beta) is functionally identical for testing. Building only stage 1 halves build time."
 evidence = "Stage 1 build: ~5 minutes. Full stage 2 build: ~10-15 minutes. Stage 1 is sufficient for cargo, tests, and development."
+
+[[best_practices]]
+title = "Add bitwise operators before self-hosting, not during"
+explanation = "Writing an assembler requires extensive bit manipulation — REX prefixes, ModR/M bytes, register encoding all combine bit fields with AND/OR/shift. Add these operators to the bootstrap language as a dedicated stage before attempting self-hosting. Trying to implement an assembler without bitwise ops forces awkward workarounds (multiply/divide by powers of 2, manual bit extraction) that make the self-hosting code fragile and hard to audit."
+
+[[best_practices]]
+title = "Reuse the same token for unary and binary operators"
+explanation = "In a recursive-descent parser, the same token can serve dual roles without conflict: & as unary address-of (in parse_factor, prefix position) and & as binary bitwise AND (in parse_expr, infix position). The parser position disambiguates naturally — parse_factor only consumes & when it appears at the START of a factor, while parse_expr only sees & AFTER evaluating a full subexpression. No special lookahead or context flags needed."
+
+[[best_practices]]
+title = "Scale buffer capacities before self-hosting, not during"
+explanation = "A self-hosting assembler will be 10KB+ of source code with thousands of tokens. If the bootstrap compiler has 4KB input buffers and 128 token slots, it will silently truncate or overflow during the self-hosting attempt. Scale all buffers generously (16x or more) in a dedicated stage, verify backward compatibility, then attempt self-hosting. The cost is trivial — changing immediate operands in existing code adds zero new instructions."
+
+[[gotchas]]
+title = "shr is logical shift, not arithmetic — negative numbers lose their sign"
+explanation = "x86_64 shr (shift right) fills the high bits with zeros, discarding the sign bit. For unsigned operations (extracting byte fields, dividing by powers of 2), this is correct. But if you right-shift a negative number expecting sign preservation, you need sar (shift arithmetic right) instead. In a bootstrap compiler generating code for bit manipulation (REX prefixes, register encoding), all values are unsigned masks and fields — shr is correct. But document the choice."
+bad_example = "var x = 0 - 256; var hi = x >> 8;  # Gets 0x00FFFFFFFFFFFFFF, not -1"
+good_example = "var x = 0x1234; var hi = x >> 8;  # Gets 0x12 — correct for unsigned field extraction"
+
+[[gotchas]]
+title = "Modulo uses idiv which clobbers BOTH rax and rdx"
+explanation = "x86_64 idiv rcx divides rdx:rax by rcx, putting the quotient in rax and the remainder in rdx. For modulo, you need the remainder — but the idiv already overwrote rax with the quotient. You must emit an extra 'mov rax, rdx' after idiv to move the remainder into the accumulator. This is easy to forget because division and modulo share the same instruction but use different output registers."
+bad_example = "cqo; idiv rcx;  # rax now has quotient, not remainder — modulo returns wrong value"
+good_example = "cqo; idiv rcx; mov rax, rdx;  # explicitly move remainder into rax for modulo"
+
+[[gotchas]]
+title = "Hex literal parser must handle 0x without digits gracefully"
+explanation = "When the lexer sees '0x' followed by a non-hex character (like a space or semicolon), it must produce a valid token with value 0, not crash or enter an infinite loop. The hex accumulation loop should check for valid hex digits (0-9, a-f, A-F) and fall through to the number-done path when it encounters anything else. The edge case '0x' alone is unlikely in real code but will appear in test suites."
+bad_example = "Hex parser loops until it finds a hex digit — infinite loop on '0x;'"
+good_example = "Hex parser initializes accumulator to 0, loops on valid hex digits, exits on first non-hex character"
+
+[[gotchas]]
+title = "Operator precedence in a bootstrap compiler doesn't need to match C"
+explanation = "C has 15 precedence levels. A bootstrap compiler needs just 2-3: multiplicative (*/%/<</>>) and additive (+/-/&/|/^). This means 'a & 0xFF | b' parses left-to-right as '(a & 0xFF) | b' — which happens to work for the most common patterns. For the rare case where C precedence matters, use explicit parentheses. The 2-level approach adds 7 operators to the compiler with ~30 lines of assembly each, vs hundreds of lines for a C-compliant 15-level hierarchy."
+bad_example = "Implementing 15 precedence levels with 15 parse functions for a bootstrap compiler — thousands of lines of assembly for marginal benefit"
+good_example = "Two levels: parse_term handles * / % << >>, parse_expr handles + - & | ^. Use parentheses when needed."
+
+[[performance_notes]]
+title = "Bitwise operators are the cheapest language addition"
+explanation = "Each bitwise operator (AND, OR, XOR, SHL, SHR, NOT) is a single 3-byte x86_64 instruction. The full implementation cost per operator is: one 12-line emit helper (~30 bytes of seed code), plus 5-7 lines of parser dispatch. Adding all 7 operators (including modulo) costs ~320 lines of assembly and ~830 bytes of binary — less than a single if/else control flow implementation."
+evidence = "Stage1e adds % & | ^ ~ << >> (7 operators) plus hex literals, comments, uppercase identifiers, and 16x capacity scaling. Total cost: 322 new lines (3664→3986), 1157 new bytes (11187→12344). The operators themselves account for ~210 lines. Hex parsing adds ~55 lines. Comments add ~15 lines. The rest is capacity scaling (just changing immediate constants)."
+
+[[performance_notes]]
+title = "Capacity scaling is nearly free in binary size"
+explanation = "Scaling a compiler's internal buffers from 4KB to 64KB (16x) only changes the immediate operands in existing instructions — no new code paths, no new logic, just different numbers in 'add rsi, 0xNNNN' instructions. The binary size impact is dominated by new 5-byte hex immediates vs old 2-byte hex immediates (e.g., 0x29000 vs 0x2C00), adding ~3 bytes per offset reference."
+evidence = "Stage1e scales input (4KB→64KB), tokens (128→4096), codebuf (4KB→64KB), output (6KB→128KB), vars (64→256), functions (32→128). The brk allocation grows from 40KB to 448KB. All this changes only immediate values — zero new instructions. The binary grows by ~40 bytes from longer immediates."

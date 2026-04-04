@@ -7,7 +7,7 @@
 - **Type**: Flat library crate + content directory
 - **License**: GPL-3.0
 - **MSRV**: 1.89
-- **Version**: SemVer 1.0.0
+- **Version**: SemVer 1.5.0
 
 ## What This Is
 
