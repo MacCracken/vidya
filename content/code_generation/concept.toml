@@ -92,6 +92,20 @@ explanation = "When allocating a struct on the stack, `sub rsp, N` must use the 
 bad_example = "struct {i64, i32, i8} → sub rsp, 13 — misaligned stack, next call crashes"
 good_example = "struct {i64, i32, i8} → sub rsp, 16 — aligned to 16, safe for calls"
 
+[[best_practices]]
+title = "Pass arguments 7+ on the stack in right-to-left order"
+explanation = "System V AMD64 puts args 1-6 in registers (rdi, rsi, rdx, rcx, r8, r9). Args 7+ go on the stack, pushed right-to-left so arg 7 is at [rsp] when the callee starts. After the callee's prologue (push rbp; mov rbp, rsp), stack args are at [rbp+16] (arg 7), [rbp+24] (arg 8), etc. — past the saved rbp (8 bytes) and return address (8 bytes). The caller must clean up the stack after the call (add rsp, N). In a bootstrap compiler, the simplest approach: if arg count > 6, push extras before pushing the register args, then pop register args into rdi-r9, call, then add rsp to clean stack args."
+
+[[best_practices]]
+title = "Inline assembly as raw byte emission — reuse the existing assembler"
+explanation = "For a bootstrap compiler that already has a self-hosting assembler (asm.cyr), inline assembly doesn't need a separate instruction encoder. The simplest design: `asm { }` blocks contain raw assembly lines that are passed to the assembler's instruction encoder. The compiler emits the bytes directly into the code stream. No register constraint solving needed in V1 — the programmer manages registers explicitly. The compiler just needs to: (1) recognize the `asm` keyword, (2) pass each line to the instruction encoder, (3) resume normal codegen after the closing brace. This gives full x86_64 access with zero new encoding logic."
+
+[[gotchas]]
+title = "Inline assembly clobbers the compiler's register conventions"
+explanation = "A bootstrap compiler uses fixed register assignments: rax for expression results, rcx for temporaries, stack for intermediate values. Inline assembly can use ANY register, potentially destroying the compiler's live values. The simplest safe approach: save all caller-saved registers before an asm block, restore after. Or document that asm blocks clobber everything and the programmer must not use asm in the middle of an expression. The practical rule for V1: asm blocks are statements, never expressions — they execute between assignments, not within them."
+bad_example = "var x = *ptr + asm { mov rax, 42 }; — asm clobbers rax mid-expression, ptr load is lost"
+good_example = "asm { mov rax, 42; mov [rbp-8], rax }; var x = load64(&result); — asm as standalone statement, result read separately"
+
 [[performance_notes]]
 title = "Instruction selection quality matters more than register allocation"
 explanation = "Choosing the right x86 instructions (using LEA for address math, CMOV for branchless conditionals, memory operands to fuse load+op) reduces instruction count. Fewer instructions means less register pressure, which makes register allocation easier. Good instruction selection can eliminate the need for spilling entirely in many functions."
