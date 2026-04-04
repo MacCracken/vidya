@@ -267,6 +267,20 @@ bad_example = "fn try_reg() { ... return 0; } fn handle() { var r = try_reg(); i
 good_example = "fn try_reg() { ... return 0 - 1; } fn handle() { var r = try_reg(); if (r < 0) { /* not a register */ } } — only -1 takes the non-register path"
 
 [[gotchas]]
+title = "Programs are better compiler fuzzers than test cases"
+explanation = "Test cases exercise isolated features: 'var x = 42' tests literals, 'if (x == 1) { }' tests conditionals. Programs exercise feature INTERACTIONS: a sort program combines arrays + load64/store64 + nested while + && conditions + functions. Every major compiler bug in Cyrius (VCNT restore, data section layout, bridge compiler syntax, heap offset collisions) was found by programs, not by test cases. Build real programs early and often — they find the bugs that matter."
+
+[[gotchas]]
+title = "The bridge compiler limits what syntax the source can use"
+explanation = "In a self-hosting compiler chain, cc2.cyr is first compiled by a BRIDGE compiler (build/cc). If the bridge doesn't understand a new syntax (like elif), using that syntax in cc2's source causes silent failure — the bridge can't parse it, produces a broken binary, and the convergence chain produces garbage. Always check: does the bridge support every syntax feature used in the source? If not, either rebuild the bridge first or use only syntax the bridge understands."
+bad_example = "Use elif in parse.cyr source when build/cc is compiled by stage1f (no elif) — silent compilation failure"
+good_example = "Rebuild bridge from cc2 (which has elif), THEN use elif in source. Or use else { if } until bridge is updated."
+
+[[gotchas]]
+title = "Investigate 'return fn()' vs 'var x = fn(); return x;' codegen differences"
+explanation = "In a bootstrap compiler, `return EJCC(S, 0x85)` and `var patch = EJCC(S, 0x85); return patch;` should produce identical results. If they don't, the codegen for local variable capture may be corrupting the return value. This manifests as: modifying a function to capture a return value in a local variable causes ALL programs to output 0, even programs that don't use the modified function. The likely cause: the extra local changes the stack frame size, which shifts the return value or corrupts the caller's saved registers. Debug by checking the generated code for both patterns side by side."
+
+[[best_practices]]
 title = "Keep an authoritative heap offset map — collisions cause silent corruption"
 explanation = "When a bootstrap compiler manages all state via fixed heap offsets (S + 0xNNNNN), every new feature adds offsets. Without a single authoritative map, it's easy to allocate an offset that collides with an existing table. The symptom: ALL programs produce wrong output (not just programs using the new feature), because the collision corrupts a table used by every compilation (like fn_local_names). The fix: maintain a HEAP MAP comment at the top of the main file listing every offset, its size, and purpose. Mark NEXT FREE OFFSET explicitly. Check the map before allocating. This documentation prevented 0 bugs when missing and caught 1 bug instantly when added."
 
