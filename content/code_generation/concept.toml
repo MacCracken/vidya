@@ -18,7 +18,7 @@ explanation = "During code generation, use unlimited virtual registers (v0, v1, 
 
 [[best_practices]]
 title = "Emit a proper stack frame prologue/epilogue"
-explanation = "Every function needs: push rbp; mov rbp, rsp; sub rsp, N (prologue) and mov rsp, rbp; pop rbp; ret (epilogue). N is the stack frame size — space for locals, spilled registers, and callee arguments. RSP must be 16-byte aligned before any CALL instruction (System V AMD64 ABI). Forgetting alignment causes segfaults in called functions that use SSE."
+explanation = "Every function needs: push rbp; mov rbp, rsp; sub rsp, N (prologue) and leave; ret (epilogue). N is the stack frame size — space for locals, spilled registers, and callee arguments. RSP must be 16-byte aligned before any CALL instruction (System V AMD64 ABI). In a single-pass compiler, N isn't known when the prologue is emitted (locals are discovered during body parsing), so emit 'sub rsp, 0' as a placeholder, record its offset, and patch the imm32 after the body is complete. Round N up to a multiple of 16 for alignment. The 'leave' instruction (1 byte) replaces 'mov rsp, rbp; pop rbp' (4 bytes) — always use it."
 
 [[best_practices]]
 title = "Handle calling conventions explicitly"
@@ -29,8 +29,8 @@ title = "Use a fixup table for forward references"
 explanation = "When emitting code linearly, forward jumps (if/else, loops) reference addresses not yet known. Emit a placeholder (zero), record it in a fixup table (patch_offset, target_label), and resolve all fixups after the function is complete. This is the same technique linkers use for relocations, applied within a single compilation unit. If/else requires two patches: one for the condition-false jump (to else-start) and one for the skip-else jump (to end). While loops need one forward patch (condition-false to exit) plus a backward jump (which doesn't need patching since the target is already known)."
 
 [[best_practices]]
-title = "Emit syscall arguments via push/pop for clean register mapping"
-explanation = "When generating code for syscall(nr, a1, a2, ...), evaluate each argument left-to-right and push onto the stack. Then pop into the correct registers in reverse order: the last argument pops first into its register, working back to rax (syscall number). This avoids register conflicts during argument evaluation — each parse_expr can freely use rax without clobbering previous arguments. The pop sequence is fixed per argument count (1-7), so the compiler dispatches on count and emits a known byte sequence. This is simpler and more correct than trying to evaluate directly into target registers."
+title = "Emit call arguments via push/pop for clean register mapping"
+explanation = "When generating code for function calls or syscalls with multiple arguments, evaluate each argument left-to-right and push onto the stack. Then pop into the correct registers in reverse order. This avoids register conflicts — each parse_expr freely uses rax without clobbering previous arguments. The same pattern works for both syscalls (rax, rdi, rsi, rdx, r10, r8, r9) and function calls (rdi, rsi, rdx, rcx, r8, r9). The pop sequence is fixed per argument count, so the compiler dispatches on count and emits a known byte sequence. This pattern was validated across two calling conventions in the same compiler (syscall vs System V function call) — identical structure, just different register mappings."
 
 [[gotchas]]
 title = "Forgetting caller-saved register preservation across calls"

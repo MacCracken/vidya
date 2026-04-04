@@ -86,8 +86,8 @@ good_example = "Store read() return value in r12, check cursor against r12 in th
 
 [[performance_notes]]
 title = "A compiler in assembly can be tiny"
-explanation = "A complete compiler with syscalls, string literals, arrays, byte-level I/O, and full control flow fits in ~2500 lines of assembly and assembles to ~7.5KB. Generated programs can read stdin, write stdout, and manipulate byte buffers — enough to build the next compiler stage. No language runtime, no standard library, no linker — pure syscalls."
-evidence = "Cyrius stage1c: 2469 lines .cyr assembly, 7581-byte binary, 21/21 tests (syscall, strings, arrays, load8/store8, &var, if/else/while). Stage1b (control flow only): 1700 lines, 5235 bytes, 39/39 tests. Stage1a (compile-time eval): 872 lines, 2641 bytes, 16/16 tests. Each stage roughly doubles in capability and size."
+explanation = "A complete compiler with functions, syscalls, string literals, arrays, byte-level I/O, and full control flow fits in ~3700 lines of assembly and assembles to ~11KB. Generated programs support user-defined functions with up to 6 parameters, local variables, forward calls, and full System V AMD64 calling convention — enough to write a compiler in itself. No language runtime, no standard library, no linker — pure syscalls."
+evidence = "Cyrius bootstrap chain: stage1a (872 lines, 2641B, compile-time eval) -> stage1b (1725 lines, 5235B, if/else/while) -> stage1c (2470 lines, 7581B, syscalls + I/O) -> stage1d (3664 lines, 11187B, functions + stack frames). Each stage adds ~50% lines and ~50% binary size for a major capability tier. The full 4-stage chain totals 148 tests."
 
 [[performance_notes]]
 title = "brk is fast for single-allocation patterns"
@@ -148,10 +148,22 @@ explanation = "If your language exits with the last assigned variable's value, c
 bad_example = "while loop body assigns to counter variable; program exits with counter instead of result"
 good_example = "Save last_var_idx before while body, restore after — exit value reflects outer scope"
 
+[[gotchas]]
+title = "Functions need dual-mode variable access: globals via fixup, locals via rbp"
+explanation = "When adding functions to a bootstrap compiler that uses data-section variables (absolute addresses patched by fixup), function-local variables can't use the same mechanism — they must be stack-allocated at [rbp - offset] for correct scoping. This means the codegen needs an 'in_function' flag that switches emit_var_load/store between two modes: absolute-address fixup for globals, and rbp-relative addressing for locals. The compiler must save and restore the global variable table state (var_count, last_var_idx) around each function definition parse. Forgetting to switch modes means function locals alias global addresses — subtly wrong for any program with both functions and top-level code."
+bad_example = "Function locals use data-section addresses — two calls to the same function corrupt each other's variables"
+good_example = "in_function flag: 0 = emit fixup-based mov rcx,<addr>; mov rax,[rcx]. 1 = emit mov rax,[rbp-offset]"
+
+[[gotchas]]
+title = "Store complex parse state in heap scratch, not on the stack"
+explanation = "When parsing a function definition, the compiler must track many values across nested parse calls: frame size patch offset, parameter count, saved variable state. Storing these on the x86 stack with push/pop is fragile because nested parse_expr and parse_statement calls have their own push/pop sequences. Any imbalance corrupts the saved values. Using dedicated heap scratch locations (fixed offsets from the heap base register) is more reliable — the values persist regardless of call depth and can be read/written at any point without worrying about stack balance."
+bad_example = "push frame_size_patch; ... parse body with its own push/pop ...; pop frame_size_patch — stack corrupted"
+good_example = "mov [r15 + SCRATCH_OFFSET], frame_size_patch; ... parse body ...; mov rax, [r15 + SCRATCH_OFFSET]"
+
 [[performance_notes]]
-title = "Runtime codegen doubles compiler size but enables real programs"
-explanation = "Adding runtime codegen (if/else/while/variables) roughly doubles the compiler binary size compared to compile-time evaluation, but enables programs that actually compute at runtime. The tradeoff is worth it — a 5KB compiler that generates real programs vs a 2.6KB compiler that can only evaluate constants."
-evidence = "Cyrius stage1a (compile-time eval): 2641 bytes, 872 lines. Stage1b (control flow): 5235 bytes, 1700 lines. Stage1c (syscalls + I/O): 7581 bytes, 2469 lines. Each stage adds ~50% binary size for a major capability tier."
+title = "Each compiler stage adds ~50% size for a major capability tier"
+explanation = "A bootstrap compiler grows predictably: each stage adds one capability tier (control flow, I/O, functions) and increases binary size by roughly 50%. The growth is sublinear because infrastructure code (lexer, parser framework, ELF emitter) is shared across stages. Functions are the most expensive addition (~50% more code than I/O) because they require stack frame management, calling convention compliance, and a separate variable scoping mechanism."
+evidence = "Cyrius stage1a: 2641B (eval). Stage1b: 5235B (+98%, control flow). Stage1c: 7581B (+45%, syscalls/I/O). Stage1d: 11187B (+48%, functions). The function stage is proportionally larger because it adds stack frames, parameter passing (6 System V registers), forward call fixups, and local variable scoping — all new infrastructure."
 
 [[performance_notes]]
 title = "Sub-millisecond compilation for bootstrap compilers"
