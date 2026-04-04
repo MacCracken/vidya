@@ -79,6 +79,16 @@ title = "Import resolution dominates compilation of small modules"
 explanation = "For modules with minimal code, the time spent resolving imports (reading interface files, deserializing type information, checking version compatibility) can exceed actual code generation time. Languages with heavy import machinery (Python's finder/loader chain, Java's classpath scanning) are especially vulnerable."
 evidence = "Python import of an empty module: ~1-5ms (finder chain + bytecode check + loader). Rust use of a small crate: ~10-50ms (deserialize .rmeta, resolve names). For a 10-line module generating <1ms of code, import overhead dominates."
 
+[[best_practices]]
+title = "Textual include is the simplest module system — and sufficient for bootstrapping"
+explanation = "For a bootstrap compiler that reads from stdin, the simplest module system is C-style textual inclusion: `include \"file.cyr\"` reads the file contents and inserts them at the include point before lexing. Implementation: (1) preprocess pass scans for include directives, (2) open file via sys_open syscall (#2), (3) read contents into input buffer, (4) concatenate and lex as one stream. No separate compilation, no interfaces, no linking. This is enough to split a 1500-line compiler into manageable files. Add include guards (track which files were already included) to prevent double-inclusion. Graduate to separate compilation later."
+
+[[gotchas]]
+title = "Switching from stdin to file I/O requires sys_open — not just sys_read"
+explanation = "A bootstrap compiler that reads stdin (fd=0) can't just 'read a file' without the open syscall. sys_open (syscall #2 on x86_64 Linux) takes: rdi=pathname (pointer to null-terminated string), rsi=flags (O_RDONLY=0), rdx=mode (ignored for reads). Returns a file descriptor in rax. Then sys_read with that fd. Then sys_close (syscall #3) to free the fd. The pathname must be a null-terminated C string in memory — if your compiler stores filenames in a string table, ensure null termination."
+bad_example = "syscall(0, filename, buf, count) — fd 0 is stdin, not the file you want"
+good_example = "var fd = syscall(2, filename, 0, 0); syscall(0, fd, buf, count); syscall(3, fd);"
+
 [[performance_notes]]
 title = "Module-level caching requires deterministic compilation"
 explanation = "To cache a module's output, the compiler must produce identical results for identical inputs. Non-determinism (timestamps in output, pointer-address-dependent hashing, random iteration order) breaks caching. If a module's output differs between runs despite no source changes, every downstream module rebuilds unnecessarily."

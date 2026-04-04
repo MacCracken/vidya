@@ -78,6 +78,20 @@ title = "Linear scan register allocation is O(n) and good enough"
 explanation = "Linear scan sorts live intervals by start point and greedily assigns registers. It's one pass over the intervals, O(n log n) with sorting. Graph coloring is O(n²) or worse. For JIT compilers where compilation time matters, linear scan is the standard choice. Code quality is within 5-10% of graph coloring for most programs."
 evidence = "V8 TurboFan uses linear scan. HotSpot C1 uses linear scan. LLVM uses a variant of linear scan for -O1. Graph coloring (LLVM -O2) improves runtime by ~5% but takes 2-3x longer to compile."
 
+[[best_practices]]
+title = "Compile struct field access as base+constant offset — zero runtime lookup"
+explanation = "Struct field access should compile to a single memory operation with a constant displacement: `mov rax, [rbp - 16 + 8]` for a local struct's second field. The compiler resolves field names to byte offsets at compile time from the struct definition table. No hash table, no string comparison, no indirection at runtime. For stack-allocated structs, the total offset is (stack_slot + field_offset). For heap-allocated structs accessed through a pointer, it's two operations: load pointer then access field (`mov rax, [rbp-8]; mov rbx, [rax+8]`). The struct definition table in the compiler stores: (struct_name, [(field_name, field_offset, field_size), ...], total_size)."
+
+[[best_practices]]
+title = "Pass structs by pointer when they exceed 16 bytes"
+explanation = "The System V x86_64 ABI splits struct arguments: structs up to 8 bytes pass in one register (RDI/RSI/etc), 9-16 bytes split across two registers, and anything larger passes by hidden pointer. For a bootstrap compiler, the simplest correct approach is: ALWAYS pass structs by pointer. The caller allocates stack space, the callee receives a pointer in a register. This avoids the complexity of splitting structs across registers and works for all sizes. The cost is one extra indirection per access — negligible compared to the implementation complexity of register splitting."
+
+[[gotchas]]
+title = "Struct stack allocation must account for alignment and total size"
+explanation = "When allocating a struct on the stack, `sub rsp, N` must use the struct's TOTAL size (sum of all field sizes, aligned). If a struct has fields {i64, i32, i8}, the total is 8+4+1=13, aligned to 16 = 16 bytes. Forgetting alignment corrupts the stack for subsequent calls. Forgetting to account for total size (using field count * 8 instead of actual layout) overlaps adjacent variables. The struct definition must store both individual field sizes AND the aligned total."
+bad_example = "struct {i64, i32, i8} → sub rsp, 13 — misaligned stack, next call crashes"
+good_example = "struct {i64, i32, i8} → sub rsp, 16 — aligned to 16, safe for calls"
+
 [[performance_notes]]
 title = "Instruction selection quality matters more than register allocation"
 explanation = "Choosing the right x86 instructions (using LEA for address math, CMOV for branchless conditionals, memory operands to fuse load+op) reduces instruction count. Fewer instructions means less register pressure, which makes register allocation easier. Good instruction selection can eliminate the need for spilling entirely in many functions."

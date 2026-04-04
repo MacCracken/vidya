@@ -103,6 +103,10 @@ title = "Transition from interpreter to compiler incrementally"
 explanation = "Build the lexer and parser as a compile-time interpreter first (stage 1a), then convert it to a code emitter (stage 1b). The parser structure stays identical — recursive descent with the same grammar. Only the leaf actions change: instead of computing values, they emit instruction bytes. This lets you test the parsing infrastructure independently before tackling codegen."
 
 [[best_practices]]
+title = "Test codegen independently from the parser by hardcoding emit calls"
+explanation = "When writing a new compiler (like a self-hosting rewrite), validate the codegen infrastructure FIRST by bypassing the parser and directly calling emit functions from main. For 'var x = 42;', hardcode: EMOVI(S, 42); EVSTORE(S, 0); EVLOAD(S, 0); EEXIT(S); and compare output byte-for-byte with the reference compiler. This isolates codegen bugs from parser bugs. Once codegen is byte-exact, you know any remaining issues are in lexing or parsing. This technique caught the duplicate-var lexer bug in cc.cyr — the hardcoded bypass produced byte-exact output while the parser path failed, proving the codegen was correct and narrowing the bug to the lexer."
+
+[[best_practices]]
 title = "Use the stack for expression temporaries in generated code"
 explanation = "When generating code for nested expressions like (a + b) * (c - d), use push/pop to save intermediate results. The left operand is evaluated into rax and pushed. The right operand is evaluated into rax. Then pop the left into rcx and apply the operator. This naturally handles arbitrary nesting without register allocation."
 
@@ -227,10 +231,10 @@ bad_example = "Implementing 15 precedence levels with 15 parse functions for a b
 good_example = "Two levels: parse_term handles * / % << >>, parse_expr handles + - & | ^. Use parentheses when needed."
 
 [[gotchas]]
-title = "Duplicate var names in a function silently create separate stack slots"
-explanation = "In a bootstrap compiler with flat function scoping, declaring `var val = 0` inside an if block and then `var val = 0` again later in the same function creates TWO separate stack slots both named `val`. The compiler allocates slots for all `var` declarations encountered during parsing, regardless of whether the runtime path reaches them. References to `val` after the second declaration use the second slot — but the first slot still occupies stack space and may hold stale data from previous iterations. This causes subtle corruption when the compiler's local variable lookup returns the wrong slot for nested scopes."
-bad_example = "fn parse(S) { if (is_hex) { var val = hex_parse(); return val; } var val = dec_parse(); return val; } — two 'val' slots, second may see garbage"
-good_example = "fn parse_hex(S) { var val = ...; return val; } fn parse_dec(S) { var val = ...; return val; } fn parse(S) { if (is_hex) { return parse_hex(S); } return parse_dec(S); } — separate functions, no name collision"
+title = "Duplicate var names in a function are the #1 bootstrap compiler bug"
+explanation = "In a bootstrap compiler with flat function scoping, declaring `var val = 0` inside an if block and then `var val = 0` again later in the same function creates TWO separate stack slots both named `val`. The compiler allocates slots for all `var` declarations during parsing, regardless of runtime control flow. The second `val` gets a different stack slot than the first. This causes silent data corruption: the value stored in one slot is read from a different slot. This bug hit three times during Cyrius development — in SNUM (hex/decimal parsing), LEXNUM (same pattern), and DO_MOV (memory/register/immediate branches). Each time it produced values corrupted by heap addresses, different on every run, extremely hard to diagnose. The fix is always the same: split the function into separate functions, one per branch, so each has its own clean var namespace. Scan every function for duplicate var names before debugging anything else."
+bad_example = "fn parse(S) { if (is_hex) { var val = hex_parse(); return val; } var val = dec_parse(); return val; } — two 'val' slots, second may read from first's slot or vice versa"
+good_example = "fn parse_hex(S) { var val = ...; return val; } fn parse_dec(S) { var val = ...; return val; } fn parse(S) { if (is_hex) { return parse_hex(S); } return parse_dec(S); } — one var per function, no collision possible"
 
 [[gotchas]]
 title = "Functions cannot reference globals declared after them in a bootstrap compiler"
@@ -262,6 +266,18 @@ explanation = "In a language without exceptions or option types, a 'try' functio
 bad_example = "fn try_reg() { ... return 0; } fn handle() { var r = try_reg(); if (r == 0) { /* immediate path */ } } — rax (code 0) takes the immediate path"
 good_example = "fn try_reg() { ... return 0 - 1; } fn handle() { var r = try_reg(); if (r < 0) { /* not a register */ } } — only -1 takes the non-register path"
 
+[[gotchas]]
+title = "Deeply nested else-if chains need brace counting — off-by-one breaks everything"
+explanation = "In a language without else-if as a construct (only if/else with braces), a multi-way dispatch like a lexer token switch becomes: `if (c==59) { ... } else { if (c==43) { ... } else { if (c==45) { ... } else { ... } } }`. Each `else { if` opens a new brace pair. For N cases, you need N closing `}` at the bottom. Adding a new case (e.g., adding `{` and `}` token handling) means adding exactly one more `}` to each closing line. Miss one and the function body is unclosed — the compiler sees the next `fn` keyword inside the current function body and fails with a syntax error that gives no location information. Count braces programmatically: `tr -cd '{}' | fold -w1 | awk` should show final depth 0."
+bad_example = "16 else-if branches but only 14 closing braces — compiler error with no useful diagnostic"
+good_example = "After every edit to an if-else chain, verify: sed -n 'START,ENDp' file | tr -cd '{}' | awk ... shows depth 0"
+
+[[gotchas]]
+title = "Byte-exact testing catches alignment and padding differences"
+explanation = "A compiler can produce functionally correct output that differs from the reference in padding bytes. For example, aligning code to 8 bytes by emitting 0x90 (nop) vs leaving brk-zeroed memory (0x00) produces different bytes at the same offsets. The program runs correctly either way, but byte-exact comparison fails. Match the reference compiler's EXACT alignment behavior: if stage1f advances the code position counter without writing, the padding bytes are whatever brk returned (zeros). Don't emit explicit nops — just advance the counter."
+bad_example = "while (cp % 8 != 0) { emit(0x90); cp++; } — pads with nop (0x90), reference leaves zeros"
+good_example = "cp = (cp + 7) & ~7; — advances counter without writing, padding stays zeroed from brk"
+
 [[performance_notes]]
 title = "A self-hosting assembler fits in 1128 lines of bootstrap language"
 explanation = "A complete two-pass x86_64 assembler supporting 43 mnemonics (enough to assemble a 4000-line compiler) fits in ~1100 lines of a minimal language with only variables, functions, if/else, while, and byte-level memory access. The assembler uses packed 64-bit word comparison for mnemonic dispatch (same pattern as the bootstrap compiler's keyword matching), heap-based state passed to every function, and a single reusable memory operand encoder for all memory-accessing instructions. It produces byte-identical output to the Rust reference implementation for all test cases."
@@ -270,4 +286,63 @@ evidence = "Cyrius asm.cyr: 1128 lines, 43 mnemonics, compiled by stage1f (12344
 [[performance_notes]]
 title = "The bootstrap loop closes at ~12KB"
 explanation = "The minimum viable self-hosting bootstrap requires a compiler that can compile the assembler that can assemble the compiler. In Cyrius, this loop closes at 12,344 bytes: the stage1f compiler (12344B) compiles asm.cyr (1128 lines) into an assembler binary, and that assembler produces a byte-identical copy of stage1f when given stage1f.cyr as input. The entire bootstrap chain from bare assembly to self-hosting closure spans 7 stages (seed + 1a through 1f) totaling ~20,000 lines of source code."
-evidence = "Cyrius bootstrap closure: seed (Rust, 2076 lines) → stage1f.cyr (3986 lines assembly) → stage1f (12344B binary) → asm.cyr (1128 lines high-level) → asm (19688B binary) → stage1f_v2 (12344B, byte-identical to seed output). Total source: seed(2076) + stages(3986*6≈24000) + asm(1128) ≈ 27,000 lines."
+evidence = "Cyrius bootstrap closure: seed (Rust, 2076 lines) → stage1f.cyr (3986 lines assembly) → stage1f (12344B binary) → asm.cyr (1128 lines high-level) → asm (29016B binary) → stage1f_v2 (12344B, byte-identical to seed output). Total source: seed(2076) + stages(3986*6≈24000) + asm(1128) ≈ 27,000 lines."
+
+[[best_practices]]
+title = "Commit the bootstrap binary, not the bootstrap compiler's source language"
+explanation = "Once a self-hosting bootstrap loop is verified (assembler assembles the compiler that compiles the assembler, byte-identical), commit the assembler BINARY as the root of trust. The binary is small (29KB), reproducible (SHA256 manifest + verification script), and eliminates the dependency on whatever language the original seed was written in. The original seed (e.g., Rust) becomes an archived verification artifact, not a build dependency. This is how you achieve true language independence: the committed binary bootstraps everything from source, and the source is in YOUR language."
+
+[[best_practices]]
+title = "Separate the bootstrap binary from build artifacts"
+explanation = "Put the committed bootstrap binary in its own directory (e.g., bootstrap/) separate from source (stage1/) and build output (build/). The bootstrap directory contains exactly three things: the binary, a SHA256 manifest, and a bootstrap script. This makes the trust boundary visible — reviewers know exactly what they're trusting (one binary) and how to verify it (one script). Build artifacts are gitignored and regenerated; the bootstrap binary is committed and immutable."
+
+[[gotchas]]
+title = "Archive the original seed — don't delete it"
+explanation = "When replacing a Rust/C seed with a self-hosted binary, archive the original seed source rather than deleting it. The original seed is the independent implementation that PROVES the committed binary is correct — without it, there's no way to verify the binary from scratch. A third party needs: (1) the original seed source, (2) its compiler (e.g., rustc), (3) the bootstrap source files, to reproduce the committed binary and verify the SHA256 hash. Deleting the seed destroys this verification path. The archived seed is small (240KB of Rust source) and costs nothing to keep."
+bad_example = "rm -rf seed/ — the only independent verifier is gone, the committed binary becomes trust-me-bro"
+good_example = "mv seed/ archive/seed/ — kept for verification, not in any build path, clearly labeled as historical"
+
+[[gotchas]]
+title = "Language extensions go INTO the bootstrap compiler, not into the host language"
+explanation = "When adding features like structs, type checking, or domain-specific attributes to a self-hosted language, add them to the bootstrap compiler itself — don't modify the host language (Rust, C) that was used for the original seed. If you add structs by modifying rustc, you're back to depending on Rust. Instead, write a new compiler (cc.cyr) in your bootstrap language that compiles a richer subset. Each feature is a compiler extension, not a fork of someone else's compiler. This is how you achieve true sovereignty: the entire toolchain, from binary seed to language features, is yours."
+bad_example = "Add struct support by modifying upstream rustc — now you maintain a 13GB fork of rust-lang/rust forever"
+good_example = "Write cc.cyr in stage1f's language that compiles structs → x86_64. The compiler IS the language definition. No external dependency."
+
+[[performance_notes]]
+title = "A self-hosting compiler with structs and multi-width access fits in 1759 lines"
+explanation = "A self-hosting compiler that extends beyond its bootstrap compiler — adding structs, field access, and multi-width memory intrinsics (load16/32/64, store16/32/64) — fits in 1759 lines with 142 functions. It compiles its own 1759-line source into a 53912-byte binary, and the self-compiled version produces a byte-identical copy (cc2==cc3 verified). The compiler is the first tool in the chain that understands features the bootstrap compiler (stage1f) doesn't — structs only work in cc, not stage1f. This is the beginning of language evolution from within."
+evidence = "Cyrius cc.cyr: 1759 lines, 142 functions, 53912-byte binary. Features beyond stage1f: struct definition/init/field access/field assignment, load16/32/64, store16/32/64. Self-hosting: cc2==cc3 byte-identical. 36/36 backward compat tests + 6 new feature tests."
+
+[[gotchas]]
+title = "Function table overflow silently corrupts the compiled binary"
+explanation = "When a bootstrap compiler has a fixed-size function table (e.g., 128 slots) and the source program declares more functions than the table holds, the compiler silently overflows into adjacent heap memory. The resulting binary contains corrupted function call offsets and segfaults on execution. The symptoms — segfault with no error message, even on trivial inputs like 'var x = 42;' — give no clue that the root cause is a table overflow in the COMPILER, not in the compiled program. Always check function count against the compiler's limit before debugging the generated binary."
+bad_example = "136 functions in source, 128-slot compiler → compiled binary segfaults, no error message"
+good_example = "Count functions (grep -c '^fn ' source.cyr), compare to compiler limit. If over: bump limit in BOTH the bootstrap compiler AND the self-hosting compiler, rebuild both."
+
+[[gotchas]]
+title = "Extending a self-hosting compiler breaks byte-identity with the bootstrap compiler"
+explanation = "When you add features to cc.cyr that stage1f doesn't have (like structs), cc.cyr compiled by stage1f and cc.cyr compiled by itself produce different binaries. This is expected: the two compilers have different internal function counts and table layouts, producing different code offsets for function calls. The fix is NOT to make stage1f and cc agree — it's to verify the cc→cc2→cc3 chain instead: cc compiles itself into cc2, cc2 compiles itself into cc3, cc2 must equal cc3. The stage1f→cc binary is the bootstrap bridge, not the self-hosting proof."
+bad_example = "Debugging why stage1f→cc differs from cc→cc2 — wrong question, they're different compilers"
+good_example = "Verify cc2==cc3 (second-generation self-hosting). Once cc2 and cc3 are byte-identical, cc is self-hosting. Also: when the self-compiled binary crashes, check that BOTH the bootstrap compiler AND the self-hosting compiler have adequate table sizes — bumping only the bootstrap compiler is not enough."
+
+[[gotchas]]
+title = "Underscore separators in hex literals are not universal — bootstrap compilers may reject them"
+explanation = "Languages like Rust and Python allow underscores in numeric literals for readability (0x0036_3164). But a bootstrap compiler's lexer typically only handles digits and a-f/A-F after 0x. Writing 0x0036316461_6F6C in source compiled by a bootstrap compiler causes a silent parse failure — the lexer stops at the underscore and produces a truncated value, or the parser sees an unexpected IDENT token after the number. This is particularly insidious because the hex literal looks correct to a human reader but the compiler treats _6F6C as a separate identifier."
+bad_example = "0x0036316461_6F6C in source compiled by stage1f — underscore stops hex parsing, produces wrong value"
+good_example = "0x003631646F6C — no separators, works in every lexer"
+
+[[gotchas]]
+title = "Capacity limits must be bumped in BOTH the bootstrap and self-hosting compiler"
+explanation = "When a self-hosting compiler outgrows a limit (function table, token slots), you must bump the limit in TWO places: the bootstrap compiler (stage1f) that first compiles it, AND the self-hosting compiler's own internal tables (cc.cyr). Bumping only stage1f produces a working cc binary (compiled with larger tables), but cc then tries to compile itself with its own smaller tables and overflows. The symptom is: cc works fine for small programs but crashes when self-compiling. The cc→cc2 binary has corrupted call targets because cc's own function table overflowed during self-compilation."
+bad_example = "Bump stage1f from 128→256 fn slots, forget to bump cc.cyr → cc works, cc2 crashes"
+good_example = "Bump BOTH stage1f.cyr AND cc.cyr fn tables to 256, rebuild chain: stage1f→cc→cc2→cc3, verify cc2==cc3"
+
+[[performance_notes]]
+title = "Full bootstrap in 41ms, self-compile in 9ms"
+explanation = "The complete Cyrius bootstrap — from committed 29KB binary to working compiler + assembler with verification — runs in 41ms. The self-hosting compiler compiles its own 1467-line source in 9ms. The assembler processes 3983 lines of assembly in 3ms (1.3 million lines/sec). These speeds are dominated by process startup (fork+exec), not compilation itself. At these sizes, the compiler is faster than the OS can spawn it."
+evidence = "Benchmarks on Linux x86_64: stage1f compiles cc.cyr (1467 lines → 43504B): 5ms. cc self-compiles cc.cyr: 9ms. asm assembles stage1f.cyr (3983 lines → 12344B): 3ms (19ms with pipe overhead). Full bootstrap (asm→stage1f + stage1f→asm + verify): 41ms. Throughput: stage1f ~367K lines/sec, cc ~163K lines/sec, asm ~1.3M lines/sec."
+
+[[performance_notes]]
+title = "Full language independence requires only a 29KB binary + shell"
+explanation = "A complete self-hosting toolchain — from committed binary to working compiler and assembler — requires only a 29KB ELF binary and a shell script. No Rust, no LLVM, no Python, no cmake, no package manager. The bootstrap produces a compiler that compiles programs with functions, control flow, bitwise operations, syscalls, strings, arrays, and byte-level memory access — and that compiler compiles itself. The entire toolchain fits on a floppy disk."
+evidence = "Cyrius bootstrap: bootstrap/asm (29016 bytes) + bootstrap.sh. Produces build/stage1f (12344 bytes, compiler) and build/asm (29016 bytes, assembler). Then cc.cyr (1467 lines) compiles to cc (43504 bytes) which compiles itself byte-identically. Total bootstrap + self-hosting verification: under 50ms. Dependencies: Linux x86_64 + /bin/sh."

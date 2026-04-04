@@ -65,3 +65,23 @@ title = "Trait object call overhead"
 explanation = "Each method call on dyn Trait requires a vtable lookup (pointer indirection). This prevents inlining and adds ~2-5ns per call."
 evidence = "dyn Trait method call: ~2-5ns overhead vs direct/inlined call"
 language = "Rust"
+
+[[best_practices]]
+title = "Implement structs as compiler-computed fixed offsets, not runtime lookups"
+explanation = "In a minimal compiler, struct field access should compile to a constant offset from a base pointer — no hash table lookups, no field name resolution at runtime. The compiler stores struct definitions as (field_name, field_offset, field_size) tuples. When it sees `point.x`, it resolves `x` to offset 0 at compile time and emits `mov rax, [base + 0]`. This is how C compilers work and why struct access is zero-cost. The struct definition table lives in the compiler's metadata alongside the variable and function tables — it generates no runtime code."
+
+[[best_practices]]
+title = "Progressive typing: annotations inform, never block"
+explanation = "For a bootstrap compiler adding types incrementally, the type checker must accept untyped code unchanged. Type annotations are opt-in metadata: `var x: i64 = 42` means the compiler KNOWS x is i64, but `var x = 42` still works (inferred or untyped). Type mismatches produce warnings, not errors. This lets the compiler self-host with its existing untyped codebase while new code opts into safety. The key rule: removing all type annotations from a program must not change its compiled output. Types are assertions for the programmer, not requirements for the compiler."
+
+[[gotchas]]
+title = "Pointer arithmetic must scale by element size — not by 1"
+explanation = "When a language has typed pointers, `ptr + 1` must add sizeof(element), not 1. For `i64*`, ptr+1 adds 8 bytes. For `i32*`, ptr+1 adds 4. For `i8*` (byte pointer), ptr+1 adds 1. The compiler must track the pointed-to type and emit a multiply (or shift) before the addition. Getting this wrong is the classic C bug: `int* p = arr; p += 1;` advances by 4 bytes, not 1. In x86_64 codegen, use `lea rax, [rax + rcx*8]` (scale factor in SIB byte) for efficient scaling, or `shl rcx, 3; add rax, rcx` when the scale isn't a power of 2."
+bad_example = "ptr + 1 emits 'add rax, 1' — advances by 1 byte regardless of type, corrupts data alignment"
+good_example = "ptr + 1 emits 'add rax, 8' for i64*, 'add rax, 4' for i32* — correct element stride"
+
+[[gotchas]]
+title = "Struct field access through pointers requires two steps: load pointer, then offset"
+explanation = "For `ptr->field`, the compiler must: (1) load the pointer value into a register, (2) add the field offset, (3) load/store through the resulting address. This is two memory accesses for a read (load ptr, load field) or one load + one store for a write. Getting the order wrong — computing the offset before loading the pointer — produces garbage. In x86_64: `mov rax, [rbp-8]` (load ptr), then `mov rbx, [rax+16]` (load field at offset 16). The field offset is a compile-time constant from the struct definition."
+bad_example = "mov rax, [rbp-8 + 16] — adds field offset to stack offset, reads wrong memory entirely"
+good_example = "mov rax, [rbp-8]; mov rbx, [rax+16] — load pointer first, then dereference with field offset"
