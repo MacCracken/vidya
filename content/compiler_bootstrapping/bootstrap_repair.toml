@@ -1,0 +1,391 @@
+# Bootstrap Repair Techniques — Vidya Research
+# Sourced from GCC, Go, Chez Scheme, Onramp, shecc, and hard-won Cyrius experience.
+# 2026-04-04
+
+[[entries]]
+name = "three_stage_comparison"
+description = "GCC's stage2==stage3 identity check is the gold standard for detecting codegen bugs"
+category = "compiler_bootstrapping"
+content = '''
+GCC builds itself three times: stage1 (host compiler builds GCC), stage2 (stage1 GCC
+builds GCC), stage3 (stage2 GCC builds GCC). Then it compares stage2 and stage3 object
+files. If they differ, stage2 has a codegen bug — it compiled itself wrong.
+
+This is the ONLY reliable automated test for self-hosting correctness. Unit tests catch
+known bugs. Stage comparison catches unknown ones — including offset miscalculations,
+register clobbers, and buffer sizing errors that only manifest when the compiler processes
+its own complexity.
+
+Practical application: After any codegen change, compile the compiler twice with itself.
+If binary2 != binary3, the change introduced a bug. In Cyrius terms: cc.cyr compiled by
+stage1f produces cc2. cc2 compiles cc.cyr to produce cc3. cc2 must equal cc3 byte-exact.
+If not, cc2 has a codegen defect — bisect the change.
+
+GCC also supports --enable-stage1-checking and bootstrap-debug which saves internal
+compiler dumps at stage2 and stage3 for comparison, catching semantic differences even
+when object files happen to match.
+
+Source: https://gcc.gnu.org/install/build.html
+'''
+
+[[entries]]
+name = "go_reproducible_bootstrap"
+description = "Go 1.21 achieved perfect reproducibility — same source always produces same binary regardless of host"
+category = "compiler_bootstrapping"
+content = '''
+Go solved eight distinct reproducibility problems to reach bit-for-bit identical builds:
+
+1. Map iteration order — sort all lists before codegen output
+2. Bootstrap library drift — copy critical stdlib packages into source tree so bootstrap
+   compiler uses identical algorithms (sort, compress/zlib)
+3. Host C toolchain — rewrote cgo-dependent packages in pure Go
+4. Dynamic linker path — runtime detection instead of build-time embedding
+5. Source directory in debug info — trimpath replaces absolute paths with module paths
+6. File timestamps — canonical timestamp in VERSION file
+7. Packaging tools — moved into main tree as cmd/distpack
+8. User/group IDs in archives — clear metadata fields
+
+Key insight for Cyrius: Go builds every release on two different systems (Linux/x86-64
+and Windows/x86-64) and requires bit-for-bit identical archives. If they differ, the
+release fails. They also publish a gorebuild tool anyone can run to verify.
+
+The bootstrap chain: Go 1.17 (bootstrap) -> Toolchain1 -> Toolchain2 -> Toolchain3.
+Toolchain2 and Toolchain3 must be identical. Any divergence = reproducibility bug.
+
+The deeper lesson: timestamps, absolute paths, and host-dependent decisions are the most
+common sources of non-reproducibility. A compiler that embeds NOTHING from the host
+environment into its output is reproducible by construction.
+
+Source: https://go.dev/blog/rebuild
+'''
+
+[[entries]]
+name = "chez_boot_file_repair"
+description = "Chez Scheme's make re.boot repairs bootstrap when committed boot files diverge from source"
+category = "compiler_bootstrapping"
+content = '''
+Chez Scheme is self-hosting: you need Chez to build Chez. Boot files (petite.boot,
+scheme.boot) are committed binary artifacts that bootstrap the build. When source changes
+make the C side and Scheme side incompatible, the build fails.
+
+Repair process:
+  ./configure --force
+  make re.boot
+
+The --force flag disables the requirement to have existing boot files for the target.
+re.boot uses ANY installed version of Chez Scheme (even very old ones) to regenerate
+boot files from current source. This is the escape hatch.
+
+The key architectural decision: boot files are committed to the repo. This means every
+clone can build without external dependencies. But it also means boot files can drift
+from source — any change to the compiler's IR, calling convention, or data layout breaks
+the committed boot files.
+
+Chez also supports cross.boot for faster rebuilds when you have a compatible version,
+and re.boot for when compatibility is broken and you need maximum tolerance.
+
+Lesson for Cyrius: The committed binary (bootstrap/asm) IS the boot file. When stage1f
+source changes make it incompatible with the committed asm binary, you need either:
+(a) A known-good older binary that can still compile the new source (re.boot approach)
+(b) An incremental repair path that modifies source to match what the binary can compile
+
+Source: https://github.com/cisco/ChezScheme/blob/main/BUILDING
+'''
+
+[[entries]]
+name = "onramp_staged_fallback"
+description = "Onramp maintains every bootstrap stage so any break has a fallback checkpoint"
+category = "compiler_bootstrapping"
+content = '''
+Onramp bootstraps C from hex through 7 stages: hex -> VM -> assembler -> minimal C ->
+practical C -> full C. Every intermediate stage is retained in the repository.
+
+The critical design: if stage N+1 breaks, you fall back to stage N. cci/2-full broken?
+Use cci/1-opc. The assembler broken? Use the bytecode-level tools. Each stage is written
+in the language of the PREVIOUS stage, so earlier stages are always available.
+
+Verification: Onramp uses the "eight queens puzzle" implemented at multiple language
+levels as a cross-stage functional test. The peephole optimizer (cg/0-asm) self-applies
+immediately — running the optimizer on its own output validates correctness.
+
+The final rebuild recompiles EVERYTHING with the final toolchain. This catches ABI
+compatibility issues that slip through incremental building.
+
+Lesson for Cyrius: Keep stage1f.cyr (the base compiler) permanently working. It is the
+fallback. If cc.cyr breaks the bootstrap, stage1f can always recompile a simpler version.
+The monolithic cc.cyr should be a checkpoint that stage1f can compile, and the modular
+cc2.cyr should be a checkpoint that cc can compile. Each link in the chain must be
+independently rebuildable from the link before it.
+
+Source: https://github.com/ludocode/onramp/blob/develop/docs/bootstrap-path.md
+'''
+
+[[entries]]
+name = "bootstrap_break_codebuf_offset"
+description = "Codebuf offset splits are the #1 cause of bootstrap breaks in small self-hosting compilers"
+category = "compiler_bootstrapping"
+content = '''
+When a self-hosting compiler uses fixed offsets into a code buffer (common in assembly-
+level compilers without a linker), splitting the buffer or changing its base address
+breaks every hardcoded reference.
+
+The failure mode: source says "codebuf starts at offset X" but the committed binary was
+built when codebuf started at offset Y. The binary compiles the source, but emits wrong
+addresses. The resulting binary crashes or produces garbage.
+
+This is insidious because:
+- The compiler APPEARS to compile successfully (no crash during compilation)
+- The output binary has correct structure (valid ELF, right size)
+- But jump targets, data references, and function addresses are all shifted
+- Symptoms: segfaults, wrong output, infinite loops, or silent data corruption
+
+Diagnosis technique: hexdump both the working and broken binaries. Look for systematic
+offset differences — if every address is shifted by the same constant, you found the
+codebuf base mismatch.
+
+Repair approaches:
+1. REVERT: git checkout the source to match what the committed binary can compile, build
+   a new binary, then incrementally re-apply changes
+2. BRIDGE: write a minimal "bridge" version of the source that uses the OLD offsets but
+   compiles to a binary that uses the NEW offsets — a one-time transitional compiler
+3. EXTERNAL: use a different compiler (the seed, an older stage) to compile the new source
+   directly, producing a new committed binary
+4. BISECT: if the break happened over multiple commits, git bisect to find the exact
+   commit that broke the chain, revert just that change
+'''
+
+[[entries]]
+name = "bridge_compiler_subset"
+description = "A bridge compiler must support exactly the subset of syntax used by its input — nothing more matters"
+category = "compiler_bootstrapping"
+content = '''
+When compiler C1 compiles source S to produce C2, the ONLY thing that matters is whether
+C1 supports every syntactic and semantic feature used in S. Features C1 supports but S
+doesn't use are irrelevant. Features S uses but C1 doesn't support cause hard failures.
+
+This creates a subtle constraint: when modifying cc.cyr (the source), you must verify
+that every syntax construct you use is supported by whatever compiler will compile it.
+If stage1f compiles cc.cyr, then cc.cyr can only use stage1f's language subset. If cc
+(the binary) compiles cc2.cyr, then cc2.cyr can only use cc's language subset.
+
+Common mistakes:
+- Adding a new operator to cc.cyr's codegen, then using that operator IN cc.cyr's own
+  source. stage1f doesn't know the new operator, so it can't compile cc.cyr.
+- Adding a language feature to the modular cc2.cyr that the monolithic cc binary doesn't
+  support. cc can't compile cc2.cyr.
+- Using a stdlib function in the compiler source that the compiler doesn't yet provide.
+
+The rule: NEW features can only be used ONE generation later. If you add feature F to
+cc.cyr, compile it with stage1f to get cc, then cc2.cyr (compiled by cc) can use F.
+But cc.cyr itself CANNOT use F because stage1f doesn't know about it.
+
+shecc enforces this: stage0 is built by an external compiler, stage1 is built by stage0,
+stage2 is built by stage1. stage1 == stage2 byte-identical proves correctness.
+Source: https://github.com/sysprog21/shecc
+'''
+
+[[entries]]
+name = "heap_offset_collision"
+description = "Fixed-offset heap layouts break silently when you add data structures or resize buffers"
+category = "compiler_bootstrapping"
+content = '''
+Compilers without malloc use fixed offsets from a heap base (typically brk). Each data
+structure gets a manually assigned region: tokens at +0, variables at +8192, strings at
++32768, codebuf at +65536, etc.
+
+The collision bug: you add a new data structure or grow an existing one, and it overlaps
+with the next region. The compiler doesn't crash — it silently corrupts the overlapping
+structure. Symptoms appear much later: wrong variable lookups, corrupted string literals,
+or codegen that references garbage.
+
+Prevention:
+- Document the heap map in the source file header: "HEAP LAYOUT: tokens 0-8191,
+  vars 8192-32767, strings 32768-65535, codebuf 65536-131071"
+- After ANY resize, verify no overlap by checking: base + (count * element_size) < next_base
+- Add a runtime guard: before writing to a region, check if the write address exceeds
+  the region's boundary. Emit a diagnostic and exit(1) instead of corrupting silently.
+- When splitting a buffer (e.g., splitting codebuf into code + data sections), EVERY
+  offset that references anything after the split point must be updated.
+
+The split-specific version: when you split codebuf into code_section and data_section,
+you change the base address of data_section. Every reference to data (string literals,
+global variables, jump tables) that was previously codebuf+N must become
+data_section+M where M accounts for the new base. Miss one reference and the binary
+has a single corrupt pointer that may only trigger on specific inputs.
+'''
+
+[[entries]]
+name = "incremental_bootstrap_repair"
+description = "Repair a broken bootstrap by finding the last working state and taking one step at a time"
+category = "compiler_bootstrapping"
+content = '''
+When the bootstrap chain is broken (committed binary can't reproduce itself from source),
+the repair process is:
+
+1. FIND LAST KNOWN GOOD: git log to find the last commit where bootstrap.sh succeeded.
+   Check out that commit, verify the chain works. This is your anchor.
+
+2. IDENTIFY THE BREAK: diff the last-good source against current source. The break is
+   in those changes. Common culprits:
+   - Buffer base address or size changed
+   - New data structure shifted heap layout
+   - Codegen emits different instruction encoding
+   - String table grew past its allocated region
+   - Stack frame size calculation changed
+
+3. ONE STEP FORWARD: From last-good, apply ONE change at a time. After each change:
+   - Compile with the committed binary
+   - Run the test suite
+   - Do the three-stage comparison (compile twice, compare binaries)
+   - If all pass, this is the new anchor
+
+4. IF A STEP BREAKS: You found the problem. The specific change is incompatible with the
+   committed binary. Options:
+   a) Reorder: apply other changes first, build a new binary, then apply this change
+   b) Split: break the change into smaller pieces that are each compatible
+   c) Bridge: modify the change so the committed binary can compile it, even if the
+      output isn't optimal. Then use the output to compile the real version.
+
+5. RECOMMIT: Once the chain is restored, build the final binary from the repaired source
+   and commit it as the new root of trust. Verify with SHA256.
+
+The Ghuloum approach (from "An Incremental Approach to Compiler Construction"): extend
+the language ONE feature at a time, each extension compiles with the previous compiler.
+Never add two features simultaneously — you can't debug two unknowns.
+
+Source: https://www.researchgate.net/publication/213882562_An_Incremental_Approach_to_Compiler_Construction
+'''
+
+[[entries]]
+name = "diverse_double_compilation"
+description = "Use two independent compilers to verify bootstrap integrity — catches Thompson trust attacks"
+category = "compiler_bootstrapping"
+content = '''
+Diverse Double Compilation (DDC), from Wheeler's PhD thesis: compile your compiler's
+source with TWO independently-developed compilers. If both produce functionally identical
+output, neither compiler has injected a backdoor.
+
+Practical application for small self-hosting compilers:
+- Compile cc.cyr with stage1f → binary A
+- Compile cc.cyr with an independent tool (e.g., a simple assembler, a different stage) → binary B
+- A and B should be identical (or functionally equivalent if compilers differ in padding/alignment)
+
+Go does this at scale: every release is built on Linux/x86-64 AND Windows/x86-64. If
+the archives aren't bit-identical, the release is blocked.
+
+For Cyrius specifically: the bootstrap chain has a natural DDC point. The seed assembler
+(bootstrap/asm) and asm.cyr (self-hosting assembler) are independent implementations.
+If both assemble stage1f.cyr to identical output, both are correct. This is already
+verified ("11 byte-exact matches"). Preserve this invariant — it's your DDC.
+
+The mes project (GNU Guix) demonstrated cross-distro DDC: Guix, NixOS, and Debian each
+built mes independently and got bit-identical output. Three distros, three toolchains,
+one binary. That's strong evidence of correctness.
+
+Source: https://lwn.net/Articles/841797/
+'''
+
+[[entries]]
+name = "frame_size_and_stack_bugs"
+description = "Wrong stack frame sizes and register clobbers are the hardest codegen bugs to find in self-hosting compilers"
+category = "compiler_bootstrapping"
+content = '''
+When a compiler compiles itself, stack frame bugs are amplified. The compiler's own
+functions have deep call stacks (recursive descent parsing, nested expression evaluation).
+A frame size off by 8 bytes may work for simple programs but corrupt the return address
+when the compiler processes its own deeply-nested source.
+
+Common manifestations:
+1. FRAME TOO SMALL: local variables overlap with saved registers or return address.
+   Symptom: works on simple inputs, segfaults on complex ones (like compiling itself).
+2. FRAME TOO LARGE: wastes stack space. Usually harmless unless you hit stack limits.
+   Can mask other bugs by adding padding that prevents corruption.
+3. CALLEE-SAVE CLOBBER: function uses a register without saving it. Works when the
+   caller doesn't use that register, breaks when it does. Self-hosting maximizes the
+   chance of hitting this because the compiler uses all registers heavily.
+4. ALIGNMENT: x86_64 requires 16-byte stack alignment before CALL. Off-by-8 works
+   until you call a function that uses SSE (movaps), then segfaults.
+
+Debugging technique: add a stack canary manually. At function entry, push a known value
+(0xDEADBEEF). Before return, check it. If corrupted, print the function name and abort.
+In assembly-level compilers, this is ~6 instructions per function.
+
+The .NET JIT had a bug where frame pointer chaining was wrong for frames with localloc —
+the saved RBP didn't point to the caller's frame. This broke debugging but also caused
+subtle corruption in specific call patterns. Self-hosting compilers are particularly
+vulnerable because they ARE the debugger — you can't use another tool to debug them
+until the bug is fixed.
+
+Source: https://github.com/dotnet/runtime/issues/4651
+'''
+
+[[entries]]
+name = "committed_binary_hygiene"
+description = "Rules for maintaining a committed bootstrap binary as root of trust"
+category = "compiler_bootstrapping"
+content = '''
+A committed binary (like bootstrap/asm or Chez's boot files) is the root of trust.
+Rules for keeping it trustworthy:
+
+1. ALWAYS RECORD THE SHA256: in a comment, in the commit message, or in a manifest file.
+   Anyone can verify the binary hasn't been tampered with.
+
+2. REBUILD AND RECOMMIT AFTER EVERY LANGUAGE CHANGE: if the compiler's output format
+   changes (new instructions, different encoding, changed data layout), the committed
+   binary must be updated. Stale binaries produce stale output.
+
+3. VERIFY THE CHAIN BEFORE COMMITTING: the new binary must be produced by the OLD binary
+   compiling the current source. Then the NEW binary compiling the current source must
+   produce a byte-identical copy of itself. This is the bootstrap closure test.
+
+4. MINIMIZE THE BINARY: smaller binaries are easier to audit. Cyrius's 29KB asm is good.
+   GCC's bootstrap requires downloading a multi-MB binary. Chez's boot files are opaque
+   Scheme bytecode. The more readable and smaller the committed binary, the stronger the
+   trust guarantee.
+
+5. DOCUMENT WHAT PRODUCED IT: commit message should say "built by: stage1f compiled with
+   asm from commit abc123, source at commit def456." This makes the chain auditable
+   after the fact.
+
+6. CI VERIFICATION: if you have CI, the very first job should be: clone, build from
+   committed binary, verify three-stage identity. If this fails, block the merge.
+   Go does this for every release candidate.
+
+7. NEVER HAND-EDIT THE BINARY: if you need to fix the binary, fix the source and rebuild.
+   Hand-editing introduces unauditable changes that break the trust chain.
+'''
+
+[[entries]]
+name = "monolithic_to_modular_transition"
+description = "Splitting a monolithic compiler into modules is a bootstrap-critical operation that requires a bridge"
+category = "compiler_bootstrapping"
+content = '''
+The monolithic-to-modular transition (single file -> multiple files with includes) is one
+of the most dangerous moments in a self-hosting compiler's life. The monolithic compiler
+is the bridge — it must be able to compile the modular version.
+
+The problem: the monolithic compiler doesn't have #include or a module system. But the
+modular source uses includes. You need the monolithic compiler to gain JUST enough module
+support to compile the modular version — without itself becoming modular (because then
+nothing can compile it).
+
+Strategy:
+1. Add minimal include support to the monolithic cc.cyr (concatenation, not real modules)
+2. Compile cc.cyr with stage1f to produce the cc binary
+3. Use cc to compile the modular cc2.cyr (which uses includes)
+4. Verify cc2 can compile cc2.cyr to produce byte-identical cc3
+5. cc2 is now the new bridge for future development
+
+The trap: making cc.cyr so complex that stage1f can barely compile it. If cc.cyr grows
+to use features stage1f doesn't support, you lose the ability to rebuild cc from scratch.
+Keep cc.cyr in stage1f's language subset ALWAYS.
+
+Onramp avoids this by having explicit "language levels" — omC (minimal C), opC (practical
+C), full C. Each level is a defined subset. The compiler at level N is written in level
+N-1's subset. This makes the constraint explicit rather than implicit.
+
+For Cyrius: cc.cyr (monolithic, in stage1f's language) -> cc (binary) -> cc2.cyr (modular,
+can use cc's extended language). The cc binary is the bridge. If cc.cyr uses syntax that
+stage1f doesn't support, the bridge is broken from below. If cc2.cyr uses syntax that cc
+doesn't support, the bridge is broken from above. Guard both edges.
+'''

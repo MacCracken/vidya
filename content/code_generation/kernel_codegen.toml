@@ -1,0 +1,821 @@
+# Kernel Code Generation Patterns for x86_64
+# Focus: what a minimal self-hosting compiler needs to write a kernel
+# Research date: 2026-04-04
+
+[[entries]]
+name = "typed_pointer_scaling"
+description = "Pointer arithmetic must scale by sizeof(*ptr), not by 1"
+category = "kernel_codegen"
+content = '''
+When ptr has type *T, the expression ptr+1 must add sizeof(T) bytes, not 1 byte.
+This is critical for page table walks (array of 8-byte entries), struct arrays,
+and any pointer-based iteration.
+
+Compiler implementation:
+1. Track the pointed-to type in the symbol table (var_types[] already exists in cc2)
+2. On ptr+N or ptr-N, emit: imul rcx, sizeof(T) before the add
+
+Codegen for `ptr = ptr + 1` where ptr is *i64 (8 bytes):
+    mov rax, [rbp - ptr_offset]    ; load pointer value
+    mov rcx, 1                      ; the increment
+    imul rcx, 8                     ; scale by sizeof(i64) = 8
+    add rax, rcx                    ; scaled pointer arithmetic
+    mov [rbp - ptr_offset], rax    ; store result
+
+For a minimal compiler, support these sizes:
+    *i8  = 1,  *i16 = 2,  *i32 = 4,  *i64 = 8,  *StructName = struct_size
+
+The scaling factor is a compile-time constant, so the imul can be strength-reduced
+to a shift: imul rcx, 8 -> shl rcx, 3. But imul is correct and simpler.
+
+Key insight: array indexing is pointer arithmetic. arr[i] compiles to
+*(arr + i), which becomes *(arr + i * sizeof(element)). Page table walks
+use this: pml4[index] where pml4 is *i64 and index is (vaddr >> 39) & 0x1FF.
+
+What Cyrius needs: extend var_types to store element size alongside struct_id.
+When emitting add for pointer + integer, check if LHS is a typed pointer and
+emit the scaling multiply before the add. One new field per variable, one new
+check in the binary operator codegen.
+'''
+
+[[entries]]
+name = "struct_field_offset_codegen"
+description = "Struct field access compiles to base_address + compile-time offset"
+category = "kernel_codegen"
+content = '''
+Struct field access (s.field) is a compile-time offset addition. The compiler
+knows every field's byte offset at parse time because struct definitions are
+processed before any code that uses them.
+
+For struct studentT { name: [64]i8, age: i32, year: i32, gpa: i32 }:
+    name  -> offset 0
+    age   -> offset 64 (0x40)
+    year  -> offset 68 (0x44)
+    gpa   -> offset 72 (0x48)
+
+x86_64 codegen for `s.age` (read):
+    lea rax, [rbp - var_offset]    ; base address of struct
+    mov eax, [rax + 0x40]          ; load field at compile-time offset
+
+x86_64 codegen for `s.age = 42` (write):
+    lea rcx, [rbp - var_offset]    ; base address of struct
+    mov dword [rcx + 0x40], 42     ; store to field
+
+Cyrius cc2 already does this (struct_fnames[], field count tracking).
+The current codegen in parse.cyr emits:
+    lea rax, [rbp - var_offset]    ; base address
+    add rax, field_index * 8       ; field offset (all fields 8 bytes currently)
+
+For kernel work, fields need variable sizes (1, 2, 4, 8 bytes). This requires:
+1. Store field sizes in a new struct_fsizes[] array alongside struct_fnames[]
+2. Compute cumulative byte offset instead of field_index * 8
+3. Use the correct load/store width (movzx byte/word, mov dword/qword)
+
+Alignment: for packed kernel structs (IDT, GDT, page tables), do NOT pad.
+Pack fields tightly. Cyrius has no optimizer to reorder fields, so packed
+layout is the default — which is exactly what kernel structs need.
+'''
+
+[[entries]]
+name = "nested_struct_codegen"
+description = "Nested struct access chains base offsets: outer.inner.field"
+category = "kernel_codegen"
+content = '''
+When a struct contains another struct as a field, access to the inner struct's
+fields requires chaining two offsets: the outer field's offset plus the inner
+field's offset within its type.
+
+Example:
+    struct Inner { x: i64, y: i64 }          ; size = 16
+    struct Outer { a: i64, b: Inner, c: i64 } ; size = 32
+
+    var o: Outer;
+    o.b.y = 42;
+
+Field offsets:
+    o.a   -> offset 0   (i64, 8 bytes)
+    o.b   -> offset 8   (Inner, 16 bytes)
+    o.b.x -> offset 8   (Inner.x at 0 within Inner)
+    o.b.y -> offset 16  (Inner.y at 8 within Inner)
+    o.c   -> offset 24
+
+Codegen for `o.b.y = 42`:
+    lea rcx, [rbp - var_offset]    ; base of outer struct
+    add rcx, 8                     ; offset of field b (Inner)
+    add rcx, 8                     ; offset of field y within Inner
+    mov rax, 42
+    mov [rcx], rax                 ; store
+
+The compiler can fold the two adds at compile time: offset = 8 + 8 = 16.
+So the actual emitted code is:
+    lea rcx, [rbp - var_offset]
+    add rcx, 16                    ; combined offset
+    mov qword [rcx], 42
+
+Implementation in a single-pass compiler:
+1. Parse `o.b.y` left to right
+2. Look up `o` — get struct type Outer
+3. Look up `b` in Outer — get offset 8, field type Inner
+4. Look up `y` in Inner — get offset 8
+5. Total offset = 8 + 8 = 16
+6. Emit single lea + add + load/store
+
+This is essential for IDT entries (nested offset fields), trap frames,
+and any hardware descriptor with sub-structures.
+'''
+
+[[entries]]
+name = "inline_asm_compiler_integration"
+description = "How TCC and Plan 9 integrate inline assembly without an external assembler"
+category = "kernel_codegen"
+content = '''
+Three approaches to inline assembly in compilers, from simplest to most capable:
+
+1. RAW BYTES (what Cyrius cc2 has now):
+    asm { 0x0F 0x05 }    ; emit literal bytes into code stream
+    Pro: zero compiler complexity. Con: must hand-encode instructions.
+
+2. MNEMONIC INLINE ASM (what Cyrius needs for kernel):
+    asm { mov cr3, rax }  ; compiler encodes the instruction
+    Requires: embed the assembler's encoder into the compiler.
+
+    Cyrius already has asm.cyr with 43 mnemonics. The encoder functions can be
+    called directly from the compiler's codegen. When the parser sees an asm
+    block with mnemonics, route each line through the same encoding path that
+    asm.cyr uses.
+
+    TCC's approach: TCC has a built-in x86 assembler that shares the same
+    code generator backend. Inline asm blocks are parsed by the assembler
+    subsystem, which emits bytes directly into the code buffer — no intermediate
+    files. All x86 opcodes are supported in AT&T syntax.
+
+3. EXTENDED INLINE ASM (GCC-style, not needed yet):
+    asm volatile("mov %0, %%cr3" : : "r"(val) : "memory");
+    This requires constraint solving (which registers to use) and is complex.
+    Cyrius can defer this — for kernel work, the simple mnemonic form suffices
+    because the compiler already controls register allocation.
+
+Plan 9 approach: Plan 9 C has no inline asm at all. Instead, hardware-touching
+code is written in separate .s assembly files and linked. The assembler is
+minimal — "just a translator between textual and binary representations."
+This is viable for Cyrius too: write ISR stubs in .cyr assembly, compile
+kernel logic in .cyr high-level, link at the ELF level.
+
+Recommended for Cyrius Phase 6:
+- Extend asm blocks to accept mnemonics, not just raw bytes
+- Add kernel-critical mnemonics to asm.cyr: mov cr0/cr3/cr4, lidt, lgdt,
+  ltr, iretq, cli, sti, hlt, in, out, invlpg, wrmsr, rdmsr, swapgs
+- Route asm block lines through asm.cyr's encoder functions
+- Keep the raw byte escape for anything not yet encoded
+'''
+
+[[entries]]
+name = "bare_metal_elf_multiboot2"
+description = "ELF with multiboot2 header for GRUB to boot a kernel"
+category = "kernel_codegen"
+content = '''
+A bootable kernel ELF needs three changes from a Linux userspace ELF:
+
+1. MULTIBOOT2 HEADER (must be in first 8KB, 8-byte aligned):
+    dd 0xE85250D6              ; magic
+    dd 0                       ; architecture (0 = i386 protected mode)
+    dd header_end - header     ; header length
+    dd -(0xE85250D6 + 0 + (header_end - header))  ; checksum (all fields sum to 0)
+    ; end tag:
+    dw 0                       ; type
+    dw 0                       ; flags
+    dd 8                       ; size
+    header_end:
+
+    Total: 24 bytes minimum. Tags are 8-byte aligned, terminated by type=0 tag.
+
+2. ELF CHANGES:
+    - Entry point: kernel start address (e.g., 0x100000 for 1MB mark)
+    - No PT_INTERP segment (no dynamic linker)
+    - No libc, no _start from crt0 — your entry point IS _start
+    - Program header: PT_LOAD at physical address 0x100000
+
+    For Cyrius: the ELF builder in cc2 already emits ET_EXEC with a custom
+    entry point. Change: base address from 0x400000 (Linux default) to
+    0x100000 (conventional kernel load address). Add multiboot2 header
+    bytes at the start of the .text section.
+
+3. 32-BIT TO 64-BIT TRANSITION:
+    GRUB drops you in 32-bit protected mode. To reach long mode:
+    a. Set up identity-mapped page tables (PML4 -> PDPT -> PD with 2MB pages)
+    b. Load PML4 address into CR3
+    c. Enable PAE: set bit 5 in CR4
+    d. Set LME (Long Mode Enable): bit 8 in EFER MSR (0xC0000080)
+    e. Enable paging: set bit 31 in CR0
+    f. Far jump to 64-bit code segment (load CS with 64-bit GDT selector)
+
+    The 32-bit bootstrap is ~50 instructions. It can be a fixed blob that
+    Cyrius emits as raw bytes, or written in .cyr assembly.
+
+Cyrius approach: emit a flat ELF binary with multiboot2 header prepended.
+The 32-to-64 shim is static — always the same bytes. The kernel entry
+function is the first thing after the shim.
+'''
+
+[[entries]]
+name = "interrupt_handler_codegen"
+description = "ISR stubs: save all registers, handle error codes, iretq"
+category = "kernel_codegen"
+content = '''
+x86_64 has no PUSHA. Interrupt handlers must manually save/restore registers.
+
+THE PATTERN (one stub per vector, all jump to common handler):
+
+    ; Vector WITHOUT error code (e.g., divide error, timer):
+    vector_0:
+        push 0              ; dummy error code
+        push 0              ; vector number
+        jmp isr_common
+
+    ; Vector WITH error code (e.g., page fault = vector 14):
+    vector_14:
+        ; CPU already pushed error code
+        push 14             ; vector number
+        jmp isr_common
+
+    isr_common:
+        push rax
+        push rcx
+        push rdx
+        push rbx
+        push rbp
+        push rsi
+        push rdi
+        push r8
+        push r9
+        push r10
+        push r11
+        push r12
+        push r13
+        push r14
+        push r15
+
+        mov rdi, rsp        ; pass stack frame pointer as arg1
+        call interrupt_dispatch   ; C/Cyrius handler
+
+        pop r15
+        pop r14
+        pop r13
+        pop r12
+        pop r11
+        pop r10
+        pop r9
+        pop r8
+        pop rdi
+        pop rsi
+        pop rbp
+        pop rbx
+        pop rdx
+        pop rcx
+        pop rax
+
+        add rsp, 16         ; pop vector number + error code
+        iretq               ; return from interrupt (pops RIP, CS, RFLAGS, RSP, SS)
+
+WHICH VECTORS PUSH ERROR CODES:
+    8 (double fault), 10 (invalid TSS), 11 (segment not present),
+    12 (stack fault), 13 (general protection), 14 (page fault),
+    17 (alignment check), 21 (control protection), 29 (VMM), 30 (security)
+    All others: no error code, need dummy push.
+
+IDT ENTRY (16 bytes, packed):
+    bytes 0-1:   handler address bits 15:0
+    bytes 2-3:   code segment selector (0x08 for kernel CS)
+    byte 4:      IST index (0 = no IST)
+    byte 5:      type_attr (0x8E = present, DPL=0, 64-bit interrupt gate)
+    bytes 6-7:   handler address bits 31:16
+    bytes 8-11:  handler address bits 63:32
+    bytes 12-15: reserved (0)
+
+CRITICAL: compile kernel code with -mno-red-zone equivalent. The red zone
+(128 bytes below RSP) is clobbered by interrupts. Cyrius has no red zone
+optimization, so this is already safe.
+
+Codegen approach: the 256 ISR stubs are mechanical — generate them as a
+byte table. Each stub is 16 bytes (aligned), total 4KB. The common handler
+and IDT table are ~300 bytes. Total ISR infrastructure: ~4.5KB.
+'''
+
+[[entries]]
+name = "bitfield_pack_unpack"
+description = "Shift-and-mask patterns replace C bitfields for hardware descriptors"
+category = "kernel_codegen"
+content = '''
+Kernel hardware structures (page tables, GDT, IDT) are bitfields. A minimal
+compiler does NOT need C-style bitfield syntax. Shift-and-mask with existing
+& | << >> operators is sufficient and more explicit.
+
+PAGE TABLE ENTRY (64 bits):
+    Bit 0:     Present
+    Bit 1:     Writable
+    Bit 2:     User accessible
+    Bits 12-51: Physical address (40 bits, 4KB aligned)
+    Bit 63:    No Execute
+
+    # Build PTE:
+    var pte = (phys_addr & 0x000FFFFFFFFFF000) | flags;
+
+    # Read PTE fields:
+    var present  = pte & 1;
+    var writable = (pte >> 1) & 1;
+    var addr     = pte & 0x000FFFFFFFFFF000;
+
+GDT ENTRY (64 bits, encoded):
+    Kernel code: 0x00AF9A000000FFFF
+    Kernel data: 0x00CF92000000FFFF
+
+    # Decode:
+    var present   = (entry >> 47) & 1;
+    var dpl       = (entry >> 45) & 3;
+    var long_mode = (entry >> 53) & 1;
+
+IDT ENTRY (128 bits = two 64-bit values):
+    # Build from handler address:
+    var low  = (handler & 0xFFFF) | (selector << 16) | (type_attr << 40) | (((handler >> 16) & 0xFFFF) << 48);
+    var high = (handler >> 32) & 0xFFFFFFFF;
+
+    # Store as two consecutive 64-bit values:
+    store64(idt_base + vector * 16, low);
+    store64(idt_base + vector * 16 + 8, high);
+
+VIRTUAL ADDRESS DECOMPOSITION (4-level paging):
+    var pml4_idx = (vaddr >> 39) & 0x1FF;
+    var pdpt_idx = (vaddr >> 30) & 0x1FF;
+    var pd_idx   = (vaddr >> 21) & 0x1FF;
+    var pt_idx   = (vaddr >> 12) & 0x1FF;
+    var offset   = vaddr & 0xFFF;
+
+Cyrius already has all needed operators: & | ^ << >>. No new language
+features required for bitfield access — just library functions.
+The vidya kernel_topics/c.c file has tested C implementations of all these
+patterns that can be translated directly to Cyrius.
+'''
+
+[[entries]]
+name = "global_initializers_single_pass"
+description = "Global variable initialization in a single-pass compiler"
+category = "kernel_codegen"
+content = '''
+Problem: `var gdt_entry = 0x00AF9A000000FFFF;` at file scope. In a single-pass
+compiler, globals are typically in the data section with compile-time constant
+values. But Cyrius cc2 currently only supports variables inside functions.
+
+Three approaches, from simplest to most capable:
+
+1. DATA SECTION CONSTANTS (simplest, handles 90% of kernel needs):
+    Global `var x = 42;` emits the value directly into the .data section.
+    The compiler stores the initial value at the variable's fixed address.
+
+    Codegen: during ELF emission, write initial values into the data segment.
+    Access uses absolute addressing: mov rax, [data_base + var_offset]
+
+    x86_64:
+        mov rax, [rip + gdt_offset]    ; RIP-relative for PIC
+    or:
+        mov rax, [abs_address]         ; absolute for kernel (no PIC needed)
+
+2. INIT FUNCTION (what cc2 can do today with minimal changes):
+    Emit a hidden __init() function that runs before main(). It contains:
+        mov rax, 0x00AF9A000000FFFF
+        mov [data_base + gdt_offset], rax
+
+    The compiler collects all global `var x = expr;` statements, emits their
+    initialization code into __init(), and calls __init() at program start.
+    This handles non-constant initializers too.
+
+3. BSS + ZEROINIT (for uninitialized globals):
+    Uninitialized globals go in .bss (zero-filled by loader, or by boot shim
+    in bare metal). This saves binary space — 4KB of zero-init page tables
+    costs 0 bytes in the ELF.
+
+For Cyrius Phase 6:
+- Option 2 is the natural fit. cc2 already has a mechanism for emitting code
+  before the user's main() (the brk setup). Add global var declarations to
+  the parser's top-level loop, collect them, emit init code at program start.
+- Static page tables and GDT can be initialized this way.
+- For bare metal: the boot shim calls __init() then kernel_main().
+'''
+
+[[entries]]
+name = "kernel_c_features_minimum"
+description = "Minimum compiler features to write a kernel (from Linux kernel analysis)"
+category = "kernel_codegen"
+content = '''
+The Linux kernel uses GNU C89 with extensions. Analyzing what features are
+actually required to write a minimal x86_64 kernel:
+
+REQUIRED (Cyrius must have before kernel work):
+    - Functions with parameters and return values          [done]
+    - Local variables, arrays                              [done]
+    - if/else, while loops                                 [done]
+    - Bitwise operators: & | ^ ~ << >>                     [done]
+    - Pointer dereference and address-of                   [done]
+    - Structs with field access                            [done]
+    - Inline assembly (at least raw bytes)                 [done]
+    - Integer types: i8, i16, i32, i64                     [done via load/store widths]
+    - Hex literals                                         [done]
+    - Typed pointer arithmetic (ptr+1 scales)              [Phase 6]
+    - Nested structs                                       [Phase 6]
+    - Inline asm with mnemonics (mov cr3, lgdt, iretq)     [Phase 6]
+    - Global variables                                     [Phase 6]
+
+NOT REQUIRED for a minimal kernel:
+    - malloc/free (use static allocation + page frame allocator)
+    - Floating point (kernel has no FPU use)
+    - String type (use i8 arrays + length)
+    - Generics/templates
+    - Closures/lambdas
+    - Exceptions/unwinding
+    - Dynamic dispatch / vtables
+    - Preprocessor macros (use functions instead)
+
+NICE TO HAVE (quality of life):
+    - sizeof() operator (can hardcode sizes for now)
+    - for loops (while is equivalent)
+    - Switch/case (if/elif chains work)
+    - Enum (use constants: var PTE_PRESENT = 1;)
+    - memcpy/memset builtins (can write as functions)
+
+Key insight from Linux kernel: the kernel uses volatile for MMIO, but Cyrius
+has no optimizer, so every load/store is already "volatile." This is an
+advantage — no need for volatile annotations until an optimizer exists.
+
+The kernel also uses __attribute__((packed)) for hardware structs. Cyrius
+structs are already packed (no padding inserted). Another advantage of
+starting from assembly — the default is what kernels need.
+'''
+
+[[entries]]
+name = "higher_half_kernel_no_linker"
+description = "Higher-half mapping without a linker script using ELF LMA/VMA split"
+category = "kernel_codegen"
+content = '''
+A higher-half kernel runs at virtual address 0xFFFF800000000000 but is loaded
+at physical address 0x100000 (1MB). Traditional compilers use a linker script
+with AT() to set separate LMA and VMA. Cyrius emits ELF directly — no linker.
+
+APPROACH: emit ELF program headers with split addresses.
+
+ELF program header (PT_LOAD) has two address fields:
+    p_vaddr: virtual address where code expects to run (0xFFFF800000100000)
+    p_paddr: physical address where bootloader loads it (0x100000)
+
+The ELF entry point (e_entry) is set to the VIRTUAL address.
+
+Cyrius ELF builder change:
+    Currently: p_vaddr = p_paddr = 0x400000 (Linux userspace convention)
+    Kernel:    p_vaddr = 0xFFFF800000100000, p_paddr = 0x100000
+
+GRUB reads p_paddr to know where to load the binary in physical RAM.
+The CPU uses p_vaddr (after paging is enabled) for all address references.
+
+BOOT SEQUENCE:
+1. GRUB loads kernel at physical 0x100000
+2. 32-bit shim runs (identity-mapped, uses physical addresses)
+3. Shim sets up page tables mapping:
+   - Identity map: physical 0x0-0x200000 -> virtual 0x0-0x200000
+   - Higher half: physical 0x0-0x200000 -> virtual 0xFFFF800000000000+
+4. Shim enables paging, far-jumps to higher-half virtual address
+5. Kernel runs at 0xFFFF800000100000, removes identity mapping
+
+ADDRESS CONVERSION (compile-time, used only in boot shim):
+    KERNEL_OFFSET = 0xFFFF800000000000
+    V2P(addr) = addr & ~KERNEL_OFFSET      ; clear high bits
+    P2V(addr) = addr | KERNEL_OFFSET       ; set high bits
+
+For code references within the kernel: the compiler emits addresses relative
+to p_vaddr. All function call targets, global variable addresses, and jump
+targets use virtual addresses. This works because once paging is enabled,
+the CPU translates virtual -> physical transparently.
+
+All fixup addresses in cc2 need to use the virtual base (p_vaddr) instead
+of the physical base when generating kernel ELFs. This is a one-line change
+in the base address constant.
+'''
+
+[[entries]]
+name = "gdt_setup_codegen"
+description = "GDT structure and lgdt instruction for x86_64 long mode"
+category = "kernel_codegen"
+content = '''
+The GDT is required before any kernel code runs. GRUB provides a temporary
+GDT, but the kernel must set up its own.
+
+MINIMAL 64-BIT GDT (3 entries, 24 bytes):
+    Entry 0: Null descriptor          = 0x0000000000000000
+    Entry 1: Kernel code (CS=0x08)    = 0x00AF9A000000FFFF
+    Entry 2: Kernel data (SS=0x10)    = 0x00CF92000000FFFF
+
+    ; Bit decode for kernel code segment:
+    ;   Base = 0, Limit = 0xFFFFF (with granularity, covers 4GB)
+    ;   Present=1, DPL=0 (ring 0), S=1 (code/data), Type=0xA (exec/read)
+    ;   Long mode=1, DB=0 (must be 0 in long mode)
+
+GDT POINTER (10 bytes, packed):
+    bytes 0-1:  limit (size of GDT - 1) = 23 for 3 entries
+    bytes 2-9:  base address of GDT (64-bit linear address)
+
+LGDT INSTRUCTION:
+    lgdt [gdt_pointer]     ; loads GDT register from memory
+    ; Encoding: 0x0F 0x01 0x15 + 4-byte RIP-relative offset
+    ; Or with absolute address in register:
+    ;   lea rax, [gdt_pointer]
+    ;   lgdt [rax]         ; 0x0F 0x01 0x10
+
+After lgdt, reload segment registers:
+    mov ax, 0x10           ; kernel data selector
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    ; CS reload requires a far return:
+    push 0x08              ; new CS
+    lea rax, [rip + .reload_cs]
+    push rax               ; new RIP
+    retfq                  ; far return loads CS:RIP
+    .reload_cs:
+
+Cyrius implementation: the GDT is 24 bytes of constant data. Emit it into
+the data section. The lgdt + segment reload is ~30 bytes of fixed machine
+code. This can be a raw byte sequence or mnemonic inline asm.
+'''
+
+[[entries]]
+name = "page_table_setup_codegen"
+description = "4-level page table construction for x86_64 long mode"
+category = "kernel_codegen"
+content = '''
+x86_64 uses 4-level page tables: PML4 -> PDPT -> PD -> PT.
+Each table is 4096 bytes (512 entries of 8 bytes each).
+
+MINIMUM FOR BOOT (identity map first 2MB with huge pages):
+    Only need 3 tables: PML4, PDPT, PD. No PT level needed with 2MB pages.
+
+    PML4[0] = physical_addr(PDPT) | PRESENT | WRITABLE    ; 0x03
+    PDPT[0] = physical_addr(PD)   | PRESENT | WRITABLE    ; 0x03
+    PD[0]   = 0x000000            | PRESENT | WRITABLE | HUGE_PAGE  ; 0x83
+
+    This maps virtual 0x0-0x200000 to physical 0x0-0x200000.
+
+FOR HIGHER-HALF (map at 0xFFFF800000000000):
+    PML4 index for 0xFFFF800000000000 = (addr >> 39) & 0x1FF = 256
+
+    PML4[0]   = phys(PDPT) | 0x03    ; identity map (boot)
+    PML4[256] = phys(PDPT) | 0x03    ; higher half (same PDPT works)
+
+    Both map to the same physical memory, just at different virtual addresses.
+    Remove PML4[0] after jumping to higher-half code.
+
+CODEGEN FOR TABLE CONSTRUCTION:
+    ; Allocate 3 page-aligned 4KB regions (12KB total, must be 4KB aligned)
+    ; Zero them first (BSS or explicit memset)
+
+    ; PML4[0] = PDPT_addr | 3
+    var pml4 = page_alloc();          ; returns 4KB-aligned physical address
+    var pdpt = page_alloc();
+    var pd   = page_alloc();
+
+    store64(pml4, pdpt | 3);          ; entry 0: identity map
+    store64(pml4 + 256 * 8, pdpt | 3); ; entry 256: higher half
+
+    store64(pdpt, pd | 3);            ; PDPT[0] -> PD
+
+    store64(pd, 0x83);                ; PD[0]: 2MB huge page at physical 0
+
+    ; Load page table root:
+    asm { mov cr3, pml4_addr }        ; or: mov rax, pml4_addr; mov cr3, rax
+
+ALIGNMENT REQUIREMENT: all page tables MUST be 4KB aligned. In bare metal,
+allocate from a known physical region (e.g., after the kernel image).
+The boot shim can reserve a fixed region: kernel_end rounded up to 4KB.
+
+For Cyrius: page tables are arrays of i64 manipulated with store64/load64
+and bitwise ops. No new language features needed — just typed pointers
+for cleaner iteration and global variables for the table base addresses.
+'''
+
+[[entries]]
+name = "idt_construction_codegen"
+description = "Building the IDT programmatically with store operations"
+category = "kernel_codegen"
+content = '''
+The IDT has 256 entries, each 16 bytes (4096 bytes total). It maps interrupt
+vectors to handler addresses.
+
+IDT ENTRY LAYOUT (16 bytes):
+    Offset  Size   Field
+    0       2      handler_addr bits 15:0
+    2       2      code segment selector (0x08)
+    4       1      IST index (0 for most handlers)
+    5       1      type_attr (0x8E = present + DPL0 + interrupt gate)
+    6       2      handler_addr bits 31:16
+    8       4      handler_addr bits 63:32
+    12      4      reserved (0)
+
+BUILD ONE ENTRY (Cyrius pseudocode):
+    fn idt_set_entry(idt_base, vector, handler_addr) {
+        var off = idt_base + vector * 16;
+
+        # Build low 8 bytes:
+        var low = (handler_addr & 0xFFFF);           # bits 15:0
+        low = low | (0x08 << 16);                     # selector
+        low = low | (0x8E << 40);                     # type_attr at byte 5
+        low = low | (((handler_addr >> 16) & 0xFFFF) << 48);  # bits 31:16
+
+        # Build high 8 bytes:
+        var high = (handler_addr >> 32) & 0xFFFFFFFF; # bits 63:32
+
+        store64(off, low);
+        store64(off + 8, high);
+    }
+
+Alternative using byte-width stores (more readable):
+    store16(off + 0, handler_addr & 0xFFFF);
+    store16(off + 2, 0x08);
+    store8(off + 4, 0);                          # IST = 0
+    store8(off + 5, 0x8E);                       # type_attr
+    store16(off + 6, (handler_addr >> 16) & 0xFFFF);
+    store32(off + 8, (handler_addr >> 32) & 0xFFFFFFFF);
+    store32(off + 12, 0);                        # reserved
+
+LOAD IDT:
+    ; IDTR structure (10 bytes):
+    ;   limit (2 bytes): 256 * 16 - 1 = 4095 = 0x0FFF
+    ;   base (8 bytes): address of IDT
+
+    lidt [idtr_address]    ; encoding: 0x0F 0x01 0x18 (with [rax])
+
+Cyrius already has store8/16/32/64. The IDT construction is pure arithmetic
+and memory stores — no new language features needed. The lidt instruction
+needs to be added to asm.cyr (one new mnemonic).
+'''
+
+[[entries]]
+name = "kernel_privileged_instructions"
+description = "x86_64 privileged instructions a kernel compiler must encode"
+category = "kernel_codegen"
+content = '''
+Beyond normal user-mode instructions, a kernel uses privileged instructions
+that must be added to the assembler. Grouped by kernel subsystem:
+
+PAGING (Phase 7.5 — page tables):
+    mov cr3, rax     ; load page table root (0x0F 0x22 0xD8)
+    mov rax, cr3     ; read page table root  (0x0F 0x20 0xD8)
+    mov cr0, rax     ; enable/disable paging (0x0F 0x22 0xC0)
+    mov rax, cr0     ; read CR0              (0x0F 0x20 0xC0)
+    mov cr4, rax     ; PAE, PGE, etc.        (0x0F 0x22 0xE0)
+    invlpg [rax]     ; invalidate TLB entry  (0x0F 0x01 0x38)
+
+DESCRIPTOR TABLES (Phase 7.4 — GDT/IDT):
+    lgdt [rax]       ; load GDT register     (0x0F 0x01 0x10)
+    lidt [rax]       ; load IDT register     (0x0F 0x01 0x18)
+    ltr ax           ; load task register    (0x0F 0x00 0xD8)
+
+INTERRUPTS (Phase 7.6 — interrupt handling):
+    cli              ; disable interrupts    (0xFA)
+    sti              ; enable interrupts     (0xFB)
+    iretq            ; return from interrupt (0x48 0xCF)
+    hlt              ; halt until interrupt  (0xF4)
+    int 3            ; breakpoint            (0xCC)
+
+PORT I/O (Phase 7.3 — serial console, PIC, PIT):
+    in al, dx        ; read byte from port   (0xEC)
+    in ax, dx        ; read word from port   (0x66 0xED)
+    in eax, dx       ; read dword from port  (0xED)
+    out dx, al       ; write byte to port    (0xEE)
+    out dx, ax       ; write word to port    (0x66 0xEF)
+    out dx, eax      ; write dword to port   (0xEF)
+
+MSR ACCESS (Phase 7.2 — long mode setup):
+    rdmsr            ; read MSR (ECX=addr, result in EDX:EAX)  (0x0F 0x32)
+    wrmsr            ; write MSR (ECX=addr, EDX:EAX=value)     (0x0F 0x30)
+
+MISC:
+    swapgs           ; swap GS base (kernel entry) (0x0F 0x01 0xF8)
+    cpuid            ; CPU identification           (0x0F 0xA2)
+
+Total: ~25 new mnemonics for asm.cyr. Most are 2-3 byte encodings.
+asm.cyr currently has 43 mnemonics — this brings it to ~68, still compact.
+
+Priority order for implementation:
+1. cli, sti, hlt, iretq (interrupt basics)
+2. mov cr0/cr3/cr4 (paging)
+3. lgdt, lidt, ltr (descriptor tables)
+4. in, out (serial console — first sign of life)
+5. rdmsr, wrmsr (MSR access for long mode)
+6. invlpg, swapgs, cpuid (refinements)
+'''
+
+[[entries]]
+name = "bare_metal_boot_shim"
+description = "32-to-64 bit transition shim that GRUB hands off to"
+category = "kernel_codegen"
+content = '''
+GRUB loads a multiboot2 ELF and jumps to the entry point in 32-bit protected
+mode. The boot shim transitions to 64-bit long mode. This is a fixed sequence
+of ~50 instructions that can be emitted as raw bytes.
+
+STATE WHEN GRUB JUMPS TO ENTRY:
+    - 32-bit protected mode, paging disabled
+    - EAX = 0x36D76289 (multiboot2 magic)
+    - EBX = physical address of multiboot2 info struct
+    - CS = flat code segment, DS/ES/FS/GS/SS = flat data segment
+    - A20 enabled, interrupts disabled
+    - No stack set up
+
+SHIM SEQUENCE (32-bit code):
+    1. Save EBX (multiboot info pointer)
+    2. Set up a temporary stack (e.g., at kernel_end + 4KB)
+    3. Zero the page table region (3 * 4KB = 12KB)
+    4. Build identity map page tables:
+         PML4[0]   -> PDPT | 0x03
+         PML4[256] -> PDPT | 0x03  (higher half)
+         PDPT[0]   -> PD | 0x03
+         PD[0]     -> 0x00000000 | 0x83  (2MB huge page)
+    5. Load CR3 with PML4 physical address
+    6. Enable PAE in CR4 (bit 5)
+    7. Enable Long Mode in EFER MSR 0xC0000080 (bit 8)
+    8. Enable paging in CR0 (bit 31)
+    9. Load a 64-bit GDT
+    10. Far jump to 64-bit entry point
+
+TRANSITION TO 64-BIT (the far jump):
+    ; In 32-bit code:
+    push 0x08              ; 64-bit code segment selector
+    push kernel_entry_64   ; 64-bit entry point address
+    retf                   ; far return -> loads CS:EIP, enters long mode
+
+    ; Now in 64-bit code:
+    kernel_entry_64:
+        mov ax, 0x10       ; 64-bit data segment
+        mov ds, ax
+        mov es, ax
+        mov ss, ax
+        xor ax, ax
+        mov fs, ax
+        mov gs, ax
+        mov rsp, stack_top ; set up 64-bit stack
+        mov rdi, rbx       ; pass multiboot info as arg1
+        call kernel_main
+        hlt
+
+SIZE: the entire 32-bit shim is ~200 bytes. It is position-independent
+(all addresses are relative or absolute physical). Cyrius can emit this
+as a fixed byte blob prepended to the kernel code.
+
+For Cyrius: this shim is the ONLY 32-bit code needed. Everything after
+kernel_entry_64 is normal 64-bit Cyrius code. The shim is static —
+write it once, emit the bytes, never touch it again.
+'''
+
+[[entries]]
+name = "no_red_zone_no_sse"
+description = "Kernel code must disable red zone and avoid SSE state"
+category = "kernel_codegen"
+content = '''
+Two critical differences between userspace and kernel code generation:
+
+1. NO RED ZONE:
+    The System V ABI defines a 128-byte "red zone" below RSP that leaf
+    functions can use without adjusting RSP. Interrupts clobber this area
+    because the CPU pushes the interrupt frame onto the current stack.
+
+    GCC/Clang use -mno-red-zone for kernel code.
+
+    Cyrius cc2 does NOT use the red zone — every function has a proper
+    sub rsp, frame_size prologue. This means Cyrius kernel code is already
+    interrupt-safe. No compiler changes needed.
+
+2. NO SSE/FPU STATE IN INTERRUPTS:
+    SSE registers (xmm0-xmm15) are 128 bits each. Saving/restoring all 16
+    in every interrupt handler costs 256 bytes of stack and ~30 instructions.
+    The kernel avoids this by never using SSE in interrupt context.
+
+    GCC uses -mgeneral-regs-only to prevent SSE codegen.
+
+    Cyrius cc2 generates no SSE/FPU instructions at all. All arithmetic is
+    integer, all values are in GPRs. No compiler changes needed.
+
+3. NO STACK CANARIES (not relevant yet):
+    Stack canaries require a thread-local __stack_chk_guard symbol. Kernel
+    code that enables stack protection needs per-CPU canary values. Cyrius
+    has no stack canaries, so this is not a concern.
+
+SUMMARY OF CYRIUS ADVANTAGES FOR KERNEL CODEGEN:
+    - No red zone (already correct)
+    - No SSE/FPU (already correct)
+    - No stack canaries (already correct)
+    - Packed structs by default (already correct)
+    - No optimizer to reorder volatile accesses (already correct)
+    - Direct syscall/memory control (already correct)
+
+The simplicity of the Cyrius codegen model (stack frames, GPRs only,
+no optimization passes) means it is accidentally kernel-ready for the
+properties that trip up GCC/Clang users.
+'''

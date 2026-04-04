@@ -1,0 +1,412 @@
+# Stack Frame Management for x86_64 Compiler Code Generation
+# Focus: no-libc compilers, deferred patching, common bugs
+
+[[entries]]
+name = "sysv_stack_frame_layout"
+description = "System V AMD64 ABI stack frame layout from caller through callee"
+category = "code_generation"
+content = '''
+x86_64 System V ABI stack frame, from high to low addresses:
+
+    [rbp+24]  arg 8 (if > 6 args, caller pushed right-to-left)
+    [rbp+16]  arg 7
+    [rbp+8]   return address (pushed by CALL)
+    [rbp+0]   saved rbp (pushed by callee prologue)
+    [rbp-8]   local 0
+    [rbp-16]  local 1
+    [rbp-N]   local N/8 - 1
+    [rsp]     bottom of frame (rsp = rbp - frame_size)
+
+The prologue establishes this:
+    push rbp          ; 1 byte  (0x55)
+    mov rbp, rsp      ; 3 bytes (0x48 0x89 0xE5)
+    sub rsp, imm32    ; 7 bytes (0x48 0x81 0xEC imm32)
+
+The epilogue tears it down:
+    leave             ; 1 byte  (0xC9) — equivalent to mov rsp, rbp; pop rbp
+    ret               ; 1 byte  (0xC3)
+
+Total prologue: 11 bytes. Total epilogue: 2 bytes.
+
+Key invariants:
+- RSP must be 16-byte aligned before any CALL instruction
+- After CALL pushes 8-byte return address, RSP is 16n+8 inside callee
+- After push rbp, RSP is 16n+0 (aligned again)
+- frame_size in sub rsp must be a multiple of 16 to maintain alignment
+- Locals are accessed as [rbp - offset], stack args as [rbp + offset]
+'''
+
+[[entries]]
+name = "deferred_frame_size_patching"
+description = "How to correctly patch sub rsp,imm32 after function body is parsed"
+category = "code_generation"
+content = '''
+In a single-pass compiler, the stack frame size is unknown when the prologue
+is emitted — locals are discovered during body parsing. The solution:
+
+1. Emit prologue with placeholder:
+   push rbp                    ; 0x55
+   mov rbp, rsp                ; 0x48 0x89 0xE5
+   sub rsp, 0x00000000         ; 0x48 0x81 0xEC 0x00 0x00 0x00 0x00
+
+2. Record the code buffer offset where the imm32 starts:
+   patch_offset = code_pointer  (AFTER emitting the 3-byte opcode 48 81 EC)
+   Then emit 4 zero bytes as placeholder.
+
+3. After parsing the entire function body, compute frame size:
+   frame_size = (local_count * 8 + 15) & ~15   ; align to 16
+
+4. Patch the imm32 at the recorded offset:
+   code_buffer[patch_offset .. patch_offset+4] = frame_size as u32 LE
+
+THE BUG: patch address calculation.
+
+The patch writes to: base + patch_offset
+where base is the code buffer's base address in memory.
+
+Common failure modes:
+(a) patch_offset is the ABSOLUTE code pointer, but you add it to base again
+    → writes to base + base + offset → wrong address → sub rsp, 0 unchanged
+(b) patch_offset is relative to code buffer start, but you use the wrong base
+    → e.g., using output buffer base (0x6A000) instead of code buffer (0x59000)
+(c) code_pointer was read BEFORE emitting the 3-byte opcode, not after
+    → patch lands on the opcode bytes instead of the imm32 bytes
+    → produces garbage instructions instead of sub rsp, N
+
+To verify correctness:
+- After patching, hexdump the prologue bytes at the function start
+- Expected: 55 48 89 E5 48 81 EC XX XX XX XX (where XX XX XX XX = LE frame_size)
+- If you see 48 81 EC 00 00 00 00, the patch missed its target
+
+In Cyrius cc.cyr, the pattern is:
+    var frame_patch = ESUBRSP(S);     # returns CP AFTER the 3-byte opcode
+    ... parse body ...
+    var pa = S + 0x59000 + frame_patch;  # code buffer base + relative offset
+    S64(pa, (L64(pa) >> 32 << 32) | (fsz & 0xFFFFFFFF));  # patch low 32 bits
+
+The S64 read-modify-write preserves the upper 32 bits of the qword at pa,
+replacing only the lower 32 bits with the frame size. This is necessary because
+code emission may have written adjacent bytes in the same 8-byte-aligned qword.
+'''
+
+[[entries]]
+name = "frame_size_alignment_rules"
+description = "Stack frame size alignment requirements and common mistakes"
+category = "code_generation"
+content = '''
+The frame size (N in `sub rsp, N`) must satisfy:
+
+1. MUST be a multiple of 16.
+   After push rbp, RSP is 16-aligned. sub rsp, N keeps it 16-aligned
+   only if N % 16 == 0. If N is not aligned, every CALL inside the function
+   has misaligned RSP, causing SSE segfaults in callees.
+
+2. Correct formula:
+   frame_size = (local_count * slot_size + 15) & -16
+   For 8-byte slots: (local_count * 8 + 15) & -16
+   Examples: 0 locals → 0, 1 local → 16, 2 locals → 16, 3 locals → 32
+
+3. Zero locals is valid.
+   sub rsp, 0 is a legal no-op (7 wasted bytes). Some compilers omit the
+   sub rsp entirely for leaf functions with no locals, saving 7 bytes.
+   But for a bootstrap compiler, always emitting it simplifies patching.
+
+4. Frame size overflow.
+   imm32 gives a 4GB frame. For a bootstrap compiler this is always enough.
+   But if local_count comes from untrusted input, validate it.
+
+5. The -16 trick.
+   -16 in two's complement is 0xFFFFFFFFFFFFFFF0. AND with this clears the
+   low 4 bits, rounding down to 16. Adding 15 first makes it round UP.
+   In Cyrius: (flc * 8 + 15) & (0 - 16) — uses (0 - 16) because the
+   language may not have unary negation or hex for negative constants.
+'''
+
+[[entries]]
+name = "read_modify_write_patching"
+description = "Why code buffer patches need read-modify-write for imm32 in a qword"
+category = "code_generation"
+content = '''
+x86_64 imm32 fields are 4 bytes, but memory stores are often 8 bytes (qword).
+When patching a 4-byte imm32 inside a code buffer, you must not destroy the
+adjacent 4 bytes in the same qword.
+
+The pattern:
+    old = load64(patch_addr)          # read 8 bytes
+    old = (old >> 32) << 32           # keep upper 32 bits, zero lower
+    new_val = old | (imm32 & 0xFFFFFFFF)  # insert new lower 32 bits
+    store64(patch_addr, new_val)      # write back
+
+Why this matters:
+- Code emission writes byte-by-byte (store8), so the buffer has valid
+  instruction bytes adjacent to the patch target
+- A naive store32 would work on architectures with 4-byte stores, but if
+  your compiler only has store64 (like Cyrius stage1f), you MUST preserve
+  the upper bytes
+
+Alternative: if you have a store32 primitive, use it directly:
+    store32(patch_addr, imm32)
+This is simpler and less error-prone. Add store32 as a compiler primitive
+if you don't have it.
+
+Common bug: forgetting the mask on the new value.
+    old | frame_size   — if frame_size has bits above 31, they leak into
+    the upper 32 bits, corrupting the next instruction.
+    Fix: old | (frame_size & 0xFFFFFFFF)
+'''
+
+[[entries]]
+name = "local_variable_stack_allocation"
+description = "How simple compilers allocate locals on the stack without register allocation"
+category = "code_generation"
+content = '''
+The simplest local variable scheme: every local gets a fixed stack slot.
+
+Allocation:
+    Each var declaration increments local_count.
+    Variable N lives at [rbp - (N+1)*8].
+
+Access patterns:
+    Read:  mov rax, [rbp - offset]
+    Write: mov [rbp - offset], rax
+
+For a function with parameters + locals:
+    Parameters 0-5 arrive in rdi, rsi, rdx, rcx, r8, r9.
+    The prologue stores them into stack slots (spill to home locations):
+        mov [rbp-8],  rdi    ; param 0
+        mov [rbp-16], rsi    ; param 1
+        ...
+    Then local variables continue from the next slot:
+        var x = 42;  → slot index = param_count, offset = (param_count+1)*8
+
+    Parameters 7+ arrive on the stack at [rbp+16], [rbp+24], etc.
+    To unify access, copy them to local slots during prologue:
+        mov rax, [rbp+16]; mov [rbp - slot*8], rax
+
+Benefits of this approach:
+- Every variable access is a single MOV instruction
+- No register allocation needed
+- Trivially correct — no aliasing, no clobbering
+- Frame size is deterministic: local_count * 8, aligned to 16
+
+Cost:
+- Every operation goes through memory (2-5x slower than register-allocated)
+- Fine for a bootstrap compiler; optimize later
+
+Function-scoped locals:
+    Save local_count on function entry. Restore on function exit.
+    This way, locals from the outer scope are not visible and their
+    stack slots can be reused by the next function.
+    In Cyrius: SSVC(S, GVCNT(S)) saves, SVCNT(S, GSVC(S)) restores.
+'''
+
+[[entries]]
+name = "red_zone_and_leaf_functions"
+description = "Red zone hazards in no-libc compilers and when sub rsp can be skipped"
+category = "code_generation"
+content = '''
+The System V AMD64 ABI reserves a 128-byte "red zone" below RSP that leaf
+functions can use without adjusting RSP. This means:
+
+    A function that does NOT call other functions can use [rsp-1] through
+    [rsp-128] freely — interrupts and signal handlers will not clobber it.
+
+Implications for compiler codegen:
+
+1. Leaf function optimization: if a function has no CALL instructions and
+   needs <= 128 bytes of locals (16 qwords), skip the sub rsp entirely.
+   Access locals as [rsp-8], [rsp-16], etc. Saves 7 bytes and the SUB cycle.
+
+2. DO NOT use the red zone if you CALL anything. A CALL pushes 8 bytes
+   onto the stack at RSP, overwriting whatever was in the red zone.
+
+3. Kernel code has no red zone. Interrupts can fire at any instruction,
+   and the CPU pushes an interrupt frame starting at RSP. Compile kernel
+   code with the equivalent of -mno-red-zone — always use sub rsp.
+
+4. For a bootstrap compiler: ignore the red zone. Always emit sub rsp.
+   The 7-byte cost is negligible, and it eliminates a class of bugs.
+   Red zone optimization is a later-stage improvement.
+
+5. Signal handlers: even in user-space, if you install signal handlers,
+   the kernel respects the red zone (subtracts 128 from RSP before pushing
+   the signal frame). But nested signals can still be problematic on some
+   older kernels.
+'''
+
+[[entries]]
+name = "callee_saved_register_bugs"
+description = "Common bugs with callee-saved registers in function prologues"
+category = "code_generation"
+content = '''
+System V AMD64 callee-saved registers: RBX, RBP, R12, R13, R14, R15.
+If a function uses any of these, it must save them in the prologue and
+restore in the epilogue.
+
+For a bootstrap compiler using RBX/R12-R15 as compiler state registers
+(token index, heap base, code pointer, etc.), every compiled function
+must save and restore them if the function body could modify them.
+
+Pattern (full save):
+    push rbp
+    mov rbp, rsp
+    push rbx          ; +8 bytes on stack
+    push r12          ; +8 bytes
+    push r13          ; +8 bytes
+    push r14          ; +8 bytes
+    push r15          ; +8 bytes
+    sub rsp, frame_size
+
+But now RSP alignment changes. With 5 extra pushes (40 bytes) + push rbp
+(8 bytes) + return address (8 bytes) = 56 bytes. 56 mod 16 = 8.
+So frame_size must be 8 mod 16 to realign. General rule:
+    total_pushes = 1 (rbp) + callee_saved_count
+    if total_pushes is odd: frame_size must be multiple of 16
+    if total_pushes is even: frame_size must be 8 + multiple of 16
+
+Simplification for bootstrap compilers:
+If the compiler itself manages these registers (not the compiled code),
+and compiled functions only use rax/rcx/rdx/rsi/rdi/r8-r11 plus the
+stack, then no callee-saved saves are needed in compiled functions.
+Cyrius stage1f uses R11 (token index), R13 (code pointer), R14 (var count),
+R15 (heap base) as compiler state — these are callee-saved, preserved
+across the compiler's own internal calls, not across compiled user functions.
+
+Common bugs:
+- Pushing callee-saved regs AFTER sub rsp → they go into the frame, not
+  above it, and locals overlap with saved registers
+- Restoring in wrong order (must be reverse of push order)
+- Forgetting to adjust frame_size for alignment after adding pushes
+'''
+
+[[entries]]
+name = "frame_pointer_walking"
+description = "Using RBP chain for debugging and stack unwinding in no-libc binaries"
+category = "code_generation"
+content = '''
+When every function uses the standard prologue (push rbp; mov rbp, rsp),
+the saved RBP values form a linked list up the call stack:
+
+    current RBP → [saved RBP of caller] → [saved RBP of caller's caller] → ...
+
+At any point:
+    [rbp]     = caller's saved RBP
+    [rbp+8]   = return address (where to resume in caller)
+    [[rbp]]   = grandcaller's saved RBP
+    [[rbp]+8] = caller's return address
+
+To walk the stack:
+    frame = rbp
+    while frame != 0:
+        return_addr = [frame + 8]
+        print(return_addr)         ; convert to function name via symbol table
+        frame = [frame]            ; follow chain
+
+This works for debugging no-libc binaries where you cannot use GDB's
+DWARF unwinder. Write a simple panic handler that walks the RBP chain
+and prints return addresses. Map addresses to functions by comparing
+against the function address table (fn_addrs[] in the compiler).
+
+For a Cyrius-compiled binary:
+- Functions start at known offsets (stored in fn_addrs at 0x8CA00 + idx*8)
+- Walk the RBP chain, for each return address find the largest fn_addr <= it
+- Print function index and offset within function
+
+Why keep frame pointers:
+- Omit-frame-pointer (-fomit-frame-pointer) saves 2 instructions per function
+  but makes debugging impossible without DWARF unwind info
+- For a bootstrap compiler: always use frame pointers, the cost is trivial
+- When the compiler is stable, frame pointer omission is a size optimization
+'''
+
+[[entries]]
+name = "diagnosing_sub_rsp_zero"
+description = "Debugging why sub rsp,imm32 patches produce 0 instead of the correct frame size"
+category = "code_generation"
+content = '''
+Symptom: disassembly shows `sub rsp, 0` in every function prologue.
+Locals are accessed at [rbp-8], [rbp-16] etc. but RSP was never moved,
+so these addresses overlap with the caller's stack frame. Writes to
+locals corrupt the caller's data. Often manifests as:
+- Return address corruption → segfault on RET
+- Wrong values in caller's variables after function returns
+- Works for leaf functions (nothing below to corrupt) but breaks with
+  call chains deeper than 2
+
+Diagnosis checklist:
+
+1. Is patch_offset correct?
+   Print patch_offset immediately after ESUBRSP returns.
+   It should equal the code pointer AFTER the 3-byte opcode (48 81 EC),
+   pointing at the first of the 4 imm32 bytes.
+   If it points at the opcode itself (3 bytes too early), the patch
+   overwrites the opcode and the imm32 stays zero.
+
+2. Is the patch address calculation correct?
+   patch_addr = code_buffer_base + patch_offset
+   In Cyrius: S + 0x59000 + frame_patch (cc.cyr) or S + 0x10000 + frame_patch
+   If using the wrong buffer base, the patch writes to random heap memory.
+
+3. Is the frame size actually non-zero?
+   Print local_count before computing frame_size.
+   If local_count is 0 (params not counted, or counter reset too early),
+   frame_size computes to 0 legitimately.
+   In Cyrius: flc = GFLC(S) must include both params AND locals.
+
+4. Is the read-modify-write correct?
+   S64(pa, (L64(pa) >> 32 << 32) | (fsz & 0xFFFFFFFF))
+   If L64(pa) returns garbage (wrong address), the upper bits are wrong,
+   but the lower 32 bits should still be fsz. If the STORE goes to a
+   different address than the LOAD, you patch one location and read another.
+
+5. Is the code buffer being relocated after patching?
+   If FIXUP or EMITELF copies from a different buffer than where you
+   patched, the patch is lost. Verify the copy source matches the
+   patch target buffer.
+
+Quick hexdump test:
+   After patching, read 11 bytes at fn_start in the code buffer:
+   Expected: 55 48 89 E5 48 81 EC [sz0] [sz1] [sz2] [sz3]
+   For frame_size=16: 55 48 89 E5 48 81 EC 10 00 00 00
+   For frame_size=0:  55 48 89 E5 48 81 EC 00 00 00 00  ← BUG
+'''
+
+[[entries]]
+name = "stack_canaries_without_libc"
+description = "Lightweight stack protection for no-libc binaries"
+category = "code_generation"
+content = '''
+Stack canaries detect buffer overflows that corrupt the return address.
+Without libc, you implement them yourself.
+
+Simple scheme:
+1. At program start, read 8 random bytes from /dev/urandom (or use a
+   fixed magic value like 0xDEADBEEFCAFEBABE for deterministic testing)
+2. Store the canary in a global variable
+
+Function prologue (after sub rsp):
+    mov rax, [canary_global]
+    mov [rbp - frame_size], rax    ; canary at bottom of frame
+
+Function epilogue (before leave):
+    mov rax, [rbp - frame_size]
+    cmp rax, [canary_global]
+    jne stack_smashed              ; jump to abort handler
+
+stack_smashed:
+    mov rax, 60                    ; exit
+    mov rdi, 137                   ; 128 + SIGABRT
+    syscall
+
+Cost: 2 MOVs + 1 CMP per function. Negligible for debug builds.
+
+For a bootstrap compiler: not needed until you handle untrusted input
+(strings, file parsing). Add it as an optional -fstack-protector flag.
+The canary slot adds 8 bytes to frame_size (adjust alignment accordingly).
+
+Alternative: shadow stack. Mirror return addresses in a separate memory
+region. On RET, compare the actual return address with the shadow.
+More robust than canaries but requires a dedicated register or TLS
+to track the shadow stack pointer. Linux CET (Control-flow Enforcement
+Technology) implements this in hardware on newer CPUs.
+'''

@@ -400,3 +400,33 @@ good_example = "Copy chars to temp buffer, append store8(buf + len, 0), pass buf
 title = "Full language independence requires only a 29KB binary + shell"
 explanation = "A complete self-hosting toolchain — from committed binary to working compiler and assembler — requires only a 29KB ELF binary and a shell script. No Rust, no LLVM, no Python, no cmake, no package manager. The bootstrap produces a compiler that compiles programs with structs, multi-width memory access, file includes, functions, control flow, bitwise operations, syscalls, strings, and arrays — and that compiler compiles itself. The entire toolchain fits on a floppy disk."
 evidence = "Cyrius bootstrap: bootstrap/asm (29016 bytes) + bootstrap.sh. Produces build/stage1f (12344 bytes) and build/asm (29016 bytes). cc2 (7 modules, 1960 lines) compiles to 58656 bytes, self-hosts cc2==cc3. Compiled 6 real Linux programs: true (168B), false (168B), echo (240B), cat (440B), tee (488B), head (592B) — all under 1KB, 108-233x smaller than GNU equivalents. 81 total tests across compiler, assembler, and programs."
+
+[[gotchas]]
+title = "Codebuf offset split causes silent frame size corruption"
+explanation = "When multiple source modules reference a shared buffer (like codebuf), ALL modules must use the same offset. A split where emit.cyr writes to 0x10000 but parse.cyr patches at 0x59000 causes silent corruption — frame size patches go to dead memory, producing `sub rsp, 0` which works for simple programs but causes stack corruption in complex ones (like compilers). Always grep for buffer offset references across ALL modules after changing any offset."
+bad_example = "emit.cyr: codebuf at S + 0x10000; parse.cyr: patch frame size at S + 0x59000 — patches go to wrong memory, sub rsp gets 0"
+good_example = "grep -n 'codebuf\\|0x10000\\|0x59000' *.cyr — verify every module agrees on the same offset"
+
+[[gotchas]]
+title = "Two-step bootstrap needed when compiler source exceeds bridge capacity"
+explanation = "When the compiler source grows beyond the bridge compiler's capacity (token arrays, codebuf, function table), a two-step bootstrap is needed: (1) build an intermediate with ONLY the capacity expansion, (2) use the intermediate to compile the full feature set. The old compiler can compile the capacity expansion because it doesn't add much code, but can't compile the full feature because the old limits are exceeded."
+bad_example = "Add 30 new functions AND bump tables in one step — bridge compiler overflows compiling the combined source"
+good_example = "Step 1: compile capacity-only patch with old bridge → intermediate. Step 2: compile full source with intermediate → new compiler."
+
+[[gotchas]]
+title = "Frame size patch writing to wrong address produces invisible sub rsp, 0"
+explanation = "If function frame size patches write to the wrong memory address (codebuf split), the `sub rsp, N` immediate stays as zeros from the placeholder. `sub rsp, 0` is a no-op — local variables at [rbp-8], [rbp-16] etc still appear to work because they write to stack space below RBP. This makes the bug invisible in simple test programs but causes stack corruption with deep call stacks or many locals."
+bad_example = "Compiler self-compiles successfully, output passes 53 tests, but the output compiler crashes when compiling complex programs"
+good_example = "objdump -d cc2 | grep 'sub.*rsp' — verify every function's frame size is non-zero (unless truly zero locals)"
+
+[[gotchas]]
+title = "Bootstrap chain repair requires going back to last known-good link"
+explanation = "When a committed binary (build/cc2) can't be reproduced from its source, the bootstrap chain is broken. Fix requires going back to the last known-good link: stage1f → cc.cyr (monolithic, compilable by stage1f) → cc2 (modular). cc.cyr must support all features cc2's source uses (token types, builtins, etc)."
+bad_example = "Try to fix cc2 by editing cc2's source and recompiling with the broken cc2 — garbage in, garbage out"
+good_example = "Rebuild from stage1f: stage1f compiles cc.cyr → cc (known good). cc compiles modular source → cc2. cc2 compiles itself → cc3. Verify cc2==cc3."
+
+[[gotchas]]
+title = "Logical && and || short-circuit codegen requires extra patch storage"
+explanation = "Short-circuit && uses extra patches: first condition's false-jump stored in an array, second condition returns the main patch. All patches point to the same false target. For ||: first condition's non-inverted true-jump goes to body start (patched inline), second condition's false-jump returned to caller. Chaining (a && b && c) uses recursion. Extra patches stored at a heap offset, caller calls PATCHXP after EPATCH."
+bad_example = "&& returns only ONE patch — the first condition's false-jump is never patched, always jumps to offset 0"
+good_example = "EAND stores first condition's patch at S + XPATCH_OFF, returns second's patch. Caller: EPATCH(patch); PATCHXP(S) patches all stored extras to same target."
