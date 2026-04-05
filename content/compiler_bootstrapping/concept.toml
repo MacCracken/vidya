@@ -478,3 +478,21 @@ title = "For loop var declarations leak into function scope"
 explanation = "In compilers without block scoping, `for (var i = 0; ...)` declares `i` in the enclosing function scope. Multiple for loops in the same function with `var i` cause duplicate variable errors. Users must use different names (a, b, c or i, j, k) for nested/sequential for loops in the same function. This is a known limitation — proper block scoping is a future enhancement."
 bad_example = "fn process() { for (var i = 0; i < 10; i = i + 1) { ... } for (var i = 0; i < 5; i = i + 1) { ... } } — duplicate variable 'i' error on second loop"
 good_example = "fn process() { for (var i = 0; i < 10; i = i + 1) { ... } for (var j = 0; j < 5; j = j + 1) { ... } } — different names, no collision"
+
+[[gotchas]]
+title = "String literal null termination in ELF data section"
+explanation = "String literals stored in the ELF data section must be null-terminated. Without null terminators, adjacent strings merge — strlen reads across boundaries, producing wrong lengths that increase with each subsequent literal. The fix is one line: store a 0 byte after each string in the lexer and increment spos, but DON'T count the null in slen (which is used for syscall output length). Symptom: strlen returns correct value for one string but wrong for multiple strings in the same program."
+bad_example = "Lexer stores 'hello' at spos, advances spos by 5, then stores 'world' at spos — strlen('hello') returns 10 because no null byte separates them"
+good_example = "Lexer stores 'hello' at spos, stores 0 at spos+5, advances spos by 6. slen = 5 (excludes null). Next string starts cleanly at new spos."
+
+[[gotchas]]
+title = "Exit code truncation modulo 256"
+explanation = "Linux exit codes are modulo 256. Testing arithmetic results via exit codes silently wraps values > 255 (e.g., 500 becomes 244, 555 becomes 43). This masquerades as a codegen bug. Always use print_num + explicit syscall(60, 0) for values that might exceed 255, or test with values under 256."
+bad_example = "fn main() { return 500; } — test expects exit code 500, gets 244, developer wastes hours debugging 'wrong' codegen"
+good_example = "fn main() { print_num(500); return 0; } — prints '500' to stdout, exits cleanly, test checks stdout not exit code"
+
+[[gotchas]]
+title = "Var inside loop body allocates a new slot each iteration"
+explanation = "In compilers without block scoping, `var x = expr;` inside a while/for body allocates a NEW stack slot each iteration. After N iterations, N slots are consumed, eventually overflowing the stack frame. The fix: declare variables OUTSIDE the loop body and assign inside. For for-loop init vars (the `var i` in `for (var i = ...)`), the token replay mechanism handles this correctly — the var is declared once and the step only reassigns."
+bad_example = "while (i < 1000) { var tmp = compute(i); use(tmp); i = i + 1; } — allocates 1000 stack slots for tmp, one per iteration, overflows stack frame"
+good_example = "var tmp = 0; while (i < 1000) { tmp = compute(i); use(tmp); i = i + 1; } — single slot for tmp, reassigned each iteration"
