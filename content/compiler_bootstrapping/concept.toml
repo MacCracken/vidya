@@ -616,3 +616,27 @@ title = "aarch64_no_push_pop"
 explanation = "AArch64 has no push/pop instructions. Use STR with pre-decrement SP or STP for pairs. STR x0, [sp, #-16]! = push (pre-decrement SP by 16, store x0). LDR x0, [sp], #16 = pop (load x0, post-increment SP by 16). The 16-byte SP alignment requirement means a single register push wastes 8 bytes unless paired with STP. STP x0, x1, [sp, #-16]! pushes two registers in one instruction with no wasted space. A compiler backend that naively translates x86 push/pop to single STR/LDR will produce binaries 2x larger in prologue/epilogue code. Always pair saves: if you need to save an odd number of registers, pair the last one with XZR (zero register) or X29/X30."
 bad_example = "Push 3 regs: STR x0,[sp,#-16]!; STR x1,[sp,#-16]!; STR x2,[sp,#-16]! — 48 bytes of stack for 24 bytes of data, 3 instructions"
 good_example = "Push 3 regs: STP x0,x1,[sp,#-16]!; STP x2,x30,[sp,#-16]! — 32 bytes of stack, 2 instructions, x30 save is free"
+
+[[gotchas]]
+title = "switch_break_vs_flag"
+explanation = "The break keyword inside a switch case body can interact with the switch's case-skip jumps in a self-hosted compiler. When the compiler's own code uses break inside a while loop that terminates case body parsing, the generated break jump may conflict with the switch's conditional jumps. Use a flag variable (var cgo = 1; while (cgo == 1) { if (token == CASE) { cgo = 0; } else { PARSE_STMT; } }) instead of while/break for case body termination."
+bad_example = "while (PEEKT != CASE) { if (PEEKT == DEFAULT) { break; } PARSE_STMT; } — break may conflict with switch jumps"
+good_example = "var cgo = 1; while (cgo == 1) { if (PEEKT == CASE) { cgo = 0; } else { if (PEEKT == DEFAULT) { cgo = 0; } else { PARSE_STMT; } } }"
+
+[[gotchas]]
+title = "enum_init_after_jmp"
+explanation = "Enum variant values must be emitted AFTER the jmp-over-fn-bodies, not during pass-2 function parsing. Code emitted during pass 2 goes into the fn-body zone that gets jumped over and never executes. Solution: scan for ENUM tokens after the jmp patch and emit init code there (EMOVI + EVSTORE for each variant), alongside EMIT_GVAR_INITS."
+bad_example = "Pass 2: PARSE_ENUM_DEF(S, 1) emits init code in fn-body zone — jumped over, enums stay 0"
+good_example = "After jmp patch: scan tokens for ENUM (60), call PARSE_ENUM_DEF(S, 1) to emit init code in main section"
+
+[[gotchas]]
+title = "function_pointer_fixup_type3"
+explanation = "To support &fn_name (taking a function's address), add fixup type 3 for absolute function addresses. Type 2 patches relative call offsets (rel32 for CALL). Type 3 patches absolute addresses (imm64 for MOV) by computing entry_point + fn_code_offset. In PARSE_FACTOR, the &-handler checks FINDFN before FINDVAR — if the name matches a function, emit mov rax, <placeholder> with a type-3 fixup. In FIXUP, type 3: S64(codebuf + offset, entry + fn_offsets[idx])."
+bad_example = "Only type-2 fixups: can call functions but can't get their address"
+good_example = "Type 3 fixup: &add → mov rax, 0x400XXX (absolute address of add function)"
+
+[[gotchas]]
+title = "block_scoping_token_replay"
+explanation = "Block scoping (scope depth tracking) interacts badly with for-loop token replay. The step expression (i = i + 1) is replayed after the body. If the for-loop init var (var i) was declared in a for-scope that incremented depth, and the replay happens after the body's PARSE_PROG decremented depth, FINDLOCAL may not find i at the correct depth. Solutions: (1) pin for-init vars to the outer scope, (2) don't decrement depth until after step replay, (3) exempt step replay from depth checks."
+bad_example = "PARSE_FOR opens scope, PARSE_PROG opens/closes inner scope, step replay can't find i — returns 0"
+good_example = "Open for-scope BEFORE init, close AFTER step replay (not after body), or store for-init vars at outer depth"
