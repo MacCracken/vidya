@@ -1,0 +1,246 @@
+# Cyrius Language Reference for Vidya
+# This is the canonical reference for the Cyrius programming language.
+# Any agent reading this should be able to write Cyrius programs,
+# modify the compiler, build kernels, and port to new architectures.
+
+[[entries]]
+name = "cyrius_overview"
+description = "Cyrius is a sovereign self-hosting systems language. Assembly up."
+category = "compiler_bootstrapping"
+content = '''
+Cyrius is a self-hosting compiler that bootstraps from a 29KB binary seed.
+No Rust, no LLVM, no Python. Just sh + Linux x86_64.
+
+Everything is a 64-bit integer. No floats, no separate types.
+Type annotations (var x: i64 = 42) are documentation only — no enforcement.
+
+The compiler (cc2) is 85KB, 181 functions, 7 modules. It compiles itself
+byte-identical in 10ms. The AGNOS kernel is written entirely in Cyrius.
+
+Build: sh bootstrap/bootstrap.sh (40ms)
+Compile: echo 'var x = 42;' | ./build/cc2 > prog && chmod +x prog
+Test: sh stage1/test_cc.sh ./build/cc2 ./build/stage1f
+
+Source: stage1/cc2.cyr (entry) + stage1/cc/*.cyr (modules)
+'''
+
+[[entries]]
+name = "cyrius_syntax"
+description = "Complete Cyrius language syntax reference"
+category = "compiler_bootstrapping"
+content = '''
+VARIABLES:
+    var x = 42;            # scalar (8 bytes)
+    var x: i64 = 42;       # with type annotation (no enforcement)
+    var buf[256];           # array (256 * 8 bytes)
+    x = x + 1;             # reassignment
+
+FUNCTIONS:
+    fn add(a, b) { return a + b; }
+    var r = add(20, 22);
+    # Up to 6 register params, 7+ on stack
+    # Forward calls work (call functions defined later)
+
+CONTROL FLOW:
+    if (x == 1) { ... } elif (x == 2) { ... } else { ... }
+    while (cond) { ... }
+    for (var i = 0; i < 10; i = i + 1) { ... }
+    break;    # exit loop
+    continue; # skip to next iteration
+
+OPERATORS:
+    + - * / %              # arithmetic
+    == != < > <= >=        # comparison
+    & | ^ ~ << >>          # bitwise
+    && ||                  # logical (short-circuit, chainable)
+
+MEMORY:
+    store8(&buf, 65);  load8(&buf);     # byte
+    store16/32/64      load16/32/64     # 16/32/64-bit
+
+POINTERS:
+    var p = &x;        # address-of
+    var v = *p;        # dereference
+    *p = 99;           # write through pointer
+    var p: *i64 = &buf; *(p + 1);  # typed (scales by element size)
+
+STRUCTS:
+    struct Point { x; y; }
+    var p = Point { 10, 20 };
+    p.x = 42;
+    struct Rect { tl: Point; br: Point; }  # nested
+    var r = Rect { 0, 0, 10, 5 };
+    r.br.x;  # chained dot access
+
+STRINGS:
+    "hello\n"  # null-terminated, escapes: \n \t \0 \\ \"
+    syscall(1, 1, "hello", 5);
+
+SYSCALLS:
+    syscall(1, 1, buf, len);   # write
+    syscall(0, 0, buf, len);   # read
+    syscall(60, code);         # exit
+
+INCLUDES:
+    include "stage1/lib/string.cyr"  # textual inclusion
+
+INLINE ASM:
+    asm { 0x90; }              # raw bytes
+    asm { cli; sti; hlt; }     # mnemonics
+    asm { mov cr3, rax; }      # privileged
+    asm { lgdt [rax]; }        # descriptor tables
+
+KERNEL MODE:
+    kernel;                    # emit bare-metal multiboot1 ELF
+'''
+
+[[entries]]
+name = "cyrius_compiler_architecture"
+description = "How the cc2 compiler is structured: modules, passes, heap layout"
+category = "compiler_bootstrapping"
+content = '''
+MODULES (included by cc2.cyr):
+    util.cyr   — state accessors (GCP, GTI, GVCNT...), helpers (PRNUM, ERR)
+    emit.cyr   — x86_64 instruction emission (EB, EMOVI, EPUSHR, EADDR...)
+    jump.cyr   — conditional/unconditional jumps (EJCC, EJMP, EPATCH)
+    lex.cyr    — tokenizer (ADDTOK, LEXNUM, LEXID, LEX, PREPROCESS)
+    parse.cyr  — parser + codegen (PARSE_EXPR, PARSE_STMT, PARSE_FN_DEF...)
+    fixup.cyr  — address fixup + ELF emission (FIXUP, EMITELF)
+
+COMPILATION FLOW:
+    1. Read stdin into input buffer (131072 bytes at S+0)
+    2. PREPROCESS: expand include directives
+    3. LEX: tokenize into tok_types/tok_values arrays (32768 slots)
+    4. Pass 1: scan struct/fn/var declarations (register names, skip fn bodies)
+    5. Pass 2: parse fn bodies (all globals already registered)
+    6. Emit jmp over fn bodies → parse fn defs → patch jmp
+    7. EMIT_GVAR_INITS: replay deferred global var initializations
+    8. PARSE_PROG: parse main code statements
+    9. FIXUP: patch variable/string/function addresses
+    10. EMITELF: write ELF binary to stdout
+
+HEAP LAYOUT (S = brk base):
+    0x00000  input_buf [131072]
+    0x20000  codebuf   [196608]
+    0x50000  tok_names [32768]
+    0x58000  var_noffs/var_sizes
+    0x69000  str_data [4096]
+    0x6A000  output_buf [131072]
+    0x8A000  fixup_tbl [8192]
+    0x8C000  compiler state (BL, CP, VCNT, TI, NPOS...)
+    0x8C200  function tables (names, offsets, params)
+    0x8DE30  struct tables
+    0xA2000  tok_types [262144]
+    0xE2000  tok_values [262144]
+
+CODEGEN MODEL:
+    - Stack-based expression evaluation: push lhs, eval rhs, pop lhs, operate
+    - rax = result register, rcx = scratch
+    - Variables at fixed addresses in data section (EVLOAD/EVSTORE + fixup)
+    - Function calls via rel32 fixup (type 2)
+    - String addresses via abs64 fixup (type 1)
+'''
+
+[[entries]]
+name = "cyrius_development_loop"
+description = "The proven development process for adding features to Cyrius"
+category = "compiler_bootstrapping"
+content = '''
+1. RESEARCH  — Check vidya for existing patterns. If covered, skip to 3.
+2. VIDYA     — Document patterns, gotchas, codegen BEFORE coding.
+3. BUILD     — ONE change at a time. Before compiling, check:
+               - Duplicate var scan (no var x in two branches of same fn)
+               - Brace balance
+               - Bridge compiler supports syntax used in source
+               - Heap offset map (no collisions)
+4. TEST      — After EACH change:
+               - Basic: echo 'var x = 42;' | ./build/cc2 > t && chmod +x t && ./t
+               - Feature-specific test
+               - Self-hosting: cc2==cc3 byte-identical
+               - Full suite only after basic passes
+5. IF BROKEN — Revert to last known good. Apply ONE change. Test. Repeat.
+               If 3 attempts fail: defer, document root cause, move on.
+6. AUDIT     — Full chain: bootstrap, all suites, self-hosting.
+7. VIDYA+DOCS — Document findings. Update changelog, roadmap, benchmarks.
+8. ALIGN     — After major events: sync ALL docs to current state.
+               README, CLAUDE.md, roadmap, cyrius.md, benchmarks, CHANGELOG.
+
+KEY LESSONS:
+- Programs are the best compiler fuzzers — build real things early
+- Bridge compiler (build/cc) determines what syntax source files can use
+- Test after EVERY change, not after the feature is "done"
+- build/cc2 MUST be committed to git (not gitignored)
+- Capacity expansions (codebuf, tokens, input) must be separate commits
+'''
+
+[[entries]]
+name = "cyrius_known_limitations"
+description = "Current limitations to avoid when writing Cyrius code"
+category = "compiler_bootstrapping"
+content = '''
+1. NO BLOCK SCOPING: var inside while/for body allocates new stack slot
+   per iteration. Declare variables OUTSIDE loops.
+
+2. NO MIXED &&/||: Cannot write (a && b || c). Use nested ifs instead.
+
+3. FOR LOOP STEP: Must be simple assignment (i = i + 1), not complex expr.
+
+4. EXIT CODE TRUNCATION: Linux exit codes wrap at 256. Use print_num for
+   values > 255.
+
+5. VAR IN LOOP: Multiple for loops in same function cannot reuse var names.
+   Use different names: i, j, k.
+
+6. STRING LITERAL COMPARISON: streq("abc", "xyz") works via null-terminated
+   comparison. strlen works on all string literals.
+
+7. FUNCTION ADDRESS: Cannot take &fn_name. Functions are called by name
+   only. For ISR handlers, build bytecode in data buffers.
+
+8. NO NEGATIVE LITERALS: Use (0 - N) instead of -N.
+
+9. INLINE ASM REGISTER STATE: asm blocks operate on the register state
+   at that point. The compiler may have values in rax/rcx. Use push/pop
+   to save state if needed.
+'''
+
+[[entries]]
+name = "cyrius_porting_guide"
+description = "How to port Cyrius to a new architecture (aarch64 example)"
+category = "compiler_bootstrapping"
+content = '''
+The compiler is factored into arch-independent frontend and arch-specific backend.
+
+FRONTEND (shared, no changes needed):
+    util.cyr  — state accessors
+    lex.cyr   — tokenizer
+    parse.cyr — parser (calls emit/jump functions by name)
+    cc2.cyr   — main loop
+
+BACKEND (per-architecture):
+    emit.cyr  — instruction emission (~50 functions)
+    jump.cyr  — branch/patch (~4 functions)
+    fixup.cyr — address patching + ELF emission (~4 functions)
+
+TO PORT:
+1. Create stage1/arch/ARCH/emit.cyr with same function signatures as x86_64
+2. Create stage1/arch/ARCH/jump.cyr — branch encoding differs per arch
+3. Create stage1/arch/ARCH/fixup.cyr — ELF header + address patching
+4. Create stage1/cc2_ARCH.cyr that includes ARCH backend instead of x86_64
+5. Build cross-compiler: cat cc2_ARCH.cyr | ./build/cc2 > build/cc2_ARCH
+
+KEY MAPPINGS (x86_64 → aarch64 example):
+    EMOVI(imm64)  → MOVZ/MOVK sequence (up to 4 instructions)
+    EPUSHR/EPOPR  → STR/LDR with SP pre/post-index
+    EADDR/ESUBR   → ADD/SUB register-register
+    EIMUL/EIDIV   → MUL/SDIV
+    ELODC/ESTOC   → LDR/STR [x1]
+    ESYSCALL      → SVC #0 (x8=syscall number, x0-x5=args)
+    EJCC(cc)      → B.cond (map x86 cc to ARM condition codes)
+    EJMP/EJMP0    → B imm26
+    FIXUP var     → patch MOVZ/MOVK immediate fields
+    FIXUP fn call → patch BL offset
+
+TESTING:
+    qemu-system-aarch64 for kernel, qemu-aarch64 for userspace (Linux)
+'''

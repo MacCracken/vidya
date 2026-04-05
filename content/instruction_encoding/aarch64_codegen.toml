@@ -1,0 +1,710 @@
+# AArch64 Instruction Encoding for Direct Code Generation
+# Focus: what a self-hosting compiler needs to emit aarch64 machine code
+# Porting reference: x86_64 -> aarch64 for Cyrius compiler
+# Research date: 2026-04-04
+
+[[entries]]
+name = "aarch64_encoding_overview"
+description = "All aarch64 instructions are fixed 32-bit little-endian words — no variable length, no prefixes"
+category = "instruction_encoding"
+content = '''
+Every aarch64 instruction is exactly 4 bytes, stored little-endian. This is the
+single biggest simplification vs x86_64: no REX prefixes, no ModR/M, no SIB,
+no variable-length immediates. Emit 4 bytes per instruction, always.
+
+Top-level decode is bits [28:25] (the "op0" field):
+    1000  Data Processing — Immediate
+    1010  Branches, Exception Generating, System
+    0101  Data Processing — Register
+    0111  Data Processing — SIMD/FP
+    x1x0  Loads and Stores
+
+Register fields are always 5 bits (encoding registers 0-30, plus 31 = ZR or SP):
+    Rd  = bits [4:0]    destination
+    Rn  = bits [9:5]    first source
+    Rm  = bits [20:16]  second source
+    Rt  = bits [4:0]    load/store target (same position as Rd)
+    Rt2 = bits [14:10]  second register for pair ops
+
+Bit 31 (sf) selects 64-bit (1) vs 32-bit (0) for most integer instructions.
+The W-registers (w0-w30) use sf=0, X-registers (x0-x30) use sf=1.
+
+To emit an instruction: OR together the fixed opcode bits with register fields
+shifted to their positions. Example:
+    ADD X0, X1, X2 = 0x8B020020
+    = sf(1) | opc(00) | 01011 | shift(00) | 0 | Rm(00010) | imm6(000000) | Rn(00001) | Rd(00000)
+    = 0x8B020020
+
+Byte emission (little-endian): emit bytes [0x20, 0x00, 0x02, 0x8B]
+
+Key difference from x86_64: instruction size is ALWAYS 4, so pass 1 of a
+two-pass assembler is trivial — multiply instruction count by 4.
+'''
+
+[[entries]]
+name = "aarch64_movz_movk_immediate_loading"
+description = "Load arbitrary 64-bit immediates using MOVZ + up to 3 MOVK instructions"
+category = "instruction_encoding"
+content = '''
+aarch64 cannot load a 64-bit immediate in one instruction (only 32 bits available).
+Instead, use MOVZ to set a 16-bit chunk and zero the rest, then MOVK to patch in
+additional 16-bit chunks without disturbing the others.
+
+MOVZ encoding (sf=1, 64-bit):
+    31    30-29  28-23    22-21  20-5     4-0
+    [sf=1][10]  [100101] [hw]   [imm16]  [Rd]
+
+    hw = shift amount: 00=LSL#0, 01=LSL#16, 10=LSL#32, 11=LSL#48
+    Fixed bits 28-23 = 100101
+
+    MOVZ X0, #0x1234           => sf=1, hw=00, imm16=0x1234, Rd=0
+    Binary: 1_10_100101_00_0001001000110100_00000
+    Hex: 0xD2802468  =>  bytes [0x68, 0x24, 0x80, 0xD2]
+
+MOVK encoding (sf=1, 64-bit):
+    31    30-29  28-23    22-21  20-5     4-0
+    [sf=1][11]  [100101] [hw]   [imm16]  [Rd]
+
+    Only difference from MOVZ: bits 30-29 = 11 instead of 10.
+
+    MOVK X0, #0x5678, LSL#16  => sf=1, hw=01, imm16=0x5678, Rd=0
+    Binary: 1_11_100101_01_0101011001111000_00000
+    Hex: 0xF2AACF00  =>  bytes [0x00, 0xCF, 0xAA, 0xF2]
+
+Loading a full 64-bit value 0xDEADBEEFCAFEBABE into X0:
+    MOVZ X0, #0xBABE            ; 0xD2817D7C0 ... compute per formula
+    MOVK X0, #0xCAFE, LSL #16
+    MOVK X0, #0xBEEF, LSL #32
+    MOVK X0, #0xDEAD, LSL #48
+
+Encoding formula (64-bit MOVZ): 0xD2800000 | (hw << 21) | (imm16 << 5) | Rd
+Encoding formula (64-bit MOVK): 0xF2800000 | (hw << 21) | (imm16 << 5) | Rd
+
+Optimization: skip MOVK for zero chunks. If loading 0x0000000000000042:
+    MOVZ X0, #0x42             ; one instruction, done (upper bits zeroed)
+
+For small values 0-65535: single MOVZ. For values fitting in 12-bit unsigned
+immediate: consider ADD Xd, XZR, #imm (one instruction, no shift needed).
+
+Compiler strategy: emit_load_imm64(reg, value) function that checks how many
+non-zero 16-bit chunks exist and emits the minimum MOVZ+MOVK sequence.
+'''
+
+[[entries]]
+name = "aarch64_add_sub_register"
+description = "ADD and SUB register-register: one opcode bit distinguishes them"
+category = "instruction_encoding"
+content = '''
+ADD (shifted register), 64-bit:
+    31  30  29  28-24   23-22  21   20-16  15-10   9-5   4-0
+    [1] [0] [0] [01011] [shift][0]  [Rm]   [imm6]  [Rn]  [Rd]
+
+SUB (shifted register), 64-bit:
+    31  30  29  28-24   23-22  21   20-16  15-10   9-5   4-0
+    [1] [1] [0] [01011] [shift][0]  [Rm]   [imm6]  [Rn]  [Rd]
+
+The ONLY difference: bit 30 = 0 for ADD, 1 for SUB.
+shift: 00=LSL, 01=LSR, 10=ASR (11 is reserved).
+imm6: shift amount 0-63.
+
+For simple register ops with no shift (the common case), shift=00 and imm6=000000.
+
+Encoding formulas (no shift):
+    ADD Xd, Xn, Xm = 0x8B000000 | (Rm << 16) | (Rn << 5) | Rd
+    SUB Xd, Xn, Xm = 0xCB000000 | (Rm << 16) | (Rn << 5) | Rd
+
+Examples:
+    ADD X0, X1, X2  = 0x8B020020  bytes [0x20, 0x00, 0x02, 0x8B]
+    SUB X0, X1, X2  = 0xCB020020  bytes [0x20, 0x00, 0x02, 0xCB]
+    ADD X0, X0, X1  = 0x8B010000  bytes [0x00, 0x00, 0x01, 0x8B]
+
+ADD (immediate), 64-bit:
+    31  30  29  28-24  23-22  21-10    9-5   4-0
+    [1] [0] [0] [10001][sh]   [imm12]  [Rn]  [Rd]
+
+    sh=0: imm12 as-is. sh=1: imm12 << 12 (for large multiples of 4096).
+
+    ADD Xd, Xn, #imm = 0x91000000 | (imm12 << 10) | (Rn << 5) | Rd
+    SUB Xd, Xn, #imm = 0xD1000000 | (imm12 << 10) | (Rn << 5) | Rd
+
+Examples:
+    ADD X0, X0, #16  = 0x91004000  bytes [0x00, 0x40, 0x00, 0x91]
+    SUB SP, SP, #32  = 0xD10083FF  bytes [0xFF, 0x83, 0x00, 0xD1]
+
+For a compiler: most arithmetic is register-register or small immediate.
+These two forms cover 90%+ of arithmetic codegen.
+'''
+
+[[entries]]
+name = "aarch64_mul_div"
+description = "MUL is MADD with Ra=XZR; SDIV has its own encoding class"
+category = "instruction_encoding"
+content = '''
+MUL is an alias for MADD Xd, Xn, Xm, XZR (multiply-add with zero addend).
+
+MADD encoding (64-bit):
+    31  30-24      23-21  20-16  15   14-10  9-5   4-0
+    [1] [0011011] [000]   [Rm]   [0]  [Ra]   [Rn]  [Rd]
+
+For MUL, Ra = 11111 (XZR = register 31):
+    MUL Xd, Xn, Xm = 0x9B007C00 | (Rm << 16) | (Rn << 5) | Rd
+
+    (The 0x7C00 comes from Ra=11111 at bits 14-10: 11111 << 10 = 0x7C00,
+     plus bit 15 = 0)
+
+Examples:
+    MUL X0, X1, X2  = 0x9B027C20  bytes [0x20, 0x7C, 0x02, 0x9B]
+    MUL X0, X0, X1  = 0x9B017C00  bytes [0x00, 0x7C, 0x01, 0x9B]
+
+SDIV encoding (64-bit):
+    31  30-21          20-16  15-10    9-5   4-0
+    [1] [0011010110]   [Rm]   [000011] [Rn]  [Rd]
+
+    SDIV Xd, Xn, Xm = 0x9AC00C00 | (Rm << 16) | (Rn << 5) | Rd
+
+For UDIV, bits 15-10 = 000010 instead of 000011:
+    UDIV Xd, Xn, Xm = 0x9AC00800 | (Rm << 16) | (Rn << 5) | Rd
+
+Examples:
+    SDIV X0, X1, X2  = 0x9AC20C20  bytes [0x20, 0x0C, 0xC2, 0x9A]
+    UDIV X0, X1, X2  = 0x9AC20820  bytes [0x20, 0x08, 0xC2, 0x9A]
+
+Key difference from x86_64: no implicit RDX:RAX clobber! Division is a simple
+three-register operation. No need for CQO/CDQ sign-extension before dividing.
+Remainder requires a separate MSUB: rem = n - (n/d)*d.
+    SDIV X3, X1, X2     ; X3 = X1 / X2
+    MSUB X4, X3, X2, X1 ; X4 = X1 - X3*X2 = remainder
+'''
+
+[[entries]]
+name = "aarch64_ldr_str"
+description = "LDR/STR with unsigned offset is the workhorse for stack frame access"
+category = "instruction_encoding"
+content = '''
+Three addressing modes for LDR/STR. For compiler codegen, unsigned offset
+is the primary mode (stack frame access), pre/post-index for push/pop patterns.
+
+LDR (unsigned offset, 64-bit):
+    31-30  29  28-24    23-22  21-10    9-5   4-0
+    [11]   [1] [11001]  [01]   [imm12]  [Rn]  [Rt]
+
+    The imm12 is SCALED by 8 for 64-bit loads: actual offset = imm12 * 8.
+    Range: 0 to 32760 bytes in steps of 8.
+
+    LDR Xt, [Xn, #offset] = 0xF9400000 | ((offset/8) << 10) | (Rn << 5) | Rt
+
+STR (unsigned offset, 64-bit):
+    31-30  29  28-24    23-22  21-10    9-5   4-0
+    [11]   [1] [11001]  [00]   [imm12]  [Rn]  [Rt]
+
+    STR Xt, [Xn, #offset] = 0xF9000000 | ((offset/8) << 10) | (Rn << 5) | Rt
+
+Examples:
+    LDR X0, [SP, #0]    = 0xF94003E0  bytes [0xE0, 0x03, 0x40, 0xF9]
+    LDR X0, [SP, #8]    = 0xF94007E0  bytes [0xE0, 0x07, 0x40, 0xF9]
+    LDR X0, [SP, #16]   = 0xF9400BE0  bytes [0xE0, 0x0B, 0x40, 0xF9]
+    STR X0, [SP, #0]    = 0xF90003E0  bytes [0xE0, 0x03, 0x00, 0xF9]
+    STR X0, [SP, #8]    = 0xF90007E0  bytes [0xE0, 0x07, 0x00, 0xF9]
+
+    (SP = register 31. Rn = 31 => 31 << 5 = 0x3E0)
+
+LDR (pre-index, 64-bit) for stack-like access with writeback:
+    31-30  29  28-24  23-22  21  20-12    11-10  9-5   4-0
+    [11]   [1] [11000][01]   [0] [imm9]   [11]   [Rn]  [Rt]
+
+    LDR Xt, [Xn, #simm9]! = 0xF8400C00 | (imm9 << 12) | (Rn << 5) | Rt
+    (imm9 is signed, range -256 to +255)
+
+STR (pre-index, 64-bit):
+    STR Xt, [Xn, #simm9]! = 0xF8000C00 | (imm9 << 12) | (Rn << 5) | Rt
+
+For 32-bit loads/stores (W registers), change size bits [31:30] from 11 to 10:
+    LDR Wt, [Xn, #offset] = 0xB9400000 | ((offset/4) << 10) | (Rn << 5) | Rt
+    STR Wt, [Xn, #offset] = 0xB9000000 | ((offset/4) << 10) | (Rn << 5) | Rt
+    (imm12 scaled by 4 for 32-bit)
+
+For byte loads: LDRB = 0x39400000, STRB = 0x39000000 (size=00, imm12 unscaled).
+
+Key insight: unlike x86_64 where [rbp-8] needs ModR/M + disp8 with special
+RBP handling, aarch64 LDR/STR are perfectly regular. No special cases for
+any register number. The offset is always unsigned and scaled.
+'''
+
+[[entries]]
+name = "aarch64_stp_ldp_stack"
+description = "STP/LDP replace PUSH/POP — store/load register pairs with pre/post-index"
+category = "instruction_encoding"
+content = '''
+aarch64 has no PUSH/POP instructions. Instead, use STP (Store Pair) and
+LDP (Load Pair) with pre-decrement and post-increment addressing on SP.
+
+STP (pre-index, 64-bit) — equivalent to pushing two registers:
+    31-30  29-27  26  25-23  22   21-15    14-10  9-5   4-0
+    [10]   [101]  [0] [011]  [0]  [imm7]   [Rt2]  [Rn]  [Rt]
+
+    STP Xt1, Xt2, [Xn, #imm]! = 0xA9800000 | ((imm7) << 15) | (Rt2 << 10) | (Rn << 5) | Rt
+    imm7 is signed, scaled by 8: actual offset = imm7 * 8.
+    Range: -512 to +504 bytes in steps of 8.
+
+LDP (post-index, 64-bit) — equivalent to popping two registers:
+    31-30  29-27  26  25-23  22   21-15    14-10  9-5   4-0
+    [10]   [101]  [0] [001]  [1]  [imm7]   [Rt2]  [Rn]  [Rt]
+
+    LDP Xt1, Xt2, [Xn], #imm = 0xA8C00000 | ((imm7) << 15) | (Rt2 << 10) | (Rn << 5) | Rt
+
+Function prologue (push FP + LR, set up frame):
+    STP X29, X30, [SP, #-16]!    ; push FP and LR, SP -= 16
+    MOV X29, SP                   ; set frame pointer
+
+    STP encoding: imm7 = -16/8 = -2 = 0x7E (7-bit signed)
+    = 0xA9BF7BFD
+    bytes: [0xFD, 0x7B, 0xBF, 0xA9]
+
+    MOV X29, SP is actually ADD X29, SP, #0
+    = 0x910003FD
+    bytes: [0xFD, 0x03, 0x00, 0x91]
+
+Function epilogue (restore FP + LR, pop):
+    LDP X29, X30, [SP], #16      ; pop FP and LR, SP += 16
+    RET                           ; branch to X30
+
+    LDP encoding: imm7 = 16/8 = 2
+    = 0xA8C17BFD
+    bytes: [0xFD, 0x7B, 0xC1, 0xA8]
+
+Saving/restoring callee-saved registers (e.g., X19-X20):
+    STP X19, X20, [SP, #-16]!    ; push pair
+    ...
+    LDP X19, X20, [SP], #16      ; pop pair
+
+The SP must always be 16-byte aligned on aarch64 (hardware enforced).
+STP/LDP with 16-byte offsets maintain this naturally.
+
+Key difference from x86_64: no single-register push/pop. Always pairs.
+If you need to save an odd number of registers, pad with XZR or save an
+extra callee-saved register you do not actually use.
+'''
+
+[[entries]]
+name = "aarch64_cmp_branch"
+description = "CMP + B.cond for conditional branching — condition code in bits [3:0]"
+category = "instruction_encoding"
+content = '''
+CMP is an alias for SUBS with destination = XZR (register 31).
+
+CMP (register, 64-bit):
+    SUBS XZR, Xn, Xm with Rd=11111
+    CMP Xn, Xm = 0xEB00001F | (Rm << 16) | (Rn << 5)
+
+    (0xEB00001F = SUBS base with Rd=31=0x1F)
+
+CMP (immediate, 64-bit):
+    SUBS XZR, Xn, #imm12 with Rd=11111
+    CMP Xn, #imm = 0xF100001F | (imm12 << 10) | (Rn << 5)
+
+Examples:
+    CMP X0, X1   = 0xEB01001F  bytes [0x1F, 0x00, 0x01, 0xEB]
+    CMP X0, #0   = 0xF100001F  bytes [0x1F, 0x00, 0x00, 0xF1]
+    CMP X0, #42  = 0xF100A81F  bytes [0x1F, 0xA8, 0x00, 0xF1]
+
+B.cond encoding:
+    31-24       23-5      4    3-0
+    [01010100]  [imm19]   [0]  [cond]
+
+    B.cond target = 0x54000000 | (imm19 << 5) | (cond << 0)
+    imm19 is signed, scaled by 4: offset = imm19 * 4, range +/- 1MB.
+
+Condition codes (bits [3:0]):
+    0x0  EQ  (Z==1)         Equal
+    0x1  NE  (Z==0)         Not equal
+    0x2  CS/HS (C==1)       Carry set / unsigned higher or same
+    0x3  CC/LO (C==0)       Carry clear / unsigned lower
+    0x4  MI  (N==1)         Minus / negative
+    0x5  PL  (N==0)         Plus / positive or zero
+    0x6  VS  (V==1)         Overflow set
+    0x7  VC  (V==0)         Overflow clear
+    0x8  HI  (C==1,Z==0)   Unsigned higher
+    0x9  LS  (C==0|Z==1)    Unsigned lower or same
+    0xA  GE  (N==V)         Signed greater or equal
+    0xB  LT  (N!=V)         Signed less than
+    0xC  GT  (Z==0,N==V)    Signed greater than
+    0xD  LE  (Z==1|N!=V)    Signed less or equal
+    0xE  AL                 Always (unconditional)
+
+Mapping from C-like comparisons after CMP Xn, Xm:
+    ==   B.EQ  cond=0x0       !=   B.NE  cond=0x1
+    <    B.LT  cond=0xB       >=   B.GE  cond=0xA
+    >    B.GT  cond=0xC       <=   B.LE  cond=0xD
+
+Example: if (x0 == x1) goto target (target is 20 bytes ahead, imm19 = 20/4 = 5):
+    CMP X0, X1          = 0xEB01001F
+    B.EQ target          = 0x540000A0  (imm19=5 => 5<<5=0xA0, cond=0)
+    bytes: [0xA0, 0x00, 0x00, 0x54]
+
+For forward jumps with unknown target (fixup pattern):
+    1. Emit B.cond with imm19=0 as placeholder
+    2. Record patch location
+    3. After target is known: offset = (target - branch_addr) / 4
+    4. Patch: instruction |= ((offset & 0x7FFFF) << 5)
+'''
+
+[[entries]]
+name = "aarch64_bl_ret_function_calls"
+description = "BL (branch with link) for calls, RET for returns — 128MB range"
+category = "instruction_encoding"
+content = '''
+BL encoding (branch with link = function call):
+    31-26      25-0
+    [100101]   [imm26]
+
+    BL target = 0x94000000 | (imm26 & 0x3FFFFFF)
+    imm26 is signed, scaled by 4: offset = imm26 * 4, range +/- 128MB.
+    Sets X30 (LR) = PC + 4, then branches to PC + offset.
+
+B encoding (unconditional branch, no link):
+    31-26      25-0
+    [000101]   [imm26]
+
+    B target = 0x14000000 | (imm26 & 0x3FFFFFF)
+
+Examples:
+    BL +0x100 (256 bytes forward): imm26 = 256/4 = 64 = 0x40
+    = 0x94000040  bytes [0x40, 0x00, 0x00, 0x94]
+
+    B  +0x100: = 0x14000040  bytes [0x40, 0x00, 0x00, 0x14]
+
+    BL -0x100 (256 bytes backward): imm26 = -64 & 0x3FFFFFF = 0x3FFFFC0
+    = 0x97FFFFC0  bytes [0xC0, 0xFF, 0xFF, 0x97]
+
+RET encoding (return to address in Xn, default X30):
+    31-25       24-21   20-16     15-10    9-5     4-0
+    [1101011]   [0010]  [11111]   [000000] [Rn]    [00000]
+
+    RET (to X30) = 0xD65F03C0
+    bytes: [0xC0, 0x03, 0x5F, 0xD6]
+
+    This is a fixed 4-byte sequence. Every function epilogue ends with it.
+
+BR encoding (indirect branch, no link):
+    BR Xn = 0xD61F0000 | (Rn << 5)
+    BR X0 = 0xD61F0000  bytes [0x00, 0x00, 0x1F, 0xD6]
+
+BLR encoding (indirect call):
+    BLR Xn = 0xD63F0000 | (Rn << 5)
+    BLR X0 = 0xD63F0000  bytes [0x00, 0x00, 0x3F, 0xD6]
+
+For a compiler: direct calls use BL with a fixup table (same as x86_64 CALL
+rel32 fixup pattern). Offset = (target_addr - call_addr) / 4.
+The division by 4 is the only difference from x86_64 relative offset computation.
+'''
+
+[[entries]]
+name = "aarch64_svc_syscalls"
+description = "SVC #0 replaces x86_64 SYSCALL — different register mapping and syscall numbers"
+category = "instruction_encoding"
+content = '''
+SVC (Supervisor Call) encoding:
+    31-21          20-5     4-0
+    [11010100000]  [imm16]  [00001]
+
+    SVC #0 = 0xD4000001
+    bytes: [0x01, 0x00, 0x00, 0xD4]
+
+    This is a fixed 4-byte sequence. Always SVC #0 for Linux syscalls.
+
+Syscall calling convention (Linux aarch64):
+    Syscall number:  X8   (not RAX like x86_64)
+    Argument 1:      X0   (same as function arg 1)
+    Argument 2:      X1
+    Argument 3:      X2
+    Argument 4:      X3
+    Argument 5:      X4
+    Argument 6:      X5
+    Return value:    X0   (same as function return)
+
+Key aarch64 Linux syscall numbers (DIFFERENT from x86_64!):
+    read       =  63  (0x3F)    [x86_64:  0]
+    write      =  64  (0x40)    [x86_64:  1]
+    openat     =  56  (0x38)    [x86_64: 257]
+    close      =  57  (0x39)    [x86_64:  3]
+    lseek      =  62  (0x3E)    [x86_64:  8]
+    mmap       = 222  (0xDE)    [x86_64:  9]
+    munmap     = 215  (0xD7)    [x86_64: 11]
+    mprotect   = 226  (0xE2)    [x86_64: 10]
+    brk        = 214  (0xD6)    [x86_64: 12]
+    ioctl      =  29  (0x1D)    [x86_64: 16]
+    exit       =  93  (0x5D)    [x86_64: 60]
+    exit_group =  94  (0x5E)    [x86_64: 231]
+    getpid     = 172  (0xAC)    [x86_64: 39]
+    clone      = 220  (0xDC)    [x86_64: 56]
+    execve     = 221  (0xDD)    [x86_64: 59]
+    wait4      = 260  (0x104)   [x86_64: 61]
+    getcwd     =  17  (0x11)    [x86_64: 79]
+    mkdirat    =  34  (0x22)    [x86_64: 258]
+
+NOTE: aarch64 Linux has NO open() syscall — use openat() with AT_FDCWD (-100)
+as the first argument for equivalent behavior. Same for mkdir -> mkdirat.
+
+Example — write(1, msg, len):
+    MOV X0, #1        ; fd = stdout
+    ADR X1, msg        ; buf (PC-relative address)
+    MOV X2, #14        ; len
+    MOV X8, #64        ; __NR_write = 64
+    SVC #0             ; syscall
+
+Example — exit(0):
+    MOV X0, #0         ; status = 0
+    MOV X8, #93        ; __NR_exit = 93
+    SVC #0             ; syscall
+'''
+
+[[entries]]
+name = "aarch64_calling_convention"
+description = "AAPCS64: x0-x7 args, x0 return, x19-x28 callee-saved, x29=FP, x30=LR"
+category = "instruction_encoding"
+content = '''
+AAPCS64 (Arm Architecture Procedure Call Standard, 64-bit):
+
+Argument registers:     X0-X7  (first 8 integer/pointer args)
+Return value:           X0     (also X1 for 128-bit returns)
+Link register:          X30    (LR — set by BL, used by RET)
+Frame pointer:          X29    (FP — callee-saved by convention)
+Stack pointer:          SP     (hardware-enforced 16-byte alignment)
+Zero register:          XZR    (register 31 in most contexts)
+
+Caller-saved (scratch):  X0-X15, X16-X17 (IP0/IP1 intra-procedure)
+Callee-saved (preserved): X19-X28, X29 (FP), X30 (LR)
+Platform register:       X18 (reserved on some platforms, avoid)
+
+Comparison with x86_64 System V:
+    x86_64              aarch64
+    rdi, rsi, rdx,      X0, X1, X2,
+    rcx, r8, r9         X3, X4, X5, X6, X7
+    (6 reg args)         (8 reg args)
+
+    rax (return)         X0 (return)
+    rbx,rbp,r12-r15     X19-X28, X29, X30
+    (callee-saved)       (callee-saved)
+
+Stack alignment: 16 bytes on BOTH architectures, but aarch64 enforces it
+in hardware — misaligned SP causes an immediate fault, not a silent perf hit.
+
+Standard function prologue:
+    STP X29, X30, [SP, #-frame_size]!   ; save FP+LR, allocate frame
+    MOV X29, SP                          ; set frame pointer
+    ; save callee-saved regs if needed:
+    STP X19, X20, [SP, #16]             ; at FP+16
+    STP X21, X22, [SP, #32]             ; at FP+32
+
+Standard function epilogue:
+    LDP X19, X20, [SP, #16]             ; restore callee-saved
+    LDP X21, X22, [SP, #32]
+    LDP X29, X30, [SP], #frame_size     ; restore FP+LR, deallocate
+    RET
+
+For a minimal compiler that does not use callee-saved registers (all values
+on the stack, like Cyrius stage1), the prologue/epilogue is just:
+    STP X29, X30, [SP, #-16]!           ; 0xA9BF7BFD
+    MOV X29, SP                          ; 0x910003FD
+    ... function body ...
+    LDP X29, X30, [SP], #16             ; 0xA8C17BFD
+    RET                                  ; 0xD65F03C0
+'''
+
+[[entries]]
+name = "aarch64_elf_differences"
+description = "aarch64 ELF differs from x86_64: e_machine, entry address, instruction alignment"
+category = "instruction_encoding"
+content = '''
+ELF header differences (aarch64 vs x86_64):
+
+    Field           x86_64              aarch64
+    e_ident[4]      ELFCLASS64 (2)      ELFCLASS64 (2)      same
+    e_ident[5]      ELFDATA2LSB (1)     ELFDATA2LSB (1)     same
+    e_machine       EM_X86_64 (0x3E)    EM_AARCH64 (0xB7)   DIFFERENT
+    e_entry         any address         4-byte aligned       MUST be aligned
+    e_flags         0                   0                    same (usually)
+    e_ehsize        64 (0x40)           64 (0x40)            same
+    e_phentsize     56 (0x38)           56 (0x38)            same
+
+Program header is identical in structure (Elf64_Phdr is arch-independent).
+Segment flags (PF_R, PF_W, PF_X) work the same way.
+
+Key difference: p_vaddr and p_offset alignment. On aarch64, the page size
+is commonly 4KB (same as x86_64), BUT some kernels use 16KB or 64KB pages.
+For maximum compatibility, align segments to 64KB (0x10000).
+
+Minimal static ELF for aarch64 (no sections, just ELF header + phdr + code):
+
+    ELF header (64 bytes):
+    7f 45 4c 46  02 01 01 00  00 00 00 00 00 00 00 00   ; e_ident
+    02 00        ; e_type = ET_EXEC
+    b7 00        ; e_machine = EM_AARCH64 (183)
+    01 00 00 00  ; e_version = 1
+    78 00 40 00 00 00 00 00  ; e_entry = 0x400078 (code starts after headers)
+    40 00 00 00 00 00 00 00  ; e_phoff = 64 (phdr right after ehdr)
+    00 00 00 00 00 00 00 00  ; e_shoff = 0 (no sections)
+    00 00 00 00  ; e_flags = 0
+    40 00        ; e_ehsize = 64
+    38 00        ; e_phentsize = 56
+    01 00        ; e_phnum = 1
+    00 00        ; e_shentsize = 0
+    00 00        ; e_shnum = 0
+    00 00        ; e_shstrndx = 0
+
+    Program header (56 bytes) at offset 0x40:
+    01 00 00 00  ; p_type = PT_LOAD
+    05 00 00 00  ; p_flags = PF_R | PF_X
+    00 00 00 00 00 00 00 00  ; p_offset = 0
+    00 00 40 00 00 00 00 00  ; p_vaddr = 0x400000
+    00 00 40 00 00 00 00 00  ; p_paddr = 0x400000
+    XX XX 00 00 00 00 00 00  ; p_filesz = total file size
+    XX XX 00 00 00 00 00 00  ; p_memsz = same as filesz
+    00 00 01 00 00 00 00 00  ; p_align = 0x10000 (64KB)
+
+    Code starts at offset 0x78 (64 + 56 = 120 = 0x78).
+
+For a two-segment binary (code + data), add a second PT_LOAD with PF_R|PF_W.
+The structure is identical to x86_64 — only e_machine and e_entry differ.
+'''
+
+[[entries]]
+name = "aarch64_hello_world_elf"
+description = "Complete minimal aarch64 Hello World ELF — raw bytes, no libc, no linker"
+category = "instruction_encoding"
+content = '''
+A complete static aarch64 ELF binary that writes "Hello\n" and exits.
+This is the equivalent of the x86_64 raw ELF pattern used in Cyrius bootstrap.
+
+Code (at offset 0x78, vaddr 0x400078):
+
+    ; write(1, msg, 6)
+    MOV X0, #1             ; fd = stdout
+                           ; 0xD2800020  bytes: 20 00 80 D2
+    ADR X1, msg            ; buf = PC-relative address to string
+                           ; (encode once offset to msg is known)
+    MOV X2, #6             ; len = 6
+                           ; 0xD28000C2  bytes: C2 00 80 D2
+    MOV X8, #64            ; __NR_write = 64
+                           ; 0xD2800808  bytes: 08 08 80 D2
+    SVC #0                 ; syscall
+                           ; 0xD4000001  bytes: 01 00 00 D4
+
+    ; exit(0)
+    MOV X0, #0             ; status = 0
+                           ; 0xD2800000  bytes: 00 00 80 D2
+    MOV X8, #93            ; __NR_exit = 93
+                           ; 0xD2800BA8  bytes: A8 0B 80 D2
+    SVC #0                 ; syscall
+                           ; 0xD4000001  bytes: 01 00 00 D4
+
+    msg: "Hello\n"         ; 48 65 6C 6C 6F 0A
+
+ADR encoding (PC-relative address, +/- 1MB):
+    31  30-29  28-24    23-5     4-0
+    [0] [immlo][10000]  [immhi]  [Rd]
+
+    ADR Xd, PC+offset where offset = (immhi << 2) | immlo
+    For msg at 7 instructions * 4 = 28 bytes after ADR:
+    ADR X1, #+28 = #+0x1C
+    immhi = 0x1C >> 2 = 7, immlo = 0x1C & 3 = 0
+    = 0x100000E1  bytes: E1 00 00 10
+
+    (ADR base = 0x10000000, immhi << 5 | Rd)
+
+Alternatively, avoid ADR by loading the absolute address with MOVZ/MOVK,
+or by computing it relative to the data segment base.
+
+Total binary size: 64 (ehdr) + 56 (phdr) + 32 (code) + 6 (string) = 158 bytes.
+
+MOV Xd, #imm is an alias for MOVZ when imm >= 0:
+    MOV X0, #1  = MOVZ X0, #1, LSL#0 = 0xD2800020
+    Encoding: 0xD2800000 | (imm16 << 5) | Rd
+    MOV X0, #1:   0xD2800000 | (1 << 5) | 0 = 0xD2800020
+    MOV X2, #6:   0xD2800000 | (6 << 5) | 2 = 0xD28000C2
+    MOV X8, #64:  0xD2800000 | (64 << 5) | 8 = 0xD2800808
+    MOV X8, #93:  0xD2800000 | (93 << 5) | 8 = 0xD2800BA8
+'''
+
+[[entries]]
+name = "aarch64_x86_codegen_porting_map"
+description = "Direct mapping of x86_64 codegen patterns to aarch64 equivalents"
+category = "instruction_encoding"
+content = '''
+For porting a compiler backend from x86_64 to aarch64, here is the operation-
+by-operation mapping. Each x86_64 pattern maps to exactly one aarch64 pattern.
+
+REGISTER MAPPING (for a stack-based compiler like Cyrius):
+    x86_64 RAX  ->  aarch64 X0  (primary scratch / return value)
+    x86_64 RCX  ->  aarch64 X1  (secondary scratch)
+    x86_64 RDX  ->  aarch64 X2  (third scratch)
+    x86_64 RBP  ->  aarch64 X29 (frame pointer)
+    x86_64 RSP  ->  aarch64 SP  (stack pointer, register 31)
+    x86_64 RDI  ->  aarch64 X0  (first arg — SAME as scratch!)
+
+ARITHMETIC:
+    x86: add rax, rcx       -> arm64: ADD X0, X0, X1      0x8B010000
+    x86: sub rax, rcx       -> arm64: SUB X0, X0, X1      0xCB010000
+    x86: imul rax, rcx      -> arm64: MUL X0, X0, X1      0x9B017C00
+    x86: cqo; idiv rcx      -> arm64: SDIV X0, X0, X1     0x9AC10C00
+    x86: neg rax             -> arm64: NEG X0, X0          0xCB0003E0
+                                       (= SUB X0, XZR, X0)
+
+COMPARISON + BRANCH:
+    x86: cmp rax, rcx       -> arm64: CMP X0, X1           0xEB01001F
+         je  target          ->        B.EQ target          0x54000000|off|0x0
+         jne target          ->        B.NE target          0x54000000|off|0x1
+         jl  target          ->        B.LT target          0x54000000|off|0xB
+         jg  target          ->        B.GT target          0x54000000|off|0xC
+         jle target          ->        B.LE target          0x54000000|off|0xD
+         jge target          ->        B.GE target          0x54000000|off|0xA
+         jmp target          ->        B   target           0x14000000|off
+
+LOAD/STORE (stack frame, unsigned offset):
+    x86: mov rax, [rbp-8]   -> arm64: LDR X0, [X29, #N]    (N = frame_size - 8)
+    x86: mov [rbp-8], rax   -> arm64: STR X0, [X29, #N]
+
+    NOTE: x86 uses negative offsets from RBP (stack grows down).
+    aarch64 unsigned offset LDR/STR only supports positive offsets.
+    Two strategies:
+    1. Use X29 pointing to frame bottom, access locals at positive offsets.
+    2. Use pre-index STR with negative simm9 for SP-relative negative offsets.
+
+    Strategy 1 is simpler: after SUB SP, SP, #frame_size + MOV X29, SP,
+    locals are at [X29, #0], [X29, #8], [X29, #16], etc.
+
+PUSH/POP:
+    x86: push rax            -> arm64: STR X0, [SP, #-16]!  (or STP for pairs)
+    x86: pop rax             -> arm64: LDR X0, [SP], #16
+
+FUNCTION CALL:
+    x86: call target         -> arm64: BL target             0x94000000|off
+    x86: ret                 -> arm64: RET                   0xD65F03C0
+
+SYSCALL:
+    x86: mov rax, NR         -> arm64: MOV X8, NR
+         mov rdi, arg1       ->        MOV X0, arg1
+         mov rsi, arg2       ->        MOV X1, arg2
+         mov rdx, arg3       ->        MOV X2, arg3
+         syscall             ->        SVC #0                0xD4000001
+
+IMMEDIATE LOADING:
+    x86: mov rax, imm64      -> arm64: MOVZ+MOVK sequence (1-4 instructions)
+    x86: mov eax, imm32      -> arm64: MOVZ Wd, #lo; MOVK Wd, #hi, LSL#16
+
+KEY SIMPLIFICATIONS on aarch64:
+    - No REX prefix calculation
+    - No ModR/M byte computation
+    - No SIB byte
+    - No variable instruction lengths (always 4)
+    - Division does not clobber RDX (no CQO needed)
+    - 8 argument registers instead of 6
+    - Instruction size computation is trivial (count * 4)
+
+KEY COMPLICATIONS on aarch64:
+    - Cannot load 64-bit immediate in one instruction (need MOVZ+MOVK)
+    - No direct [base - offset] with unsigned offset LDR/STR
+    - Must use STP/LDP pairs instead of single push/pop
+    - SP must be 16-byte aligned at ALL times (hardware fault)
+    - Branch offsets divided by 4 and limited in range
+'''

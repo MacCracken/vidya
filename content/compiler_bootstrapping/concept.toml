@@ -474,6 +474,24 @@ bad_example = "One commit: double codebuf + add 500 lines of struct support — 
 good_example = "Commit 1: increase CODEBUF_CAP from 64K to 128K (compiles fine with old compiler). Commit 2: add struct support (compiles fine with expanded compiler)."
 
 [[gotchas]]
+title = "qemu-system-i386 does NOT support 64-bit long mode"
+explanation = "qemu-system-i386 does NOT support 64-bit long mode — the paging enable step will triple-fault. Use qemu-system-x86_64 -kernel for kernels that transition from 32-bit to 64-bit. Both accept multiboot ELF32 via -kernel, but only x86_64 QEMU emulates the long mode transition correctly."
+bad_example = "qemu-system-i386 -kernel kernel.elf — triple-faults when enabling paging + long mode, no error output"
+good_example = "qemu-system-x86_64 -kernel kernel.elf — correctly emulates 32-bit multiboot entry → PAE → long mode transition"
+
+[[gotchas]]
+title = "Far jump offset calculation requires exact byte counting"
+explanation = "The call/pop/add trick for computing a far jump target requires EXACT byte counting. `call $+5; pop eax; add eax, N` — N must equal the total bytes between `pop eax` and the first 64-bit instruction. Count: pop(1) + add(3) + push(1) + push(2) + mov[esp](3) + mov[esp+4](8) + jmp_far(3) = 21 bytes. Getting N wrong by even 1 byte jumps into the middle of an instruction, causing an immediate triple fault with no debug output."
+bad_example = "call $+5; pop eax; add eax, 20 — off by 1 byte, far jump lands mid-instruction, triple fault with no diagnostic"
+good_example = "call $+5; pop eax; add eax, 21 — exactly pop(1)+add(3)+push(1)+push(2)+mov[esp](3)+mov[esp+4](8)+jmp_far(3)=21 bytes to the 64-bit entry point"
+
+[[gotchas]]
+title = "Paging enable order — LME must be set BEFORE PG"
+explanation = "The correct order for enabling long mode: (1) build page tables, (2) enable PAE in CR4 bit 5, (3) load PML4 physical address into CR3, (4) set LME in EFER MSR 0xC0000080 bit 8, (5) enable paging in CR0 bit 31. Setting CR3 before PAE works on most hardware but is technically wrong. The key constraint: LME must be set BEFORE PG is set, otherwise you get compatibility mode instead of long mode."
+bad_example = "Set CR0.PG first, then set EFER.LME — CPU enters compatibility mode (32-bit segments in 64-bit page tables), code appears to work but uses wrong instruction decoding"
+good_example = "CR4.PAE=1 → CR3=PML4 → EFER.LME=1 → CR0.PG=1 — long mode activates on the PG write because LME is already set"
+
+[[gotchas]]
 title = "Orphaned function references generate calls to address 0"
 explanation = "If cc2.cyr references functions (PARSE_GVAR_REG, EMIT_GVAR_INITS) that don't exist in parse.cyr, the compiler generates calls to address 0. Programs that don't trigger the code path work fine; programs that do hang or crash. Always grep for function names across ALL modules before committing."
 bad_example = "cc2 calls EMIT_GVAR_INITS in codegen, but the function was removed from parse.cyr — binary links silently, crashes only when a program uses global vars"
@@ -550,3 +568,51 @@ title = "serial_port_initialization_before_output"
 explanation = "Writing to COM1 (0x3F8) without initialization may work on some hardware/emulators but not others. The proper init sequence: disable interrupts (port+1=0x00), enable DLAB (port+3=0x80), set divisor (port+0=0x03 for 38400 baud, port+1=0x00), set 8N1 (port+3=0x03), enable FIFO (port+2=0xC7). Total: 7 out instructions before the first data write."
 bad_example = "mov dx, 0x3F8; mov al, 'H'; out dx, al — works on QEMU, hangs or produces garbage on real hardware and some emulators"
 good_example = "Init COM1: out 0x3F9,0x00; out 0x3FB,0x80; out 0x3F8,0x03; out 0x3F9,0x00; out 0x3FB,0x03; out 0x3FA,0xC7; then out 0x3F8,data"
+
+[[gotchas]]
+title = "isr_in_data_section"
+explanation = "When building ISR stubs by writing machine code bytes into a data buffer (var isr_stub[64]), the ISR code lives in the ELF data section, not the code section. The single PT_LOAD segment must have RWX permissions (p_flags=7) for the ISR to be executable. If the segment is RW only, executing the ISR will cause a page fault / triple fault."
+bad_example = "PT_LOAD with p_flags=6 (RW) — ISR stub in data section triggers page fault when CPU vectors to it, triple fault with no debug output"
+good_example = "PT_LOAD with p_flags=7 (RWX) — ISR stub in data section is executable, CPU vectors to it and runs the handler correctly"
+
+[[gotchas]]
+title = "retfq_rip_offset_64bit"
+explanation = "In 64-bit mode, the far return (retfq = 0x48 0xCB) for reloading CS after lgdt requires `lea rax, [rip+3]` (not +1). The offset must skip past: push rax (1 byte) + retfq (2 bytes) = 3 bytes. Using +1 jumps into the middle of the retfq instruction, causing #GP. The `rip` in `lea rax, [rip+N]` points to the END of the lea instruction itself."
+bad_example = "lea rax, [rip+1]; push 0x08; push rax; retfq — rip+1 lands inside the retfq opcode (0xCB), #GP fault"
+good_example = "lea rax, [rip+3]; push 0x08; push rax; retfq — rip+3 skips push(1) + retfq(2) = 3 bytes, lands at the next instruction after retfq"
+
+[[gotchas]]
+title = "pic_remap_before_idt"
+explanation = "The 8259 PIC must be remapped BEFORE enabling interrupts. By default, IRQ 0-7 map to INT 8-15 which overlap CPU exceptions (e.g., IRQ0=timer conflicts with INT8=double fault). Remap to INT 32+ with the standard ICW1-ICW4 sequence. Mask all IRQs except the ones you have handlers for."
+bad_example = "Load IDT and sti without remapping PIC — IRQ0 timer fires as INT 8 (double fault handler), kernel enters infinite exception loop"
+good_example = "Remap PIC: ICW1(0x11) to 0x20/0xA0, ICW2(0x20/0x28) for INT 32-47, ICW3(0x04/0x02), ICW4(0x01). Mask all except IRQ0. Then load IDT with handler at vector 32, then sti."
+
+[[gotchas]]
+title = "timer_isr_absolute_addressing"
+explanation = "When building a timer ISR as raw bytecode that accesses a global variable (timer_ticks), the ISR must use absolute addressing (48 A1 addr64 for load, 48 A3 addr64 for store). The address must be the RUNTIME address from &var, not a compile-time offset. Build the ISR at runtime after the kernel's data section addresses are known."
+bad_example = "Build ISR bytecode at compile time with hardcoded offset 0x1234 for timer_ticks — actual runtime address is different, ISR reads/writes wrong memory, counter never increments"
+good_example = "At runtime: addr = &timer_ticks; store8(isr_stub + 2, addr & 0xFF); ... store8(isr_stub + 9, addr >> 56); — ISR bytecode contains the actual runtime address of timer_ticks"
+
+[[gotchas]]
+title = "kernel_string_fixup_base"
+explanation = "In kernel mode, the FIXUP base address for string/variable addresses must match the ELF entry point calculation: base(0x100000) + ELF32_header(52) + PH32(32) + multiboot_header(12) = 0x100060. If FIXUP uses a different base than EMITELF_KERNEL, all string literals and global variable addresses will be offset by the difference, causing garbled output."
+bad_example = "EMITELF_KERNEL sets entry=0x100060 but FIXUP uses base=0x400078 (the userspace default) — all string addresses are wrong by 0x300018, serial output is garbage"
+good_example = "FIXUP and EMITELF_KERNEL both use base = 0x100000 + header_size. Verify: objdump -s kernel.elf shows string data at the addresses the code references."
+
+[[gotchas]]
+title = "codegen_backend_factoring"
+explanation = "When splitting a compiler into arch-independent frontend (lexer, parser) and arch-specific backend (emit, jump, fixup), the shared parser calls emit functions by NAME. Both backends implement the same function signatures. The entry point (cc2.cyr vs cc2_aarch64.cyr) just includes the right backend files. No vtable or function pointers needed — the linker resolves the names to whichever backend was included. This is the simplest factoring: one frontend source file, N backend source files, N entry points that each include the frontend + one backend."
+bad_example = "Frontend calls backend through function pointers stored in a vtable struct — unnecessary complexity, hard to debug, wastes heap slots"
+good_example = "cc2.cyr includes parser.cyr + emit_x86.cyr. cc2_aarch64.cyr includes parser.cyr + emit_aarch64.cyr. Both emit_*.cyr files define EMIT(), EJMP(), EFIXUP() with identical signatures."
+
+[[gotchas]]
+title = "cross_compiler_jmp_encoding"
+explanation = "The main compiler code's jmp-over-fn-bodies is emitted by the SHARED cc2.cyr using EB(S, 0xE9) — an x86 opcode. For cross-compilation, this must be replaced with the target arch's branch instruction. Either make cc2.cyr arch-aware (if target == AARCH64: emit B instruction instead of 0xE9) or have each backend provide an EJMPINIT function that the shared code calls. The second approach is cleaner — the shared code never contains architecture-specific opcodes, only calls to backend functions."
+bad_example = "Shared parser.cyr contains EB(S, 0xE9) directly — compiles x86 jump opcode even when targeting aarch64, producing garbage"
+good_example = "Shared parser.cyr calls EJMPOVER(S) — emit_x86.cyr implements it as EB(S, 0xE9), emit_aarch64.cyr implements it as B with imm26 forward branch, each backend owns its own opcodes"
+
+[[gotchas]]
+title = "aarch64_no_push_pop"
+explanation = "AArch64 has no push/pop instructions. Use STR with pre-decrement SP or STP for pairs. STR x0, [sp, #-16]! = push (pre-decrement SP by 16, store x0). LDR x0, [sp], #16 = pop (load x0, post-increment SP by 16). The 16-byte SP alignment requirement means a single register push wastes 8 bytes unless paired with STP. STP x0, x1, [sp, #-16]! pushes two registers in one instruction with no wasted space. A compiler backend that naively translates x86 push/pop to single STR/LDR will produce binaries 2x larger in prologue/epilogue code. Always pair saves: if you need to save an odd number of registers, pair the last one with XZR (zero register) or X29/X30."
+bad_example = "Push 3 regs: STR x0,[sp,#-16]!; STR x1,[sp,#-16]!; STR x2,[sp,#-16]! — 48 bytes of stack for 24 bytes of data, 3 instructions"
+good_example = "Push 3 regs: STP x0,x1,[sp,#-16]!; STP x2,x30,[sp,#-16]! — 32 bytes of stack, 2 instructions, x30 save is free"
