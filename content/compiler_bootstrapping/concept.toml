@@ -430,3 +430,51 @@ title = "Logical && and || short-circuit codegen requires extra patch storage"
 explanation = "Short-circuit && uses extra patches: first condition's false-jump stored in an array, second condition returns the main patch. All patches point to the same false target. For ||: first condition's non-inverted true-jump goes to body start (patched inline), second condition's false-jump returned to caller. Chaining (a && b && c) uses recursion. Extra patches stored at a heap offset, caller calls PATCHXP after EPATCH."
 bad_example = "&& returns only ONE patch — the first condition's false-jump is never patched, always jumps to offset 0"
 good_example = "EAND stores first condition's patch at S + XPATCH_OFF, returns second's patch. Caller: EPATCH(patch); PATCHXP(S) patches all stored extras to same target."
+
+[[gotchas]]
+title = "Input buffer silent truncation produces cryptic syntax errors"
+explanation = "When the preprocessed source exceeds the input buffer (65536 bytes), it silently truncates. The lexer then hits garbage or EOF mid-function, producing cryptic 'syntax error' at high token numbers. Always check preprocessed source size against input buffer capacity before adding new functions. The symptom is errors at token N > 15000 that appear to be in random locations."
+bad_example = "Add 20 new functions to cc2, get 'syntax error at token 16384' — spend hours debugging the parser when the source was truncated at read() time"
+good_example = "wc -c < preprocessed_source.cyr — if it exceeds 65536, increase INPUT_CAP in the compiler before adding more code"
+
+[[gotchas]]
+title = "For loop step expression uses token replay — no semicolon termination"
+explanation = "For loops use token replay for the step expression: save TI before step, skip to ), parse body, then rewind TI and re-parse step. The step is NOT terminated by semicolon (unlike normal statements), so it must be parsed as a raw assignment (IDENT = EXPR) without consuming ;. Inside functions, the step must use FINDLOCAL before FINDVAR for correct local variable lookup."
+bad_example = "Parse for-step as a normal statement — consumes ; that isn't there, eats the ) delimiter, body parse fails"
+good_example = "Save TI at step start. Skip tokens to matching ). Parse body. Restore TI. Parse step as raw IDENT = EXPR (no ;). Emit backward jump."
+
+[[gotchas]]
+title = "Capacity expansion must be a separate commit before feature additions"
+explanation = "When expanding compiler capacity (codebuf, input buffer, token arrays), do it as a SEPARATE commit before adding features. The old compiler compiles the capacity expansion (small change, fits in old limits). The new compiler then has room for feature additions. Combining expansion + features in one step fails because the old compiler can't handle both."
+bad_example = "One commit: double codebuf + add 500 lines of struct support — old compiler can't compile it because the new code exceeds old codebuf capacity"
+good_example = "Commit 1: increase CODEBUF_CAP from 64K to 128K (compiles fine with old compiler). Commit 2: add struct support (compiles fine with expanded compiler)."
+
+[[gotchas]]
+title = "Orphaned function references generate calls to address 0"
+explanation = "If cc2.cyr references functions (PARSE_GVAR_REG, EMIT_GVAR_INITS) that don't exist in parse.cyr, the compiler generates calls to address 0. Programs that don't trigger the code path work fine; programs that do hang or crash. Always grep for function names across ALL modules before committing."
+bad_example = "cc2 calls EMIT_GVAR_INITS in codegen, but the function was removed from parse.cyr — binary links silently, crashes only when a program uses global vars"
+good_example = "grep -rn 'EMIT_GVAR_INITS' stage1/*.cyr — verify every referenced function exists in exactly one module before building"
+
+[[gotchas]]
+title = "Two-pass declaration scanning needed for globals declared after functions"
+explanation = "Single-pass compilers that parse fn bodies during the declaration loop can't reference globals declared after the function. Fix: pass 1 scans ALL declarations (struct, fn headers, var names) without parsing fn bodies. Pass 2 parses fn bodies with all globals already registered. The fn-skip in pass 1 just counts braces to find the closing }. This is the standard approach for C-like languages without forward declarations."
+bad_example = "fn emit(b) { store8(CODE + cp, b); } var cp = 0; var CODE = brk_alloc(); — cp and CODE are undefined when emit's body is parsed in pass 1"
+good_example = "Pass 1: register fn emit, var cp, var CODE (skip emit's body by brace-counting). Pass 2: parse emit's body — cp and CODE are already in the global table."
+
+[[gotchas]]
+title = "Struct init in deferred global var replay needs special handling"
+explanation = "When replaying deferred global var inits, struct initializers (StructName { expr, ... }) need special handling — they can't be parsed by PARSE_EXPR. The replay must detect struct init by checking if the token after = is a known struct name, then emit field stores directly using the already-registered var index. Re-calling PARSE_STRUCT_INIT would re-register the variable, creating duplicate entries."
+bad_example = "Deferred replay calls PARSE_STRUCT_INIT for 'var p = Point { 1, 2 };' — re-registers p as a new variable, creating duplicate var slots and corrupted offsets"
+good_example = "Replay checks: is token after = a struct name? If yes, emit field stores using the existing var index from pass 1. No re-registration, no PARSE_STRUCT_INIT call."
+
+[[gotchas]]
+title = "Nested struct field offset folding for chained access"
+explanation = "For chained access like `outer.inner.field`, compute the total offset at compile time by summing: FIELDOFF(outer_struct, inner_field) + FIELDOFF(inner_struct, field). Emit a single `add rcx, combined_offset` instead of two adds. This produces optimal code and simplifies the implementation to just two FINDFIELD calls chained together."
+bad_example = "outer.inner.field emits: add rcx, offset_of_inner; mov rcx, [rcx]; add rcx, offset_of_field — extra dereference treats inner as a pointer, not an embedded struct"
+good_example = "outer.inner.field emits: add rcx, (offset_of_inner + offset_of_field) — single add, no dereference, correct for embedded (non-pointer) structs"
+
+[[gotchas]]
+title = "For loop var declarations leak into function scope"
+explanation = "In compilers without block scoping, `for (var i = 0; ...)` declares `i` in the enclosing function scope. Multiple for loops in the same function with `var i` cause duplicate variable errors. Users must use different names (a, b, c or i, j, k) for nested/sequential for loops in the same function. This is a known limitation — proper block scoping is a future enhancement."
+bad_example = "fn process() { for (var i = 0; i < 10; i = i + 1) { ... } for (var i = 0; i < 5; i = i + 1) { ... } } — duplicate variable 'i' error on second loop"
+good_example = "fn process() { for (var i = 0; i < 10; i = i + 1) { ... } for (var j = 0; j < 5; j = j + 1) { ... } } — different names, no collision"
