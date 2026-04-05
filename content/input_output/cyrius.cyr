@@ -1,72 +1,49 @@
-# Cyrius Input/Output Reference
-# Direct syscalls for I/O. No libc. No buffering abstraction layer.
+# Input/Output — Cyrius reference (runnable)
+# Patterns: file I/O, read/write, file_exists
 
-# === Raw syscalls ===
-syscall(1, 1, "hello\n", 6);     # write(fd=1/stdout, buf, len)
-syscall(0, 0, &buf, 256);        # read(fd=0/stdin, buf, maxlen)
-syscall(60, 0);                   # exit(code)
+include "stage1/lib/string.cyr"
+include "stage1/lib/fmt.cyr"
+include "stage1/lib/alloc.cyr"
+include "stage1/lib/io.cyr"
+include "stage1/lib/assert.cyr"
 
-# === File I/O library ===
-# include "lib/io.cyr"
-#
-# var fd = file_open(path, flags, mode);
-# var n = file_read(fd, buf, len);
-# file_write(fd, buf, len);
-# file_close(fd);
-# var n = file_read_all(path, buf, maxlen);  — read entire file
-# file_write_all(path, buf, len);            — write entire file
-# file_exists(path);                         — returns 0 or 1
+fn test_write_read() {
+    var path = "/tmp/cyr_io_test";
+    var msg = "hello cyrius";
+    file_write_all(path, msg, 12);
 
-# === Open flags ===
-# var O_RDONLY = 0;
-# var O_WRONLY = 1;
-# var O_RDWR = 2;
-# var O_CREAT = 64;
-# var O_TRUNC = 512;
-# var O_APPEND = 1024;
+    var rbuf[16];
+    var n = file_read_all(path, &rbuf, 128);
+    assert_eq(n, 12, "read len");
+    assert(memeq(&rbuf, msg, 12) == 1, "read data");
 
-# === Standard file descriptors ===
-# STDIN = 0, STDOUT = 1, STDERR = 2
+    # cleanup
+    syscall(87, path);
+    return 0;
+}
 
-# === Buffered I/O pattern ===
-# Cyrius has no built-in buffering. Use block reads for performance:
-# fn cat(fd) {
-#     var buf[512];                         # 4096 bytes
-#     var n = syscall(0, fd, &buf, 4096);
-#     while (n > 0) {
-#         syscall(1, 1, &buf, n);
-#         n = syscall(0, fd, &buf, 4096);
-#     }
-# }
-# Block reads are 85x faster than byte-at-a-time (766ms → 9ms for 1MB).
+fn test_file_exists() {
+    var path2 = "/tmp/cyr_io_exist";
+    file_write_all(path2, "x", 1);
+    assert(file_exists(path2) == 1, "exists yes");
+    syscall(87, path2);
+    assert(file_exists(path2) == 0, "exists no");
+    return 0;
+}
 
-# === Printing numbers ===
-# include "lib/string.cyr"
-# print_num(42);                  — decimal to stdout
-# println("message");             — string + newline
-#
-# include "lib/fmt.cyr"
-# fmt_int(42);                    — decimal to stdout
-# fmt_hex(0xFF);                  — hex to stdout
-# fmt_hex0x(0xFF);                — "0xff" to stdout
+fn test_open_flags() {
+    assert_eq(O_RDONLY, 0, "O_RDONLY");
+    assert_eq(O_WRONLY, 1, "O_WRONLY");
+    assert_eq(O_CREAT, 64, "O_CREAT");
+    return 0;
+}
 
-# === Printf-like formatting ===
-# include "lib/fmt.cyr"
-# var args = vec_new();
-# vec_push(args, 42);
-# vec_push(args, "world");
-# fmt_printf("n=%d, hello %s\n", args);
-# # Output: n=42, hello world
-
-# === Reading CLI arguments ===
-# include "lib/args.cyr"
-# args_init();
-# var n = argc();
-# var first = argv(1);            — first argument as C string
-
-# === Pipe and redirect (agnosys) ===
-# include "lib/agnosys/syscalls.cyr"
-# sys_pipe(&pipefd);              — create pipe
-# sys_dup2(oldfd, newfd);         — redirect fd
-# sys_open(path, flags, mode);
-# sys_close(fd);
+fn main() {
+    alloc_init();
+    test_write_read();
+    test_file_exists();
+    test_open_flags();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,73 @@
+# Kernel Topics — Cyrius reference (compile-only)
+# Patterns: bitfields, PTE, GDT, IDT, constants
+# Kernel code needs bare-metal mode; this tests the logic in userspace.
+
+include "stage1/lib/string.cyr"
+include "stage1/lib/fmt.cyr"
+include "stage1/lib/alloc.cyr"
+include "stage1/lib/assert.cyr"
+
+# PTE helpers
+fn pte_build(phys, flags) { return (phys & 0x000FFFFFFFFFF000) | flags; }
+fn pte_present(pte) { return pte & 1; }
+fn pte_writable(pte) { return (pte >> 1) & 1; }
+fn pte_addr(pte) { return pte & 0x000FFFFFFFFFF000; }
+
+# GDT helpers
+fn gdt_present(e) { return (e >> 47) & 1; }
+fn gdt_dpl(e) { return (e >> 45) & 3; }
+fn gdt_long(e) { return (e >> 53) & 1; }
+
+# IDT gate builder (low 64 bits)
+fn idt_low(handler, sel, tattr) {
+    var lo = handler & 0xFFFF;
+    var s = sel << 16;
+    var t = tattr << 40;
+    var hi16 = ((handler >> 16) & 0xFFFF) << 48;
+    return lo | s | t | hi16;
+}
+
+fn test_pte() {
+    var pte = pte_build(0x1000, 3);
+    assert(pte_present(pte) == 1, "pte present");
+    assert(pte_writable(pte) == 1, "pte writable");
+    assert_eq(pte_addr(pte), 0x1000, "pte addr");
+    return 0;
+}
+
+fn test_gdt() {
+    var code64 = 0x00AF9A000000FFFF;
+    assert(gdt_present(code64) == 1, "gdt present");
+    assert_eq(gdt_dpl(code64), 0, "gdt dpl");
+    assert(gdt_long(code64) == 1, "gdt long");
+    return 0;
+}
+
+fn test_idt() {
+    var handler = 0xFFFF80000010;
+    var low = idt_low(handler, 8, 0x8E);
+    assert_eq(low & 0xFFFF, 0x0010, "idt offset lo");
+    assert_eq((low >> 16) & 0xFFFF, 8, "idt selector");
+    return 0;
+}
+
+fn test_constants() {
+    # Process table limits
+    var PROC_MAX = 16;
+    assert_eq(PROC_MAX, 16, "proc max");
+    # PIT frequency
+    var PIT_HZ = 100;
+    assert_eq(PIT_HZ, 100, "pit hz");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_pte();
+    test_gdt();
+    test_idt();
+    test_constants();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

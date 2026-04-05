@@ -1,59 +1,63 @@
-# Cyrius Memory Management Reference
-# Direct memory access via load/store. Bump allocator. No GC.
+# Memory Management — Cyrius reference (runnable)
+# Patterns: stack arrays, load/store, heap alloc, pointers
 
-# === Stack arrays ===
-var buf[16];                    # 16 slots × 8 bytes = 128 bytes on stack
-store64(&buf, 42);              # write to slot 0
-var v = load64(&buf);           # read from slot 0
-store64(&buf + 8, 99);          # write to slot 1 (offset 8)
+include "stage1/lib/string.cyr"
+include "stage1/lib/fmt.cyr"
+include "stage1/lib/alloc.cyr"
+include "stage1/lib/vec.cyr"
+include "stage1/lib/assert.cyr"
 
-# === Raw memory access ===
-# load8(addr)  load16(addr)  load32(addr)  load64(addr)
-# store8(addr, val)  store16(addr, val)  store32(addr, val)  store64(addr, val)
+fn test_stack_arrays() {
+    var buf[4];
+    store64(&buf, 42);
+    store64(&buf + 8, 99);
+    assert_eq(load64(&buf), 42, "stack slot0");
+    assert_eq(load64(&buf + 8), 99, "stack slot1");
+    return 0;
+}
 
-# === Address-of ===
-var x = 42;
-var p = &x;                     # pointer to x
-var v2 = *p;                    # dereference → 42
-*p = 99;                        # write through pointer
+fn test_pointers() {
+    var x = 42;
+    var p = &x;
+    assert_eq(*p, 42, "deref");
+    *p = 99;
+    assert_eq(x, 99, "write thru ptr");
+    return 0;
+}
 
-# === Heap allocator (bump from brk) ===
-# include "lib/alloc.cyr"
-# alloc_init()                  — must call before any alloc
-# alloc(size)                   — returns aligned pointer (8-byte aligned)
-# alloc_reset()                 — free everything (batch)
-# alloc_used()                  — bytes currently allocated
-#
-# No individual free. Bump allocator grows via brk syscall.
-# Grows by 1MB chunks automatically.
+fn test_heap() {
+    var a = alloc(64);
+    var b = alloc(128);
+    store64(a, 42);
+    store64(b, 99);
+    assert_eq(load64(a), 42, "heap a");
+    assert_eq(load64(b), 99, "heap b");
+    assert_eq(alloc_used(), 192, "used");
+    alloc_reset();
+    assert_eq(alloc_used(), 0, "reset");
+    return 0;
+}
 
-# === Heap-allocated structs ===
-# struct Point { x; y; }
-# fn point_new(x, y) {
-#     var p = alloc(16);           # 2 fields × 8 bytes
-#     store64(p, x);
-#     store64(p + 8, y);
-#     return p;
-# }
-# fn point_x(p) { return load64(p); }
+fn test_vec() {
+    var v = vec_new();
+    vec_push(v, 10);
+    vec_push(v, 20);
+    vec_push(v, 30);
+    assert_eq(vec_len(v), 3, "vec len");
+    assert_eq(vec_get(v, 0), 10, "vec get0");
+    assert_eq(vec_get(v, 2), 30, "vec get2");
+    assert_eq(vec_pop(v), 30, "vec pop");
+    assert_eq(vec_len(v), 2, "vec len after pop");
+    return 0;
+}
 
-# === Vec (dynamic array) ===
-# include "lib/vec.cyr"
-# var v = vec_new();             — heap-allocated { data, len, cap }
-# vec_push(v, 42);               — append (auto-grows at capacity)
-# var x = vec_get(v, 0);         — bounds-checked read
-# vec_set(v, 0, 99);             — bounds-checked write
-# vec_len(v), vec_pop(v), vec_find(v, val), vec_remove(v, idx)
-
-# === HashMap ===
-# include "lib/hashmap.cyr"
-# var m = map_new();             — FNV-1a hash, open addressing
-# map_set(m, "key", value);      — auto-grows at 70% load
-# map_get(m, "key"), map_has(m, "key"), map_delete(m, "key")
-# map_keys(m)                    — returns vec of key pointers
-
-# === Bounds checking (opt-in) ===
-# include "lib/bounds.cyr"
-# checked_load64(buf, len, idx)  — aborts if idx >= len
-# checked_store64(buf, len, idx, val)
-# checked_load8 / checked_store8 / checked_memcpy
+fn main() {
+    alloc_init();
+    test_stack_arrays();
+    test_pointers();
+    test_heap();
+    test_vec();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

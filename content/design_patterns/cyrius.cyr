@@ -1,85 +1,88 @@
-# Cyrius Design Patterns Reference
-# Patterns adapted for a language with no classes, no closures, no GC.
+# Design Patterns — Cyrius reference (runnable)
+# Patterns: builder, accessor, bitmask, lazy init, result chaining
 
-# === Builder pattern ===
-# Use str_builder for string construction:
-# var sb = str_builder_new();
-# str_builder_add_cstr(sb, "/sys/fs/cgroup/");
-# str_builder_add_cstr(sb, service);
-# str_builder_add_cstr(sb, "/cgroup.procs");
-# var path = str_builder_build(sb);
-#
-# For structs, use constructor functions:
-# fn config_new(name) {
-#     var cfg = alloc(40);
-#     store64(cfg, name);          # sensible defaults
-#     store64(cfg + 8, 0);
-#     store64(cfg + 16, 64);
-#     return cfg;
-# }
+include "stage1/lib/string.cyr"
+include "stage1/lib/fmt.cyr"
+include "stage1/lib/alloc.cyr"
+include "stage1/lib/assert.cyr"
+include "stage1/lib/tagged.cyr"
 
-# === Accessor pattern (getters/setters) ===
-# Every heap struct gets typed accessors:
-# fn config_name(cfg) { return load64(cfg); }
-# fn config_set_name(cfg, n) { store64(cfg, n); return 0; }
-# Keeps field offsets in one place. Callers never use raw offsets.
+# Accessor pattern: constructor + getters/setters
+fn config_new(name, size) {
+    var cfg = alloc(24);
+    store64(cfg, name);
+    store64(cfg + 8, size);
+    store64(cfg + 16, 0);
+    return cfg;
+}
+fn config_name(cfg) { return load64(cfg); }
+fn config_size(cfg) { return load64(cfg + 8); }
+fn config_set_size(cfg, n) { store64(cfg + 8, n); return 0; }
 
-# === Trait objects (vtable dispatch) ===
-# include "lib/trait.cyr"
-# fn _point_print(p) { fmt_int(load64(p)); ... }
-# var vt = display_vtable(&_point_print, &_point_to_string);
-# var obj = trait_obj_new(vt, &my_point);
-# display(obj);  # polymorphic call through vtable
+# Bitmask permissions
+fn has_perm(perms, p) { if ((perms & p) != 0) { return 1; } return 0; }
+fn grant_perm(perms, p) { return perms | p; }
+fn revoke_perm(perms, p) { return perms & (0 - 1 - p); }
 
-# === Callback / observer ===
-# include "lib/callback.cyr"
-# fn on_event(data) { ... }
-# for_each(events, &on_event);
-# var mapped = vec_map(items, &transform);
-# var filtered = vec_filter(items, &predicate);
-# var total = vec_fold(items, 0, &accumulate);
+# Lazy init
+var _cache = 0;
+fn get_cached() {
+    if (_cache == 0) { _cache = 42; }
+    return _cache;
+}
 
-# === Result chaining (error propagation) ===
-# include "lib/tagged.cyr"
-# fn step1() { if (fail) { return Err(1); } return Ok(value); }
-# fn step2(input) { if (fail) { return Err(2); } return Ok(result); }
-# fn pipeline() {
-#     var r1 = step1();
-#     if (is_err_result(r1) == 1) { return r1; }  # propagate error
-#     var r2 = step2(result_unwrap(r1));
-#     return r2;
-# }
+# Result chaining
+fn step1(x) {
+    if (x < 0) { return Err(1); }
+    return Ok(x * 2);
+}
+fn step2(x) {
+    if (x > 100) { return Err(2); }
+    return Ok(x + 1);
+}
 
-# === Data-driven dispatch (table pattern) ===
-# Instead of switch with many cases, use a table:
-# var _mount_table[8];   # packed array of entries
-# fn mount_essential() {
-#     var i = 0;
-#     while (i < _mount_count) {
-#         var off = i * 40;
-#         mount_if_needed(load64(t + off), load64(t + off + 8), ...);
-#         i = i + 1;
-#     }
-# }
+fn test_accessor() {
+    var cfg = config_new("test", 64);
+    assert_eq(config_size(cfg), 64, "cfg size");
+    config_set_size(cfg, 128);
+    assert_eq(config_size(cfg), 128, "cfg set");
+    return 0;
+}
 
-# === Lazy initialization ===
-# var _vt_cache = 0;
-# fn get_vtable() {
-#     if (_vt_cache == 0) {
-#         _vt_cache = display_vtable(&my_print, &my_to_string);
-#     }
-#     return _vt_cache;
-# }
+fn test_bitmask() {
+    var perms = 0;
+    perms = grant_perm(perms, 1);
+    perms = grant_perm(perms, 4);
+    assert(has_perm(perms, 1) == 1, "has read");
+    assert(has_perm(perms, 2) == 0, "no write");
+    perms = revoke_perm(perms, 1);
+    assert(has_perm(perms, 1) == 0, "revoked");
+    return 0;
+}
 
-# === RAII-lite (explicit close) ===
-# Cyrius has no destructors. Use explicit cleanup:
-# struct OwnedFd { fd; }
-# fn owned_fd_new(fd) { var o = alloc(8); store64(o, fd); return o; }
-# fn owned_fd_close(o) { sys_close(load64(o)); store64(o, 0 - 1); }
-# # Caller MUST call owned_fd_close — no automatic Drop.
+fn test_lazy() {
+    assert_eq(get_cached(), 42, "lazy init");
+    return 0;
+}
 
-# === Bitmask permissions ===
-# enum Permission { READ = 1; WRITE = 2; EXEC = 4; NETWORK = 8; }
-# fn has_perm(ctx, perm) { return (load64(ctx + 8) & perm) != 0; }
-# fn grant(ctx, perm) { store64(ctx + 8, load64(ctx + 8) | perm); }
-# fn revoke(ctx, perm) { store64(ctx + 8, load64(ctx + 8) & (0 - 1 - perm)); }
+fn test_chain() {
+    var r1 = step1(5);
+    assert(is_ok(r1) == 1, "step1 ok");
+    var r2 = step2(result_unwrap(r1));
+    assert(is_ok(r2) == 1, "step2 ok");
+    assert_eq(result_unwrap(r2), 11, "chain val");
+    var r3 = step1(0 - 1);
+    assert(is_err_result(r3) == 1, "chain err");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_accessor();
+    test_bitmask();
+    test_lazy();
+    test_chain();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

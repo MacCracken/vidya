@@ -1,84 +1,73 @@
-# Cyrius Security Reference
-# Manual memory safety. No GC, no borrow checker (yet). Defense in depth.
+# Security — Cyrius reference (runnable)
+# Patterns: bounds checking, bitmask perms, input validation
 
-# === Bounds checking (opt-in) ===
-# include "lib/bounds.cyr"
-# checked_load64(buf, len, idx);    # aborts if idx >= len
-# checked_store64(buf, len, idx, val);
-# checked_load8(buf, len, idx);
-# checked_memcpy(dst, dst_len, src, src_len, count);
-#
-# Error output: "bounds: index 10 >= len 4" → stderr, exit 1
-# Vec already has built-in bounds checks in vec_get/vec_set.
+include "stage1/lib/string.cyr"
+include "stage1/lib/fmt.cyr"
+include "stage1/lib/alloc.cyr"
+include "stage1/lib/assert.cyr"
+include "stage1/lib/bounds.cyr"
 
-# === Input validation ===
-# Always validate syscall arguments:
-# fn ksyscall(num, arg1, arg2) {
-#     if (num == 1) {  # write
-#         var wlen = arg2;
-#         if (wlen > 4096) { wlen = 4096; }    # clamp length
-#         if (wlen < 0) { wlen = 0; }
-#         if (arg1 == 0) { return 0 - 1; }     # reject null
-#         serial_print(arg1, wlen);
-#     }
-# }
+# Permission bitmasks
+var PERM_READ = 1;
+var PERM_WRITE = 2;
+var PERM_EXEC = 4;
+var PERM_NET = 8;
 
-# === Privilege separation ===
-# include "lib/kybernet/privdrop.cyr"
-# fn drop_privileges(uid, gid) {
-#     # Fail fast if not root
-#     if (sys_geteuid() != 0) { return Err(PRIV_NOT_ROOT); }
-#     # Order matters: groups → gid → uid (irreversible)
-#     sys_setgroups(0, 0);
-#     sys_setgid(gid);
-#     sys_setuid(uid);
-#     # VERIFY the drop took effect
-#     if (sys_getuid() != uid) { return Err(PRIV_VERIFY_FAIL); }
-# }
+fn has_perm(perms, p) { if ((perms & p) != 0) { return 1; } return 0; }
+fn grant(perms, p) { return perms | p; }
+fn revoke(perms, p) { return perms & (0 - 1 - p); }
 
-# === Permission bitmasks ===
-# enum Permission { READ = 1; WRITE = 2; EXEC = 4; NETWORK = 8; }
-# fn has_perm(ctx, p) { return (load64(ctx + 8) & p) != 0; }
-# fn grant(ctx, p) { store64(ctx + 8, load64(ctx + 8) | p); }
-# fn revoke(ctx, p) { store64(ctx + 8, load64(ctx + 8) & (0 - 1 - p)); }
+# Input validation: clamp length
+fn clamp_len(n, maxn) {
+    if (n > maxn) { return maxn; }
+    if (n < 0) { return 0; }
+    return n;
+}
 
-# === Safe error handling ===
-# include "lib/tagged.cyr"
-# Never ignore errors. Use Result:
-# var r = sys_open(path, flags, mode);
-# if (r < 0) { return Err(0 - r); }   # convert errno to Result
-# return Ok(r);
-#
-# unwrap() aborts with message on None/Err — better than silent failure.
+fn test_bounds() {
+    var buf[4];
+    checked_store64(&buf, 4, 0, 42);
+    checked_store64(&buf, 4, 3, 99);
+    assert_eq(checked_load64(&buf, 4, 0), 42, "bounds load 0");
+    assert_eq(checked_load64(&buf, 4, 3), 99, "bounds load 3");
+    return 0;
+}
 
-# === Buffer overflow prevention ===
-# - Always pass buffer length alongside pointer
-# - Use checked_load/checked_store for untrusted indices
-# - Clamp copy lengths: if (n > bufsize) { n = bufsize; }
+fn test_byte_bounds() {
+    var b[2];
+    checked_store8(&b, 16, 0, 65);
+    checked_store8(&b, 16, 15, 90);
+    assert_eq(checked_load8(&b, 16, 0), 65, "byte 0");
+    assert_eq(checked_load8(&b, 16, 15), 90, "byte 15");
+    return 0;
+}
 
-# === Dependency auditing ===
-# cyrc vet <file>    — scan includes, report UNTRUST/MISSING
-# cyrc deny <file>   — reject absolute paths, parent traversal
+fn test_perms() {
+    var p = 0;
+    p = grant(p, PERM_READ);
+    p = grant(p, PERM_EXEC);
+    assert(has_perm(p, PERM_READ) == 1, "has read");
+    assert(has_perm(p, PERM_WRITE) == 0, "no write");
+    assert(has_perm(p, PERM_EXEC) == 1, "has exec");
+    p = revoke(p, PERM_READ);
+    assert(has_perm(p, PERM_READ) == 0, "revoked");
+    return 0;
+}
 
-# === Process table safety (kernel) ===
-# var PROC_MAX = 16;
-# fn proc_create(entry) {
-#     if (proc_count >= PROC_MAX) { return 0 - 1; }   # guard overflow
-# }
-# fn proc_get_state(pid) {
-#     if (pid >= proc_count) { return 0 - 1; }         # guard OOB
-# }
+fn test_clamp() {
+    assert_eq(clamp_len(100, 4096), 100, "normal");
+    assert_eq(clamp_len(9999, 4096), 4096, "clamp hi");
+    assert_eq(clamp_len(0 - 5, 4096), 0, "clamp neg");
+    return 0;
+}
 
-# === ISR register safety (kernel) ===
-# Save ALL 9 caller-saved registers in interrupt handlers:
-# push rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11
-# ... ISR body ...
-# pop r11, r10, r9, r8, rdi, rsi, rdx, rcx, rax
-# iretq
-
-# === What Cyrius does NOT have (yet) ===
-# - Borrow checker (Phase 14)
-# - Stack canaries
-# - ASLR (binaries have fixed base 0x400000)
-# - W^X enforcement (PT_LOAD is RWX for kernel ISR bytecode)
-# - Sanitizers (ASan, UBSan)
+fn main() {
+    alloc_init();
+    test_bounds();
+    test_byte_bounds();
+    test_perms();
+    test_clamp();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

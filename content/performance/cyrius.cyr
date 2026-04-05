@@ -1,62 +1,69 @@
-# Cyrius Performance Reference
-# Zero-overhead by default. No runtime, no GC, no vtable unless you ask for one.
+# Performance — Cyrius reference (runnable)
+# Patterns: bench_new, bench_run, bench_report, stack vs heap
 
-# === Why Cyrius is fast ===
-# - No libc: direct syscalls, no abstraction layers
-# - No dynamic linking: static binaries, no PLT/GOT overhead
-# - No GC: bump allocator, manual memory control
-# - No locale/UTF-8: byte operations only
-# - Minimal ELF: 120-byte header, no sections, no symbols
-# - Compiler: 11ms self-compile, <5ms for any program
+include "stage1/lib/string.cyr"
+include "stage1/lib/fmt.cyr"
+include "stage1/lib/alloc.cyr"
+include "stage1/lib/vec.cyr"
+include "stage1/lib/fnptr.cyr"
+include "stage1/lib/assert.cyr"
+include "stage1/lib/bench.cyr"
 
-# === Binary sizes vs GNU coreutils ===
-# true:  168B vs 39KB  (233x smaller)
-# echo:  240B vs 43KB  (180x smaller)
-# cat:   4.5KB vs 47KB (10x smaller)
-# wc:    5.8KB vs 68KB (11x smaller)
-# grep:  5.5KB vs 158KB (28x smaller)
+fn _noop() { return 0; }
 
-# === Buffered I/O ===
-# CRITICAL: Always read/write in blocks, never byte-at-a-time.
-# var buf[512];                    # 4096 bytes
-# var n = syscall(0, fd, &buf, 4096);
-# Byte-at-a-time is 85x slower (766ms vs 9ms for 1MB).
+fn _alloc_work() {
+    var p = alloc(64);
+    store64(p, 42);
+    return 0;
+}
 
-# === Benchmarking ===
-# include "lib/bench.cyr"
-# fn work() { ... }
-# var b = bench_new("operation");
-# bench_run(b, &work, 10000);
-# bench_report(b);
-# # Output: operation: 407ns avg (min=390ns max=8us) [10000 iters]
+fn test_bench_api() {
+    var b = bench_new("noop");
+    bench_start(b);
+    bench_stop(b);
+    assert_eq(bench_iterations(b), 1, "1 iter");
+    assert(bench_avg_ns(b) >= 0, "avg >= 0");
+    return 0;
+}
 
-# === Avoid re-allocation ===
-# Vec auto-grows by doubling. Pre-size if you know the count:
-# var v = vec_new();  # starts at cap=16
-# # 1000 pushes = ~6 grows (16→32→64→128→256→512→1024)
-# # Each grow copies all existing data
+fn test_bench_run() {
+    var b = bench_new("noop_1000");
+    bench_run(b, &_noop, 1000);
+    assert_eq(bench_iterations(b), 1000, "1000 iters");
+    bench_report(b);
+    return 0;
+}
 
-# === HashMap load factor ===
-# map_new() starts at cap=16, grows at 70% load.
-# For 1000 entries: ~7 grows. FNV-1a hash + linear probing = O(1) avg.
+fn test_alloc_bench() {
+    alloc_reset();
+    var b = bench_new("alloc64");
+    bench_run(b, &_alloc_work, 1000);
+    assert(bench_avg_ns(b) > 0, "alloc time");
+    bench_report(b);
+    alloc_reset();
+    return 0;
+}
 
-# === Stack vs heap ===
-# Stack arrays (var buf[N]) are free — no alloc call.
-# Heap alloc() is fast (bump pointer) but never freed individually.
-# Use alloc_reset() to batch-free everything.
+fn test_stack_vs_heap() {
+    # Stack: free, instant
+    var buf[16];
+    store64(&buf, 42);
+    assert_eq(load64(&buf), 42, "stack fast");
 
-# === Inline assembly for hot paths ===
-# asm { 0x90; }                  # nop
-# asm { rdtsc; }                 # read timestamp counter
-# Use sparingly — breaks portability to aarch64.
+    # Heap: bump alloc
+    var h = alloc(128);
+    store64(h, 99);
+    assert_eq(load64(h), 99, "heap works");
+    return 0;
+}
 
-# === Compile-time costs ===
-# Every include is textually expanded — no caching.
-# 17 includes = ~58KB expanded source = ~6000 tokens.
-# Compiler handles this in <20ms.
-# Fixup table: 1024 entries max (~200 functions before limit).
-
-# === What NOT to optimize ===
-# - Compiler is 11ms — don't micro-optimize the compiler
-# - Process startup dominates at these binary sizes (fork+exec > compile)
-# - Vec bounds checks are branch-predicted — negligible cost
+fn main() {
+    alloc_init();
+    test_bench_api();
+    test_bench_run();
+    test_alloc_bench();
+    test_stack_vs_heap();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);
