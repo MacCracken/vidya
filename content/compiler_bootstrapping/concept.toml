@@ -396,6 +396,30 @@ explanation = "The Linux sys_open syscall expects a null-terminated C string for
 bad_example = "Pass address of in-buffer '\"path.cyr\"' directly to sys_open — no null terminator, reads past end"
 good_example = "Copy chars to temp buffer, append store8(buf + len, 0), pass buf to sys_open"
 
+[[gotchas]]
+title = "The self-hosting compiler binary must be committed — not gitignored"
+explanation = "The self-hosting compiler binary (build/cc2) is the compiler seed, just as bootstrap/asm is the assembler seed. If the binary is lost and cc.cyr can't compile cc2 (due to feature gaps between the bridge compiler and cc2's source), the entire bootstrap chain breaks. The binary must be committed to git with an explicit gitignore exception. Update .gitignore to use `/build/*` with `!/build/cc2` so that build artifacts are ignored but the compiler seed is tracked. Without this, a fresh clone has no compiler capable of building the next generation, and the bootstrap chain requires manual reconstruction from an earlier stage."
+bad_example = "/build/ in .gitignore — cc2 is never committed, fresh clone can't self-host without rebuilding from stage1f"
+good_example = "/build/* and !/build/cc2 in .gitignore — cc2 is committed as the compiler seed, fresh clone bootstraps immediately"
+
+[[gotchas]]
+title = "The bridge compiler must support ALL features the source uses — not just defines"
+explanation = "The monolithic bridge compiler (cc.cyr) must support every syntax feature that cc2's source code uses in its own implementation — not just the features cc2 defines for its output programs. If cc2's source uses elif, &&, continue, or for loops in its own parser/codegen logic, cc.cyr must handle those tokens during compilation. Feature additions to cc2 must be accompanied by corresponding bridge compiler updates, or cc2's source must be written using only the syntax the bridge compiler already understands. The failure mode is silent: the bridge produces a broken cc2 binary that crashes or produces wrong output, with no error pointing back to the unsupported token."
+bad_example = "Add 'for' loops to cc2's codegen, then use 'for' in cc2's own lexer loop — bridge compiler (cc.cyr) doesn't know 'for', produces corrupt cc2"
+good_example = "Before using 'for' in cc2's source: add 'for' support to cc.cyr, rebuild bridge, verify cc→cc2→cc3 chain. Or use 'while' in cc2's source until the bridge catches up."
+
+[[gotchas]]
+title = "Mnemonic prefix collision — longer mnemonics must be checked before shorter ones"
+explanation = "When dispatching assembly mnemonics by packed-byte prefix matching, longer mnemonics must be checked BEFORE shorter ones that share a prefix. 'invlpg' starts with the bytes 0x6E69, which also matches 'in' when checked with a 2-byte mask. If 'in' is checked first, it matches 'invlpg' and dispatches to the wrong handler, silently encoding the wrong instruction. The same issue affects 'int' vs 'in', 'movzx' vs 'mov', and any pair where one mnemonic is a prefix of another. Always order dispatch checks from longest prefix to shortest, or use exact-length matching that compares the full mnemonic including the terminating delimiter."
+bad_example = "if (packed & 0xFFFF) == 0x6E69 { emit_in(); } — matches both 'in' and 'invlpg', 'int', 'inc'"
+good_example = "Check 'invlpg' (6 bytes) first, then 'int' (3 bytes), then 'inc' (3 bytes), then 'in' (2 bytes) — longest match wins"
+
+[[gotchas]]
+title = "Codebuf overflow mimics parse errors at high token numbers"
+explanation = "When the code buffer overflows into adjacent memory regions (str_data, tok_names), the symptoms look like parse errors at high token numbers — 'error at token 15XXX (type=N)' with seemingly random type values. The actual cause is memory corruption: generated code has written past the codebuf boundary and overwritten the token or string tables. The misleading error messages send you chasing parser bugs that don't exist. Always check codebuf headroom (current code position vs buffer end) before investigating parse errors that appear at high token numbers or report nonsensical token types. The fix is to increase the codebuf allocation and adjust all downstream heap offsets accordingly."
+bad_example = "See 'error at token 15234 (type=7)', spend hours debugging the parser — actual cause is codebuf overflow corrupting tok_types at offset 0x30000"
+good_example = "Check code_pos vs codebuf_end first. If code_pos is within 1KB of the boundary, increase codebuf size and rebuild before debugging anything else."
+
 [[performance_notes]]
 title = "Full language independence requires only a 29KB binary + shell"
 explanation = "A complete self-hosting toolchain — from committed binary to working compiler and assembler — requires only a 29KB ELF binary and a shell script. No Rust, no LLVM, no Python, no cmake, no package manager. The bootstrap produces a compiler that compiles programs with structs, multi-width memory access, file includes, functions, control flow, bitwise operations, syscalls, strings, and arrays — and that compiler compiles itself. The entire toolchain fits on a floppy disk."
@@ -496,3 +520,33 @@ title = "Var inside loop body allocates a new slot each iteration"
 explanation = "In compilers without block scoping, `var x = expr;` inside a while/for body allocates a NEW stack slot each iteration. After N iterations, N slots are consumed, eventually overflowing the stack frame. The fix: declare variables OUTSIDE the loop body and assign inside. For for-loop init vars (the `var i` in `for (var i = ...)`), the token replay mechanism handles this correctly — the var is declared once and the step only reassigns."
 bad_example = "while (i < 1000) { var tmp = compute(i); use(tmp); i = i + 1; } — allocates 1000 stack slots for tmp, one per iteration, overflows stack frame"
 good_example = "var tmp = 0; while (i < 1000) { tmp = compute(i); use(tmp); i = i + 1; } — single slot for tmp, reassigned each iteration"
+
+[[gotchas]]
+title = "multiboot1_vs_multiboot2_grub_compat"
+explanation = "GRUB 2.14+ has strict ELF section header validation for multiboot2 that rejects ELFs with e_shoff=0 and e_shnum=0, even though the ELF spec allows it. Multiboot1 (magic 0x1BADB002) is simpler and has better compatibility. For first boot, use multiboot1 with flags=0x03 (page-align + meminfo). The header is only 12 bytes vs 24 for multiboot2. Switch to multiboot2 later when you need its advanced features."
+bad_example = "Use multiboot2 header with a minimal ELF (e_shoff=0, e_shnum=0) — GRUB 2.14+ rejects it with section header validation error"
+good_example = "Use multiboot1: magic=0x1BADB002, flags=0x03, checksum=-(magic+flags). 12 bytes, works on all GRUB versions. Upgrade to multiboot2 when you need framebuffer tags or module loading."
+
+[[gotchas]]
+title = "qemu_kernel_flag_version_sensitivity"
+explanation = "QEMU 10.x requires PVH ELF notes for `-kernel` on x86_64 (`Error loading uncompressed kernel without PVH ELF Note`). Workaround: use `qemu-system-i386 -kernel` directly for multiboot ELF32 kernels, or create a GRUB ISO with `grub-mkrescue`. The i386 QEMU variant handles multiboot1 ELFs correctly via direct `-kernel` loading."
+bad_example = "qemu-system-x86_64 -kernel kernel.elf — fails on QEMU 10.x with 'Error loading uncompressed kernel without PVH ELF Note'"
+good_example = "qemu-system-i386 -kernel kernel.elf — loads multiboot1 ELF32 directly. Or: grub-mkrescue -o boot.iso isodir/ && qemu-system-x86_64 -cdrom boot.iso"
+
+[[gotchas]]
+title = "elf32_for_multiboot_boot"
+explanation = "Multiboot kernels must use ELF32 (ELFCLASS32, e_machine=EM_386) even though the kernel will transition to 64-bit long mode. GRUB and QEMU multiboot loaders only understand 32-bit ELFs. The 32-to-64 transition happens in the kernel's boot shim AFTER the bootloader hands off control. ELF32 header = 52 bytes, PH32 = 32 bytes, total headers = 84 bytes."
+bad_example = "Emit ELF64 with multiboot header — GRUB says 'unsupported ELF file type' or silently ignores the multiboot header"
+good_example = "Emit ELF32 (e_ident[EI_CLASS]=1, e_machine=3) with multiboot1 header. Boot shim sets up page tables and jumps to long mode before calling 64-bit kernel code."
+
+[[gotchas]]
+title = "multiboot_header_8byte_alignment"
+explanation = "The multiboot2 header MUST be 8-byte aligned within the loaded image. If ELF32 headers total 84 bytes (52 + 32), the multiboot header at offset 84 is NOT 8-byte aligned (84 mod 8 = 4). Add 4 bytes of padding before the header. Multiboot1 has no alignment requirement — it just needs to be within the first 8192 bytes."
+bad_example = "Place multiboot2 header immediately after ELF32 headers at offset 84 — GRUB fails to find the header because 84 % 8 != 0"
+good_example = "Add 4 bytes of padding after ELF32 headers (offset 84), place multiboot2 header at offset 88 (88 % 8 == 0). Or use multiboot1 which has no alignment constraint."
+
+[[gotchas]]
+title = "serial_port_initialization_before_output"
+explanation = "Writing to COM1 (0x3F8) without initialization may work on some hardware/emulators but not others. The proper init sequence: disable interrupts (port+1=0x00), enable DLAB (port+3=0x80), set divisor (port+0=0x03 for 38400 baud, port+1=0x00), set 8N1 (port+3=0x03), enable FIFO (port+2=0xC7). Total: 7 out instructions before the first data write."
+bad_example = "mov dx, 0x3F8; mov al, 'H'; out dx, al — works on QEMU, hangs or produces garbage on real hardware and some emulators"
+good_example = "Init COM1: out 0x3F9,0x00; out 0x3FB,0x80; out 0x3F8,0x03; out 0x3F9,0x00; out 0x3FB,0x03; out 0x3FA,0xC7; then out 0x3F8,data"
