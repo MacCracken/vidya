@@ -1,0 +1,389 @@
+# Cyrius Language Implementation Patterns
+# How each language feature is implemented in the compiler.
+# An agent reading these entries can implement or extend any feature.
+
+[[entries]]
+name = "struct_implementation"
+description = "How structs work: definition, initialization, field access, nested structs"
+category = "compiler_bootstrapping"
+content = '''
+STORAGE:
+  struct_names[32]   — name offset per struct (1-based ID)
+  struct_fcounts[32] — field count per struct
+  struct_fnames[32*16] — field name offsets (16 fields max per struct)
+  struct_ftypes[32*16] — field type IDs (0=scalar, >0=struct_id for nested)
+  var_types[256]     — per-variable struct type ID (>0=struct, <0=pointer scale)
+
+DEFINITION: struct Point { x; y; }
+  PARSE_STRUCT_DEF registers name, parses fields with optional `: TypeName`
+  annotation for nested structs. All fields are 8 bytes unless nested.
+
+INIT: var p = Point { 10, 20 };
+  PARSE_STRUCT_INIT allocates var with size = STRUCTSZ (recursive for nested),
+  then emits stores for each field at var_addr + FIELDOFF(struct, field_idx).
+  For nested structs, flattens: Outer { 1, 20, 22, 99 } stores 4 values.
+
+FIELD ACCESS: p.x
+  PARSE_FIELD_LOAD: lookup var → get struct type → find field index →
+  compute offset via FIELDOFF → emit mov rcx, <var_addr>; add rcx, offset;
+  mov rax, [rcx]. Offsets folded at compile time for nested: o.inner.field
+  = single add with combined offset.
+
+FIELD STORE: p.x = 42;
+  Same lookup, emit push rax (value); mov rcx, <addr+offset>; pop rax;
+  mov [rcx], rax.
+'''
+
+[[entries]]
+name = "typed_pointer_implementation"
+description = "How typed pointers scale arithmetic: var p: *i64 = &buf; *(p+1)"
+category = "compiler_bootstrapping"
+content = '''
+DECLARATION: var p: *i64 = &buf;
+  In PARSE_VAR, after `:` check for `*` token. If found, parse type name
+  (i64→8, i32→4, i16→2, i8→1). Store scale as negative value in var_types:
+  SVTYPE(S, vcnt, 0 - pscale). For locals: SLTYPE(S, li, pscale).
+
+TRACKING: ptr_scale state variable at heap offset 0x8F890.
+  PARSE_FACTOR clears SPSC(S, 0) at start. When loading a typed pointer
+  variable, sets SPSC(S, scale). After dereference (*ptr), clears to 0.
+
+SCALING: p + 1 adds 8 bytes (not 1)
+  In PARSE_EXPR, before EADDR (add), check GPSC(S). If > 1:
+  EPTR_SCALE(S, ps) emits: mov rcx, rax; mov rax, ps; imul rcx
+  This multiplies the offset by the pointer scale before adding.
+
+CODEGEN: *(p + 1) for *i64
+  1. Load p → rax (SPSC set to 8)
+  2. Push rax
+  3. Load 1 → rax
+  4. EPTR_SCALE: multiply rax by 8 → rax = 8
+  5. Pop p → rcx
+  6. Add → rax = p + 8
+  7. ELOAD64 → load 8 bytes from [rax]
+  8. Clear SPSC
+'''
+
+[[entries]]
+name = "logical_and_or_implementation"
+description = "How && and || short-circuit evaluation works with extra patches"
+category = "compiler_bootstrapping"
+content = '''
+TOKENS: && = 53, || = 54 (lexer handles double-char)
+
+ECOND parses: expr OP expr [&& expr OP expr]* [|| expr OP expr]*
+
+FOR &&: a == 1 && b == 2
+  1. Parse first comparison (a == 1), emit cmp + inverted jcc → patch1
+  2. See && token, call ECOND_AND
+  3. Store patch1 in extra_patches array (ADDXP)
+  4. Parse second comparison (b == 2), emit cmp + inverted jcc → patch2
+  5. Return patch2 to caller
+  6. Caller patches BOTH patch1 and patch2 to the false branch (PATCHXP)
+
+FOR ||: a == 1 || b == 2
+  1. Parse first comparison, emit NON-inverted jcc → true_patch
+  2. See || token, call ECOND_OR
+  3. Parse second comparison, emit inverted jcc → false_patch
+  4. Patch true_patch to land HERE (start of body)
+  5. Return false_patch to caller
+
+CHAINING: a && b && c
+  ECOND_AND is recursive: if another && follows, calls itself again.
+  Each extra patch stored in array, all patched at the same false target.
+
+HEAP: extra_patches[64] at 0x8F848, extra_patch_cnt at 0x8F888.
+'''
+
+[[entries]]
+name = "for_loop_implementation"
+description = "How for loops use token replay for the step expression"
+category = "compiler_bootstrapping"
+content = '''
+SYNTAX: for (init; cond; step) { body }
+
+PARSE_FOR:
+  1. Parse init: call PARSE_STMT (handles var or assignment)
+  2. Record loop_top = current code position
+  3. Parse cond: call ECOND → get condition patch
+  4. Save step tokens: record GTI, skip tokens until matching ), save range
+  5. Parse body: consume { }, call PARSE_PROG
+  6. REPLAY step: save current TI, rewind to step_start, parse as assignment
+     (IDENT = EXPR without semicolon), restore TI
+  7. Emit EJMP back to loop_top
+  8. Patch condition false branch
+
+STEP REPLAY: The step (i = i + 1) has no semicolon — it ends at ).
+  Parse as: load noff (IDENT), consume =, PARSE_EXPR, then FINDLOCAL/FINDVAR
+  to store. Must check locals first (GINFN) for correct stack slot.
+
+BREAK: Uses loop_top (0x8F838) and break_patch (0x8F840) heap state.
+  break emits EJMP0, stores patch. After loop, EPATCH to end.
+
+CONTINUE: Emits EJMP to loop_top (condition check, skipping step in for loops).
+
+VAR SCOPE: for (var i = 0; ...) declares i as a local. The compiler
+  doesn't have block scoping — i persists in the function scope.
+  Multiple for loops in the same function need different var names.
+'''
+
+[[entries]]
+name = "break_continue_implementation"
+description = "How break and continue work with loop state"
+category = "compiler_bootstrapping"
+content = '''
+HEAP STATE:
+  0x8F838  loop_top   — code position of current loop condition
+  0x8F840  break_patch — placeholder offset for break jump (0 if none)
+
+WHILE LOOP:
+  Save loop_top/break_patch. Set loop_top = current CP. Set break_patch = 0.
+  After body: EJMP to loop_top. EPATCH condition. If break_patch > 0,
+  EPATCH it to current position (after loop).
+
+BREAK: Emits EJMP0 (placeholder), stores offset in break_patch.
+  Only ONE break per loop (last break wins). Nested loops save/restore state.
+
+CONTINUE: Emits EJMP to loop_top. In while loops, jumps to condition.
+  In for loops, jumps to condition (skipping step — known limitation).
+
+NESTING: PARSE_WHILE saves saved_ltop and saved_brk at entry,
+  restores at exit. Each nesting level has its own break/continue state.
+'''
+
+[[entries]]
+name = "elif_implementation"
+description = "How elif chains are implemented with recursive parsing"
+category = "compiler_bootstrapping"
+content = '''
+PARSE_IF checks for elif (token 50) after the if body closes:
+
+  if (cond1) { body1 }
+  elif (cond2) { body2 }
+  elif (cond3) { body3 }
+  else { body4 }
+
+CODEGEN:
+  1. Emit cond1 check → patch1 (jumps to false if cond1 fails)
+  2. Emit body1
+  3. See elif → emit jmp-to-end (skip), patch1 to land here
+  4. PARSE_ELIF_CHAIN: parse cond2 → patch2, emit body2
+  5. See elif → recurse: emit jmp-to-end, patch2 to here
+  6. Parse cond3 → patch3, emit body3
+  7. See else → emit jmp-to-end, patch3 to here, emit body4
+  8. Patch all jmp-to-end to land at final position
+
+RECURSIVE: PARSE_ELIF_CHAIN calls itself for each elif. Each level
+  emits a skip-jmp before patching the previous condition, ensuring
+  only one branch executes.
+'''
+
+[[entries]]
+name = "include_preprocessing"
+description = "How include directives expand files before lexing"
+category = "compiler_bootstrapping"
+content = '''
+PREPROCESS runs before LEX. Scans input for lines starting with "include ".
+
+ALGORITHM:
+  1. Walk input byte by byte
+  2. Check ISINCLUDE: matches "include " (8 chars) via byte comparison
+  3. Extract filename from quotes: include "path/to/file.cyr"
+  4. Read file with READFILE(path, dst, maxsz) using syscall(2, open)
+  5. Append file contents to output buffer at S+0x91000
+  6. Skip to end of include line
+  7. Non-include lines: copy byte to output
+  8. After scanning: copy expanded output back to S+0 (input buffer)
+  9. Update BL (input length) to expanded size
+
+LIMITS: Input buffer = 131072 bytes. Include expansion must fit.
+  Currently no recursive include support (includes in included files
+  are NOT expanded). No include guards needed.
+
+FILENAME: Extracted into temp at S+0x90000, null-terminated for syscall.
+'''
+
+[[entries]]
+name = "inline_asm_mnemonic_dispatch"
+description = "How inline asm handles both raw bytes and mnemonic instructions"
+category = "compiler_bootstrapping"
+content = '''
+PARSE_STMT dispatches asm (token 48) to the asm block parser.
+
+ASM BLOCK: asm { ... }
+  Inside braces, each item is either:
+  - NUM (type 1): emit as raw byte via EB(S, value)
+  - IDENT (type 2): dispatch to ASM_MNEMONIC
+
+ASM_MNEMONIC:
+  Reads the identifier name, packs first 8 bytes as L64(S + 0x50000 + noff).
+  Matches against known mnemonics using masked comparison:
+    if (mnem & 0xFFFFFF == 0x696C63) → cli (3 bytes match)
+
+  ORDER MATTERS: longer prefixes first to avoid collisions.
+  "invlpg" starts with "in" — check invlpg before int before in.
+
+  18 mnemonics implemented:
+  No-operand: cli, sti, hlt, nop, iretq, wrmsr, rdmsr, cpuid, pushfq, popfq
+  With operands: lgdt [rax], lidt [rax], invlpg [rax], ltr ax,
+    mov cr0/cr3/cr4, rax / mov rax, cr0/cr3/cr4, int N, in al dx, out dx al
+
+  Operand parsing: simple pattern matching (expect [, ident, ] for memory;
+  ident, comma, ident for register pairs; NUM for immediates).
+'''
+
+[[entries]]
+name = "gt6_params_implementation"
+description = "How functions with more than 6 parameters use the stack"
+category = "compiler_bootstrapping"
+content = '''
+System V AMD64 ABI: first 6 args in rdi, rsi, rdx, rcx, r8, r9.
+Args 7+ are pushed on the stack by the caller.
+
+CALLER (PARSE_FNCALL):
+  1. Evaluate each arg, push onto stack
+  2. Pop first 6 into registers (reverse order)
+  3. Remaining args stay on stack
+  4. Emit CALL (rel32 fixup)
+  5. After call: adjust SP to remove stack args
+
+CALLEE (PARSE_FN_DEF):
+  1. Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size
+  2. Store register params to local slots: mov [rbp-8], rdi etc.
+  3. Stack params at [rbp+16], [rbp+24], etc. (above saved rbp + return addr)
+  4. ESTOREPARM(pc, li, total_params) handles the addressing
+
+FRAME LAYOUT:
+  [rbp+24] = param 8 (7th, 0-indexed)
+  [rbp+16] = param 7
+  [rbp+8]  = return address
+  [rbp]    = saved rbp
+  [rbp-8]  = local 0 / param 0
+  [rbp-16] = local 1 / param 1
+  ...
+'''
+
+[[entries]]
+name = "two_pass_scanning"
+description = "How the two-pass declaration scan enables global vars before/after functions"
+category = "compiler_bootstrapping"
+content = '''
+PROBLEM: fn f() { return g; } var g = 42;
+  Single-pass parsing: f references g before g is declared → error.
+
+SOLUTION: Two-pass scanning in cc2.cyr main loop.
+
+PASS 1 (register names, no codegen):
+  - struct: PARSE_STRUCT_DEF (full parse, registers struct)
+  - fn: skip body by counting braces (don't parse)
+  - var: PARSE_GVAR_REG — register name+size, save TI, skip to semicolon
+  - kernel: set kernel_mode flag
+  - other: stop (start of main code)
+
+PASS 2 (parse fn bodies):
+  - struct: skip (already parsed)
+  - fn: PARSE_FN_DEF (full parse — all globals now visible)
+  - var: skip (already registered)
+  - kernel: skip
+  - other: stop
+
+AFTER PASS 2:
+  EMIT_GVAR_INITS: replay saved token positions, parse init expressions,
+  emit stores. For struct inits, handle PARSE_STRUCT_INIT specially
+  (detect struct name after =, emit field stores without re-registering).
+
+HEAP: gvar_toks[512] at 0x8FA98, gvar_cnt at 0x8FC98.
+'''
+
+[[entries]]
+name = "kernel_elf_emission"
+description = "How kernel; directive produces a bootable multiboot1 ELF32"
+category = "compiler_bootstrapping"
+content = '''
+DIRECTIVE: kernel; (token 56) sets kernel_mode flag at 0x8FCA0.
+
+FIXUP changes: base address 0x400078 → 0x100060 for kernel mode.
+  All variable/string addresses shift to kernel load address.
+
+EMITELF_KERNEL produces ELF32 (not ELF64):
+  - e_ident: ELFCLASS32, ELFDATA2LSB
+  - e_machine: EM_386 (3) — required for multiboot compatibility
+  - e_entry: 0x100060 (base + 52 ELF + 32 PH + 12 multiboot)
+  - p_vaddr = p_paddr = 0x100000
+
+  Layout: [ELF32 header 52B] [PH32 32B] [multiboot1 12B] [code] [data] [strings]
+
+MULTIBOOT1 HEADER (12 bytes):
+  magic:    0x1BADB002
+  flags:    0x00000003 (page-align + memory info)
+  checksum: -(magic + flags) & 0xFFFFFFFF = 0xE4524FFB
+
+BOOT: qemu-system-x86_64 -kernel build/kernel -serial stdio
+  (NOT qemu-system-i386 — needs x86_64 for long mode transition)
+'''
+
+[[entries]]
+name = "isr_data_section_pattern"
+description = "How interrupt service routines are built as bytecode in data buffers"
+category = "compiler_bootstrapping"
+content = '''
+PROBLEM: ISR entry points cannot be Cyrius functions (prologue/epilogue wrong).
+  Cyrius functions have: push rbp; mov rbp, rsp; sub rsp, N; ... ; ret
+  ISRs need: save regs; handle; restore regs; iretq
+
+SOLUTION: Build ISR bytecode in a data buffer at runtime.
+
+PATTERN (timer_isr_build):
+  var p = &timer_isr;
+  store8(p, 0x50);       # push rax
+  store8(p+1, 0x51);     # push rcx
+  store8(p+2, 0x52);     # push rdx
+  # mov rcx, &counter (48 B9 + 8-byte addr)
+  store8(p+3, 0x48); store8(p+4, 0xB9);
+  store64(p+5, &timer_ticks);  # RUNTIME address
+  # mov rax, [rcx]; inc rax; mov [rcx], rax
+  # EOI: mov al, 0x20; mov edx, 0x20; out dx, al
+  # pop rdx; pop rcx; pop rax; iretq (48 CF)
+
+IDT REGISTRATION:
+  idt_set_gate(&idt + vector * 16, &timer_isr, 0x08, 0x8E);
+  The buffer address (&timer_isr) is a DATA section address.
+  Works because the PT_LOAD segment has RWX permissions.
+
+KEY: store64(p+5, &timer_ticks) embeds the RUNTIME address.
+  This is resolved by FIXUP at compile time, so the ISR code
+  at runtime contains the correct absolute address.
+'''
+
+[[entries]]
+name = "pic_timer_keyboard_pattern"
+description = "How PIC remap, PIT timer, and keyboard interrupts are set up"
+category = "compiler_bootstrapping"
+content = '''
+PIC REMAP (pic_init):
+  Default: IRQ 0-7 → INT 8-15 (conflicts with CPU exceptions)
+  Remap: IRQ 0-7 → INT 32-39, IRQ 8-15 → INT 40-47
+  ICW1-ICW4 sequence via out instructions to ports 0x20/0xA0 (command)
+  and 0x21/0xA1 (data). Set mask to enable only desired IRQs.
+
+PIT TIMER:
+  Channel 0, mode 2 (rate generator), ~100 Hz
+  Command port 0x43: out 0x34 (channel 0, lobyte/hibyte, mode 2)
+  Data port 0x40: out divisor low (0x9C), then high (0x2E)
+  Divisor = 1193180 / 100 = 11932 = 0x2E9C
+  Fires IRQ 0 → INT 32 after PIC remap
+
+TIMER ISR: Read nothing, increment counter, send EOI (out 0x20, 0x20), iretq.
+  EOI acknowledges the interrupt so PIC delivers the next one.
+
+KEYBOARD ISR:
+  Fires IRQ 1 → INT 33
+  Read scancode: in al, 0x60
+  Store in ring buffer: kb_buf[kb_head], increment kb_head & 0xFF
+  Send EOI, iretq
+  Ring buffer: kb_buf[256], kb_head, kb_tail
+  API: kb_has_key() checks head != tail, kb_read_scancode() reads + advances tail
+  scancode_to_ascii() maps PS/2 set 1 scancodes to ASCII
+
+PIC MASK: 0xFC = enable IRQ0 (timer) + IRQ1 (keyboard), mask all others.
+'''
