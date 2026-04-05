@@ -194,14 +194,26 @@ content = '''
 6. STRING LITERAL COMPARISON: streq("abc", "xyz") works via null-terminated
    comparison. strlen works on all string literals.
 
-7. FUNCTION ADDRESS: Cannot take &fn_name. Functions are called by name
-   only. For ISR handlers, build bytecode in data buffers.
+7. NO NEGATIVE LITERALS: Use (0 - N) instead of -N.
 
-8. NO NEGATIVE LITERALS: Use (0 - N) instead of -N.
-
-9. INLINE ASM REGISTER STATE: asm blocks operate on the register state
+8. INLINE ASM REGISTER STATE: asm blocks operate on the register state
    at that point. The compiler may have values in rax/rcx. Use push/pop
    to save state if needed.
+
+9. NO COMPARISONS IN FUNCTION ARGS: f(x == 1) fails. The parser does not
+   handle comparison operators inside function call arguments.
+   WORKAROUND: if (x == 1) { f(1); } else { f(0); }
+
+10. GLOBAL VAR INIT LIMIT: Max ~64 global vars with initializers (gvar_toks
+    table at 0x8FA98 has 64 slots). Use enums for large constant groups.
+    Enums have separate init path and don't consume gvar_toks slots.
+
+11. ENUM INIT ORDERING: Enum init runs before gvar init in cc2.cyr.
+    If you modify the compiler, do NOT reorder these — functions called
+    during gvar init depend on enum values being set.
+
+12. FUNCTION POINTERS: &fn_name IS supported (fixup type 3). Use fncall0/1/2
+    from fnptr.cyr for indirect calls. The earlier limitation was removed.
 '''
 
 [[entries]]
@@ -243,4 +255,106 @@ KEY MAPPINGS (x86_64 → aarch64 example):
 
 TESTING:
     qemu-system-aarch64 for kernel, qemu-aarch64 for userspace (Linux)
+'''
+
+[[entries]]
+name = "cyrius_stdlib"
+description = "Cyrius standard library: 8 core + 15 ecosystem libraries, 150+ functions"
+category = "compiler_bootstrapping"
+content = '''
+CORE LIBRARIES (stage1/lib/):
+
+string.cyr  — strlen, streq, memeq, memcpy, memset, memchr, strchr, print_num, println
+alloc.cyr   — alloc_init, alloc, alloc_reset, alloc_used (bump allocator from brk)
+str.cyr     — Str struct (data+len): str_from, str_new, str_len, str_eq, str_cat, str_sub, str_print
+vec.cyr     — Dynamic array: vec_new, vec_push, vec_pop, vec_get, vec_set, vec_len, vec_find, vec_remove
+io.cyr      — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists
+fmt.cyr     — Formatting: fmt_int, fmt_hex, fmt_hex0x, fmt_bool, fmt_byte, fmt_pad, fmt_int_buf
+args.cyr    — CLI args: args_init, argc, argv (reads /proc/self/cmdline)
+fnptr.cyr   — Function pointers: fncall0, fncall1, fncall2 (indirect call via inline asm)
+
+ECOSYSTEM LIBRARIES (stage1/lib/agnostik/, agnosys/, kybernet/, nous/):
+
+agnostik/error.cyr    — Error codes (1001-1010), err_is_retriable, err_print
+agnostik/types.cyr    — AgentType, AgentStatus, MessageType, SystemStatus, etc.
+agnostik/security.cyr — Permission bitmask, Role, SecurityContext, ResourceLimits
+agnostik/agent.cyr    — AgentConfig, AgentInfo, AgentStats, ResourceUsage
+agnostik/audit.cyr    — AuditSeverity, AuditEntry, audit_print
+agnostik/config.cyr   — AgnosConfig, EnvironmentProfile, edge overrides
+agnosys/syscalls.cyr  — 50 syscall numbers, 20+ wrappers, sigset, epoll, timerfd
+kybernet/console.cyr  — PID 1 stdio redirect (close/open/dup2)
+kybernet/signals.cyr  — Signal blocking + signalfd
+kybernet/reaper.cyr   — Zombie reaper (waitpid loop)
+kybernet/privdrop.cyr — Privilege dropping (setgroups/setgid/setuid)
+kybernet/mount.cyr    — Essential filesystem mounts
+kybernet/cgroup.cyr   — Cgroup v2 service management
+kybernet/eventloop.cyr— Epoll + timerfd event loop
+nous/nous.cyr         — Dependency resolver (marketplace + system)
+
+USAGE PATTERN:
+    include "stage1/lib/alloc.cyr"
+    include "stage1/lib/vec.cyr"
+    alloc_init();
+    var v = vec_new();
+    vec_push(v, 42);
+
+DEPENDENCY ORDER:
+    string.cyr   — standalone
+    alloc.cyr    — standalone (call alloc_init() first)
+    str.cyr      — requires alloc.cyr + string.cyr
+    vec.cyr      — requires alloc.cyr
+    io.cyr       — standalone
+    fmt.cyr      — standalone (requires string.cyr for fmt_int_buf)
+    args.cyr     — requires string.cyr
+    fnptr.cyr    — standalone
+    agnostik/*   — require string.cyr + fmt.cyr + alloc.cyr
+    agnosys/*    — requires alloc.cyr
+    kybernet/*   — requires agnosys/syscalls.cyr + string.cyr + io.cyr + vec.cyr + fmt.cyr
+    nous/*       — requires all of the above
+
+INCLUDE ORDER FOR FULL STACK:
+    include "stage1/lib/string.cyr"
+    include "stage1/lib/fmt.cyr"
+    include "stage1/lib/alloc.cyr"
+    include "stage1/lib/io.cyr"
+    include "stage1/lib/vec.cyr"
+    include "stage1/lib/args.cyr"
+    include "stage1/lib/agnosys/syscalls.cyr"
+    include "stage1/lib/nous/nous.cyr"
+'''
+
+[[entries]]
+name = "cyrius_new_features"
+description = "Features added in Phase 8: enums, switch, function pointers, type warnings"
+category = "compiler_bootstrapping"
+content = '''
+ENUMS:
+    enum Color { RED; GREEN; BLUE; }        # AUTO: RED=0, GREEN=1, BLUE=2
+    enum Error { OK = 0; FAIL = 44; }      # EXPLICIT values
+    var c = BLUE;                           # c = 2
+    # Enums are compile-time integer constants. No type safety (yet).
+
+SWITCH/MATCH:
+    switch (expr) {
+        case 1: stmts;
+        case 2: stmts;
+        default: stmts;
+    }
+    # Case values must be integer literals. No fallthrough.
+    # Compiles to chained comparisons (cmp + jne per case).
+    # Switch value stored in hidden global variable (not register).
+
+FUNCTION POINTERS:
+    fn add(a, b) { return a + b; }
+    var fp = &add;                  # Get absolute function address
+    # Compiler emits fixup type 3 (absolute addr) for &fn_name.
+    # Call via fncall2(fp, 20, 22) from fnptr.cyr library.
+    # Direct call rax (FF D0) via inline asm.
+
+TYPE WARNINGS:
+    fn f() {
+        var p: *i64 = 42;          # WARNING: assigning non-pointer to typed pointer
+    }
+    # Warnings emitted to stderr, compilation continues.
+    # Only checked for pointer/scalar mismatch in function scope.
 '''

@@ -1,0 +1,717 @@
+# Cyrius Ecosystem — Crate Rewrites, Build Tools, Gotchas
+# Documents lessons from rewriting AGNOS Rust crates in Cyrius.
+# Covers: agnostik, agnosys, kybernet, nous, ark, cyrb.
+
+[[entries]]
+name = "cyrius_ecosystem_overview"
+description = "The AGNOS ecosystem rewritten in Cyrius: 5 crates, 23 library modules, 3 tools"
+category = "compiler_bootstrapping"
+content = '''
+Five AGNOS Rust crates have been rewritten in Cyrius:
+
+1. agnostik (6 modules) — shared types: error codes, agent lifecycle, security, audit, config
+2. agnosys (1 module) — Linux x86_64 syscall bindings: 50 syscall numbers, 20+ wrappers
+3. kybernet (7 modules) — PID 1 init: console, signals, reaper, privdrop, mount, cgroup, eventloop
+4. nous (1 module) — dependency resolver: marketplace + system package resolution
+5. ark (1 program) — package manager CLI: install/remove/search/list/info/status/verify
+
+Plus cyrb (build tool): compile, test, self-host, suite runner.
+
+All libraries at: stage1/lib/{agnostik,agnosys,kybernet,nous}/
+All tools at: stage1/programs/{ark,cyrb}.cyr
+Test programs: stage1/programs/{agnostik,kybernet,nous}_test.cyr
+
+Total: 23 library modules, 150+ functions, 102 .cyr files.
+151 tests (94 compiler + 57 programs), 0 failures.
+'''
+
+[[entries]]
+name = "cyrius_rewrite_methodology"
+description = "How to port a Rust crate to Cyrius: idiom translation, not 1:1 porting"
+category = "compiler_bootstrapping"
+content = '''
+Porting Rust to Cyrius is RE-IMPLEMENTATION, not direct translation.
+
+KEY PRINCIPLE: Strip the type system to what consumers actually need.
+Rust agnostik is 7090 lines. Cyrius agnostik is 629 lines (11x less).
+Same functionality for the kernel/init/tools that use it.
+
+TRANSLATION PATTERNS:
+
+Rust enum with data → Cyrius integer enum + separate error string functions
+  Rust:   AgnostikError::AgentNotFound(String)
+  Cyrius: ERR_AGENT_NOT_FOUND = 1001; fn err_print(code) { ... }
+
+Rust struct with derives → Cyrius heap-allocated struct with accessors
+  Rust:   #[derive(Clone, Debug, Serialize)] struct Config { name: String, ... }
+  Cyrius: fn config_new() { var c = alloc(SIZE); ... } fn config_name(c) { return load64(c); }
+
+Rust HashMap → Cyrius vec of key-value pairs (or sorted vec for lookup)
+
+Rust Result<T> → Cyrius return value (0 = success, negative = error code)
+
+Rust Option<T> → Cyrius pointer (0 = None, nonzero = Some)
+
+Rust traits → Cyrius concrete functions (no vtable, no dynamic dispatch)
+
+Rust generics → Cyrius monomorphized (Vec is always Vec<i64>)
+
+Rust String → Cyrius null-terminated C strings (pointers)
+
+Rust serde JSON → Manual parsing (find key, extract value between quotes)
+
+WORKFLOW: Survey Rust source → identify consumed API surface → implement only what's used.
+'''
+
+[[entries]]
+name = "cyrius_enum_init_ordering"
+description = "CRITICAL: Enum init code must run before global var inits in cc2.cyr"
+category = "compiler_bootstrapping"
+content = '''
+BUG: Enum values were always 0 inside functions.
+
+ROOT CAUSE: In cc2.cyr, the init ordering was:
+  1. EMIT_GVAR_INITS (global var initializers — may call functions)
+  2. Enum scan (emit enum init code)
+
+A global var like `var r = main()` would call main() during step 1,
+but enum values weren't initialized until step 2. So any enum
+referenced inside a function returned 0.
+
+FIX: Swap the order in cc2.cyr (around line 241):
+  1. Enum scan FIRST (initialize all enum constants)
+  2. EMIT_GVAR_INITS SECOND (now functions can see enum values)
+  3. STI(S, gvar_save_ti) to restore token index for PARSE_PROG
+
+VERIFICATION: Self-hosting still byte-identical. All 94 tests pass.
+Enum values now work correctly inside functions.
+'''
+
+[[entries]]
+name = "cyrius_comparison_in_args"
+description = "Parser limitation: comparison operators cannot appear in function call arguments"
+category = "compiler_bootstrapping"
+content = '''
+LIMITATION: f(x == 1, "name") fails with "error at token N (type=17)".
+
+The parser's PARSE_FNCALL doesn't handle comparison operators (==, !=, <, >, <=, >=)
+inside function argument expressions. It likely terminates argument parsing at
+operators that aren't arithmetic.
+
+WORKAROUND: Pre-evaluate comparisons before passing as arguments:
+  # FAILS:  assert(x == 42, "test");
+  # WORKS:  if (x == 42) { ok("test"); } else { fail("test"); }
+
+This affects test programs heavily — all assertion patterns must use if/else.
+
+POTENTIAL FIX: Extend PARSE_FNCALL to use PARSE_EXPR which includes comparisons.
+Would require careful handling of comma separator vs comparison operators.
+Currently deferred — workaround is simple.
+'''
+
+[[entries]]
+name = "cyrius_gvar_overflow"
+description = "Global var initializer table limited to 64 entries — use enums for constants"
+category = "compiler_bootstrapping"
+content = '''
+LIMITATION: The gvar_toks array at 0x8FA98 stores saved token indices for
+deferred global var initialization. It has 512 bytes = 64 slots.
+
+If a program has >64 global vars with initializers (var x = value),
+the array overflows into gvar_cnt at 0x8FC98, causing corruption.
+
+SOLUTION: Use enums instead of vars for constant groups.
+Enums have their own init path (PARSE_ENUM_DEF) that doesn't use gvar_toks.
+
+  # BAD — 50 vars = 50 gvar_toks entries:
+  var SYS_READ = 0;
+  var SYS_WRITE = 1;
+  ...50 more...
+
+  # GOOD — 0 gvar_toks entries:
+  enum SysNr { SYS_READ = 0; SYS_WRITE = 1; ... }
+
+COUNTING: stdlib uses ~3 globals (alloc), io.cyr uses ~9 (flags),
+so programs have ~52 slots remaining. With agnosys using enums,
+even large programs stay well under the limit.
+
+PERMANENT FIX: Expand gvar_toks to 256 or 512 entries (change heap map offsets).
+'''
+
+[[entries]]
+name = "cyrius_fork_exec_pattern"
+description = "How to run subprocesses in Cyrius using fork + execve + waitpid"
+category = "compiler_bootstrapping"
+content = '''
+Cyrius subprocess execution using agnosys syscall wrappers:
+
+BASIC PATTERN (run command, get exit code):
+  var pid = sys_fork();
+  if (pid == 0) {
+      # Child process
+      var argv[3];
+      store64(&argv, "/usr/bin/cmd");
+      store64(&argv + 8, "arg1");
+      store64(&argv + 16, 0);  # NULL terminator
+      var envp[1];
+      store64(&envp, 0);       # NULL envp
+      sys_execve("/usr/bin/cmd", &argv, &envp);
+      sys_exit(127);            # If exec fails
+  }
+  # Parent: wait for child
+  var status_buf[1];
+  sys_waitpid(pid, &status_buf, 0);
+  var exit_code = WEXITSTATUS(load32(&status_buf));
+
+CAPTURE OUTPUT PATTERN (run command, read stdout):
+  var pipefd[2];
+  sys_pipe(&pipefd);
+  var read_fd = load64(&pipefd);
+  var write_fd = load64(&pipefd + 8);
+  var pid = sys_fork();
+  if (pid == 0) {
+      sys_close(read_fd);
+      sys_dup2(write_fd, 1);   # Redirect stdout to pipe
+      sys_close(write_fd);
+      # ... exec ...
+  }
+  sys_close(write_fd);
+  var n = sys_read(read_fd, buf, buflen);  # Read child output
+  sys_close(read_fd);
+  sys_waitpid(pid, &status_buf, 0);
+
+COMPILE PATTERN (cyrb uses this):
+  # Child: open source as stdin, output as stdout, exec cc2
+  sys_dup2(sys_open(source, O_RDONLY, 0), 0);
+  sys_dup2(sys_open(output, O_WRONLY|O_CREAT|O_TRUNC, 0x1ED), 1);
+  sys_execve("./build/cc2", argv, envp);
+
+KEY GOTCHAS:
+- argv must be NULL-terminated array of pointers
+- envp can be [NULL] for empty environment
+- Child inherits all parent fds — close unused pipe ends
+- sys_waitpid(-1, ..., WNOHANG) for non-blocking reap
+- WIFEXITED/WEXITSTATUS macros decode the status word
+'''
+
+[[entries]]
+name = "cyrius_agnostik_patterns"
+description = "Patterns used in agnostik rewrite: error codes, bitmask permissions, heap structs"
+category = "compiler_bootstrapping"
+content = '''
+AGNOSTIK LIBRARY PATTERNS (stage1/lib/agnostik/):
+
+ERROR CODES (error.cyr):
+  enum AgnostikError { ERR_NONE = 0; ERR_AGENT_NOT_FOUND = 1001; ... }
+  fn err_is_retriable(code) { if (code == ERR_TIMEOUT) { return 1; } ... }
+  fn err_print(code) { if (code == ERR_NONE) { print("OK"); } ... }
+  fn err_fatal(code) { err_eprint(code); syscall(60, 1); }
+
+BITMASK PERMISSIONS (security.cyr):
+  enum Permission { PERM_FILE_READ = 1; PERM_NETWORK = 4; PERM_SPAWN = 8; }
+  fn sec_has_perm(ctx, perm) { if ((load64(ctx+8) & perm) != 0) { return 1; } }
+  fn sec_grant_perm(ctx, perm) { store64(ctx+8, load64(ctx+8) | perm); }
+  fn sec_revoke_perm(ctx, perm) { store64(ctx+8, load64(ctx+8) & (0-1-perm)); }
+
+HEAP-ALLOCATED STRUCT (agent.cyr):
+  var AGENT_CONFIG_SIZE = 80;
+  fn agent_config_new(name) {
+      var cfg = alloc(AGENT_CONFIG_SIZE);
+      store64(cfg, name);        # offset 0: name pointer
+      store64(cfg + 8, AGENT_USER);  # offset 8: type
+      store64(cfg + 16, RESTART_NEVER);  # offset 16: restart policy
+      ... return cfg;
+  }
+  fn agent_config_name(cfg) { return load64(cfg); }
+  fn agent_config_type(cfg) { return load64(cfg + 8); }
+  fn agent_config_set_type(cfg, t) { store64(cfg + 8, t); return 0; }
+
+AUDIT LOGGING (audit.cyr):
+  fn audit_print(e) {
+      print("["); severity_print(load64(e+24)); print("] agent=");
+      fmt_int(load64(e+8)); print(" "); ... print("\n");
+  }
+
+PATTERN: Every struct has new/get/set functions. Offsets are manual (8 bytes per field).
+PATTERN: Print functions per enum/struct for debugging.
+PATTERN: Include order matters — stdlib first, then agnostik modules.
+'''
+
+[[entries]]
+name = "cyrius_agnosys_patterns"
+description = "Patterns for agnosys syscall bindings: enum constants, sigset, epoll, timerfd"
+category = "compiler_bootstrapping"
+content = '''
+AGNOSYS LIBRARY PATTERNS (stage1/lib/agnosys/syscalls.cyr):
+
+SYSCALL CONSTANTS AS ENUMS (avoids gvar_toks overflow):
+  enum SysNr { SYS_READ = 0; SYS_WRITE = 1; SYS_OPEN = 2; ... SYS_EPOLL_CREATE1 = 291; }
+  enum Signal { SIGHUP = 1; SIGINT = 2; ... SIGPWR = 30; }
+  enum MsFlag { MS_RDONLY = 1; MS_NOSUID = 2; MS_NODEV = 4; MS_NOEXEC = 8; }
+
+SYSCALL WRAPPERS:
+  fn sys_open(path, flags, mode) { return syscall(SYS_OPEN, path, flags, mode); }
+  fn sys_fork() { return syscall(SYS_FORK); }
+  fn sys_execve(path, argv, envp) { return syscall(SYS_EXECVE, path, argv, envp); }
+  fn sys_mount(source, target, fstype, flags, data) {
+      return syscall(SYS_MOUNT, source, target, fstype, flags, data);
+  }
+
+SIGNAL SET (64-bit bitmask):
+  fn sigset_new() { var set = alloc(8); store64(set, 0); return set; }
+  fn sigset_add(set, signum) { store64(set, load64(set) | (1 << (signum-1))); }
+  fn sigset_has(set, signum) { return (load64(set) & (1 << (signum-1))) != 0; }
+
+EPOLL EVENT (12-byte struct: u32 events + u64 data):
+  fn epoll_event_new(events, data) {
+      var ev = alloc(16);
+      store32(ev, events);
+      store64(ev + 4, data);  # Note: 4-byte offset, not 8
+      return ev;
+  }
+
+TIMERSPEC (32-byte struct: interval + initial):
+  fn timerspec_new(interval_sec, initial_sec) {
+      var ts = alloc(32);
+      store64(ts, interval_sec); store64(ts+8, 0);   # interval
+      store64(ts+16, initial_sec); store64(ts+24, 0); # initial value
+      return ts;
+  }
+
+WAIT STATUS DECODING:
+  fn WIFEXITED(s) { return (s & 0x7F) == 0; }
+  fn WEXITSTATUS(s) { return (s >> 8) & 0xFF; }
+  fn WIFSIGNALED(s) { var sig = s & 0x7F; return sig > 0 && sig != 0x7F; }
+  fn WTERMSIG(s) { return s & 0x7F; }
+
+ERROR CHECKING:
+  fn is_err(ret) { return ret < 0; }
+  fn err_code(ret) { return 0 - ret; }
+'''
+
+[[entries]]
+name = "cyrius_kybernet_patterns"
+description = "PID 1 init patterns: console redirect, signal fd, zombie reaping, mount, cgroup"
+category = "compiler_bootstrapping"
+content = '''
+KYBERNET LIBRARY PATTERNS (stage1/lib/kybernet/):
+
+CONSOLE REDIRECT (console.cyr):
+  Close inherited fds 0/1/2.
+  Open /dev/null as stdin (fd 0).
+  Open /dev/console as stdout (fd 1), fallback /dev/null.
+  dup2(1, 2) for stderr.
+
+SIGNAL HANDLING (signals.cyr):
+  Block SIGCHLD/SIGTERM/SIGINT/SIGHUP/SIGPWR via sigprocmask.
+  Create signalfd for epoll-based dispatch.
+  Read 128-byte signalfd_siginfo struct, signal number at offset 0 (u32).
+
+ZOMBIE REAPING (reaper.cyr):
+  Loop: sys_waitpid(-1, &status, WNOHANG) until pid <= 0.
+  Decode exit status. Store (pid, code) pairs in vec.
+  PID 1 MUST reap all orphans or they become zombies.
+
+PRIVILEGE DROP (privdrop.cyr):
+  ORDER MATTERS: setgroups(0, NULL) → setgid(gid) → setuid(uid).
+  Can't change groups after setuid drops root.
+  Call in child process after fork, before exec.
+
+ESSENTIAL MOUNTS (mount.cyr):
+  Check /proc/self/mounts before mounting (avoid EBUSY).
+  Mount order: /proc → /sys → /dev/pts → /dev/shm → /run → /sys/fs/cgroup.
+  Flags: MS_NOSUID|MS_NODEV|MS_NOEXEC for virtual filesystems.
+  Create mount point with sys_mkdir before mount.
+
+CGROUP v2 (cgroup.cyr):
+  Path: /sys/fs/cgroup/kybernet.slice/{service}/
+  move_to_cgroup: write PID to cgroup.procs file.
+  kill_cgroup: write "1" to cgroup.kill (kernel 5.14+), or read PIDs and SIGKILL each.
+  All operations are pure filesystem (no special syscalls).
+
+EPOLL EVENT LOOP (eventloop.cyr):
+  Create epoll + timerfd for health/watchdog.
+  Register signal fd + timers with epoll_add_read.
+  Event tokens: TOKEN_SIGNAL=1, TOKEN_HEALTH=2, TOKEN_WATCHDOG=3.
+  epoll_wait with EINTR retry.
+'''
+
+[[entries]]
+name = "cyrius_nous_ark_patterns"
+description = "Resolver and package manager patterns: marketplace resolution, CLI tools, file DB"
+category = "compiler_bootstrapping"
+content = '''
+NOUS RESOLVER (stage1/lib/nous/nous.cyr):
+
+SOURCE DETECTION: name contains '/' → marketplace, ends '.flutter' → flutter, else unknown.
+
+MARKETPLACE RESOLUTION:
+  Build path: marketplace_dir/name/manifest.json
+  Read file, parse JSON manually (find "version": "..." between quotes).
+  Return ResolvedPackage with name, version, source, description.
+
+SYSTEM RESOLUTION (apt-based):
+  run_capture("/usr/bin/apt-cache", "show", name, buf, 4096)
+  Parse "Version: " and "Description:" lines from output.
+  Uses fork+exec+pipe pattern from agnosys.
+
+STRATEGY DISPATCH:
+  STRAT_MARKETPLACE_FIRST: try marketplace → system
+  STRAT_SYSTEM_FIRST: try system → marketplace
+  STRAT_ONLY_*: single source
+
+SIMPLE JSON PARSING (no serde, no parser library):
+  Scan for "\"key\"" in buffer.
+  Find next quote pair after colon.
+  Extract bytes between quotes, null-terminate.
+  Works for flat JSON objects. Not recursive.
+
+ARK PACKAGE MANAGER (stage1/programs/ark.cyr):
+
+CLI DISPATCH:
+  args_init() + argc()/argv() for argument parsing.
+  streq(cmd, "install") for command matching.
+  Each command is a separate function.
+
+FILE-BASED PACKAGE DATABASE:
+  Format: name|version|source\n (one entry per line)
+  db_load(): read file, split into vec of line strings.
+  db_has(): scan vec for "name|" prefix match.
+  db_register(): append entry to file (O_APPEND).
+  cmd_remove(): rewrite file without matching entry.
+
+TRANSACTION LOG:
+  Append-only text file: "action package\n"
+  log_transaction("install", name) on every operation.
+
+VERIFICATION:
+  Read all entries, check each has ≥2 pipe separators.
+  Report corrupt entries.
+
+BINARY SIZE: ark is 44KB, comparable to individual coreutils.
+'''
+
+[[entries]]
+name = "cyrius_build_tool_pattern"
+description = "cyrb: how to build a Cyrius program that compiles other Cyrius programs"
+category = "compiler_bootstrapping"
+content = '''
+CYRB BUILD TOOL (stage1/programs/cyrb.cyr):
+
+COMPILE PATTERN:
+  Fork child.
+  Child: open source as stdin (dup2), open output as stdout (dup2), exec cc2.
+  Parent: waitpid, check exit code, chmod +x output.
+
+  fn compile(source, output) {
+      var pid = sys_fork();
+      if (pid == 0) {
+          sys_dup2(sys_open(source, O_RDONLY, 0), 0);
+          sys_dup2(sys_open(output, O_WRONLY|O_CREAT|O_TRUNC, 0x1ED), 1);
+          sys_execve(CC2_PATH, argv, envp);
+          sys_exit(127);
+      }
+      sys_waitpid(pid, &status, 0);
+      sys_chmod(output, 0x1ED);  # rwxr-xr-x
+  }
+
+SELF-HOSTING CHECK:
+  cc2 compiles cc2.cyr → cc3. cc3 compiles cc2.cyr → cc4.
+  Compare cc3 and cc4 byte-by-byte using heap buffers + memeq.
+  NOTE: Use heap (alloc) not stack arrays for compare buffers.
+  Large stack arrays (var buf[8192] = 64KB) caused binary data leak.
+
+TEST RUNNER:
+  compile(test_source, "/tmp/cyrb_test")
+  run_cmd("/tmp/cyrb_test", 0, 0)
+  Check exit code 0 = pass.
+
+GOTCHA: When doing byte comparison of binaries, use alloc() for buffers,
+not stack-allocated arrays. Stack arrays >8KB can cause issues.
+'''
+
+[[entries]]
+name = "cyrius_language_gaps_for_parity"
+description = "Language features needed for 1:1 Rust parity, identified during crate rewrites"
+category = "compiler_bootstrapping"
+content = '''
+Features needed for 1:1 Rust ports, identified from agnostik/nous/ark rewrites.
+Grouped by blocking priority.
+
+TIER 1 — BLOCKS PORT (no workaround):
+  Generics:          Vec<T>, Result<T>, Option<T> — 121 uses in agnostik
+  Enums with data:   Error(String) variants — 9 variants in error.rs
+  Traits:            Display, From, Default, Serialize — 58 impl blocks
+  Module system:     pub/mod/use — 715 pub markers, 80 mod/use
+  HashMap:           32 uses for key-value lookup
+
+TIER 2 — IMPORTANT (workaround exists):
+  Pattern matching:  match with destructuring — 7 blocks
+  Closures:          |arg| expr — 27 uses (mostly iterators)
+  String formatting: format!() — embedded in 373 string operations
+  Conditional compilation: #[cfg(feature)] — 34 uses
+
+TIER 3 — NICE TO HAVE (can replace with convention):
+  Serde:             Serialize/Deserialize — 820 attributes (use manual JSON)
+  Display/Debug:     Already doing _print() functions
+  From conversions:  3 impls (use explicit functions)
+  Lifetimes:         8 annotations (not needed without borrow checker)
+  Derive macros:     161 uses (implement manually)
+
+CURRENT WORKAROUNDS USED:
+  Rust Result<T>     → return 0 for success, negative for error
+  Rust Option<T>     → return 0 for None, pointer for Some
+  Rust String        → null-terminated C string pointers
+  Rust HashMap       → vec of entries, linear scan
+  Rust traits        → concrete function per type
+  Rust generics      → everything is i64 (Vec is always Vec<i64>)
+  Rust serde JSON    → manual scan-and-extract between quotes
+
+These workarounds work for system code but don't scale for application code.
+Phase 13 (enums-with-data, generics, traits, modules) is the path to 1:1 parity.
+'''
+
+[[entries]]
+name = "cyrius_preprocessor_include_bug"
+description = "CRITICAL: preprocessor eats string literals containing 'include quote' pattern"
+category = "compiler_bootstrapping"
+content = '''
+BUG: The preprocessor (PREPROCESS in lex.cyr) scans raw source bytes for the
+pattern: i-n-c-l-u-d-e-space-quote. It does NOT distinguish between code and
+string literals.
+
+If a string literal contains this pattern, the preprocessor will try to
+process it as a file inclusion, corrupting the source.
+
+EXAMPLE (BREAKS):
+  if (memeq(buf, "include \"", 9) == 1) { ... }
+  # Preprocessor sees 'include "' and tries to open file '", 9) == 1) {...}'
+
+WORKAROUND: Build the pattern at runtime using byte stores:
+  var _pat[2];
+  fn _init_pat() {
+      store8(&_pat, 105);   # i
+      store8(&_pat + 1, 110); # n
+      ... etc ...
+      store8(&_pat + 8, 34);  # "
+      return 0;
+  }
+  # Then use: memeq(buf, &_pat, 9)
+
+PROPER FIX (not yet implemented): Modify PREPROCESS to track whether it is
+inside a string literal (between unescaped quotes). Only trigger include
+processing when NOT inside a string.
+
+This affects any program that needs to scan source files for include
+directives (e.g., cyrc vet/deny). Also affects comments containing
+the word "include" followed by a quote — be careful in documentation.
+'''
+
+[[entries]]
+name = "cyrius_cyrc_tool"
+description = "cyrc: dependency auditing (vet) and policy enforcement (deny) for Cyrius projects"
+category = "compiler_bootstrapping"
+content = '''
+CYRC — CYRIUS CHECK (stage1/programs/cyrc.cyr, 22KB binary):
+
+cyrc vet <file>:
+  Scans source file for include directives.
+  Reports each dependency as OK, UNTRUST, or MISSING.
+  Trusted paths: stage1/lib/, stage1/cc/, stage1/arch/, kernel/
+  Returns 0 if all trusted and present, 1 otherwise.
+
+cyrc deny <file>:
+  Enforces project policies:
+  - No absolute path includes (/foo/bar.cyr)
+  - No parent directory traversal (../something.cyr)
+  - Source file must exist
+  Returns 0 if no violations, count of violations otherwise.
+
+SEPARATE FROM CYRB: cyrc is a separate binary, not part of cyrb.
+Reason: combining too many functions in one program hits compiler
+limits (large programs with many includes exceed fixup table or
+code buffer capacity). Keeping tools focused and small is better.
+
+GOTCHA: Cannot use "include \"" as a string literal in the source
+due to the preprocessor bug. Pattern must be built at runtime.
+'''
+
+[[entries]]
+name = "cyrius_tagged_unions"
+description = "tagged.cyr: Option, Result, Either types via heap-allocated tag+value pairs"
+category = "compiler_bootstrapping"
+content = '''
+TAGGED UNIONS (stage1/lib/tagged.cyr):
+
+A tagged union is a heap-allocated pair: { tag: i64, value: i64 } = 16 bytes.
+tag(t) returns the discriminant. payload(t) returns the value.
+
+OPTION TYPE:
+  var x = Some(42);      # tag=1, value=42
+  var y = None();         # tag=0, value=0
+  if (is_some(x) == 1) { var v = unwrap(x); }
+  var v = unwrap_or(y, 99);  # returns 99 (fallback)
+  # unwrap() aborts on None with error message
+
+RESULT TYPE:
+  fn divide(a, b) {
+      if (b == 0) { return Err(1); }
+      return Ok(a / b);
+  }
+  var r = divide(42, 2);
+  if (is_ok(r) == 1) { var v = result_unwrap(r); }  # v = 21
+  # result_unwrap() aborts on Err with "result_unwrap on Err(N)"
+
+EITHER TYPE:
+  var l = Left(10);
+  var r = Right(20);
+  if (is_left(l) == 1) { ... }
+
+PRINT HELPERS:
+  option_print(x) → "Some(42)" or "None"
+  result_print(r) → "Ok(21)" or "Err(1)"
+
+GOTCHA: Do not use "default" as a parameter name — it is a reserved keyword.
+Use "fallback" instead (e.g., unwrap_or(opt, fallback)).
+
+IMPLEMENTATION: No compiler changes. Pure library using alloc(16) + store64.
+Compiler syntax (enum Foo { None; Some(val); }) deferred — library works well.
+
+REAL-WORLD PATTERNS:
+  # Safe file read
+  fn safe_read(path, buf, len) {
+      var fd = file_open(path, 0, 0);
+      if (fd < 0) { return Err(0 - fd); }
+      var n = file_read(fd, buf, len);
+      file_close(fd);
+      return Ok(n);
+  }
+'''
+
+[[entries]]
+name = "cyrius_aarch64_codegen_fixes"
+description = "All aarch64 codegen bugs found and fixed — instruction encoding, register ordering, ABI"
+category = "compiler_bootstrapping"
+content = '''
+AARCH64 CODEGEN FIXES (cumulative):
+
+1. INITIAL BRANCH: cc2_aarch64.cyr emitted x86 JMP (0xE9) instead of aarch64 B.
+   Fix: Replace EB(S, 0xE9)+4 placeholders with EJMP0(S) from jump.cyr.
+
+2. RECFIX ORDERING: RECFIX recorded CP after MOVZ, but FIXUP_MOV expected CP of MOVZ.
+   Fix: Call RECFIX BEFORE the first EW in EVSTORE/EVLOAD/EVADDR.
+
+3. POP ENCODING: EPOPR/EPOPC used pre-indexed load (0xF8410FE0 = [sp, #16]!)
+   instead of post-indexed (0xF84107E0 = [sp], #16). Loaded from wrong address.
+   Fix: Change bit [11] from 1→0: 0xF8410FE0 → 0xF84107E0.
+
+4. MODULO: ECQO was no-op, EIDIV overwrote dividend, EMOVDR returned unset x2.
+   Fix: ECQO saves dividend (mov x2, x0), EIDIV divides saved value (sdiv x0, x2, x1),
+   EMOVDR computes remainder (msub x0, x0, x1, x2). Note: msub encoding 0x9B018800
+   not 0x9B018840 (Rn must be x0, not x2).
+
+5. ARCH-SPECIFIC FUNCTIONS IN PARSE.CYR: 14 functions (EFNPRO, ESUBRSP, EFNEPI,
+   ECALLTO, ECALLFIX, EPOPARG, ECALLPOPS, ECALLCLEAN, EDISP32, ESTOREREGPARM,
+   ESTORESTACKPARM, ESTOREPARM, EFLLOAD, EFLSTORE) were hardcoded x86 in parse.cyr.
+   Fix: Moved to cc/emit.cyr (x86) and arch/aarch64/emit.cyr (aarch64).
+
+6. STRUCT FIELD ACCESS: EMIT_STRUCT_FIELD, PARSE_FIELD_LOAD, PARSE_FIELD_STORE
+   used inline x86 (mov rcx + add rcx). Fix: Refactored to EVADDR_X1 + EADDIMM_X1
+   (arch-independent helpers defined in each emit file).
+
+7. FUNCTION ABI: aarch64 uses STP x29,x30,[sp,#-16]! for prologue,
+   LDP x29,x30,[sp],#16 for epilogue. Locals via STUR/LDUR [x29, #-offset].
+   Calls via BL. Parameters in x0-x7 (vs x86 rdi,rsi,rdx,rcx,r8,r9).
+
+8. ENUM INIT + SCANNING: cc2_aarch64.cyr was missing enum handling in pass 1/2
+   and the init ordering fix. Synced from cc2.cyr.
+
+RESULT: 29/29 aarch64 tests passing (arithmetic, control flow, functions,
+structs, enums, strings, syscalls, load/store).
+'''
+
+[[entries]]
+name = "cyrius_string_formatting"
+description = "fmt_sprintf: printf-like string formatting with %d, %x, %s, %% into a buffer"
+category = "compiler_bootstrapping"
+content = '''
+STRING FORMATTING (stage1/lib/fmt.cyr):
+
+fmt_sprintf(buf, format, args) — write formatted string into buf, return length.
+args is a vec of i64 values consumed in order.
+
+  Format specifiers:
+    %d — decimal integer (fmt_int_buf)
+    %x — hex integer (fmt_hex_buf)
+    %s — null-terminated string (memcpy)
+    %% — literal % character
+
+  Usage:
+    var buf[128];
+    var args = vec_new();
+    vec_push(args, "Cyrius");
+    vec_push(args, 168);
+    vec_push(args, 0);
+    fmt_sprintf(&buf, "%s: %d tests, %d failures", args);
+    println(&buf);
+    # Output: Cyrius: 168 tests, 0 failures
+
+  fmt_printf(format, args) — format + print to stdout.
+
+GOTCHA: Use unique var names in each specifier branch (dval/dtmp/dlen for %d,
+xval/xtmp/xlen for %x) because Cyrius has no block scoping.
+
+Also added: fmt_hex_buf(n, buf) — hex number to buffer, returns length.
+'''
+
+[[entries]]
+name = "cyrius_bounds_checking"
+description = "bounds.cyr: opt-in runtime bounds checking for arrays and buffers"
+category = "compiler_bootstrapping"
+content = '''
+BOUNDS CHECKING (stage1/lib/bounds.cyr):
+
+Opt-in checked memory access. Aborts with error message on violation.
+
+  checked_load64(buf, len, idx)   — load 64-bit slot, abort if idx >= len or < 0
+  checked_store64(buf, len, idx, val) — store, same bounds check
+  checked_load8(buf, len, idx)    — byte load with bounds check
+  checked_store8(buf, len, idx, val) — byte store with bounds check
+  checked_memcpy(dst, dst_len, src, src_len, count) — abort if count exceeds either
+
+Error output goes to stderr with index and length info:
+  "bounds: index 10 >= len 4"
+
+Uses fmt_int_buf + syscall(1, 2, ...) to write to stderr without touching stdout.
+Process exits with code 1 on violation.
+
+PATTERN: Use checked_ functions during development, switch to raw load/store
+for hot paths after correctness is proven.
+
+NOTE: vec.cyr already has bounds checking in vec_get/vec_set (exits on violation).
+bounds.cyr adds the same for raw array buffers.
+'''
+
+[[entries]]
+name = "cyrius_nested_calls_work"
+description = "Nested function calls f(g(x)) already work — no fix needed"
+category = "compiler_bootstrapping"
+content = '''
+NESTED FUNCTION CALLS — NOT BROKEN (verified 2026-04-05):
+
+Tested cases that all pass:
+  double(add1(20)) = 42          # nested as argument
+  f(g(10), g(11)) = 42           # nested in multi-arg
+  f(f(f(42))) = 42               # triple nesting
+  f(20) + f(22) = 42             # calls in arithmetic
+  1 + f(41) = 42                 # call in right operand
+  f(20) * 2 = 42                 # call in left operand
+
+WHY IT WORKS: PARSE_FNCALL pushes each argument via EPUSHR after evaluation.
+Inner function calls happen during argument evaluation, but their result
+goes into rax, which then gets pushed. The call/return convention preserves
+the stack correctly because each call saves rbp and has its own frame.
+
+This was listed as a Phase 13 item but turns out to already work.
+No compiler change needed.
+'''
