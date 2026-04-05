@@ -1,0 +1,84 @@
+# Cyrius Security Reference
+# Manual memory safety. No GC, no borrow checker (yet). Defense in depth.
+
+# === Bounds checking (opt-in) ===
+# include "lib/bounds.cyr"
+# checked_load64(buf, len, idx);    # aborts if idx >= len
+# checked_store64(buf, len, idx, val);
+# checked_load8(buf, len, idx);
+# checked_memcpy(dst, dst_len, src, src_len, count);
+#
+# Error output: "bounds: index 10 >= len 4" → stderr, exit 1
+# Vec already has built-in bounds checks in vec_get/vec_set.
+
+# === Input validation ===
+# Always validate syscall arguments:
+# fn ksyscall(num, arg1, arg2) {
+#     if (num == 1) {  # write
+#         var wlen = arg2;
+#         if (wlen > 4096) { wlen = 4096; }    # clamp length
+#         if (wlen < 0) { wlen = 0; }
+#         if (arg1 == 0) { return 0 - 1; }     # reject null
+#         serial_print(arg1, wlen);
+#     }
+# }
+
+# === Privilege separation ===
+# include "lib/kybernet/privdrop.cyr"
+# fn drop_privileges(uid, gid) {
+#     # Fail fast if not root
+#     if (sys_geteuid() != 0) { return Err(PRIV_NOT_ROOT); }
+#     # Order matters: groups → gid → uid (irreversible)
+#     sys_setgroups(0, 0);
+#     sys_setgid(gid);
+#     sys_setuid(uid);
+#     # VERIFY the drop took effect
+#     if (sys_getuid() != uid) { return Err(PRIV_VERIFY_FAIL); }
+# }
+
+# === Permission bitmasks ===
+# enum Permission { READ = 1; WRITE = 2; EXEC = 4; NETWORK = 8; }
+# fn has_perm(ctx, p) { return (load64(ctx + 8) & p) != 0; }
+# fn grant(ctx, p) { store64(ctx + 8, load64(ctx + 8) | p); }
+# fn revoke(ctx, p) { store64(ctx + 8, load64(ctx + 8) & (0 - 1 - p)); }
+
+# === Safe error handling ===
+# include "lib/tagged.cyr"
+# Never ignore errors. Use Result:
+# var r = sys_open(path, flags, mode);
+# if (r < 0) { return Err(0 - r); }   # convert errno to Result
+# return Ok(r);
+#
+# unwrap() aborts with message on None/Err — better than silent failure.
+
+# === Buffer overflow prevention ===
+# - Always pass buffer length alongside pointer
+# - Use checked_load/checked_store for untrusted indices
+# - Clamp copy lengths: if (n > bufsize) { n = bufsize; }
+
+# === Dependency auditing ===
+# cyrc vet <file>    — scan includes, report UNTRUST/MISSING
+# cyrc deny <file>   — reject absolute paths, parent traversal
+
+# === Process table safety (kernel) ===
+# var PROC_MAX = 16;
+# fn proc_create(entry) {
+#     if (proc_count >= PROC_MAX) { return 0 - 1; }   # guard overflow
+# }
+# fn proc_get_state(pid) {
+#     if (pid >= proc_count) { return 0 - 1; }         # guard OOB
+# }
+
+# === ISR register safety (kernel) ===
+# Save ALL 9 caller-saved registers in interrupt handlers:
+# push rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11
+# ... ISR body ...
+# pop r11, r10, r9, r8, rdi, rsi, rdx, rcx, rax
+# iretq
+
+# === What Cyrius does NOT have (yet) ===
+# - Borrow checker (Phase 14)
+# - Stack canaries
+# - ASLR (binaries have fixed base 0x400000)
+# - W^X enforcement (PT_LOAD is RWX for kernel ISR bytecode)
+# - Sanitizers (ASan, UBSan)

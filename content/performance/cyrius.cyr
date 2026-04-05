@@ -1,0 +1,62 @@
+# Cyrius Performance Reference
+# Zero-overhead by default. No runtime, no GC, no vtable unless you ask for one.
+
+# === Why Cyrius is fast ===
+# - No libc: direct syscalls, no abstraction layers
+# - No dynamic linking: static binaries, no PLT/GOT overhead
+# - No GC: bump allocator, manual memory control
+# - No locale/UTF-8: byte operations only
+# - Minimal ELF: 120-byte header, no sections, no symbols
+# - Compiler: 11ms self-compile, <5ms for any program
+
+# === Binary sizes vs GNU coreutils ===
+# true:  168B vs 39KB  (233x smaller)
+# echo:  240B vs 43KB  (180x smaller)
+# cat:   4.5KB vs 47KB (10x smaller)
+# wc:    5.8KB vs 68KB (11x smaller)
+# grep:  5.5KB vs 158KB (28x smaller)
+
+# === Buffered I/O ===
+# CRITICAL: Always read/write in blocks, never byte-at-a-time.
+# var buf[512];                    # 4096 bytes
+# var n = syscall(0, fd, &buf, 4096);
+# Byte-at-a-time is 85x slower (766ms vs 9ms for 1MB).
+
+# === Benchmarking ===
+# include "lib/bench.cyr"
+# fn work() { ... }
+# var b = bench_new("operation");
+# bench_run(b, &work, 10000);
+# bench_report(b);
+# # Output: operation: 407ns avg (min=390ns max=8us) [10000 iters]
+
+# === Avoid re-allocation ===
+# Vec auto-grows by doubling. Pre-size if you know the count:
+# var v = vec_new();  # starts at cap=16
+# # 1000 pushes = ~6 grows (16→32→64→128→256→512→1024)
+# # Each grow copies all existing data
+
+# === HashMap load factor ===
+# map_new() starts at cap=16, grows at 70% load.
+# For 1000 entries: ~7 grows. FNV-1a hash + linear probing = O(1) avg.
+
+# === Stack vs heap ===
+# Stack arrays (var buf[N]) are free — no alloc call.
+# Heap alloc() is fast (bump pointer) but never freed individually.
+# Use alloc_reset() to batch-free everything.
+
+# === Inline assembly for hot paths ===
+# asm { 0x90; }                  # nop
+# asm { rdtsc; }                 # read timestamp counter
+# Use sparingly — breaks portability to aarch64.
+
+# === Compile-time costs ===
+# Every include is textually expanded — no caching.
+# 17 includes = ~58KB expanded source = ~6000 tokens.
+# Compiler handles this in <20ms.
+# Fixup table: 1024 entries max (~200 functions before limit).
+
+# === What NOT to optimize ===
+# - Compiler is 11ms — don't micro-optimize the compiler
+# - Process startup dominates at these binary sizes (fork+exec > compile)
+# - Vec bounds checks are branch-predicted — negligible cost

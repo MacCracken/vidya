@@ -472,6 +472,144 @@ Phase 13 (enums-with-data, generics, traits, modules) is the path to 1:1 parity.
 '''
 
 [[entries]]
+name = "cyrius_hashmap"
+description = "hashmap.cyr: FNV-1a hash table with string keys and i64 values"
+category = "compiler_bootstrapping"
+content = '''
+HASHMAP (stage1/lib/hashmap.cyr):
+
+Open addressing with linear probing. Auto-grows at 70% load.
+Keys are null-terminated strings. Values are i64.
+
+  var m = map_new();
+  map_set(m, "name", 42);
+  var v = map_get(m, "name");       # 42
+  map_has(m, "name");               # 1
+  map_delete(m, "name");
+  var keys = map_keys(m);           # vec of string pointers
+  map_count(m);                     # number of entries
+  map_print(m);                     # {key: val, ...}
+
+IMPLEMENTATION:
+  Entry = { key_ptr, value, occupied } = 24 bytes
+  Header = { entries_ptr, capacity, count } = 24 bytes
+  Hash: FNV-1a (0xCBF29CE484222325 seed, 0x100000001B3 prime)
+  Growth: double capacity when count * 10 >= capacity * 7
+  Capacity must be power of 2 (for & mask instead of %)
+
+GOTCHA: Values are always i64. String pointers are i64.
+If you store a string pointer, map_print shows the raw number.
+'''
+
+[[entries]]
+name = "cyrius_string_enhancements"
+description = "str.cyr extended: contains, split, join, trim, builder, from_int, to_int"
+category = "compiler_bootstrapping"
+content = '''
+STRING ENHANCEMENTS (stage1/lib/str.cyr):
+
+New functions added to the Str (fat pointer) type:
+
+  str_contains(s, "needle")    — substring search, returns 0/1
+  str_starts_with(s, "pre")    — prefix check
+  str_ends_with(s, "suf")      — suffix check
+  str_index_of(s, byte)        — find byte, returns index or -1
+  str_from_int(42)              — integer to Str ("42")
+  str_to_int(s)                 — parse Str to integer
+  str_trim(s)                   — strip leading/trailing whitespace
+  str_split(s, byte_sep)        — split into vec of Str
+  str_join(parts_vec, ",")      — join vec of Str with separator
+  str_clone(s)                  — deep copy (new buffer)
+
+STRING BUILDER:
+  var sb = str_builder_new();
+  str_builder_add_cstr(sb, "hello ");
+  str_builder_add_int(sb, 42);
+  var result = str_builder_build(sb);  # "hello 42"
+
+PATTERN: Use str_builder for concatenating many parts.
+Direct str_cat is O(n) per call. Builder is O(total) once.
+'''
+
+[[entries]]
+name = "cyrius_traits"
+description = "trait.cyr: vtable-based trait objects for polymorphic dispatch (Display, Eq, From)"
+category = "compiler_bootstrapping"
+content = '''
+TRAITS (stage1/lib/trait.cyr):
+
+Traits are vtables — heap-allocated arrays of function pointers.
+A "trait object" is a fat pointer: { vtable_ptr, data_ptr } = 16 bytes.
+
+DEFINING A TRAIT (Display example):
+  Slot 0: print(data)       — print to stdout
+  Slot 1: to_string(data)   — return Str representation
+
+  var vt = display_vtable(&my_print, &my_to_string);
+  var obj = trait_obj_new(vt, my_data);
+  display(obj);              — calls my_print(my_data)
+  var s = to_string(obj);    — calls my_to_string(my_data)
+
+IMPLEMENTING FOR A TYPE:
+  fn _point_print(p) { fmt_int(load64(p)); ... }
+  fn _point_to_string(p) { ... return str; }
+  var _point_vt = 0;
+  fn point_as_display(p) {
+      if (_point_vt == 0) { _point_vt = display_vtable(&_point_print, &_point_to_string); }
+      return trait_obj_new(_point_vt, p);
+  }
+
+POLYMORPHISM:
+  var items = vec_new();
+  vec_push(items, int_as_display(1));
+  vec_push(items, str_as_display(str_from("two")));
+  vec_push(items, point_as_display(&p));
+  # All callable via display(item) — dispatches through vtable
+
+BUILT-IN IMPLEMENTATIONS:
+  int_as_display(n)   — wraps i64 as Display
+  str_as_display(s)   — wraps Str as Display
+
+AVAILABLE TRAITS:
+  Display (print + to_string), Eq (equality), From (conversion), Default
+
+PATTERN: Lazy vtable init — create vtable on first use, cache in global var.
+'''
+
+[[entries]]
+name = "cyrius_generics_syntax"
+description = "Generic syntax fn foo<T>() and struct Bar<T> parsed — no codegen change (everything is i64)"
+category = "compiler_bootstrapping"
+content = '''
+GENERICS (Phase 1 — syntax only):
+
+The compiler now accepts generic parameter syntax:
+  fn identity<T>(x: T) { return x; }
+  fn map<K, V>(key: K, val: V) { ... }
+  struct Pair<T> { first; second; }
+  struct Result<T, E> { ok; err; }
+  var x: Vec<i64> = vec_new();
+  fn f<T>(v: Vec<T>) { ... }
+
+WHAT HAPPENS: The compiler parses <...> after function/struct names
+and in type annotations, then IGNORES them. Everything is still i64.
+No monomorphization. No type checking. No code duplication.
+
+WHY THIS WORKS: In Cyrius, all values are 8 bytes (i64). There is no
+runtime difference between Vec<i64> and Vec<String> — both are the
+same code, same layout, same machine instructions. Generics are purely
+documentation and future-proofing.
+
+COMPILER CHANGES:
+  1. SKIP_GENERICS(S) — helper in parse.cyr: if token is <, skip to >
+  2. Called after fn name, struct name, and in type annotation positions
+  3. Also added to cc2.cyr pass 1 fn-skip and pass 2 struct-skip
+  4. Synced to cc2_aarch64.cyr
+
+PHASE 2 (future): Type parameter tracking, mismatch warnings.
+'''
+
+[[entries]]
 name = "cyrius_preprocessor_include_bug"
 description = "CRITICAL: preprocessor eats string literals containing 'include quote' pattern"
 category = "compiler_bootstrapping"
@@ -714,4 +852,251 @@ the stack correctly because each call saves rbp and has its own frame.
 
 This was listed as a Phase 13 item but turns out to already work.
 No compiler change needed.
+'''
+
+[[entries]]
+name = "cyrius_cyrb_dispatcher"
+description = "cyrb is a shell dispatcher routing subcommands to individual tools — like git"
+category = "compiler_bootstrapping"
+content = '''
+CYRB DISPATCHER (scripts/cyrb):
+
+cyrb is a shell script that dispatches subcommands to individual tools.
+This avoids the fixup table limit (~1024 entries) that prevents a single
+large Cyrius binary from having all commands.
+
+COMMANDS:
+  Build:    cyrb build, test, bench, self
+  Project:  cyrb init, package, publish, install
+  Quality:  cyrb vet, deny (→ delegates to cyrc binary)
+  Info:     cyrb version, which, help
+
+TOOL RESOLUTION ORDER:
+  1. $CYRIUS_HOME/bin/cc2 (installed version)
+  2. ../build/cc2 (dev mode, relative to script)
+
+COMPILE HELPER:
+  compile() pipes source through cc2: cat $src | $CC > $out && chmod +x $out
+  --aarch64 flag switches to cc2_aarch64
+
+RUN HELPER:
+  run_binary() executes directly on x86, via qemu-aarch64 on ARM
+
+SELF-HOSTING:
+  cyrb self finds stage1/cc2.cyr, compiles twice, compares with cmp.
+  Works from either the cyrius repo or a sibling project.
+
+PATTERN: Like git — one entry point, individual tools underneath.
+Keeps each tool small, avoids compiler limits, easy to extend.
+'''
+
+[[entries]]
+name = "cyrius_package_format"
+description = "Three-layer package system: cyrb.toml (manifest), .ark (distributable), zugot (recipe)"
+category = "compiler_bootstrapping"
+content = '''
+CYRIUS PACKAGE SYSTEM:
+
+Three layers, matching how Rust has Cargo.toml / crates.io / system packages:
+
+LAYER 1 — cyrb.toml (project manifest, lives in project repo):
+  [package]
+  name = "kybernet"
+  version = "0.9.0"
+  description = "PID 1 init system"
+  license = "GPL-3.0-only"
+  language = "cyrius"
+
+  [build]
+  entry = "src/main.cyr"
+  test = "src/test.cyr"
+  output = "kybernet"
+
+LAYER 2 — .ark package (created by cyrb package):
+  kybernet-0.9.0.ark (gzipped tar):
+    manifest.json — {"name", "version", "description", "license", "type"}
+    kybernet      — compiled binary
+
+  cyrb package reads cyrb.toml, compiles entry, creates .ark
+  cyrb publish uploads .ark to Ark marketplace (future)
+
+LAYER 3 — zugot recipe (lives in zugot repo, for system builds):
+  zugot/base/kybernet.toml — TOML recipe with:
+    [package] metadata
+    [source] github_release + sha256
+    [depends] runtime=[], build=["cyrius"]
+    [build] make = "cat src/main.cyr | cc2 > build/kybernet"
+    [security] hardening flags
+
+  Used by takumi (build system) for AGNOS system images.
+  Users install via: ark install kybernet
+
+WORKFLOW:
+  Developer: cyrb package → .ark → cyrb publish → Ark registry
+  System:    zugot recipe → takumi build → AGNOS ISO
+  User:      ark install kybernet → prebuilt binary from registry
+'''
+
+[[entries]]
+name = "cyrius_installer"
+description = "install.sh + cyrius version manager — like rustup for Cyrius"
+category = "compiler_bootstrapping"
+content = '''
+INSTALLER (scripts/install.sh):
+
+  curl -sSf https://raw.githubusercontent.com/.../install.sh | sh
+
+Installs to ~/.cyrius/:
+  bin/         cc2, cyrb, ark, cyrc, cyrius (version mgr) — on PATH
+  versions/    0.9.0/, 0.10.0/ etc — one dir per version
+  current      file containing active version string
+
+INSTALL FLOW:
+  1. Detect arch (x86_64 / aarch64)
+  2. Try downloading prebuilt binaries from GitHub Releases
+  3. Fallback: clone repo + bootstrap from source (40ms)
+  4. Symlink active version to bin/
+  5. Add ~/.cyrius/bin to PATH (zshrc/bashrc/profile)
+
+VERSION MANAGER (cyrius command):
+  cyrius version      — show active (reads ~/.cyrius/current)
+  cyrius list         — show all installed
+  cyrius use 0.10.0   — switch active (repoints symlinks)
+  cyrius install 0.10.0 — install a new version
+  cyrius which        — show path to active cc2
+
+PATTERN: Like rustup — installer bootstraps, version manager switches.
+Multiple versions coexist. Symlinks point active version to bin/.
+'''
+
+[[entries]]
+name = "cyrius_standalone_project"
+description = "Pattern for standalone Cyrius projects: vendored stdlib in lib/, no path deps"
+category = "compiler_bootstrapping"
+content = '''
+STANDALONE PROJECT PATTERN:
+
+Cyrius projects vendor their stdlib in lib/ so they build without
+a relative path to the cyrius repo. Only the cc2 binary is needed.
+
+PROJECT STRUCTURE (created by cyrb init):
+  myproject/
+  ├── cyrb.toml          project manifest
+  ├── VERSION
+  ├── lib/               vendored Cyrius stdlib
+  │   ├── string.cyr
+  │   ├── alloc.cyr
+  │   ├── agnosys/syscalls.cyr
+  │   └── ... (14 modules)
+  ├── src/
+  │   ├── main.cyr       entry (includes from lib/)
+  │   ├── test.cyr
+  │   └── lib/            project-specific modules
+  ├── scripts/
+  │   ├── build.sh
+  │   └── test.sh
+  └── build/              gitignored
+
+INCLUDE PATHS: All relative to project root:
+  include "lib/string.cyr"      ← vendored stdlib
+  include "src/lib/module.cyr"  ← project modules
+
+BUILD: cd $ROOT && cat src/main.cyr | cc2 > build/$NAME
+
+VENDORING: cyrb init copies stdlib from the cyrius install.
+To update: re-run cyrb init or manually copy from cyrius repo.
+
+WHY VENDOR: Avoids ../cyrius/ path dependency. Project is
+self-contained. CI just needs the cc2 binary, not the full repo.
+'''
+
+[[entries]]
+name = "cyrius_bench_library"
+description = "bench.cyr: nanosecond-precision benchmarking with min/max/avg and human-readable output"
+category = "compiler_bootstrapping"
+content = '''
+BENCHMARKING (stage1/lib/bench.cyr):
+
+  var b = bench_new("my_operation");
+  bench_run(b, &work_fn, 10000);  # run 10000 iterations
+  bench_report(b);
+  # Output: my_operation: 407ns avg (min=390ns max=8us) [10000 iters]
+
+API:
+  bench_new(name)              — create benchmark
+  bench_start(b) / bench_stop(b) — manual timing
+  bench_run(b, fp, n)         — auto-run function pointer N times
+  bench_report(b)             — print one benchmark
+  bench_report_all(benches)   — print vec of benchmarks
+
+  bench_avg_ns(b), bench_min_ns(b), bench_max_ns(b), bench_iterations(b)
+
+TIMING: Uses clock_gettime(CLOCK_MONOTONIC_RAW) via syscall 228.
+Resolution is nanoseconds. Output auto-scales: ns → us → ms → s.
+
+PATTERN: Define work functions, create bench, run, report:
+  fn work_loop() { var s = 0; for (var i = 0; i < 1000; i = i + 1) { s = s + i; } return 0; }
+  var b = bench_new("loop_1000");
+  bench_run(b, &work_loop, 1000);
+
+GOTCHA: _fmt_time uses shared var names (major, minor, tlen) — no
+block scoping means all vars must be declared at function top.
+'''
+
+[[entries]]
+name = "cyrius_callback_library"
+description = "callback.cyr: closure-like patterns via function pointers (map, filter, fold, pre_exec)"
+category = "compiler_bootstrapping"
+content = '''
+CALLBACK LIBRARY (stage1/lib/callback.cyr):
+
+Replaces closures with function pointer patterns:
+
+  for_each(vec, &fn)         — apply fn(item) to each element
+  vec_filter(vec, &fn)       — return new vec where fn(item)==1
+  vec_map(vec, &fn)          — return new vec with fn(item) applied
+  vec_fold(vec, init, &fn)   — accumulate with fn(acc, item)
+  vec_any(vec, &fn)          — return 1 if any fn(item)==1
+  vec_all(vec, &fn)          — return 1 if all fn(item)==1
+  vec_find_by(vec, &fn)      — return first item where fn(item)==1
+
+  fork_with_pre_exec(cmd, argv, envp, &cb, cb_data)
+    — fork, run callback in child before exec (replaces Rust closures in Command::pre_exec)
+
+USAGE:
+  fn double(x) { return x * 2; }
+  var mapped = vec_map(my_vec, &double);
+
+  fn is_even(x) { if (x % 2 == 0) { return 1; } return 0; }
+  var evens = vec_filter(my_vec, &is_even);
+
+LIMITATION: Functions used as callbacks must be named top-level functions.
+No anonymous closures. No captured variables (use globals or pass via data pointer).
+'''
+
+[[entries]]
+name = "cyrius_fixup_table_expansion"
+description = "Fixup table expanded from 512 to 1024 entries by relocating fixup_cnt/last_var"
+category = "compiler_bootstrapping"
+content = '''
+FIXUP TABLE EXPANSION (512 → 1024):
+
+Large programs (kybernet test with 17 includes, 200+ functions) exceeded
+the 512-entry fixup table limit. Each variable load/store creates a fixup.
+
+FIX: Relocated fixup_cnt and last_var to free heap offsets.
+  Old: fixup_cnt at 0x8C000, last_var at 0x8C008
+  New: fixup_cnt at 0x8FCA8, last_var at 0x8FCB0
+
+This lets the fixup table at 0x8A000 grow from 8192 to 16384 bytes
+(1024 entries × 16 bytes) without conflicting with compiler state
+at 0x8C100+.
+
+CHANGES:
+  - cc/util.cyr: GFCNT/SFCNT/GLVAR/SLVAR use new offsets
+  - cc2.cyr + cc2_aarch64.cyr: zero-init at new offsets
+  - cc/emit.cyr: guard changed from 512 to 1024
+  - Heap map comments updated in both compiler entry files
+
+SELF-HOSTING: byte-identical after change. All 168 tests pass.
 '''

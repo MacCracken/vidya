@@ -1,0 +1,85 @@
+# Cyrius Design Patterns Reference
+# Patterns adapted for a language with no classes, no closures, no GC.
+
+# === Builder pattern ===
+# Use str_builder for string construction:
+# var sb = str_builder_new();
+# str_builder_add_cstr(sb, "/sys/fs/cgroup/");
+# str_builder_add_cstr(sb, service);
+# str_builder_add_cstr(sb, "/cgroup.procs");
+# var path = str_builder_build(sb);
+#
+# For structs, use constructor functions:
+# fn config_new(name) {
+#     var cfg = alloc(40);
+#     store64(cfg, name);          # sensible defaults
+#     store64(cfg + 8, 0);
+#     store64(cfg + 16, 64);
+#     return cfg;
+# }
+
+# === Accessor pattern (getters/setters) ===
+# Every heap struct gets typed accessors:
+# fn config_name(cfg) { return load64(cfg); }
+# fn config_set_name(cfg, n) { store64(cfg, n); return 0; }
+# Keeps field offsets in one place. Callers never use raw offsets.
+
+# === Trait objects (vtable dispatch) ===
+# include "lib/trait.cyr"
+# fn _point_print(p) { fmt_int(load64(p)); ... }
+# var vt = display_vtable(&_point_print, &_point_to_string);
+# var obj = trait_obj_new(vt, &my_point);
+# display(obj);  # polymorphic call through vtable
+
+# === Callback / observer ===
+# include "lib/callback.cyr"
+# fn on_event(data) { ... }
+# for_each(events, &on_event);
+# var mapped = vec_map(items, &transform);
+# var filtered = vec_filter(items, &predicate);
+# var total = vec_fold(items, 0, &accumulate);
+
+# === Result chaining (error propagation) ===
+# include "lib/tagged.cyr"
+# fn step1() { if (fail) { return Err(1); } return Ok(value); }
+# fn step2(input) { if (fail) { return Err(2); } return Ok(result); }
+# fn pipeline() {
+#     var r1 = step1();
+#     if (is_err_result(r1) == 1) { return r1; }  # propagate error
+#     var r2 = step2(result_unwrap(r1));
+#     return r2;
+# }
+
+# === Data-driven dispatch (table pattern) ===
+# Instead of switch with many cases, use a table:
+# var _mount_table[8];   # packed array of entries
+# fn mount_essential() {
+#     var i = 0;
+#     while (i < _mount_count) {
+#         var off = i * 40;
+#         mount_if_needed(load64(t + off), load64(t + off + 8), ...);
+#         i = i + 1;
+#     }
+# }
+
+# === Lazy initialization ===
+# var _vt_cache = 0;
+# fn get_vtable() {
+#     if (_vt_cache == 0) {
+#         _vt_cache = display_vtable(&my_print, &my_to_string);
+#     }
+#     return _vt_cache;
+# }
+
+# === RAII-lite (explicit close) ===
+# Cyrius has no destructors. Use explicit cleanup:
+# struct OwnedFd { fd; }
+# fn owned_fd_new(fd) { var o = alloc(8); store64(o, fd); return o; }
+# fn owned_fd_close(o) { sys_close(load64(o)); store64(o, 0 - 1); }
+# # Caller MUST call owned_fd_close — no automatic Drop.
+
+# === Bitmask permissions ===
+# enum Permission { READ = 1; WRITE = 2; EXEC = 4; NETWORK = 8; }
+# fn has_perm(ctx, perm) { return (load64(ctx + 8) & perm) != 0; }
+# fn grant(ctx, perm) { store64(ctx + 8, load64(ctx + 8) | perm); }
+# fn revoke(ctx, perm) { store64(ctx + 8, load64(ctx + 8) & (0 - 1 - perm)); }
