@@ -387,3 +387,196 @@ KEYBOARD ISR:
 
 PIC MASK: 0xFC = enable IRQ0 (timer) + IRQ1 (keyboard), mask all others.
 '''
+
+[[entries]]
+name = "floating_point_sse2"
+description = "How f64 floating point works: SSE2 codegen, builtins, float literals"
+category = "compiler_bootstrapping"
+content = '''
+DESIGN: "Everything is i64" — float values are IEEE 754 bit patterns stored in regular vars.
+  Float operations are builtins (like syscall, load8) that emit SSE2 instructions.
+  No type system changes needed. The programmer chooses float vs int operations explicitly.
+
+BUILTINS (10 keywords, token types 62-71):
+  f64_from(int)    — cvtsi2sd xmm0, rax; movq rax, xmm0 (int64 → double bits)
+  f64_to(f64)      — movq xmm0, rax; cvttsd2si rax, xmm0 (double → int64, truncate)
+  f64_add(a, b)    — addsd xmm0, xmm1
+  f64_sub(a, b)    — subsd xmm0, xmm1
+  f64_mul(a, b)    — mulsd xmm0, xmm1
+  f64_div(a, b)    — divsd xmm0, xmm1
+  f64_eq(a, b)     — ucomisd + sete → 0/1
+  f64_lt(a, b)     — ucomisd + setb → 0/1
+  f64_gt(a, b)     — ucomisd + seta → 0/1
+  f64_neg(val)     — xorpd xmm1,xmm1; subsd xmm1,xmm0; movapd xmm0,xmm1
+
+REGISTER PATTERN (binary ops):
+  rax=b (second arg), stack=[a] (first arg pushed earlier)
+  1. EPOPC → rcx=a, rax=b
+  2. push rax (save b), mov rax,rcx (a→rax), movq xmm0,rax (a→xmm0)
+  3. pop rax (restore b), mov rcx,rax (b→rcx), movq xmm1,rcx (b→xmm1)
+  4. SSE op (xmm0 = result)
+  5. movq rax, xmm0 (result back to rax for integer world)
+
+FLOAT LITERALS: 3.14 lexed as token type 61.
+  Value packed: (denominator << 32) | numerator. For 3.14: numer=314, denom=100.
+  Codegen emits runtime conversion:
+    mov rax, 314; cvtsi2sd xmm0, rax
+    mov rcx, 100; cvtsi2sd xmm1, rcx
+    divsd xmm0, xmm1; movq rax, xmm0
+
+COMPARISON BUG (FIXED):
+  xor eax,eax CLOBBERS ZF from ucomisd. sete always returns 1 after xor.
+  Fix: use mov eax, 0 (B8 00000000) to clear rax without touching flags.
+
+SSE2 INSTRUCTION ENCODINGS:
+  movq xmm0, rax:     66 48 0F 6E C0
+  movq xmm1, rcx:     66 48 0F 6E C9
+  movq rax, xmm0:     66 48 0F 7E C0
+  addsd xmm0, xmm1:   F2 0F 58 C1
+  subsd xmm0, xmm1:   F2 0F 5C C1
+  mulsd xmm0, xmm1:   F2 0F 59 C1
+  divsd xmm0, xmm1:   F2 0F 5E C1
+  cvtsi2sd xmm0, rax: F2 48 0F 2A C0
+  cvttsd2si rax, xmm0: F2 48 0F 2C C0
+  ucomisd xmm0, xmm1: 66 0F 2E C1
+'''
+
+[[entries]]
+name = "methods_on_structs"
+description = "Convention-based method dispatch: point.scale(2) → Point_scale(&point, 2)"
+category = "compiler_bootstrapping"
+content = '''
+DESIGN: No new syntax for defining methods. Just a naming convention.
+  Define: fn Point_scale(self, factor) { ... }
+  Call:   point.scale(2)
+  The compiler resolves point.scale(2) to Point_scale(&point, 2).
+
+RESOLUTION:
+  1. Parser sees ident.name( — the ( after dot-name triggers method dispatch
+  2. FINDVAR(ident) → get struct type ID
+  3. Look up struct name from struct_names[sid-1]
+  4. Build mangled name: "Point" + "_" + "scale" in tok_names scratch area (offset 30000)
+  5. FINDFN(mangled_name) → get function index
+  6. Emit &var as first arg (self), then parse remaining args
+  7. Emit normal function call to mangled name
+
+BUILD_METHOD_NAME(S, si, mnoff):
+  Uses tok_names scratch at offset 30000 to build "StructName_method\0"
+  Copies struct name bytes, underscore (95), method name bytes, null terminator
+  Returns offset 30000 for FINDFN lookup
+
+STATEMENT CONTEXT:
+  point.scale(2); as a statement needs special handling in PARSE_STMT.
+  When parser sees ident.name in statement context, it peeks ahead:
+    - If next is ( → method call: rewind, call PARSE_FIELD_LOAD, expect ;
+    - Otherwise → field store: PARSE_FIELD_STORE
+
+DUPLICATE VAR GOTCHA:
+  No block scoping means var declarations in the method-call path and field-access
+  path of the same function cannot reuse names like "si", "fi", "idx".
+  Solution: declare shared vars once at function top, assign in branches.
+'''
+
+[[entries]]
+name = "error_line_numbers"
+description = "How line:column error reporting works in the compiler"
+category = "compiler_bootstrapping"
+content = '''
+DESIGN: Parallel tok_lines array stores line number for each token.
+  Line counter incremented during lexing on every newline (char 10).
+  Error functions read line from tok_lines[token_index].
+
+HEAP LAYOUT:
+  tok_lines at S+0x1A2000 (65536 slots × 8 bytes = 524288 bytes)
+  cur_line at S+0x8FCB8 (current line number during lexing)
+
+LEXER TRACKING:
+  In LEX() main loop:
+    - Whitespace: if (c == 10) { SCLINE(S, GCLINE(S) + 1); }
+    - Comments: same increment when hitting newline at end of # comment
+  In ADDTOK(): STLINE(S, tc, GCLINE(S)) stores current line for each token
+
+ERROR FORMAT:
+  Old: "error at token 42 (type=5)"
+  New: "error:3: unexpected token (type=5)"
+  Warnings: "warning:15: assigning non-pointer"
+  Duplicates: "error:7: duplicate variable"
+
+INIT: cur_line starts at 1 (not 0) — S64(S + 0x8FCB8, 1) in compiler.cyr
+
+PREPROCESSOR NOTE:
+  Line numbers are for the EXPANDED source (after include processing).
+  Included files reset nothing — lines count continuously.
+  A future improvement would track file:line pairs.
+'''
+
+[[entries]]
+name = "tok_names_overflow"
+description = "Critical capacity bug: tok_names buffer overflow corrupts var_noffs silently"
+category = "compiler_bootstrapping"
+content = '''
+THE BUG:
+  tok_names buffer at 0x50000 (32768 bytes) stores ALL identifier strings.
+  LEXID appends every identifier occurrence without bounds checking.
+  When total identifier bytes exceed 32768, writes overflow into var_noffs at 0x58000.
+  Corrupted var_noffs causes FINDVAR to return wrong indices.
+  Manifests as "unexpected token" errors at RANDOM locations in unrelated code.
+
+WHY IT WAS HARD TO FIND:
+  - Error location (EMITELF) has nothing wrong with its code
+  - Adding/removing ANY function changes whether overflow hits critical data
+  - 12 one-liner functions compile fine; adding 1 more breaks everything
+  - Binary search for "which function breaks" gives inconsistent results
+  - The corruption is silent — no segfault, no obvious error
+
+ROOT CAUSE CHAIN:
+  1. ~6000 identifiers × ~8 bytes avg = ~48000 bytes needed
+  2. tok_names capacity = 32768 bytes
+  3. Overflow at byte 32769 writes to 0x58000 (var_noffs[0])
+  4. var_noffs stores variable name offsets — now garbage
+  5. FINDVAR compares against garbage → wrong variable resolution
+  6. Parser state corrupted → "unexpected token" at random
+
+FIX:
+  Expanded tok_names to 65536 bytes (0x50000-0x60000)
+  Relocated var_noffs to 0x60000, var_sizes to 0x60800
+  Added bounds check in LEXID: error at 65000 bytes
+  Required updating ALL references to 0x58000/0x58800 across:
+    parse.cyr (14 occurrences)
+    fixup.cyr (2 occurrences)
+    arch/aarch64/fixup.cyr (2 occurrences)
+
+LESSON: Adjacent fixed-size buffers with no guard bytes are time bombs.
+  Always add bounds checks on write. Always verify after relocation.
+'''
+
+[[entries]]
+name = "two_step_bootstrap"
+description = "How to bootstrap heap layout changes without breaking the chain"
+category = "compiler_bootstrapping"
+content = '''
+PROBLEM: When you change heap offsets (tok_values, var_noffs, preprocessor buffer),
+  the committed cc2 binary uses the OLD layout. But the new source expects the NEW layout.
+  If the old cc2 compiles the new source, the generated binary has correct offsets,
+  but the old cc2 ITSELF may corrupt data during compilation if the old preprocessor
+  buffer overlaps with the new token arrays.
+
+TWO-STEP BOOTSTRAP:
+  Step 1: Old cc2 compiles new source → cc3 (has new layout)
+  Step 2: cc3 compiles same source → cc4 (verify cc3==cc4 byte-identical)
+  Step 3: cp cc3 build/cc2 (update committed binary)
+  Step 4: Now cc2 has the new layout and can compile any source
+
+WHEN IT FAILS:
+  If the old cc2 preprocessor buffer overlaps with the new token arrays,
+  the old cc2 corrupts its own data during compilation of the new source.
+  Solution: make the infrastructure change (buffer relocation) FIRST without
+  adding new code, bootstrap to get a clean cc2, THEN add the new code.
+
+MULTI-BACKEND GOTCHA:
+  When relocating shared buffers (tok_values, var_noffs), ALL backend-specific
+  files must be updated too. The aarch64/emit.cyr had its own TOKVAL function
+  still reading from the old 0xE2000 while the shared lexer wrote to 0x122000.
+  Every token value read as 0. All immediates compiled as MOVZ X0, #0.
+  Fix: grep ALL source files for the old offset and update every occurrence.
+'''
