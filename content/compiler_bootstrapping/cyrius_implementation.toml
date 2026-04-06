@@ -580,3 +580,115 @@ MULTI-BACKEND GOTCHA:
   Every token value read as 0. All immediates compiled as MOVZ X0, #0.
   Fix: grep ALL source files for the old offset and update every occurrence.
 '''
+
+[[entries]]
+name = "preprocessor_fix"
+description = "How the include preprocessor was fixed to not eat string literals"
+category = "compiler_bootstrapping"
+content = '''
+THE BUG:
+  "include " appearing anywhere in source triggers file inclusion.
+  A string literal like var s = "include this" causes the preprocessor
+  to try opening a file named "this" and silently fail.
+
+ROOT CAUSE:
+  ISINCLUDE(S, ip, bl) checked if 8 bytes at position ip match "include ".
+  Called on EVERY byte position in the source, not just line starts.
+
+FIX:
+  Track beginning-of-line (bol) state in PREPROCESS:
+    var bol = 1;
+    # Only check include at column 0
+    var is_inc = 0;
+    if (bol == 1) { is_inc = ISINCLUDE(S, ip, bl); }
+    if (is_inc == 1) { ... handle include ... }
+    else { copy byte; if (c == 10) { bol = 1; } else { bol = 0; } }
+
+GOTCHA:
+  The initial implementation used nested ifs: if (bol==1) { if (ISINCLUDE...) { } } else { }
+  The else bound to the INNER if, not the outer. When bol==0, NEITHER branch executed,
+  causing an infinite loop (ip never advanced). Fix: compute is_inc into a var first.
+'''
+
+[[entries]]
+name = "hashmap_tombstone"
+description = "Why delete-by-zeroing breaks open-addressing hashmaps and the tombstone fix"
+category = "compiler_bootstrapping"
+content = '''
+THE BUG:
+  hashmap.cyr used open addressing with linear probing.
+  map_delete set occupied=0 (empty). This breaks probe chains:
+    1. Insert "alpha" at slot 3
+    2. Insert "beta" at slot 3 (collision) → probes to slot 4
+    3. Delete "alpha" (slot 3 = empty)
+    4. Lookup "beta" → hash to slot 3, see empty, stop → NOT FOUND (wrong!)
+
+FIX — TOMBSTONE STATE:
+  Entry state: 0=empty, 1=occupied, 2=tombstone (deleted)
+  map_delete sets state=2 instead of state=0.
+  _map_find skips tombstones (state==2) during probe, keeps searching.
+  _map_find remembers first tombstone for INSERT (reuse deleted slots).
+  map_get/map_has check state==1 (not state!=0 — tombstone is not occupied).
+  _map_grow only rehashes state==1 entries (tombstones are garbage-collected).
+
+RELATED CHECKS:
+  map_set: count tombstone->occupied as new insertion (st != 1 increments count)
+  hash_str: guard against null pointer (return 0)
+'''
+
+[[entries]]
+name = "p1_hardening_pattern"
+description = "P-1 hardening checklist for Cyrius stdlib libraries"
+category = "compiler_bootstrapping"
+content = '''
+Before adding new features, audit existing code for robustness.
+Checklist per function:
+
+  1. NULL POINTER: Does the function dereference args without checking for 0?
+     Fix: if (ptr == 0) { return 0; } or return error code.
+
+  2. BOUNDS CHECK: Does the function index into arrays without validating?
+     Fix: if (idx < 0 || idx >= len) { return -1; }
+
+  3. DIVISION BY ZERO: Any division without checking divisor?
+     Fix: if (divisor == 0) { return 0; }
+
+  4. ALLOCATION FAILURE: Does alloc() return value get checked?
+     Fix: var p = alloc(size); if (p == 0) { return 0; }
+
+  5. BUFFER OVERFLOW: Does the function write without tracking position vs capacity?
+     Fix: Add maxlen parameter or internal bounds check.
+
+FOUND IN v0.9.3 AUDIT:
+  - vec_remove: no bounds check on idx → arbitrary memory write
+  - alloc: brk failure not checked → writes to unmapped memory
+  - json_get: null key dereference → crash
+  - fmt_sprintf: no output buffer bounds → overflow
+  - hashmap delete: breaks probe chains → data loss
+
+PRINCIPLE: Every library function that takes a pointer or index should
+validate before dereferencing. Return 0 or -1 on invalid input.
+'''
+
+[[entries]]
+name = "self_hosting_test"
+description = "How to correctly test self-hosting in compiler.sh"
+category = "compiler_bootstrapping"
+content = '''
+CORRECT TEST:
+  cat src/compiler.cyr | build/cc2 > /tmp/cc3
+  cmp build/cc2 /tmp/cc3
+  # Must be byte-identical
+
+WRONG TEST (was in compiler.sh):
+  cat src/cc_bridge.cyr | cc2 > cc2_copy
+  cat src/cc_bridge.cyr | cc2_copy > cc3
+  cmp cc2_copy cc3
+  # This tests bridge compiler self-hosting, not cc2 self-hosting.
+  # cc2 was compiled from compiler.cyr, not cc_bridge.cyr.
+  # Different source = different binary = always fails comparison.
+
+PRINCIPLE: The self-hosting test must compile the SAME source that
+produced the binary being tested. cc2 was built from compiler.cyr,
+so the test must compile compiler.cyr with cc2 and compare.
+'''
