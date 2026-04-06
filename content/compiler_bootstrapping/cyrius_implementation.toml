@@ -692,3 +692,684 @@ PRINCIPLE: The self-hosting test must compile the SAME source that
 produced the binary being tested. cc2 was built from compiler.cyr,
 so the test must compile compiler.cyr with cc2 and compare.
 '''
+
+# ================================================================
+# PLANNED FEATURES — Implementation strategies for v0.9.5+
+# These entries describe HOW to implement each feature, not what it does.
+# ================================================================
+
+[[entries]]
+name = "plan_block_scoping"
+description = "Implementation strategy for block-scoped variables (scope depth tracking)"
+category = "compiler_bootstrapping"
+content = '''
+DIFFICULTY: Very Low. No codegen changes. Compile-time only.
+
+HEAP ADDITIONS (~2KB):
+  scope_depth        [8]      — current nesting depth (0 = function top)
+  fn_local_depths[64] [512]   — scope depth where each local was declared
+
+ALGORITHM:
+  1. When parsing { in function body: scope_depth += 1
+  2. When PARSE_VAR declares a local: fn_local_depths[local_idx] = scope_depth
+  3. When parsing }: scope_depth -= 1, then walk fn_local_names backward:
+     while (fn_local_cnt > 0 && fn_local_depths[fn_local_cnt-1] > scope_depth) {
+       fn_local_cnt -= 1;
+     }
+  4. Variable lookup (FINDLOCAL) unchanged — it only searches 0..fn_local_cnt
+
+STACK FRAME:
+  No change. All locals share the same stack frame (max locals * 8 bytes).
+  Scope exit just removes names from the compile-time table.
+  Stack space is NOT reclaimed (no benefit for single-frame functions).
+
+GOTCHA:
+  for-loop vars (var i = 0) need special handling — the i is in the for body scope.
+  Currently for loops use token replay. The scope should open before the init var
+  and close after the loop body.
+
+PATTERN: Same as Crafting Interpreters chapter on locals. Runtime cost: zero.
+'''
+
+[[entries]]
+name = "plan_enum_constructors"
+description = "Implementation strategy for enum variants with data (auto-generated constructor functions)"
+category = "compiler_bootstrapping"
+content = '''
+DIFFICULTY: Medium. Extends PARSE_ENUM_DEF to auto-generate functions.
+
+CURRENT ENUM STATE:
+  enum Color { RED = 0; GREEN = 1; BLUE = 2; }
+  → Stored as named constants. No payload.
+
+EXTENSION — ENUM WITH DATA:
+  enum Result { Ok(val); Err(code); }
+  → Each variant gets an auto-generated constructor function.
+
+HEAP ADDITIONS (~2KB):
+  enum_payloads[32*8]  [2048]  — 1 if variant has payload, 0 if not
+
+PARSING:
+  In PARSE_ENUM_DEF, after parsing variant name:
+    if (PEEKT(S) == 10) {  # ( after variant name
+      # This variant has a payload
+      STI(S, GTI(S) + 1); # consume (
+      # parse param name (store for constructor)
+      STI(S, GTI(S) + 1); # consume param
+      if (PEEKT(S) != 11) { ERR(S); }
+      STI(S, GTI(S) + 1); # consume )
+      enum_payloads[variant_idx] = 1;
+    }
+
+CONSTRUCTOR GENERATION:
+  For each variant with payload, emit a function at compile time:
+    fn Result_Ok(val) {
+      var t = alloc(16);      # tag + payload
+      store64(t, 0);          # tag = variant index
+      store64(t + 8, val);    # payload
+      return t;
+    }
+  Without payload:
+    fn Result_None() {
+      var t = alloc(16);
+      store64(t, 0);
+      store64(t + 8, 0);
+      return t;
+    }
+
+  The constructor name is EnumName_VariantName (same mangling as methods).
+  Register via REGFN, emit code into codebuf, record offset in fn_offsets.
+
+USAGE:
+  var r = Result_Ok(42);    # calls generated constructor
+  var tag = load64(r);      # 0 = Ok
+  var val = load64(r + 8);  # 42
+
+INTEGRATION WITH tagged.cyr:
+  The existing Some/None/Ok/Err functions in tagged.cyr ARE hand-written constructors.
+  Auto-generation replaces them — any enum with data gets constructors for free.
+'''
+
+[[entries]]
+name = "plan_pattern_matching"
+description = "Implementation strategy for match expressions with destructuring"
+category = "compiler_bootstrapping"
+content = '''
+DIFFICULTY: High. New keyword + codegen for destructuring binds.
+
+SYNTAX:
+  match expr {
+    0 => { ... }
+    42 => { ... }
+    _ => { ... }
+  }
+
+  With destructuring (requires enum constructors):
+  match result {
+    Ok(v) => { use v }
+    Err(e) => { use e }
+  }
+
+TOKEN: Add MATCH keyword (token type 72). ARROW => (token type 73).
+
+CODEGEN (simple match — integer values):
+  1. Evaluate match expression → rax
+  2. Store in hidden temp var (like switch does)
+  3. For each arm: compare tag, emit JNE to next arm
+  4. Body of matching arm executes
+  5. JMP to end after body
+  Same as switch/case but with => instead of case/colon.
+
+CODEGEN (destructuring match — tagged unions):
+  1. Evaluate match expression → rax (pointer to tagged union)
+  2. Load tag: load64(rax) → store in temp
+  3. For each arm with pattern Ok(v):
+     a. Compare tag with Ok variant index (e.g., 0)
+     b. If match: load payload (load64(rax + 8)) into new local var v
+     c. Execute body with v in scope (uses block scoping)
+     d. JMP to end
+
+HEAP ADDITIONS (~1KB):
+  match_var_idx      [8]    — hidden var index for match subject
+  match_arm_count    [8]    — number of arms parsed so far
+  match_end_patches[32] [256] — JMP-to-end offsets for each arm
+
+DEPENDENCY: Block scoping (for destructured variables in arm scope).
+PATTERN: Compiles identically to switch + variable binding. The switch codegen
+already exists (PARSE_SWITCH). Match extends it with destructuring.
+'''
+
+[[entries]]
+name = "plan_closures"
+description = "Implementation strategy for closures and lambda expressions"
+category = "compiler_bootstrapping"
+content = '''
+DIFFICULTY: High. New syntax + heap-allocated capture struct + indirect calls.
+
+SYNTAX:
+  var f = |x| x + 1;        # single expression
+  var g = |a, b| { ... };   # block body
+
+REPRESENTATION (runtime):
+  Closure = heap-allocated struct:
+    offset 0: fn_ptr (code address of closure body)
+    offset 8: capture_count (number of captured vars)
+    offset 16+: captured values (i64 each, copied by value)
+
+PARSING:
+  New token PIPE (|) already exists as token 35.
+  When PARSE_FACTOR sees |:
+    1. Parse parameter list until next |
+    2. Register anonymous function __closure_N
+    3. Scan body for references to outer locals (capture analysis)
+    4. Generate function body with captures as extra leading parameters
+    5. Emit allocation of closure struct
+
+CAPTURE ANALYSIS (simple):
+  Walk tokens in closure body. For each IDENT token:
+    if FINDLOCAL(outer_scope, name) succeeds → mark as captured
+  This is a pre-scan, not a full parse. Works for single-pass.
+
+CALLING A CLOSURE:
+  Current fnptr.cyr uses fncall0/fncall1/fncall2 for indirect calls.
+  Closure call:
+    1. Load fn_ptr from closure: load64(closure_addr)
+    2. Load captures: load64(closure_addr + 16), load64(closure_addr + 24)...
+    3. Push captures as first N args, then actual args
+    4. Emit indirect call: call rax (already supported)
+
+CAPTURE BY VALUE:
+  Cyrius has no GC or borrow checker. Closures COPY captured values.
+  If the original variable changes after closure creation, the closure keeps the old value.
+  This is safe and simple. Mutable captures require capture-by-reference (pointer),
+  which is a future enhancement.
+
+GOTCHA: Closures that outlive their creating scope need heap allocation.
+  The bump allocator handles this (no free needed for short-lived closures).
+'''
+
+[[entries]]
+name = "plan_module_system"
+description = "Implementation strategy for modules with namespace and visibility"
+category = "compiler_bootstrapping"
+content = '''
+DIFFICULTY: Medium. Extends preprocessor + parser with name mangling.
+
+DESIGN: File-based modules. Each .cyr file is a module. Directory = submodule.
+  mod math;           → includes math.cyr, prefixes all names with math_
+  use math::sqrt;     → registers sqrt as alias for math_sqrt
+  pub fn foo() {}     → exported (visible outside module)
+  fn bar() {}         → private (module-internal only)
+
+IMPLEMENTATION:
+
+1. MODULE CONTEXT:
+  Add current_module state (name offset in tok_names).
+  When parsing mod name { ... } or including a module file:
+    save old current_module
+    set current_module = name
+    parse contents
+    restore current_module
+
+2. NAME MANGLING:
+  During PARSE_FN_DEF, if current_module != 0:
+    actual_name = BUILD_METHOD_NAME(current_module, fn_name)
+    # Reuses the same mangling as struct methods
+  During FINDVAR/FINDFN, try both mangled and unmangled names.
+
+3. VISIBILITY:
+  Add pub_flags[256] — 1 bit per function/var (32 bytes).
+  pub fn → set flag. fn → clear flag.
+  When resolving names from outside current module:
+    if (!pub_flags[fn_idx]) { error "private function" }
+
+4. USE STATEMENTS:
+  use_aliases[64] — maps alias name offset → mangled name offset
+  When FINDFN fails on short name, check use_aliases for a mapping.
+
+HEAP ADDITIONS (~3KB):
+  current_module     [8]
+  module_names[32]   [256]
+  pub_flags[256]     [256]    (one byte per fn, packed later)
+  use_aliases[64]    [1024]   (name_offset pairs)
+
+MULTI-FILE: Once modules work within a single compilation, extend to:
+  cat src/main.cyr src/math.cyr | cc2 > binary
+  Each file auto-becomes a module based on filename.
+  The preprocessor concatenates but tracks file boundaries.
+
+PATTERN: Same as Kalyn compiler — file paths as module identifiers.
+Avoids registry, package resolution, or complex name lookup.
+'''
+
+[[entries]]
+name = "plan_iterators"
+description = "Implementation strategy for for-in loops (syntactic sugar)"
+category = "compiler_bootstrapping"
+content = '''
+DIFFICULTY: Low. Pure syntactic sugar in the parser. No codegen changes.
+
+SYNTAX:
+  for item in collection { body }
+
+DESUGARING:
+  Becomes:
+    var _it = CollectionType_iter(collection);
+    while (iter_has_next(_it) == 1) {
+      var item = iter_next(_it);
+      body
+    }
+
+PARSING:
+  In PARSE_FOR, after consuming for:
+    if next token is IDENT and token after that is IN (new keyword):
+      # for-in loop
+      parse item name
+      consume IN
+      parse collection expression
+      desugar to while loop with iterator protocol
+
+ITERATOR PROTOCOL (library convention):
+  For each collection type, define:
+    fn Vec_iter(v) → creates iterator state: { data_ptr, len, pos }
+    fn iter_has_next(it) → load64(it + 16) < load64(it + 8)
+    fn iter_next(it) → load value, increment pos
+
+  The parser needs to know the collection type to call Vec_iter vs Map_iter.
+  Option A: require explicit type annotation: for item in vec_iter(v) { }
+  Option B: dispatch based on variable type (requires var_types tracking)
+
+  Option A is simpler and avoids type system complexity.
+  With methods: for item in v.iter() { body }
+  This works TODAY with the method dispatch already implemented.
+
+HEAP ADDITIONS: None. Just parser desugaring.
+
+INTEGRATION: The for keyword (token 55) already exists. Add IN as token 72 or 73.
+Alternatively, use the existing for loop syntax:
+  for (var item = v.iter(); iter_has_next(item); iter_advance(item)) { }
+This works NOW with no compiler changes — just library functions.
+'''
+
+[[entries]]
+name = "plan_trait_impls"
+description = "Implementation strategy for impl Trait for Type blocks"
+category = "compiler_bootstrapping"
+content = '''
+DIFFICULTY: Medium. Builds on existing method dispatch.
+
+SYNTAX:
+  trait Display { fn format(self); }
+  impl Display for Point { fn format(self) { ... } }
+
+IMPLEMENTATION:
+  trait Display { fn format(self); }
+  → Registers trait name + method signatures in trait_table
+
+  impl Display for Point { fn format(self) { ... } }
+  → Parses as: fn Point_format(self) { ... }
+  → Records that Point implements Display
+  → Method dispatch via existing mangling: point.format() → Point_format(&point)
+
+NAME RESOLUTION:
+  When parser sees point.format():
+    1. Look up Point_format (direct method) — found? call it.
+    2. Not found? Search trait impls for any impl that defines format for Point.
+    3. Still not found? Error.
+
+HEAP ADDITIONS (~5KB):
+  trait_names[32]          [256]  — trait name offsets
+  trait_methods[32*8]      [2048] — method name offsets per trait
+  trait_method_counts[32]  [256]  — methods per trait
+  impl_records[64]         [1024] — {trait_idx, type_idx} pairs
+  trait_count              [8]
+  impl_count               [8]
+
+TRAIT OBJECTS (dynamic dispatch):
+  Already have vtable-based dispatch in trait.cyr library.
+  Compiler-native traits would generate vtables automatically:
+    fn Point_Display_vtable() { return &Point_format; }
+  But this is a v1.0+ feature — start with static dispatch only.
+
+PATTERN: trait.cyr already proves the concept with hand-written vtables.
+Compiler-native impl blocks automate what the library does manually.
+'''
+
+[[entries]]
+name = "plan_feature_flags"
+description = "Implementation strategy for conditional compilation (#[cfg])"
+category = "compiler_bootstrapping"
+content = '''
+DIFFICULTY: Low. Preprocessor-time decision. No codegen impact.
+
+SYNTAX:
+  #[cfg(feature = "debug")]
+  fn debug_print(msg) { println(msg); }
+
+  #[cfg(not(feature = "release"))]
+  var VERBOSE = 1;
+
+IMPLEMENTATION:
+  Extend PREPROCESS to detect #[cfg(...)] patterns.
+  Before lexing, scan for # followed by [ at beginning of line.
+
+  1. Parse condition: feature = "name" | not(condition) | all(c1, c2) | any(c1, c2)
+  2. Evaluate against enabled_features[] (set from command line)
+  3. If false: skip tokens until the next top-level declaration (fn, var, struct, enum)
+     or skip the entire { } block if the #[cfg] precedes one
+
+COMMAND LINE:
+  cc2 --feature debug --feature trace < src/main.cyr > binary
+  Or via environment: CYRIUS_FEATURES="debug,trace" cc2 < main.cyr
+
+HEAP ADDITIONS (~800 bytes):
+  enabled_features[32]  [256]  — feature name offsets
+  feature_count         [8]    — number of enabled features
+  cfg_depth             [8]    — nesting depth for #[cfg] blocks
+
+INTERACTION WITH PREPROCESSOR:
+  #[cfg] is processed AFTER include expansion but BEFORE lexing.
+  This means included files can have their own #[cfg] blocks.
+  Order: PREPROCESS (expand includes) → CFG_FILTER (strip disabled blocks) → LEX
+
+ALTERNATIVE (simpler):
+  Use ifdef/endif preprocessor style:
+    #ifdef DEBUG
+    fn debug_print(msg) { println(msg); }
+    #endif
+  This is easier to parse (line-based) and matches C conventions.
+'''
+
+[[entries]]
+name = "plan_string_type"
+description = "Implementation strategy for owned String and borrowed &str types"
+category = "compiler_bootstrapping"
+content = '''
+DIFFICULTY: Medium. Needs type tracking for automatic string operations.
+
+DESIGN: String = heap pointer to { len: i64, data: bytes... }
+  A String variable is a single i64 (pointer to the heap block).
+  Length is stored at ptr-8 (before the data) or at ptr+0 with data at ptr+8.
+
+OPTION A (simpler — length-prefixed heap block):
+  String layout on heap:
+    offset 0: length (i64)
+    offset 8: byte data (length bytes, null-terminated for C compat)
+
+  Variable holds pointer to offset 8 (the data).
+  str_len(s) = load64(s - 8)   — O(1) length
+  Null-terminated for compatibility with syscall(write) and C strings.
+
+OPTION B (fat pointer — Rust/Go style):
+  Variable holds TWO i64 values: {ptr, len}.
+  Requires multi-word variable support.
+  Not feasible in current everything-is-one-i64 model.
+
+RECOMMENDED: Option A. Single i64 variable, length stored before data.
+
+LIBRARY CHANGES:
+  str_new(data, len) → alloc(len + 9); store64(ptr, len); memcpy(ptr+8, data, len); store8(ptr+8+len, 0); return ptr+8;
+  str_len(s) → load64(s - 8)
+  str_data(s) → s (pointer to bytes)
+  str_cat(a, b) → new string with combined content
+  str_eq(a, b) → compare by length then bytes
+
+NOTE: This is what lib/str.cyr already does. The "String type" feature
+is about making the compiler AWARE of strings (type tracking) so that
+string literals automatically create String objects instead of raw pointers.
+
+COMPILER CHANGE:
+  When assigning a string literal to a variable:
+    var msg = "hello";
+  Currently: msg = pointer to data section (null-terminated, no length)
+  With String type: msg = str_new("hello", 5) — heap-allocated with length
+
+  This requires detecting string-typed variables in the parser.
+  Simplest approach: treat ALL string literals as String objects.
+  Breaking change for code that passes strings to syscall (expects raw pointer).
+  Solution: keep raw string syntax as "hello" and add new syntax s"hello" for String.
+'''
+
+[[entries]]
+name = "plan_generics_phase2"
+description = "Implementation strategy for type-checked generics (no monomorphization)"
+category = "compiler_bootstrapping"
+content = '''
+DIFFICULTY: Low for type checking. High for monomorphization.
+
+KEY INSIGHT: Since everything is i64, Cyrius does NOT need monomorphization.
+  Vec<i64> and Vec<*Point> generate identical code.
+  Generics are a COMPILE-TIME check only — no runtime impact.
+
+WHAT GENERICS PHASE 2 ADDS:
+  1. Type parameter tracking: fn foo<T>(x: T) → T is a type variable
+  2. Constraint checking: ensure T is used consistently within the function
+  3. Error messages: "type mismatch: expected T=i64, got T=*Point"
+
+IMPLEMENTATION:
+  In PARSE_FN_DEF, after parsing <T>:
+    Store T in generic_params[fn_idx] (new heap array)
+    During function body parsing, track what T resolves to on first use
+    On subsequent uses, verify consistency
+
+  Example:
+    fn swap<T>(a: *T, b: *T) { var tmp = *a; *a = *b; *b = tmp; }
+    → T resolves to whatever the first call site provides
+    → No code generation difference
+
+HEAP ADDITIONS (~500 bytes):
+  generic_params[256*4]  [1024] — up to 4 type params per function
+  generic_bindings[256*4] [1024] — resolved types per param
+
+WHAT THIS DOES NOT DO:
+  - No monomorphization (Vec<i64> and Vec<Point> are the same binary code)
+  - No specialization (no optimizing for specific types)
+  - No trait bounds (impl Trait needed first)
+
+THIS IS THE RIGHT APPROACH because:
+  - Cyrius has no type system — adding one retroactively is massive
+  - The safety benefit of generics is catching mistakes, not generating different code
+  - Rust-style monomorphization requires a full type system + IR + code generation pipeline
+  - Phase 2 generics are "documentation that the compiler verifies"
+'''
+
+# ================================================================
+# IMPLEMENTED FEATURES — v0.9.7–v0.9.8
+# ================================================================
+
+[[entries]]
+name = "pattern_matching"
+description = "How match expressions work: syntax, codegen, scoped arms"
+category = "compiler_bootstrapping"
+content = '''
+SYNTAX:
+  match expr {
+    0 => { stmts }
+    42 => { stmts }
+    _ => { stmts }     # default/wildcard
+  }
+
+TOKENS: MATCH=75. Arrow => is two tokens: EQ(4) + GT(20).
+
+CODEGEN (same as switch):
+  1. Evaluate match expr → store in hidden temp global var
+  2. For each arm (except _):
+     a. Load temp var, push
+     b. Evaluate arm value, compare
+     c. JCC(NE) to skip this arm
+     d. SCOPE_PUSH, parse body, SCOPE_POP
+     e. JMP to end (patched later)
+     f. Patch the skip
+  3. Default arm (_): just parse body, no comparison
+  4. Patch all end jumps
+
+WILDCARD DETECTION:
+  Check if identifier is "_" (single underscore):
+    load8(tok_names + noff) == 95 && load8(tok_names + noff + 1) == 0
+
+SCOPING: Each arm gets its own scope (SCOPE_PUSH/POP).
+Future: destructuring `Ok(v) => { use v }` requires enum constructors + block scoping.
+'''
+
+[[entries]]
+name = "for_in_range"
+description = "How for-in range loops work: for i in 0..10 { }"
+category = "compiler_bootstrapping"
+content = '''
+SYNTAX:
+  for i in start..end { body }
+
+TOKENS: IN=76. Range (..) is two DOT(41) tokens.
+
+DETECTION:
+  In PARSE_FOR, before checking for ( (C-style for):
+    if (PEEKT == IDENT) {
+      save_ti; advance; if (PEEKT == IN) { ... for-in path ... }
+      else { rewind to save_ti; fall through to C-style }
+    }
+
+DESUGARING (inline codegen, not AST transform):
+  1. Evaluate start expr → store in new local var (iterator)
+  2. Evaluate end expr → store in hidden global var (limit)
+  3. Loop top: load iter, load limit, CMP, JCC(GE) to end
+  4. SCOPE_PUSH, parse body, SCOPE_POP
+  5. Load iter, add 1, store iter
+  6. JMP to loop top
+  7. Patch end jump
+
+SCOPING: Iterator var and body share one scope (SCOPE_PUSH before start, POP after loop).
+The iterator var is visible inside the body but not after the loop.
+
+RANGE: Exclusive end (0..5 = 0,1,2,3,4). Matches Rust/Python convention.
+'''
+
+[[entries]]
+name = "aarch64_syscall_portability"
+description = "How portable syscall numbers work across x86 and aarch64"
+category = "compiler_bootstrapping"
+content = '''
+PROBLEM:
+  x86_64 and aarch64 have COMPLETELY DIFFERENT syscall numbers:
+    read:  x86=0,  aarch64=63
+    write: x86=1,  aarch64=64
+    open:  x86=2,  aarch64=56
+    close: x86=3,  aarch64=57
+    brk:   x86=12, aarch64=214
+    exit:  x86=60, aarch64=93
+
+  Shared source files (src/cc/*.cyr) use raw syscall numbers.
+  Cross-compiler runs on x86 but generates aarch64 code.
+
+SOLUTION: SYS_* enum constants defined per-architecture.
+
+  compiler.cyr (x86):
+    enum Sys { SYS_READ=0; SYS_WRITE=1; SYS_OPEN=2; SYS_CLOSE=3; SYS_BRK=12; SYS_EXIT=60; }
+
+  compiler_aarch64.cyr (cross-compiler, runs on x86):
+    enum Sys { SYS_READ=0; SYS_WRITE=1; ... }  # x86 numbers (runs on x86!)
+
+  For native aarch64 self-hosting (patched on ARM machine):
+    enum Sys { SYS_READ=63; SYS_WRITE=64; SYS_BRK=214; SYS_EXIT=93; }
+
+CROSS-COMPILER GOTCHA:
+  The cross-compiler is an x86 binary. Its SYS_* values must be x86 numbers
+  because THAT binary runs on x86. The code it GENERATES for aarch64 uses
+  the raw numbers from the source being compiled.
+
+  When self-hosting on aarch64, the SOURCE must have aarch64 numbers because
+  the compiled binary runs on aarch64.
+
+SYSCALL TRANSLATION LAYER (in aarch64 emitter):
+  ESYSXLAT: chain of CMP X8,#N / B.NE +8 / MOVZ X8,#M
+  Translates common x86 numbers to aarch64 at codegen time.
+  Used by ESCPOPS for user-written syscall() calls.
+
+ENCODING GOTCHA:
+  MOVZ X8, #63 = 0xD28007E8 (not 0xD2800FE8!)
+  Formula: 0xD2800000 | (imm16 << 5) | Rd
+  63 << 5 = 0x7E0, NOT 0xFE0. Getting this wrong silently maps to wrong syscall.
+'''
+
+[[entries]]
+name = "aarch64_escpops_fix"
+description = "How the aarch64 syscall arg popping was fixed (pop-through-x0 approach)"
+category = "compiler_bootstrapping"
+content = '''
+THE BUG:
+  Original ESCPOPS popped args directly into target registers:
+    EPOPRDI → x0 (arg1)
+    EPOPRSI → x1 (arg2)
+    ...
+    EPOPR → x0 (syscall num, OVERWRITES arg1!)
+  Then: mov x8, x0; shift x0←x1, x1←x2, etc. Lossy register shuffle.
+
+THE FIX — pop-through-x0:
+  Pop ALL values into x0, then MOV to target register:
+    if (n >= 4) { EPOPR(S); EW(S, mov_x2_x0); }  # pop → x0, mov x2, x0
+    if (n >= 3) { EPOPR(S); EW(S, mov_x1_x0); }  # pop → x0, mov x1, x0
+    if (n >= 2) {
+      EPOPR(S); EW(S, mov_x9_x0);  # pop arg1 → x0, save to x9
+      EPOPR(S); EW(S, mov_x8_x0);  # pop syscall → x0, save to x8
+      EW(S, mov_x0_x9);             # restore arg1 from x9
+    }
+
+WHY POP-THROUGH-x0 WORKS:
+  - Only one register (x0) is used for all pops → no ordering ambiguity
+  - Each pop immediately moves to the final target register
+  - The syscall num/arg1 swap at the end uses x9 as a temporary
+  - No shift chain, no lost values
+
+LIFO ORDER:
+  Push order: syscall_num, arg1, arg2, ..., argN
+  Stack: [argN_top, ..., arg1, syscall_num_bottom]
+  Pop order: argN first (top), syscall_num last (bottom)
+  So the n>=N conditions fire from highest to lowest.
+
+ARM64 ABI:
+  Syscall: x8=number, x0-x5=args. svc #0.
+  This matches the final register state after our pop sequence.
+'''
+
+[[entries]]
+name = "module_system"
+description = "How mod/use/pub work: namespace mangling, use aliases"
+category = "compiler_bootstrapping"
+content = '''
+SYNTAX:
+  mod math;                    # set current module to "math"
+  pub fn add(a, b) { ... }    # public function in math module
+  fn helper(x) { ... }        # private (no pub)
+
+  mod main;                    # switch to main module
+  use math.add;                # alias: add → math_add
+
+IMPLEMENTATION:
+  mod name; → sets GMOD(S) to the name offset in tok_names.
+  When PARSE_FN_DEF sees GMOD != 0:
+    Builds mangled name "module_function" in tok_names (at NPOS, permanent).
+    Registers function under the mangled name.
+
+  use modname.funcname; → builds "modname_funcname" in tok_names (at NPOS).
+    Stores alias: use_from[uc] = funcname_offset, use_to[uc] = mangled_offset.
+
+  FINDFN: After checking fn_names, checks use_aliases.
+    If short name matches use_from[i], recursively calls FINDFN with use_to[i].
+
+HEAP:
+  current_module at 0x8FEC8 (8 bytes)
+  pub_flags[256] at 0x8FED0 (256 bytes)
+  use_from[64] at 0x8FFD0 (512 bytes)
+  use_to[64] at 0x901D0 (512 bytes)
+  use_count at 0x903D0 (8 bytes)
+
+MANGLED NAME STORAGE GOTCHA:
+  The mangled name must be stored PERMANENTLY in tok_names (at NPOS).
+  Using a scratch area (offset 30000) causes names to be overwritten
+  when multiple functions are defined — only the last one survives.
+  Fix: append to tok_names at NPOS, same as the lexer does.
+
+CROSS-MODULE CALLS:
+  mod math; fn add(a, b) { ... }
+  mod main; use math.add; var r = add(1, 2);
+  → FINDFN("add") fails → checks aliases → finds "math_add" → calls it.
+'''
