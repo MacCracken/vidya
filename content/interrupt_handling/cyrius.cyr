@@ -1,0 +1,86 @@
+# Interrupt Handling -- Cyrius reference
+# Patterns from AGNOS: ISR bytecode generation, PIC, timer, keyboard ring buffer
+
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# AGNOS builds ISRs as x86_64 bytecode at runtime in data buffers.
+# This allows ISR code to reference exact kernel addresses (globals, functions)
+# that are only known at runtime.
+
+# ISR register save order (9 caller-saved regs):
+# push rax(50) rcx(51) rdx(52) rsi(56) rdi(57) r8(41 50) r9(41 51) r10(41 52) r11(41 53)
+# Restore in reverse order, then iretq (48 CF).
+
+# Timer ISR flow:
+# 1. Push 9 registers
+# 2. mov rdi, rsp (pass stack pointer as arg)
+# 3. call timer_handler (mov rax, imm64; call rax)
+# 4. Pop 9 registers
+# 5. iretq
+# The timer_handler can modify the stack frame for context switching.
+
+# Keyboard ISR flow:
+# 1. Push 9 registers
+# 2. in al, 0x60 (read scancode from keyboard port)
+# 3. Store scancode in ring buffer: buf[head] = al; head = (head+1) & 0xFF
+# 4. EOI: out 0x20, 0x20
+# 5. Pop 9 registers, iretq
+
+# PIC initialization (8259A):
+# ICW1 (0x11) to both master (0x20) and slave (0xA0)
+# ICW2: remap IRQ 0-7 to INT 32+, IRQ 8-15 to INT 40+
+# ICW3: master knows slave on IRQ2, slave ID=2
+# ICW4: 8086 mode
+# Mask: 0xFC on master (allow IRQ0 timer + IRQ1 keyboard), 0xFF on slave
+
+# Ring buffer for keyboard:
+# 256-byte circular buffer, head (write) and tail (read) indices
+# Head advanced by ISR, tail advanced by reader
+# Wrap with & 0xFF
+
+fn ring_advance(idx) { return (idx + 1) & 0xFF; }
+
+# EOI (End of Interrupt) to PIC master: out 0x20, 0x20
+# CRITICAL: forgetting EOI means the interrupt never fires again.
+
+fn test_ring_buffer() {
+    var head = 0;
+    var tail = 0;
+    # Empty check
+    assert_eq(head == tail, 1, "empty initially");
+    # Write 3 items
+    head = ring_advance(head);
+    head = ring_advance(head);
+    head = ring_advance(head);
+    assert_eq(head, 3, "head=3 after 3 writes");
+    # Read 2
+    tail = ring_advance(tail);
+    tail = ring_advance(tail);
+    assert_eq(tail, 2, "tail=2 after 2 reads");
+    assert_eq(head != tail, 1, "not empty");
+    # Wrap test
+    var w = 254;
+    w = ring_advance(w);
+    assert_eq(w, 255, "254->255");
+    w = ring_advance(w);
+    assert_eq(w, 0, "255->0 wrap");
+    return 0;
+}
+
+fn test_pic_remap() {
+    # IRQ0 = INT 32 (timer)
+    assert_eq(0 + 32, 32, "irq0 = int32");
+    # IRQ1 = INT 33 (keyboard)
+    assert_eq(1 + 32, 33, "irq1 = int33");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_ring_buffer();
+    test_pic_remap();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

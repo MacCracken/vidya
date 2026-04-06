@@ -640,3 +640,33 @@ title = "block_scoping_token_replay"
 explanation = "Block scoping (scope depth tracking) interacts badly with for-loop token replay. The step expression (i = i + 1) is replayed after the body. If the for-loop init var (var i) was declared in a for-scope that incremented depth, and the replay happens after the body's PARSE_PROG decremented depth, FINDLOCAL may not find i at the correct depth. Solutions: (1) pin for-init vars to the outer scope, (2) don't decrement depth until after step replay, (3) exempt step replay from depth checks."
 bad_example = "PARSE_FOR opens scope, PARSE_PROG opens/closes inner scope, step replay can't find i — returns 0"
 good_example = "Open for-scope BEFORE init, close AFTER step replay (not after body), or store for-init vars at outer depth"
+
+[[gotchas]]
+title = "global_var_as_loop_bound_reevaluated"
+explanation = "In Cyrius, `for (var i = 0; i < GLOBAL; ...)` re-evaluates GLOBAL each iteration. If the loop body modifies the global (directly or via function call), the loop count changes mid-iteration. This is expected behavior, not a bug, but surprises kernel developers who expect C-like single-evaluation semantics. Discovered in AGNOS kernel when PROC_SIZE and SLAB_CLASSES globals were modified by functions called within the loop body."
+bad_example = "var LIMIT = 8; for (var i = 0; i < LIMIT; ...) { fn_that_modifies_LIMIT(); } // stops early or runs forever"
+good_example = "var limit = LIMIT; for (var i = 0; i < limit; ...) { ... } // or just use literal: i < 8"
+
+[[gotchas]]
+title = "inline_asm_rbp_offsets_clobber_function_params"
+explanation = "In Cyrius, function parameters are stored starting at [rbp-0x08] (first param), [rbp-0x10] (second), etc. Locals declared with var start AFTER all params. If inline asm writes to [rbp-0x08], it overwrites the first parameter. Discovered in AGNOS ring 3 transition: run_in_ring3(entry, user_rsp) had asm writing to [rbp-0x08] which clobbered 'entry', causing iretq to jump to the wrong address."
+bad_example = "fn foo(a, b) { asm { mov [rbp-0x08], rax; } // clobbers param 'a'! }"
+good_example = "fn foo(a, b) { var dummy1 = 0; var dummy2 = 0; asm { mov [rbp-0x18], rax; } // writes to first local, not params }"
+
+[[gotchas]]
+title = "push_instructions_in_asm_blocks_conflict_with_compiler_stack"
+explanation = "The Cyrius compiler manages RSP for local variable storage. Inline asm push/pop instructions between var declarations will conflict with the compiler's stack layout, causing values to land at wrong offsets. Discovered in AGNOS when trying to build iretq frames with push instructions — the iretq popped wrong values every time because the compiler interleaved stack operations."
+bad_example = "var x = 0x1B; asm { push rax; } var y = rsp; asm { push rax; } // compiler moves RSP between pushes"
+good_example = "Write iretq frame to a fixed memory address (e.g., 0x7000) via store64, then: asm { mov rsp, 0x7000; iretq; }"
+
+[[gotchas]]
+title = "nested_for_loops_with_var_cause_parse_error"
+explanation = "Cyrius (as of v1.0) cannot handle nested for-loops where the inner loop declares variables. The parser produces 'unexpected token' errors. Workaround: factor the inner loop into a separate function. Discovered in AGNOS initrd name matching which needed a byte-compare loop inside a file-search loop."
+bad_example = "for (var i = 0; i < n; ...) { var match = 1; for (var j = 0; j < m; ...) { ... } } // parse error"
+good_example = "fn inner(a, b, m) { for (var j = 0; j < m; ...) { ... } return result; } for (var i = 0; i < n; ...) { inner(...); }"
+
+[[gotchas]]
+title = "codebuf_overflow_looks_like_parse_error"
+explanation = "The Cyrius compiler's code generation buffer (codebuf) is finite (~192KB in cc2). When it overflows, the compiler either segfaults or produces misleading parse errors at seemingly random lines. The error line number doesn't correspond to the actual problem — it's wherever the compiler happened to be when the buffer ran out. Use cyrb (the build tool) which may handle this better, or reduce source code size."
+bad_example = "2000+ line kernel source with many store8 calls → segfault or 'error:30: unexpected token'"
+good_example = "Factor large byte-array construction into helper functions, remove verbose boot tests, strip comments"

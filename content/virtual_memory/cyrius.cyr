@@ -1,0 +1,75 @@
+# Virtual Memory -- Cyrius reference
+# Patterns from AGNOS: identity mapping, 2MB huge pages, per-process address spaces
+
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# x86_64 4-level paging: PML4 -> PDPT -> PD -> PT
+# AGNOS uses 2MB huge pages (PD entry with PS bit) for simplicity.
+# Page flags:
+#   0x01 = Present
+#   0x02 = Writable
+#   0x04 = User (ring 3 accessible)
+#   0x80 = Page Size (2MB in PD, 1GB in PDPT)
+# Common combinations:
+#   0x83 = Present + Writable + 2MB (kernel page)
+#   0x87 = Present + Writable + User + 2MB (user page)
+#   0x07 = Present + Writable + User (page table pointer)
+
+fn page_flags_kernel() { return 0x83; }
+fn page_flags_user() { return 0x87; }
+fn page_flags_table() { return 0x07; }
+
+# PD index from virtual address (for 2MB pages)
+fn pd_index(virt) { return (virt >> 21) & 0x1FF; }
+
+# Align address down to 2MB boundary
+fn align_2mb(addr) { return addr & 0xFFFFFFFFFFE00000; }
+
+# Per-process address space creation:
+# 1. Allocate 3 physical pages: PML4, PDPT, PD
+# 2. PML4[0] = PDPT | 0x07  (present + writable + user)
+# 3. PDPT[0] = PD | 0x07
+# 4. Copy kernel PD entries (first N entries) into new PD
+# 5. Set U/S bit on PML4[0] and PDPT[0] for ring 3 access
+
+# IMPORTANT: U/S bit must be set at EVERY level of the page walk.
+# If PML4 or PDPT lacks U/S, ring 3 will page fault even if PD has it.
+
+# CR3 switch on context switch:
+# When switching processes, load new CR3 only if it differs from old.
+# This avoids unnecessary TLB flushes (mov cr3, rax flushes entire TLB).
+
+fn test_pd_index() {
+    assert_eq(pd_index(0), 0, "pd idx 0");
+    assert_eq(pd_index(0x200000), 1, "pd idx 1 (2MB)");
+    assert_eq(pd_index(0x400000), 2, "pd idx 2 (4MB)");
+    assert_eq(pd_index(0xC00000), 6, "pd idx 6 (12MB)");
+    return 0;
+}
+
+fn test_alignment() {
+    assert_eq(align_2mb(0x200000), 0x200000, "2MB aligned");
+    assert_eq(align_2mb(0x200001), 0x200000, "2MB+1 -> 2MB");
+    assert_eq(align_2mb(0x3FFFFF), 0x200000, "4MB-1 -> 2MB");
+    return 0;
+}
+
+fn test_flags() {
+    var kflags = page_flags_kernel();
+    assert_eq(kflags & 1, 1, "kernel present");
+    assert_eq(kflags & 4, 0, "kernel not user");
+    var uflags = page_flags_user();
+    assert_eq(uflags & 4, 4, "user accessible");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_pd_index();
+    test_alignment();
+    test_flags();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

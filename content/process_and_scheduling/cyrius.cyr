@@ -1,0 +1,86 @@
+# Process and Scheduling -- Cyrius reference
+# Patterns from AGNOS: process table, context switch, round-robin scheduler
+
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# Process states
+fn PROC_HALTED() { return 0; }
+fn PROC_READY() { return 1; }
+fn PROC_RUNNING() { return 2; }
+
+# Process context: 168 bytes (21 fields x 8 bytes)
+# Layout: pid state rsp rip rax rbx rcx rdx rsi rdi rbp r8-r15 rflags cr3
+# Context switch saves/restores all GPRs + RFLAGS + RSP + RIP + CR3.
+
+# ISR stack frame after pushing 9 caller-saved regs:
+#   [rsp+0]=rax [+8]=rcx [+16]=rdx [+24]=rsi [+32]=rdi
+#   [+40]=r8 [+48]=r9 [+56]=r10 [+64]=r11
+#   [+72]=RIP [+80]=CS [+88]=RFLAGS [+96]=RSP [+104]=SS
+# The context switch reads from this frame into the process table,
+# then writes the new process's saved state back onto the frame.
+# When the ISR pops and iretq, it resumes the new process.
+
+fn isr_frame_rip_off() { return 72; }
+fn isr_frame_rsp_off() { return 96; }
+fn isr_frame_rflags_off() { return 88; }
+
+# Round-robin scheduler: find next ready process after current
+# Wraps around the process table. Returns current if none ready.
+fn sched_round_robin(current, count, states) {
+    var start = current + 1;
+    var si = 0;
+    while (si < count) {
+        var idx = start + si;
+        if (idx >= count) { idx = idx - count; }
+        if (load64(states + idx * 8) == 1) { return idx; }
+        si = si + 1;
+    }
+    return current;
+}
+
+# Ring 3 transition via iretq:
+# Write 5 values to a fixed address (e.g., 0x7000):
+#   [0]=RIP [8]=CS(0x23) [16]=RFLAGS(0x202) [24]=RSP [32]=SS(0x1B)
+# Then: mov rsp, 0x7000; iretq
+# IMPORTANT: do NOT push to the current stack -- the compiler manages RSP
+# for local variables and will interleave stack operations between pushes.
+
+fn test_states() {
+    assert_eq(PROC_HALTED(), 0, "halted=0");
+    assert_eq(PROC_READY(), 1, "ready=1");
+    assert_eq(PROC_RUNNING(), 2, "running=2");
+    return 0;
+}
+
+fn test_scheduler() {
+    # Simulate 4 processes: 0=running, 1=halted, 2=ready, 3=ready
+    var states[4];
+    store64(&states, 2);
+    store64(&states + 8, 0);
+    store64(&states + 16, 1);
+    store64(&states + 24, 1);
+    # Current=0, should pick 2 (first ready after 0)
+    assert_eq(sched_round_robin(0, 4, &states), 2, "picks proc 2");
+    # Current=2, should pick 3
+    assert_eq(sched_round_robin(2, 4, &states), 3, "picks proc 3");
+    # Current=3, should wrap to 2
+    assert_eq(sched_round_robin(3, 4, &states), 2, "wraps to proc 2");
+    return 0;
+}
+
+fn test_isr_offsets() {
+    assert_eq(isr_frame_rip_off(), 72, "rip at +72");
+    assert_eq(isr_frame_rsp_off(), 96, "rsp at +96");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_states();
+    test_scheduler();
+    test_isr_offsets();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

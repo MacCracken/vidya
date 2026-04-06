@@ -1,0 +1,68 @@
+# Syscalls and ABI -- Cyrius reference
+# Patterns from AGNOS: syscall dispatch, SYSCALL/SYSRET setup, register conventions
+
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# AGNOS syscall table:
+# 0=exit  1=write(fd,buf,len)  2=getpid  3=spawn  4=waitpid
+# 5=read(fd,buf,len)  6=close(fd)  7=open(name,namelen)
+
+# Register convention (matches Linux x86_64):
+#   rax = syscall number
+#   rdi = arg1, rsi = arg2, rdx = arg3
+#   Return value in rax
+#   SYSCALL clobbers rcx (saved RIP) and r11 (saved RFLAGS)
+
+fn syscall_num_exit() { return 0; }
+fn syscall_num_write() { return 1; }
+fn syscall_num_getpid() { return 2; }
+fn syscall_num_spawn() { return 3; }
+fn syscall_num_waitpid() { return 4; }
+fn syscall_num_read() { return 5; }
+fn syscall_num_close() { return 6; }
+fn syscall_num_open() { return 7; }
+
+# STAR MSR layout for SYSCALL/SYSRET:
+#   [47:32] = kernel CS selector (0x08)
+#   [63:48] = user segment base (0x10)
+#   SYSRET loads: CS = base+16|3 = 0x23, SS = base+8|3 = 0x1B
+fn star_kernel_cs() { return 0x08; }
+fn star_user_base() { return 0x10; }
+fn sysret_user_cs() { return 0x23; }
+fn sysret_user_ss() { return 0x1B; }
+
+# Syscall entry stub flow:
+# 1. Save user RSP to global (SYSCALL doesn't switch stack!)
+# 2. Switch to dedicated kernel stack (e.g., 0x1F0000)
+# 3. Push rcx (user RIP) and r11 (user RFLAGS) for SYSRET
+# 4. Shuffle regs: rax->num, rdi->arg1, rsi->arg2, rdx->arg3
+# 5. Call handler function
+# 6. Pop r11, rcx; restore user RSP
+# 7. SYSRET (restores RIP from rcx, RFLAGS from r11, drops to ring 3)
+
+fn test_syscall_numbers() {
+    assert_eq(syscall_num_exit(), 0, "exit=0");
+    assert_eq(syscall_num_write(), 1, "write=1");
+    assert_eq(syscall_num_read(), 5, "read=5");
+    assert_eq(syscall_num_open(), 7, "open=7");
+    return 0;
+}
+
+fn test_sysret_selectors() {
+    # SYSRET: CS = STAR[63:48] + 16 | 3
+    var base = star_user_base();
+    assert_eq(base + 16 + 3, sysret_user_cs(), "sysret cs");
+    assert_eq(base + 8 + 3, sysret_user_ss(), "sysret ss");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_syscall_numbers();
+    test_sysret_selectors();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

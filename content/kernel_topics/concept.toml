@@ -54,6 +54,48 @@ explanation = "Interrupt handlers run on a separate (often small) stack. Deep ca
 bad_example = "void irq_handler() { char buf[4096]; process(buf); }"
 good_example = "void irq_handler() { enqueue_work(); }  // minimal stack use"
 
+[[best_practices]]
+title = "Save ALL caller-saved registers in ISRs"
+explanation = "x86_64 has 9 caller-saved registers (rax, rcx, rdx, rsi, rdi, r8-r11). An ISR that calls ANY function must save all of them — the called function is allowed to clobber them. Missing one causes silent corruption when the interrupted code resumes."
+
+[[best_practices]]
+title = "Use a fixed address for iretq frames"
+explanation = "When building an iretq frame to transition to ring 3, write the 5 values (RIP, CS, RFLAGS, RSP, SS) to a known fixed address (e.g., 0x7000) and set RSP to point there. Pushing to the current stack is fragile because the compiler manages RSP for local variables and will interleave stack operations between your pushes."
+
+[[best_practices]]
+title = "Set U/S bit at every page table level"
+explanation = "x86_64 checks the User/Supervisor bit at every level of the page walk (PML4, PDPT, PD, PT). If any level is missing the U/S bit, ring 3 code will page fault even if the final page entry has U/S set."
+
+[[best_practices]]
+title = "TSS RSP0 must point to a valid kernel stack"
+explanation = "When an interrupt fires in ring 3, the CPU loads RSP0 from the TSS to switch to the kernel stack. If RSP0 points to unmapped memory, you get a double fault → triple fault → reboot. Set RSP0 before every ring 3 transition."
+
+[[gotchas]]
+title = "SYSCALL doesn't switch the stack"
+explanation = "Unlike interrupts, the SYSCALL instruction does NOT switch RSP. The handler entry point runs with the user's RSP. You must immediately save the user RSP and switch to a kernel stack before touching any stack memory."
+bad_example = "syscall_entry: push rax  // pushes to user stack — security hole"
+good_example = "syscall_entry: mov [kernel_save], rsp; mov rsp, KERNEL_STACK; push rax"
+
+[[gotchas]]
+title = "SYSRET forces ring 3 — can't return to ring 0"
+explanation = "SYSRET always sets CS to user code segment (RPL 3). If you use SYSCALL from kernel mode and SYSRET back, you'll be in ring 3 accessing kernel pages — instant page fault. Use jmp rcx + popfq for kernel-to-kernel syscalls."
+bad_example = "kernel code: syscall → handler → sysretq → ring 3 in kernel code → fault"
+good_example = "kernel code: call ksyscall() directly, or use jmp rcx for ring 0 returns"
+
+[[gotchas]]
+title = "Per-process page tables must share kernel mappings"
+explanation = "When creating per-process address spaces, copy the kernel PD entries (e.g., first 16MB identity map) into each process's page directory. Otherwise, when the kernel runs with a process's CR3, it can't access its own code/data."
+
+[[gotchas]]
+title = "2MB huge pages mean PMM 4KB allocations share physical pages"
+explanation = "If your page tables use 2MB huge pages but your PMM allocates 4KB pages, two PMM allocations from the same 2MB region map to the same physical page. Memory isolation tests will fail. Use 2MB-aligned physical regions for isolation."
+bad_example = "phys1 = pmm_alloc(); phys2 = pmm_alloc(); // both in same 2MB page"
+good_example = "phys1 = 0xE00000; phys2 = 0x1000000; // different 2MB regions"
+
+[[gotchas]]
+title = "Context switch must save/restore CR3"
+explanation = "If processes have separate page tables, the context switch must load the new process's CR3. Forgetting this means the new process runs with the old process's address space — no isolation."
+
 [[performance_notes]]
 title = "TLB misses dominate page table walk cost"
 explanation = "A page table walk requires 4 memory accesses (4-level paging). The TLB caches recent translations, reducing this to ~1 cycle. TLB misses cost 10-100 cycles."

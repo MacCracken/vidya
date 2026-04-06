@@ -1,5 +1,5 @@
-# Kernel Topics — Cyrius reference (compile-only)
-# Patterns: bitfields, PTE, GDT, IDT, constants
+# Kernel Topics -- Cyrius reference (compile-only)
+# Patterns from AGNOS: PTE, GDT, IDT, TSS, SYSCALL, context switch, VFS
 # Kernel code needs bare-metal mode; this tests the logic in userspace.
 
 include "lib/string.cyr"
@@ -7,18 +7,32 @@ include "lib/fmt.cyr"
 include "lib/alloc.cyr"
 include "lib/assert.cyr"
 
-# PTE helpers
+# === Page Table Entry helpers ===
 fn pte_build(phys, flags) { return (phys & 0x000FFFFFFFFFF000) | flags; }
 fn pte_present(pte) { return pte & 1; }
 fn pte_writable(pte) { return (pte >> 1) & 1; }
+fn pte_user(pte) { return (pte >> 2) & 1; }
 fn pte_addr(pte) { return pte & 0x000FFFFFFFFFF000; }
 
-# GDT helpers
+# 2MB huge page entry: phys | 0x83 (P+W+PS) or 0x87 (P+W+U+PS)
+fn pde_2mb(phys, user) {
+    var flags = 0x83;
+    if (user == 1) { flags = 0x87; }
+    return (phys & 0xFFFFFFFFFFE00000) | flags;
+}
+
+# === GDT helpers ===
 fn gdt_present(e) { return (e >> 47) & 1; }
 fn gdt_dpl(e) { return (e >> 45) & 3; }
 fn gdt_long(e) { return (e >> 53) & 1; }
 
-# IDT gate builder (low 64 bits)
+# GDT segment values from AGNOS
+# 0x08: kernel CS  0x00AF9A000000FFFF
+# 0x10: kernel DS  0x00CF92000000FFFF
+# 0x18: user DS    0x00CFF2000000FFFF (DPL 3)
+# 0x20: user CS    0x00AFFA000000FFFF (DPL 3, 64-bit)
+
+# === IDT gate builder ===
 fn idt_low(handler, sel, tattr) {
     var lo = handler & 0xFFFF;
     var s = sel << 16;
@@ -27,19 +41,68 @@ fn idt_low(handler, sel, tattr) {
     return lo | s | t | hi16;
 }
 
+# === TSS helpers ===
+# TSS descriptor is 16 bytes in 64-bit mode (spans 2 GDT slots)
+# RSP0 at offset 4: kernel stack loaded on ring 3 -> ring 0 transition
+fn tss_rsp0_offset() { return 4; }
+fn tss_iopb_offset() { return 100; }
+
+# === SYSCALL/SYSRET MSR values ===
+# STAR MSR (0xC0000081):
+#   [47:32] = kernel CS (0x08) -- for SYSCALL entry
+#   [63:48] = user base (0x10) -- SYSRET: CS=base+16|3=0x23, SS=base+8|3=0x1B
+fn star_value() { return 0x0010000800000000; }
+# SFMASK (0xC0000084): clear IF (0x200) on syscall entry
+fn sfmask_value() { return 0x200; }
+
+# === Process context layout ===
+# 168 bytes per process (21 fields x 8 bytes):
+# pid(0) state(8) rsp(16) rip(24)
+# rax(32) rbx(40) rcx(48) rdx(56) rsi(64) rdi(72) rbp(80)
+# r8(88) r9(96) r10(104) r11(112) r12(120) r13(128) r14(136) r15(144)
+# rflags(152) cr3(160)
+fn proc_size() { return 168; }
+fn proc_state_off() { return 8; }
+fn proc_rsp_off() { return 16; }
+fn proc_rip_off() { return 24; }
+fn proc_cr3_off() { return 160; }
+
+# === VFS file entry layout ===
+# 32 bytes: type(0) pos(8) size(16) data(24)
+# Types: 0=unused, 1=device, 2=memfile
+fn vfs_entry_size() { return 32; }
+
+# === Initrd format ===
+# Header: magic(4) count(4)
+# Entry: name(16) offset(8) size(8) = 32 bytes
+fn initrd_magic() { return 0x52444E49; }
+fn initrd_entry_size() { return 32; }
+
+# === Tests ===
+
 fn test_pte() {
     var pte = pte_build(0x1000, 3);
     assert(pte_present(pte) == 1, "pte present");
     assert(pte_writable(pte) == 1, "pte writable");
     assert_eq(pte_addr(pte), 0x1000, "pte addr");
+    # 2MB huge page
+    var pde = pde_2mb(0x200000, 0);
+    assert(pte_present(pde) == 1, "pde present");
+    assert(pte_user(pde) == 0, "pde kernel");
+    var pde_u = pde_2mb(0x200000, 1);
+    assert(pte_user(pde_u) == 1, "pde user");
     return 0;
 }
 
 fn test_gdt() {
     var code64 = 0x00AF9A000000FFFF;
     assert(gdt_present(code64) == 1, "gdt present");
-    assert_eq(gdt_dpl(code64), 0, "gdt dpl");
-    assert(gdt_long(code64) == 1, "gdt long");
+    assert_eq(gdt_dpl(code64), 0, "gdt dpl=0 kernel");
+    assert(gdt_long(code64) == 1, "gdt long mode");
+    # User code segment (DPL 3)
+    var ucode = 0x00AFFA000000FFFF;
+    assert_eq(gdt_dpl(ucode), 3, "gdt dpl=3 user");
+    assert(gdt_long(ucode) == 1, "user long mode");
     return 0;
 }
 
@@ -51,13 +114,23 @@ fn test_idt() {
     return 0;
 }
 
-fn test_constants() {
-    # Process table limits
-    var PROC_MAX = 16;
-    assert_eq(PROC_MAX, 16, "proc max");
-    # PIT frequency
-    var PIT_HZ = 100;
-    assert_eq(PIT_HZ, 100, "pit hz");
+fn test_syscall_msrs() {
+    var star = star_value();
+    assert_eq((star >> 32) & 0xFFFF, 0x08, "star kernel cs");
+    assert_eq((star >> 48) & 0xFFFF, 0x10, "star user base");
+    assert_eq(sfmask_value(), 0x200, "sfmask clears IF");
+    return 0;
+}
+
+fn test_proc_layout() {
+    assert_eq(proc_size(), 168, "proc size");
+    assert_eq(proc_cr3_off(), 160, "cr3 at 160");
+    return 0;
+}
+
+fn test_initrd() {
+    assert_eq(initrd_magic(), 0x52444E49, "initrd magic");
+    assert_eq(initrd_entry_size(), 32, "initrd entry size");
     return 0;
 }
 
@@ -66,7 +139,9 @@ fn main() {
     test_pte();
     test_gdt();
     test_idt();
-    test_constants();
+    test_syscall_msrs();
+    test_proc_layout();
+    test_initrd();
     return assert_summary();
 }
 var exit_code = main();

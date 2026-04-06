@@ -1,0 +1,92 @@
+# Filesystems -- Cyrius reference
+# Patterns from AGNOS: VFS layer, initrd (RAM disk), device files
+
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# === VFS (Virtual Filesystem) ===
+# Global file table: 32 entries x 32 bytes
+# Entry: { type(8), pos(8), size(8), data(8) }
+# Types: 0=unused, 1=device, 2=memfile
+
+fn VFS_UNUSED() { return 0; }
+fn VFS_DEVICE() { return 1; }
+fn VFS_MEMFILE() { return 2; }
+fn VFS_ENTRY_SIZE() { return 32; }
+fn VFS_MAX_FILES() { return 32; }
+
+# VFS operations flow:
+# open(name) -> initrd_find(name) -> vfs_create_memfile(data, size) -> fd
+# read(fd, buf, count) -> dispatch by type (device or memfile)
+# write(fd, buf, count) -> dispatch by type (device only for serial)
+# close(fd) -> zero the entry
+
+# Pre-opened file descriptors (set up at boot):
+# FD 0 = serial console (type=device, data=device_index_0)
+# All processes share the same FD table (per-process FDs are future work)
+
+# === Initrd (RAM Disk) ===
+# Simple flat format:
+#   Header: [magic:4 = 0x52444E49 ("INDR")] [count:4]
+#   Entries: [name:16] [data_offset:8] [data_size:8] = 32 bytes each
+#   Data: raw file bytes, referenced by offset from initrd base
+
+fn INITRD_MAGIC() { return 0x52444E49; }
+fn INITRD_ENTRY_SIZE() { return 32; }
+fn INITRD_NAME_LEN() { return 16; }
+
+# Name matching: byte-by-byte compare, must match length AND have null terminator
+# IMPORTANT: must be a separate function from the search loop.
+# Cyrius cannot handle nested for-loops with var declarations inside the inner loop.
+# Factor the inner compare into its own function.
+
+fn name_match(ent, name, namelen) {
+    for (var j = 0; j < namelen; j = j + 1) {
+        if (load8(ent + j) != load8(name + j)) { return 0; }
+    }
+    if (load8(ent + namelen) != 0) { return 0; }
+    return 1;
+}
+
+# === Device Driver Interface ===
+# Device table: 16 entries x 32 bytes = { type, read_fn, write_fn, data }
+# Dispatch is by device index (no indirect function calls in Cyrius).
+# Serial = device 0: read from keyboard ring buffer, write to COM1 port.
+
+# === Tests ===
+
+fn test_vfs_types() {
+    assert_eq(VFS_UNUSED(), 0, "unused=0");
+    assert_eq(VFS_DEVICE(), 1, "device=1");
+    assert_eq(VFS_MEMFILE(), 2, "memfile=2");
+    assert_eq(VFS_ENTRY_SIZE(), 32, "entry 32B");
+    return 0;
+}
+
+fn test_initrd_format() {
+    assert_eq(INITRD_MAGIC(), 0x52444E49, "magic");
+    assert_eq(INITRD_ENTRY_SIZE(), 32, "entry 32B");
+    return 0;
+}
+
+fn test_name_match() {
+    # Build a test entry name "hello\0"
+    var ent[4];
+    store8(&ent, 104); store8(&ent + 1, 101); store8(&ent + 2, 108);
+    store8(&ent + 3, 108); store8(&ent + 4, 111); store8(&ent + 5, 0);
+    assert_eq(name_match(&ent, "hello", 5), 1, "match hello");
+    assert_eq(name_match(&ent, "hell", 4), 0, "no match hell (extra chars)");
+    assert_eq(name_match(&ent, "hellx", 5), 0, "no match hellx");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_vfs_types();
+    test_initrd_format();
+    test_name_match();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);
