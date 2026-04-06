@@ -1373,3 +1373,67 @@ CROSS-MODULE CALLS:
   mod main; use math.add; var r = add(1, 2);
   → FINDFN("add") fails → checks aliases → finds "math_add" → calls it.
 '''
+
+[[entries]]
+name = "operator_overloading"
+description = "How operator overloading dispatches +,-,*,/ to Type_add/sub/mul/div"
+category = "compiler_bootstrapping"
+content = '''
+DESIGN:
+  When PARSE_EXPR sees + and the left operand has a struct type (GESTYPE > 0),
+  dispatch to Type_add(lhs, rhs) instead of integer addition.
+
+TRACKING:
+  expr_stype (at S+0x903D8) — set in PARSE_FACTOR when loading a struct-typed var.
+  Cleared to 0 for all other expressions (literals, function calls, etc.).
+  Set from GVTYPE for globals, GLTYPE for locals (negative = struct ID).
+
+DISPATCH (EMIT_OP_DISPATCH):
+  1. Push lhs (already in rax from PARSE_TERM)
+  2. Call PARSE_TERM to parse rhs, push result
+  3. BUILD_OP_NAME: construct "TypeName_add" in tok_names (permanent, at NPOS)
+  4. ECALLPOPS(2) + ECALLTO/ECALLFIX + ECALLCLEAN(2)
+  5. Clear expr_stype to 0
+
+BUILD_OP_NAME GOTCHA:
+  Must use inline byte copy, NOT memcpy — the compiler source does not include
+  lib/string.cyr. Using memcpy crashes the compiler during compilation.
+  Fix: while loop with load8/store8.
+
+TYPE ANNOTATION:
+  var x: Str = str_from("hello");  → sets GLTYPE to Str struct ID (negative)
+  Enables: x.len(), x + y (operator dispatch), x.contains("abc")
+  Works for both global (GVTYPE/SVTYPE) and local (GLTYPE/SLTYPE) vars.
+'''
+
+[[entries]]
+name = "block_body_closures"
+description = "How block body closures work (and the global scope limitation)"
+category = "compiler_bootstrapping"
+content = '''
+SYNTAX:
+  var f = |x| { var y = x * 2; return y; };    # block body
+  var g = |x| x * 2;                            # expression body (simpler)
+
+BLOCK BODY:
+  Parsed via PARSE_PROG inside the closure function.
+  return statements emit JMP patches → patched to EFNEPI.
+  Single EFNEPI at end handles both return paths and fall-through.
+
+WORKS: Inside functions.
+  fn make() {
+    var f = |x| { if (x > 10) { return 42; } return 0; };
+    return fncall1(f, 20);  // 42
+  }
+
+LIMITATION: Block body closures at GLOBAL scope produce wrong results.
+  The closure compiles correctly but the interaction between the global
+  context and the closure epilogue causes double-return issues.
+  Fix: always use closures inside functions. This matches Rust convention.
+
+IMPLEMENTATION:
+  |params| { body } detected in PARSE_FACTOR when PEEKT == 13 (LBRACE).
+  Same anonymous function generation as expression closures.
+  PARSE_PROG parses body. Return patches collected via GRPC/SRPC.
+  All patches resolved to single EFNEPI after body.
+'''
