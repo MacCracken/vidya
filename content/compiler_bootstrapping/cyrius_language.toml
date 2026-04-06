@@ -14,14 +14,15 @@ No Rust, no LLVM, no Python. Just sh + Linux x86_64.
 Everything is a 64-bit integer. No floats, no separate types.
 Type annotations (var x: i64 = 42) are documentation only — no enforcement.
 
-The compiler (cc2) is 85KB, 181 functions, 7 modules. It compiles itself
-byte-identical in 10ms. The AGNOS kernel is written entirely in Cyrius.
+The compiler (cc2) is 136KB, ~250 functions, 7 modules. It compiles itself
+byte-identical in ~11ms. The AGNOS kernel is written entirely in Cyrius.
 
 Build: sh bootstrap/bootstrap.sh (40ms)
 Compile: echo 'var x = 42;' | ./build/cc2 > prog && chmod +x prog
-Test: sh stage1/test_cc.sh ./build/cc2 ./build/stage1f
+Test: sh tests/compiler.sh   (212 compiler + 51 program tests)
 
-Source: stage1/cc2.cyr (entry) + stage1/cc/*.cyr (modules)
+Source: src/compiler.cyr (entry) + src/cc/*.cyr (modules)
+Version: 1.6.1 — 263 tests, 0 failures, self-hosting byte-identical
 '''
 
 [[entries]]
@@ -32,7 +33,7 @@ content = '''
 VARIABLES:
     var x = 42;            # scalar (8 bytes)
     var x: i64 = 42;       # with type annotation (no enforcement)
-    var buf[256];           # array (256 * 8 bytes)
+    var buf[256];           # array (256 BYTES, not elements)
     x = x + 1;             # reassignment
 
 FUNCTIONS:
@@ -82,7 +83,7 @@ SYSCALLS:
     syscall(60, code);         # exit
 
 INCLUDES:
-    include "stage1/lib/string.cyr"  # textual inclusion
+    include "lib/string.cyr"   # textual inclusion (relative to cwd)
 
 INLINE ASM:
     asm { 0x90; }              # raw bytes
@@ -119,23 +120,30 @@ COMPILATION FLOW:
     9. FIXUP: patch variable/string/function addresses
     10. EMITELF: write ELF binary to stdout
 
-HEAP LAYOUT (S = brk base, v0.9.2):
+HEAP LAYOUT (S = brk base, v1.6):
     0x00000  input_buf [131072]
     0x20000  codebuf   [196608]
-    0x50000  tok_names [65536]       (expanded from 32768 in v0.9.2)
-    0x60000  var_noffs [2048]        (moved from 0x58000)
-    0x60800  var_sizes [2048]        (moved from 0x58800)
-    0x69000  str_data [4096]
+    0x50000  tok_names [65536]
+    0x59000  struct_ftypes [4096]    (32*16 field type IDs)
+    0x60000  var_noffs [4096]        (512 entries, expanded from 256 in v1.5.2)
+    0x60800  var_sizes [4096]        (512 entries, expanded from 256 in v1.5.2)
+    0x62000  str_data  [30720]       (relocated from 0x61000 in v1.5.2)
+    0x69800  str_pos, data_size
     0x6A000  output_buf [131072]
-    0x8A000  fixup_tbl [16384]       (1024 entries × 16 bytes)
-    0x8C000  compiler state (BL, CP, VCNT, TI, NPOS, cur_line...)
-    0x8C200  function tables (names, offsets, params)
-    0x8DE30  struct tables
-    0xA2000  tok_types [524288]      (65536 slots, expanded from 32768)
-    0x122000 tok_values [524288]     (moved from 0xE2000)
-    0x1A2000 tok_lines [524288]     (new in v0.9.2 — line numbers per token)
-    0x222000 preprocess_out [262144] (moved from 0x91000 to avoid overlap)
-    brk: 0x262000
+    0x8C100  compiler state (BL, CP, VCNT, TI, NPOS, cur_line...)
+    0x8DA00  fn_count, in_function, locals, ret_patches
+    0x8DE30  struct tables (names, fcounts, fnames)
+    0x8F830  loop/condition/scope state
+    0x90000  preprocessor scratch
+    0xA2000  tok_types [524288]      (65536 slots)
+    0x122000 tok_values [524288]
+    0x1A2000 tok_lines [524288]      (line numbers per token)
+    0x222000 preprocess_out [262144]
+    0x262000 fixup_tbl [32768]       (2048 entries, relocated from 0x8A000)
+    0x26A000 fn_names [4096]         (512 entries, relocated from 0x8C200 in v1.6.0)
+    0x26B000 fn_offsets [4096]       (512 entries, relocated from 0x8CA00 in v1.6.0)
+    0x26C000 fn_params [4096]        (512 entries, relocated from 0x8D200 in v1.6.0)
+    brk: 0x26D000
 
 CODEGEN MODEL:
     - Stack-based expression evaluation: push lhs, eval rhs, pop lhs, operate
@@ -211,6 +219,21 @@ CURRENT LIMITATIONS:
     table at 0x8FA98 has 64 slots). Use enums for large constant groups.
     Enums have separate init path and don't consume gvar_toks slots.
 
+16. VARIABLE TABLE LIMIT: Max 512 variables (VCNT never resets between
+    functions — arrays inside functions are globals). Exceeding 512 silently
+    corrupts string data. Was 256, expanded to 512 in v1.5.2.
+
+17. FUNCTION TABLE LIMIT: Max 512 functions. Exceeding 512 corrupts jump
+    targets → runtime segfault. Was 256, expanded to 512 in v1.6.0.
+
+18. var buf[N] IS BYTES: var buf[N] allocates N BYTES, not N i64 elements.
+    var buf[8] = 8 bytes (1 i64). var buf[120] = 120 bytes (15 i64s).
+    Writing past the allocated size silently corrupts adjacent data.
+
+19. INCLUDE IN KERNEL MODE: Not supported. kernel; mode blocks require
+    single-file source or external concatenation. Main blocker for AGNOS
+    multi-arch kernel split.
+
 11. ENUM INIT ORDERING: Enum init runs before gvar init in cc2.cyr.
     If you modify the compiler, do NOT reorder these — functions called
     during gvar init depend on enum values being set.
@@ -253,11 +276,11 @@ BACKEND (per-architecture):
     fixup.cyr — address patching + ELF emission (~4 functions)
 
 TO PORT:
-1. Create stage1/arch/ARCH/emit.cyr with same function signatures as x86_64
-2. Create stage1/arch/ARCH/jump.cyr — branch encoding differs per arch
-3. Create stage1/arch/ARCH/fixup.cyr — ELF header + address patching
-4. Create stage1/cc2_ARCH.cyr that includes ARCH backend instead of x86_64
-5. Build cross-compiler: cat cc2_ARCH.cyr | ./build/cc2 > build/cc2_ARCH
+1. Create src/arch/ARCH/emit.cyr with same function signatures as x86_64
+2. Create src/arch/ARCH/jump.cyr — branch encoding differs per arch
+3. Create src/arch/ARCH/fixup.cyr — ELF header + address patching
+4. Create src/compiler_ARCH.cyr that includes ARCH backend instead of x86_64
+5. Build cross-compiler: cat src/compiler_ARCH.cyr | ./build/cc2 > build/cc2_ARCH
 
 KEY MAPPINGS (x86_64 → aarch64 example):
     EMOVI(imm64)  → MOVZ/MOVK sequence (up to 4 instructions)
@@ -280,65 +303,57 @@ name = "cyrius_stdlib"
 description = "Cyrius standard library: 8 core + 15 ecosystem libraries, 150+ functions"
 category = "compiler_bootstrapping"
 content = '''
-CORE LIBRARIES (stage1/lib/):
+CORE LIBRARIES (lib/):
 
-string.cyr  — strlen, streq, memeq, memcpy, memset, memchr, strchr, print_num, println
-alloc.cyr   — alloc_init, alloc, alloc_reset, alloc_used (bump allocator from brk)
-str.cyr     — Str struct (data+len): str_from, str_new, str_len, str_eq, str_cat, str_sub, str_print
-vec.cyr     — Dynamic array: vec_new, vec_push, vec_pop, vec_get, vec_set, vec_len, vec_find, vec_remove
-io.cyr      — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists
-fmt.cyr     — Formatting: fmt_int, fmt_hex, fmt_hex0x, fmt_bool, fmt_byte, fmt_pad, fmt_int_buf
-args.cyr    — CLI args: args_init, argc, argv (reads /proc/self/cmdline)
-fnptr.cyr   — Function pointers: fncall0, fncall1, fncall2 (indirect call via inline asm)
+string.cyr   — strlen, streq, memeq, memcpy, memset, memchr, strchr, print_num, println
+alloc.cyr    — alloc_init, alloc, alloc_reset, alloc_used (bump allocator from brk)
+str.cyr      — Str struct (data+len): str_from, str_len, str_eq, str_cat, str_sub, str_contains, str_split, str_trim
+vec.cyr      — Dynamic array: vec_new, vec_push, vec_pop, vec_get, vec_set, vec_len, vec_find, vec_remove
+io.cyr       — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists
+fmt.cyr      — Formatting: fmt_int, fmt_hex, fmt_hex0x, fmt_bool, fmt_byte, fmt_pad, fmt_int_buf, sprintf
+args.cyr     — CLI args: args_init, argc, argv (reads /proc/self/cmdline)
+fnptr.cyr    — Function pointers: fncall0, fncall1, fncall2 (indirect call via inline asm)
+tagged.cyr   — Tagged unions: packed Result (Ok/Err via bit 63), heap-based Option (Some/None)
+hashmap.cyr  — String→i64 map: map_new, map_set, map_get, map_has, map_delete, map_keys
+fs.cyr       — Filesystem: is_dir, dir_list, sys_mkdir, sys_unlink, sys_chmod
+process.cyr  — Subprocess: run, run_capture, spawn, exec_vec, exec_env, exec_capture
+syscalls.cyr — 50+ syscall numbers, wrappers (fork, waitpid, pipe, dup2, epoll, timerfd)
+net.cyr      — Socket wrappers
+json.cyr     — Minimal JSON: json_parse, json_get, json_get_int, json_build
+trait.cyr    — Manual vtable dispatch: display_vtable, trait_obj_new
+regex.cyr    — Pattern matching
+assert.cyr   — Test assertions: assert_eq, assert_ne, assert_true
+bench.cyr    — Benchmarking: bench_start, bench_end, bench_report
+bounds.cyr   — Array bounds checking
+callback.cyr — Callback patterns: fork_with_pre_exec
 
-ECOSYSTEM LIBRARIES (stage1/lib/agnostik/, agnosys/, kybernet/, nous/):
-
-agnostik/error.cyr    — Error codes (1001-1010), err_is_retriable, err_print
-agnostik/types.cyr    — AgentType, AgentStatus, MessageType, SystemStatus, etc.
-agnostik/security.cyr — Permission bitmask, Role, SecurityContext, ResourceLimits
-agnostik/agent.cyr    — AgentConfig, AgentInfo, AgentStats, ResourceUsage
-agnostik/audit.cyr    — AuditSeverity, AuditEntry, audit_print
-agnostik/config.cyr   — AgnosConfig, EnvironmentProfile, edge overrides
-agnosys/syscalls.cyr  — 50 syscall numbers, 20+ wrappers, sigset, epoll, timerfd
-kybernet/console.cyr  — PID 1 stdio redirect (close/open/dup2)
-kybernet/signals.cyr  — Signal blocking + signalfd
-kybernet/reaper.cyr   — Zombie reaper (waitpid loop)
-kybernet/privdrop.cyr — Privilege dropping (setgroups/setgid/setuid)
-kybernet/mount.cyr    — Essential filesystem mounts
-kybernet/cgroup.cyr   — Cgroup v2 service management
-kybernet/eventloop.cyr— Epoll + timerfd event loop
-nous/nous.cyr         — Dependency resolver (marketplace + system)
+Total: 21 library modules, 200+ functions.
 
 USAGE PATTERN:
-    include "stage1/lib/alloc.cyr"
-    include "stage1/lib/vec.cyr"
+    include "lib/alloc.cyr"
+    include "lib/vec.cyr"
     alloc_init();
     var v = vec_new();
     vec_push(v, 42);
 
-DEPENDENCY ORDER:
-    string.cyr   — standalone
-    alloc.cyr    — standalone (call alloc_init() first)
-    str.cyr      — requires alloc.cyr + string.cyr
-    vec.cyr      — requires alloc.cyr
-    io.cyr       — standalone
-    fmt.cyr      — standalone (requires string.cyr for fmt_int_buf)
-    args.cyr     — requires string.cyr
-    fnptr.cyr    — standalone
-    agnostik/*   — require string.cyr + fmt.cyr + alloc.cyr
-    agnosys/*    — requires alloc.cyr
-    kybernet/*   — requires agnosys/syscalls.cyr + string.cyr + io.cyr + vec.cyr + fmt.cyr
-    nous/*       — requires all of the above
-
 INCLUDE ORDER FOR FULL STACK:
-    include "stage1/lib/string.cyr"
-    include "stage1/lib/fmt.cyr"
-    include "stage1/lib/alloc.cyr"
-    include "stage1/lib/io.cyr"
-    include "stage1/lib/vec.cyr"
-    include "stage1/lib/args.cyr"
-    include "stage1/lib/agnosys/syscalls.cyr"
-    include "stage1/lib/nous/nous.cyr"
+    include "lib/string.cyr"
+    include "lib/fmt.cyr"
+    include "lib/alloc.cyr"
+    include "lib/vec.cyr"
+    include "lib/str.cyr"
+    include "lib/tagged.cyr"
+    include "lib/syscalls.cyr"
+    include "lib/io.cyr"
+    include "lib/hashmap.cyr"
+    include "lib/process.cyr"
+    include "lib/fs.cyr"
+
+IMPORTANT — var buf[N] allocates N BYTES, not N elements:
+    var buf[120];     # 120 bytes (enough for sysinfo struct)
+    var uts[392];     # 392 bytes (enough for utsname struct: 6 × 65 + padding)
+    store64(&buf, 42);          # write 8 bytes at offset 0
+    store64(&buf + 8, 43);      # write 8 bytes at offset 8
 '''
 
 [[entries]]
@@ -639,4 +654,41 @@ CYRB BINARY (v1.4.0):
     #   - str_data buffer: 2KB → 32KB (0x69000 → 0x61000)
     #   - preprocessor output: wired to 0x222000 (was 0x91000)
     #   - fixup table: 528 → 2048 entries (0x8A000 → 0x262000)
+
+COMPILER TABLE EXPANSIONS (v1.5.2–v1.6.0):
+    # Variable tables expanded: 256 → 512 entries
+    #   var_noffs/var_sizes relocated from 0x60000/0x60800 (2048 bytes each)
+    #   str_data relocated from 0x61000 → 0x62000
+    #   Root cause: VCNT never resets between functions, large programs
+    #   with many local vars silently corrupted string data.
+    #
+    # Function tables expanded: 256 → 512 entries
+    #   fn_names/fn_offsets/fn_params relocated from 0x8C200/0x8CA00/0x8D200
+    #   to 0x26A000/0x26B000/0x26C000. Old location overflowed fn_names
+    #   into fn_offsets, corrupting jump targets → runtime segfault.
+    #   brk: 0x26A000 → 0x26D000
+
+PACKED RESULT TYPE (v1.5.3 — agnosys optimization):
+    # Ok/Err encoded in single i64 using bit 63 as discriminant.
+    # Ok(value): returns value directly (bit 63 = 0 for all valid pointers/ints)
+    # Err(ptr):  returns ptr | 0x8000000000000000 (bit 63 = 1)
+    # is_ok(r):  r >= 0 (signed comparison)
+    # payload(r): r & 0x7FFFFFFFFFFFFFFF
+    #
+    # Zero heap allocations on Ok path (was 2 allocs via tagged_new).
+    # Benchmarked: Ok(42) dropped from 15ns to 2ns (7.5x faster).
+    # err_from_errno dropped from 38ns to 21ns (packed kind<<16|errno).
+
+CALLER-PROVIDED BUFFERS (v1.5.3 — agnosys optimization):
+    # query_sysinfo(out) — caller passes stack buffer, no heap copy
+    # agnosys_uname(out) — single syscall, read fields via offsets
+    # Benchmarked: query_sysinfo 1110ns → 664ns (40% faster)
+
+CYRB FIXES (v1.5.1–v1.6.1):
+    # v1.5.1: load_environ() passes parent env to child processes
+    #         (shell scripts failed without PATH/HOME)
+    #         install.sh now copies all cyrb-*.sh companion scripts
+    # v1.5.2: cyrb clean preserves itself; fixed UTF-8 byte count in output
+    # v1.6.1: --aarch64 searches ./build/ as fallback for cc2_aarch64
+    # tests/compiler.sh default fixed: ./build/cc → ./build/cc2
 '''

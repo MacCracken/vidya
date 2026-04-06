@@ -57,12 +57,44 @@ fn test_stack_vs_heap() {
     return 0;
 }
 
+# === Kernel Benchmark Patterns (from AGNOS) ===
+# In bare-metal kernel code, use rdtsc for cycle-accurate timing.
+# Pattern: t0 = rdtsc(); work(); t1 = rdtsc(); cycles = (t1 - t0) / iterations
+# rdtsc returns EDX:EAX combined to 64-bit via: shl rdx,32; or rax,rdx
+
+# Benchmark loop pattern: run N iterations, divide total cycles
+fn bench_cycles(iterations) {
+    # Simulated — in kernel, rdtsc gives real cycle count
+    # Here we use alloc as a proxy for measurable work
+    alloc_reset();
+    var b = bench_new("cycles_proxy");
+    bench_run(b, &_alloc_work, iterations);
+    bench_report(b);
+    return bench_avg_ns(b);
+}
+
+# AGNOS benchmark results (QEMU x86_64, ~1GHz emulated):
+#   Syscall (getpid):     306 cycles/op   (~306ns, 3.3M ops/sec)
+#   PMM alloc+free:     2,041 cycles/op   (~2.0us, 490K ops/sec)
+#   Heap alloc+free:    2,565 cycles/op   (~2.6us, 390K ops/sec)
+#   Serial putc:        5,922 cycles/op   (~5.9us, 169K chars/sec)
+#   Memory write 1MB:  10.9M cycles total (~10.9ms, 91 MB/s)
+# Key insight: everything under the timer tick resolution (10ms @ 100Hz)
+# requires TSC (rdtsc) for meaningful measurement.
+
+fn test_bench_cycles() {
+    var ns = bench_cycles(100);
+    assert(ns > 0, "measurable work");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_bench_api();
     test_bench_run();
     test_alloc_bench();
     test_stack_vs_heap();
+    test_bench_cycles();
     return assert_summary();
 }
 var exit_code = main();

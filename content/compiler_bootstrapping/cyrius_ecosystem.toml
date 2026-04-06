@@ -10,19 +10,24 @@ content = '''
 Five AGNOS Rust crates have been rewritten in Cyrius:
 
 1. agnostik (6 modules) — shared types: error codes, agent lifecycle, security, audit, config
-2. agnosys (1 module) — Linux x86_64 syscall bindings: 50 syscall numbers, 20+ wrappers
+2. agnosys (20 modules) — Linux kernel interface: syscalls, error, security, udev, netns, luks,
+   dmverity, ima, tpm, certpin, secureboot, fuse, audit, pam, mac, journald, bootloader, drm, update
 3. kybernet (7 modules) — PID 1 init: console, signals, reaper, privdrop, mount, cgroup, eventloop
 4. nous (1 module) — dependency resolver: marketplace + system package resolution
 5. ark (1 program) — package manager CLI: install/remove/search/list/info/status/verify
 
-Plus cyrb (build tool): compile, test, self-host, suite runner.
+Plus cyrb (build tool, 59KB): compile, test, self-host, 25+ subcommands.
 
-All libraries at: stage1/lib/{agnostik,agnosys,kybernet,nous}/
-All tools at: stage1/programs/{ark,cyrb}.cyr
-Test programs: stage1/programs/{agnostik,kybernet,nous}_test.cyr
+Cyrius stdlib at: lib/ (21 modules, 200+ functions)
+Tools at: programs/{ark,cyrb}.cyr
+agnosys port: separate repo (github.com/MacCracken/agnosys), 20 modules from 29K lines of Rust
 
-Total: 23 library modules, 150+ functions, 102 .cyr files.
-151 tests (94 compiler + 57 programs), 0 failures.
+Total: 263 tests (212 compiler + 51 programs), 0 failures.
+Self-hosting byte-identical. Compiler: 136KB. Version: 1.6.1.
+
+agnosys performance (v1.5.3): packed Result type (zero-alloc Ok), caller-provided
+buffers, packed errno errors. getpid/getuid/is_root at parity with Rust.
+query_sysinfo 1.4x Rust (was 2.4x). err_from_errno 1.9x Rust (was 3.4x).
 '''
 
 [[entries]]
@@ -48,9 +53,12 @@ Rust struct with derives → Cyrius heap-allocated struct with accessors
 
 Rust HashMap → Cyrius vec of key-value pairs (or sorted vec for lookup)
 
-Rust Result<T> → Cyrius return value (0 = success, negative = error code)
+Rust Result<T> → Cyrius packed Result: Ok(val) returns val, Err(ptr) sets bit 63.
+  is_ok(r) = r >= 0. payload(r) = r & 0x7FFFFFFFFFFFFFFF. Zero alloc on success.
+  Error structs (kind+errno+msg) heap-allocated only on error path (cold).
 
-Rust Option<T> → Cyrius pointer (0 = None, nonzero = Some)
+Rust Option<T> → Cyrius heap-allocated tagged union: Some(val)/None() via tagged_new.
+  Or simpler: pointer (0 = None, nonzero = Some) for lightweight cases.
 
 Rust traits → Cyrius concrete functions (no vtable, no dynamic dispatch)
 
@@ -199,7 +207,7 @@ name = "cyrius_agnostik_patterns"
 description = "Patterns used in agnostik rewrite: error codes, bitmask permissions, heap structs"
 category = "compiler_bootstrapping"
 content = '''
-AGNOSTIK LIBRARY PATTERNS (stage1/lib/agnostik/):
+AGNOSTIK LIBRARY PATTERNS (lib/agnostik/):
 
 ERROR CODES (error.cyr):
   enum AgnostikError { ERR_NONE = 0; ERR_AGENT_NOT_FOUND = 1001; ... }
@@ -242,7 +250,7 @@ name = "cyrius_agnosys_patterns"
 description = "Patterns for agnosys syscall bindings: enum constants, sigset, epoll, timerfd"
 category = "compiler_bootstrapping"
 content = '''
-AGNOSYS LIBRARY PATTERNS (stage1/lib/agnosys/syscalls.cyr):
+AGNOSYS LIBRARY PATTERNS (lib/agnosys/syscalls.cyr):
 
 SYSCALL CONSTANTS AS ENUMS (avoids gvar_toks overflow):
   enum SysNr { SYS_READ = 0; SYS_WRITE = 1; SYS_OPEN = 2; ... SYS_EPOLL_CREATE1 = 291; }
@@ -294,7 +302,7 @@ name = "cyrius_kybernet_patterns"
 description = "PID 1 init patterns: console redirect, signal fd, zombie reaping, mount, cgroup"
 category = "compiler_bootstrapping"
 content = '''
-KYBERNET LIBRARY PATTERNS (stage1/lib/kybernet/):
+KYBERNET LIBRARY PATTERNS (lib/kybernet/):
 
 CONSOLE REDIRECT (console.cyr):
   Close inherited fds 0/1/2.
@@ -341,7 +349,7 @@ name = "cyrius_nous_ark_patterns"
 description = "Resolver and package manager patterns: marketplace resolution, CLI tools, file DB"
 category = "compiler_bootstrapping"
 content = '''
-NOUS RESOLVER (stage1/lib/nous/nous.cyr):
+NOUS RESOLVER (lib/nous/nous.cyr):
 
 SOURCE DETECTION: name contains '/' → marketplace, ends '.flutter' → flutter, else unknown.
 
@@ -366,7 +374,7 @@ SIMPLE JSON PARSING (no serde, no parser library):
   Extract bytes between quotes, null-terminate.
   Works for flat JSON objects. Not recursive.
 
-ARK PACKAGE MANAGER (stage1/programs/ark.cyr):
+ARK PACKAGE MANAGER (programs/ark.cyr):
 
 CLI DISPATCH:
   args_init() + argc()/argv() for argument parsing.
@@ -396,7 +404,7 @@ name = "cyrius_build_tool_pattern"
 description = "cyrb: how to build a Cyrius program that compiles other Cyrius programs"
 category = "compiler_bootstrapping"
 content = '''
-CYRB BUILD TOOL (stage1/programs/cyrb.cyr):
+CYRB BUILD TOOL (programs/cyrb.cyr):
 
 COMPILE PATTERN:
   Fork child.
@@ -476,7 +484,7 @@ name = "cyrius_hashmap"
 description = "hashmap.cyr: FNV-1a hash table with string keys and i64 values"
 category = "compiler_bootstrapping"
 content = '''
-HASHMAP (stage1/lib/hashmap.cyr):
+HASHMAP (lib/hashmap.cyr):
 
 Open addressing with linear probing. Auto-grows at 70% load.
 Keys are null-terminated strings. Values are i64.
@@ -506,7 +514,7 @@ name = "cyrius_string_enhancements"
 description = "str.cyr extended: contains, split, join, trim, builder, from_int, to_int"
 category = "compiler_bootstrapping"
 content = '''
-STRING ENHANCEMENTS (stage1/lib/str.cyr):
+STRING ENHANCEMENTS (lib/str.cyr):
 
 New functions added to the Str (fat pointer) type:
 
@@ -536,7 +544,7 @@ name = "cyrius_traits"
 description = "trait.cyr: vtable-based trait objects for polymorphic dispatch (Display, Eq, From)"
 category = "compiler_bootstrapping"
 content = '''
-TRAITS (stage1/lib/trait.cyr):
+TRAITS (lib/trait.cyr):
 
 Traits are vtables — heap-allocated arrays of function pointers.
 A "trait object" is a fat pointer: { vtable_ptr, data_ptr } = 16 bytes.
@@ -650,12 +658,12 @@ name = "cyrius_cyrc_tool"
 description = "cyrc: dependency auditing (vet) and policy enforcement (deny) for Cyrius projects"
 category = "compiler_bootstrapping"
 content = '''
-CYRC — CYRIUS CHECK (stage1/programs/cyrc.cyr, 22KB binary):
+CYRC — CYRIUS CHECK (programs/cyrc.cyr, 22KB binary):
 
 cyrc vet <file>:
   Scans source file for include directives.
   Reports each dependency as OK, UNTRUST, or MISSING.
-  Trusted paths: stage1/lib/, stage1/cc/, stage1/arch/, kernel/
+  Trusted paths: lib/, src/cc/, src/arch/, kernel/
   Returns 0 if all trusted and present, 1 otherwise.
 
 cyrc deny <file>:
@@ -679,7 +687,7 @@ name = "cyrius_tagged_unions"
 description = "tagged.cyr: Option, Result, Either types via heap-allocated tag+value pairs"
 category = "compiler_bootstrapping"
 content = '''
-TAGGED UNIONS (stage1/lib/tagged.cyr):
+TAGGED UNIONS (lib/tagged.cyr):
 
 A tagged union is a heap-allocated pair: { tag: i64, value: i64 } = 16 bytes.
 tag(t) returns the discriminant. payload(t) returns the value.
@@ -773,7 +781,7 @@ name = "cyrius_string_formatting"
 description = "fmt_sprintf: printf-like string formatting with %d, %x, %s, %% into a buffer"
 category = "compiler_bootstrapping"
 content = '''
-STRING FORMATTING (stage1/lib/fmt.cyr):
+STRING FORMATTING (lib/fmt.cyr):
 
 fmt_sprintf(buf, format, args) — write formatted string into buf, return length.
 args is a vec of i64 values consumed in order.
@@ -807,7 +815,7 @@ name = "cyrius_bounds_checking"
 description = "bounds.cyr: opt-in runtime bounds checking for arrays and buffers"
 category = "compiler_bootstrapping"
 content = '''
-BOUNDS CHECKING (stage1/lib/bounds.cyr):
+BOUNDS CHECKING (lib/bounds.cyr):
 
 Opt-in checked memory access. Aborts with error message on violation.
 
@@ -883,7 +891,7 @@ RUN HELPER:
   run_binary() executes directly on x86, via qemu-aarch64 on ARM
 
 SELF-HOSTING:
-  cyrb self finds stage1/cc2.cyr, compiles twice, compares with cmp.
+  cyrb self finds src/compiler.cyr, compiles twice, compares with cmp.
   Works from either the cyrius repo or a sibling project.
 
 PATTERN: Like git — one entry point, individual tools underneath.
@@ -1015,7 +1023,7 @@ name = "cyrius_bench_library"
 description = "bench.cyr: nanosecond-precision benchmarking with min/max/avg and human-readable output"
 category = "compiler_bootstrapping"
 content = '''
-BENCHMARKING (stage1/lib/bench.cyr):
+BENCHMARKING (lib/bench.cyr):
 
   var b = bench_new("my_operation");
   bench_run(b, &work_fn, 10000);  # run 10000 iterations
@@ -1048,7 +1056,7 @@ name = "cyrius_callback_library"
 description = "callback.cyr: closure-like patterns via function pointers (map, filter, fold, pre_exec)"
 category = "compiler_bootstrapping"
 content = '''
-CALLBACK LIBRARY (stage1/lib/callback.cyr):
+CALLBACK LIBRARY (lib/callback.cyr):
 
 Replaces closures with function pointer patterns:
 

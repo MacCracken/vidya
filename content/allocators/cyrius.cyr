@@ -1,0 +1,147 @@
+# Allocators -- Cyrius reference (runnable)
+# Patterns from AGNOS: slab allocator, bitmap PMM, free-list, next-free hint
+
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# === Slab Allocator Pattern ===
+# Used in AGNOS kernel heap. 8 size classes: 32, 64, 128, 256, 512, 1024, 2048, 4096.
+# Each class has a free list. Alloc = pop head. Free = push head. O(1).
+# When free list empty, allocate a page and divide into blocks (slab_grow).
+
+# Simulated slab with bump allocator backing
+var slab_head = 0;
+var slab_block_size = 64;
+
+fn slab_init(block_sz) {
+    slab_block_size = block_sz;
+    slab_head = 0;
+    return 0;
+}
+
+fn slab_grow_sim() {
+    # Allocate a "page" (512 bytes) and divide into blocks
+    var page = alloc(512);
+    var blocks = 512 / slab_block_size;
+    var head = slab_head;
+    for (var i = 0; i < blocks; i = i + 1) {
+        var block = page + i * slab_block_size;
+        store64(block, head);
+        head = block;
+    }
+    slab_head = head;
+    return 0;
+}
+
+fn slab_alloc() {
+    if (slab_head == 0) { slab_grow_sim(); }
+    if (slab_head == 0) { return 0; }
+    var block = slab_head;
+    slab_head = load64(block);
+    # Zero the block (security: don't leak old data)
+    # Optimization: only zero requested size, not full block
+    for (var i = 0; i < slab_block_size; i = i + 8) {
+        store64(block + i, 0);
+    }
+    return block;
+}
+
+fn slab_free(ptr) {
+    store64(ptr, slab_head);
+    slab_head = ptr;
+    return 0;
+}
+
+# === Bitmap PMM Pattern ===
+# 1 bit per page. set/clear/test with byte offset + bit shift.
+# next_free hint: advance on alloc, retract on free.
+
+var bmp[8];
+var bmp_next = 0;
+
+fn bmp_set(page) {
+    var byte = page / 8;
+    var bit = page % 8;
+    store8(&bmp + byte, load8(&bmp + byte) | (1 << bit));
+    return 0;
+}
+
+fn bmp_clear(page) {
+    var byte = page / 8;
+    var bit = page % 8;
+    store8(&bmp + byte, load8(&bmp + byte) & (~(1 << bit) & 0xFF));
+    return 0;
+}
+
+fn bmp_test(page) {
+    var byte = page / 8;
+    var bit = page % 8;
+    return (load8(&bmp + byte) >> bit) & 1;
+}
+
+fn bmp_alloc(total) {
+    # Search from hint first
+    for (var i = bmp_next; i < total; i = i + 1) {
+        if (bmp_test(i) == 0) {
+            bmp_set(i);
+            bmp_next = i + 1;
+            return i;
+        }
+    }
+    # Wrap around
+    for (var i = 0; i < bmp_next; i = i + 1) {
+        if (bmp_test(i) == 0) {
+            bmp_set(i);
+            bmp_next = i + 1;
+            return i;
+        }
+    }
+    return 0 - 1;
+}
+
+fn bmp_free(page) {
+    bmp_clear(page);
+    if (page < bmp_next) { bmp_next = page; }
+    return 0;
+}
+
+# === Tests ===
+
+fn test_slab() {
+    alloc_reset();
+    slab_init(64);
+    var a = slab_alloc();
+    assert(a != 0, "slab alloc");
+    store64(a, 0xDEAD);
+    assert_eq(load64(a), 0xDEAD, "slab write");
+    var b = slab_alloc();
+    assert(b != a, "slab different blocks");
+    slab_free(a);
+    var c = slab_alloc();
+    assert_eq(c, a, "slab reuses freed block");
+    return 0;
+}
+
+fn test_bitmap() {
+    for (var i = 0; i < 8; i = i + 1) { store8(&bmp + i, 0); }
+    bmp_next = 0;
+    # Alloc pages 0, 1, 2
+    assert_eq(bmp_alloc(64), 0, "alloc page 0");
+    assert_eq(bmp_alloc(64), 1, "alloc page 1");
+    assert_eq(bmp_alloc(64), 2, "alloc page 2");
+    # Free page 1, next alloc should reuse it
+    bmp_free(1);
+    assert_eq(bmp_alloc(64), 1, "reuses freed page 1");
+    # Verify hint advancement
+    assert_eq(bmp_alloc(64), 3, "continues at page 3");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_slab();
+    test_bitmap();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);
