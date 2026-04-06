@@ -560,3 +560,83 @@ SUBPROCESS BRIDGE (v0.9.12):
     # nvidia-smi, kubectl, docker, etc.
     # Bridge strategy: Cyrius core logic + subprocess for external deps.
 '''
+
+[[entries]]
+name = "cyrius_v1x_features"
+description = "Features added in v1.0–v1.5: for-in collections, enum constructors, shared libs, address-based ops, cyrb binary"
+category = "compiler_bootstrapping"
+content = '''
+FOR-IN COLLECTIONS (v1.1.0):
+    include "lib/vec.cyr"
+
+    var v = vec_new();
+    vec_push(v, 10);
+    vec_push(v, 20);
+    vec_push(v, 12);
+
+    var total = 0;
+    for item in v {
+        total = total + item;
+    }
+    # total = 42
+
+    # Desugars to: var __len = vec_len(v); var __i = 0;
+    #   while (__i < __len) { var item = vec_get(v, __i); body; __i = __i + 1; }
+    # Item variable is scoped to loop body.
+    # Works alongside range for-in: for i in 0..10 { }
+
+ENUM CONSTRUCTORS (v1.1.0):
+    enum Result { Ok(val) = 0; Err(code) = 1; }
+
+    var r = Ok(42);              # auto-generated constructor
+    var tag = load64(r);         # 0
+    var payload = load64(r + 8); # 42
+
+    # Constructor auto-generated in pass 2 function section:
+    #   fn Ok(val) { var p = alloc(16); store64(p, 0); store64(p+8, val); return p; }
+    # Registered in pass 1, body emitted when emit_code == 2.
+    # Uses alloc(16) to heap-allocate {tag, payload}.
+
+ADDRESS-BASED OPERATOR OVERLOADING (v1.2.0):
+    struct Vec3 { x; y; z; }
+
+    fn Vec3_add(a, b) {
+        store64(a, load64(a) + load64(b));
+        store64(a + 8, load64(a + 8) + load64(b + 8));
+        store64(a + 16, load64(a + 16) + load64(b + 16));
+        return a;
+    }
+
+    var a = Vec3 { 1, 2, 3 };
+    var b = Vec3 { 10, 20, 30 };
+    var c = a + b;  # Vec3_add(&a, &b) — addresses, not values
+
+    # Multi-field structs (size > 8 bytes) pass addresses to operators.
+    # Single-field structs and scalars pass values (backward compatible).
+    # Dispatch checks var_sizes[idx]: >8 = LEA, ==8 = MOV.
+
+SHARED LIBRARY OUTPUT (v1.1.0):
+    shared;
+    pub fn add(a, b) { return a + b; }
+    # Compile: cat mylib.cyr | cc2 > mylib.so
+    # Produces ET_DYN ELF (recognized by `file` as shared object).
+    # No PIC/PLT/GOT yet — proof-of-concept for future dlopen support.
+
+CYRB BINARY (v1.4.0):
+    # cyrb.cyr — full Cyrius replacement for shell dispatcher (58KB)
+    # 25+ subcommands matching the shell version:
+    #   build, run, test, bench, check, self, clean
+    #   init, package, port, header
+    #   fmt, lint, doc, vet, deny, audit
+    #   coverage, doctest, repl
+    #   version, which, help
+    #
+    # Tool discovery: finds cc2 via ~/.cyrius/bin/ or ./build/
+    # Delegates to companion tools (cyrfmt, cyrlint, cyrdoc, cyrc)
+    # and shell scripts for init/port/audit.
+    #
+    # Required compiler fixes to compile cyrb.cyr:
+    #   - str_data buffer: 2KB → 32KB (0x69000 → 0x61000)
+    #   - preprocessor output: wired to 0x222000 (was 0x91000)
+    #   - fixup table: 528 → 2048 entries (0x8A000 → 0x262000)
+'''

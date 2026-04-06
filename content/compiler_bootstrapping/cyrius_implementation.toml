@@ -1437,3 +1437,201 @@ IMPLEMENTATION:
   PARSE_PROG parses body. Return patches collected via GRPC/SRPC.
   All patches resolved to single EFNEPI after body.
 '''
+
+[[entries]]
+name = "fixup_table_expansion"
+description = "Fixup table relocated from 0x8A000 to 0x262000 to support large programs (2048 entries)"
+category = "compiler_bootstrapping"
+content = '''
+PROBLEM:
+  Fixup table at 0x8A000 had only ~528 usable entries before overlapping
+  compiler state tables starting at 0x8C100 (BL, CP, VCNT, etc.).
+  The heap map declared [16384] bytes (1024 entries) but compiler state
+  at 0x8C100 was only 0x2100 = 8448 bytes away = 528 entries.
+
+  Programs with >500 function calls + string literals would overflow the
+  fixup table into compiler state, causing silent corruption. Manifested
+  as "unexpected token" errors on the FIRST included file because the
+  parser's internal state (token cursor, variable count) was overwritten.
+
+DIAGNOSIS:
+  Error appeared at preprocessed line 33/48 (within string.cyr) even though
+  string.cyr compiled fine alone. Binary search showed the error correlated
+  with total fixup count, not any specific function.
+
+FIX (v1.4.0):
+  1. Relocated fixup_tbl from 0x8A000 to 0x262000 (past preprocessor output buffer)
+  2. Expanded from 528 usable → 2048 entries (32768 bytes)
+  3. Extended brk from 0x262000 to 0x26A000
+  4. Updated all references in: emit.cyr, parse.cyr, fixup.cyr, aarch64/emit.cyr, aarch64/fixup.cyr
+  5. Two-step bootstrap required (heap offset change)
+
+FIXUP ENTRY FORMAT (16 bytes each):
+  [0..7]  code offset — position in codebuf where the address goes
+  [8..15] type (high byte) | index (low 7 bytes)
+    type 0 = variable address (dbase + cumulative var offsets)
+    type 1 = string address (dbase + totvar + string_offset)
+    type 2 = function call (relative offset for CALL instruction)
+    type 3 = absolute function address (for function pointers)
+
+SIZING GUIDE:
+  Each function call, string literal, global variable reference, and
+  function pointer generates one fixup entry. A program with 10 includes
+  (~150 functions, ~100 strings) uses ~800 entries. The 2048 limit
+  supports programs up to ~50KB of source.
+'''
+
+[[entries]]
+name = "str_data_buffer_expansion"
+description = "String literal buffer relocated from 0x69000 to 0x61000 for 32KB capacity"
+category = "compiler_bootstrapping"
+content = '''
+PROBLEM:
+  String literals are stored at compile time in str_data buffer.
+  Originally at 0x69000 with str_pos at 0x69800 — only 2048 bytes
+  of usable space before str_pos was overwritten.
+
+  Programs with >2KB of string literals (common with multiple includes
+  and println calls) would overflow into str_pos and data_size,
+  corrupting the ELF data section layout.
+
+DIAGNOSIS:
+  Counted total string literal bytes across all includes + program:
+    grep -oP '"[^"]*"' | awk '{ total += length($0) - 1 }'
+  Result: 4196 bytes vs 2048 limit.
+
+FIX (v1.4.0):
+  1. Relocated str_data from 0x69000 to 0x61000 (32KB free space between
+     var_sizes at 0x60800 and old str_data at 0x69000)
+  2. str_pos stays at 0x69800, data_size at 0x69808 (unchanged)
+  3. Updated all 0x69000 references in: lex.cyr, fixup.cyr, aarch64/fixup.cyr
+  4. Two-step bootstrap required
+
+HEAP LAYOUT (data region):
+  0x60000  var_noffs  [2048]   256 variable name offsets
+  0x60800  var_sizes  [2048]   256 variable sizes
+  0x61000  str_data   [32768]  String literal bytes (was 0x69000, 2KB)
+  0x69800  str_pos    [8]      Current write position in str_data
+  0x69808  data_size  [8]      Total variable data bytes for ELF
+'''
+
+[[entries]]
+name = "shared_library_output"
+description = "shared; directive emits ET_DYN ELF instead of ET_EXEC for .so output"
+category = "compiler_bootstrapping"
+content = '''
+FEATURE (v1.1.0):
+  The `shared;` keyword at top-level sets kernel_mode=2, which causes
+  the ELF emitter to produce an ET_DYN (type 3) binary instead of
+  ET_EXEC (type 2). This makes the output recognizable as a shared
+  library by tools like `file`, `nm`, and `readelf`.
+
+USAGE:
+  shared;
+  pub fn add(a, b) { return a + b; }
+  pub fn mul(a, b) { return a * b; }
+
+  Compile: cat mylib.cyr | cc2 > mylib.so
+
+IMPLEMENTATION:
+  1. Lexer: `shared` keyword (token 78) recognized in LEXID
+  2. Parser: top-level `shared;` sets kernel_mode at 0x8FCA0 to 2
+  3. Fixup: EMITELF checks kernel_mode:
+     - 0 = ET_EXEC (normal binary, base 0x400000)
+     - 1 = kernel (ELF32 multiboot, base 0x100000)
+     - 2 = ET_DYN (shared library)
+  4. EMITELF_USER(S, etype) handles both ET_EXEC and ET_DYN —
+     only the e_type field in the ELF header differs
+
+LIMITATIONS:
+  - No PIC (position-independent code) — addresses are absolute
+  - No symbol table or dynamic section — nm can't resolve names
+  - No PLT/GOT — dlsym won't find functions
+  - Useful as proof-of-concept; full .so requires PIC codegen (future)
+'''
+
+[[entries]]
+name = "address_based_operator_overloading"
+description = "Multi-field structs pass addresses (not values) to operator functions"
+category = "compiler_bootstrapping"
+content = '''
+FEATURE (v1.2.0):
+  Operator overloading (`a + b` → `Type_add(a, b)`) needs to pass struct
+  data to the operator function. For single-field structs (8 bytes), the
+  value fits in a register. For multi-field structs, only the address fits.
+
+DISPATCH RULE:
+  The compiler checks var_sizes[var_index]:
+  - size == 8  → pass VALUE (load64 from variable, put in register)
+  - size > 8   → pass ADDRESS (&var, pointer to first field)
+
+  This means operator functions for multi-field structs receive pointers:
+
+  struct Vec3 { x; y; z; }  # 24 bytes → pass by address
+
+  fn Vec3_add(a, b) {
+    var rx = load64(a) + load64(b);
+    var ry = load64(a + 8) + load64(b + 8);
+    var rz = load64(a + 16) + load64(b + 16);
+    # Must return a new struct (allocate or use result var)
+    store64(a, rx); store64(a + 8, ry); store64(a + 16, rz);
+    return a;
+  }
+
+  var a = Vec3 { 1, 2, 3 };
+  var b = Vec3 { 10, 20, 30 };
+  var c = a + b;  # calls Vec3_add(&a, &b)
+
+IMPLEMENTATION:
+  In EMIT_OP_DISPATCH (parse.cyr):
+  1. GESVAR(S) retrieves the variable index of the left operand
+  2. var_sizes[idx] checked: if >8, emit LEA (load effective address)
+     instead of MOV (load value)
+  3. Same check for right operand
+  4. Call Type_op(left, right) with addresses or values accordingly
+
+BACKWARD COMPATIBLE:
+  Single-field structs and type-annotated scalars continue to pass values.
+  Only structs with 2+ fields (>8 bytes) switch to address passing.
+'''
+
+[[entries]]
+name = "emitelf_dedup"
+description = "EMITELF and EMITELF_SHARED merged into EMITELF_USER(S, etype) — 2KB saved"
+category = "compiler_bootstrapping"
+content = '''
+REFACTOR (v1.5.0):
+  EMITELF and EMITELF_SHARED were 95% identical — both emit an x86_64
+  ELF binary with the same header layout, program header, code section,
+  variable data, and string data. The only difference: e_type field
+  (byte 16 of ELF header) is 2 (ET_EXEC) vs 3 (ET_DYN).
+
+BEFORE:
+  fn EMITELF(S) { ... 60 lines ... }      # e_type = 0x0002
+  fn EMITELF_SHARED(S) { ... 40 lines ... } # e_type = 0x0003
+
+AFTER:
+  fn EMITELF_USER(S, etype) {
+    ...
+    # e_type from parameter:
+    S64(O + op, 0x00000001003E0000 | etype);
+    ...
+  }
+
+  fn EMITELF(S) {
+    if (kernel_mode == 1) { EMITELF_KERNEL(S); return 0; }
+    if (kernel_mode == 2) { EMITELF_USER(S, 3); return 0; }
+    EMITELF_USER(S, 2);
+    return 0;
+  }
+
+RESULT: Compiler shrunk 138KB → 136KB (2KB saved). Self-hosting verified.
+
+KEY INSIGHT:
+  The ELF e_type field is at the lowest 16 bits of the third qword
+  (offset 16). Using `0x00000001003E0000 | etype` constructs:
+    e_type = etype (2 or 3)
+    e_machine = 0x3E (x86_64)
+    e_version = 1
+  All in one 64-bit store.
+'''
