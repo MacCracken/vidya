@@ -14,7 +14,7 @@ No Rust, no LLVM, no Python. Just sh + Linux x86_64.
 Everything is a 64-bit integer. No floats, no separate types.
 Type annotations (var x: i64 = 42) are documentation only — no enforcement.
 
-The compiler (cc2) is 136KB, ~250 functions, 7 modules. It compiles itself
+The compiler (cc2) is 131KB, ~250 functions, 7 modules. It compiles itself
 byte-identical in ~11ms. The AGNOS kernel is written entirely in Cyrius.
 
 Build: sh bootstrap/bootstrap.sh (40ms)
@@ -22,7 +22,8 @@ Compile: echo 'var x = 42;' | ./build/cc2 > prog && chmod +x prog
 Test: sh tests/compiler.sh   (212 compiler + 51 program tests)
 
 Source: src/compiler.cyr (entry) + src/cc/*.cyr (modules)
-Version: 1.6.5 — 267 tests (216 compiler + 51 programs), 0 failures, self-hosting byte-identical
+Version: 1.7.0 — 267 tests (216 compiler + 51 programs), 0 failures, self-hosting byte-identical
+Compiler: 131KB x86_64 (down from 136KB via EMOVI optimization)
 '''
 
 [[entries]]
@@ -140,10 +141,10 @@ HEAP LAYOUT (S = brk base, v1.6):
     0x1A2000 tok_lines [524288]      (line numbers per token)
     0x222000 preprocess_out [262144]
     0x262000 fixup_tbl [32768]       (2048 entries, relocated from 0x8A000)
-    0x26A000 fn_names [4096]         (512 entries, relocated from 0x8C200 in v1.6.0)
-    0x26B000 fn_offsets [4096]       (512 entries, relocated from 0x8CA00 in v1.6.0)
-    0x26C000 fn_params [4096]        (512 entries, relocated from 0x8D200 in v1.6.0)
-    brk: 0x26D000
+    0x26A000 fn_names [8192]         (1024 entries, expanded from 512 in v1.6.7)
+    0x26C000 fn_offsets [8192]       (1024 entries, expanded from 512 in v1.6.7)
+    0x26E000 fn_params [8192]        (1024 entries, expanded from 512 in v1.6.7)
+    brk: 0x270000
 
 CODEGEN MODEL:
     - Stack-based expression evaluation: push lhs, eval rhs, pop lhs, operate
@@ -223,8 +224,8 @@ CURRENT LIMITATIONS:
     functions — arrays inside functions are globals). Exceeding 512 silently
     corrupts string data. Was 256, expanded to 512 in v1.5.2.
 
-17. FUNCTION TABLE LIMIT: Max 512 functions. Exceeding 512 corrupts jump
-    targets → runtime segfault. Was 256, expanded to 512 in v1.6.0.
+17. FUNCTION TABLE LIMIT: Max 1024 functions. Clear error at limit:
+    "error: function table full (1024/1024)". Was 256→512→1024.
 
 18. var buf[N] IS BYTES: var buf[N] allocates N BYTES, not N i64 elements.
     var buf[8] = 8 bytes (1 i64). var buf[120] = 120 bytes (15 i64s).
@@ -662,11 +663,10 @@ COMPILER TABLE EXPANSIONS (v1.5.2–v1.6.0):
     #   Root cause: VCNT never resets between functions, large programs
     #   with many local vars silently corrupted string data.
     #
-    # Function tables expanded: 256 → 512 entries
-    #   fn_names/fn_offsets/fn_params relocated from 0x8C200/0x8CA00/0x8D200
-    #   to 0x26A000/0x26B000/0x26C000. Old location overflowed fn_names
-    #   into fn_offsets, corrupting jump targets → runtime segfault.
-    #   brk: 0x26A000 → 0x26D000
+    # Function tables expanded: 256 → 512 → 1024 entries (v1.6.0, v1.6.7)
+    #   fn_names/fn_offsets/fn_params at 0x26A000/0x26C000/0x26E000
+    #   8192 bytes each (1024 entries). Error at limit.
+    #   brk: 0x270000
 
 PACKED RESULT TYPE (v1.5.3 — agnosys optimization):
     # Ok/Err encoded in single i64 using bit 63 as discriminant.
@@ -770,4 +770,47 @@ CYRC VET FALSE POSITIVE FIX (v1.6.5):
     # Fix: build needle at runtime with store8 bytes to avoid preprocessor detection.
     # Known pattern: any string containing "include " in source code will be seen by
     # cyrc vet as a dependency. Workaround: construct such strings at runtime.
+
+HUMAN-READABLE ERROR MESSAGES (v1.6.6):
+    # error:5: unexpected token (type=17) → error:5: expected ';', got identifier 'foo'
+    # Token types replaced with names: ';', ')', '{', identifier, number, fn, return, etc.
+    # Identifier values and numeric values shown in context.
+    # 142 parse errors upgraded to ERR_EXPECT with expected/got format.
+    # Added: TOKNAME(), PRSTR(), ERR_EXPECT(), ERR_MSG() to util.cyr.
+
+PREPROCESSOR MACROS WITH ARGS (v1.6.7):
+    # #define NAME(p1, p2) body
+    # Expands NAME(arg1, arg2) by substituting p1→arg1, p2→arg2 in body.
+    # Up to 16 macros. Macro names must start uppercase.
+    # Storage inlined in PP_PASS, expansion in separate PP_MACRO_PASS.
+    #
+    # Example:
+    #   #define GETTER(name, offset) fn name(p) { return load64(p + offset); }
+    #   GETTER(get_x, 0)
+    #   GETTER(get_y, 8)
+
+EMOVI OPTIMIZATION (v1.6.7):
+    # mov rax, 0     → xor eax, eax (10 bytes → 2 bytes)
+    # mov rax, <31b> → mov eax, imm32 (10 bytes → 5 bytes)
+    # Large/negative values unchanged (10-byte movabs).
+    # Compiler: 136KB → 131KB. All generated binaries shrink proportionally.
+
+FUNCTION TABLE EXPANSION (v1.6.7):
+    # fn_names/fn_offsets/fn_params: 512 → 1024 entries.
+    # Clear error at limit: "error: function table full (1024/1024)"
+
+RETURN COMPARISONS (v1.7.0):
+    # return expr == expr; now works.
+    # PARSE_RETURN calls PARSE_CMP_EXPR instead of PARSE_EXPR.
+    # Previously: return a == b; failed with "expected ';', got '=='"
+
+INPUT BUFFER EXPANSION (v1.7.0):
+    # Expanded source up to 256KB supported (was 131KB).
+    # Preprocessor output safely overflows into codebuf area at S+0.
+    # Lexer consumes source into token arrays BEFORE codegen overwrites codebuf.
+    # Clear error at 256KB limit.
+
+CODEBUF OVERFLOW CHECK (v1.7.0):
+    # EB() checks cp >= 196608 and errors cleanly:
+    # "error: codebuf overflow (N/196608 bytes) — program too large"
 '''

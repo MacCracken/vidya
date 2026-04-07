@@ -1780,3 +1780,107 @@ BACKWARD COMPATIBILITY:
   Old heap-based tagged.cyr still works. Projects choose which to use
   by vendoring the appropriate lib/tagged.cyr.
 '''
+
+[[entries]]
+name = "emovi_optimization"
+description = "EMOVI code size optimization: xor eax,eax for 0, mov eax,imm32 for small values (v1.6.7)"
+category = "cyrius"
+content = '''
+BEFORE: EMOVI always emitted movabs rax, imm64 (10 bytes: 48 B8 + 8 bytes).
+AFTER:
+  v == 0:              xor eax, eax (2 bytes: 31 C0) — clears rax, faster
+  0 < v < 0x80000000:  mov eax, imm32 (5 bytes: B8 + 4 bytes) — zero-extends to rax
+  else:                movabs rax, imm64 (10 bytes) — unchanged
+
+  fn EMOVI(S, v) {
+    if (v == 0) { EB(S, 0x31); EB(S, 0xC0); return 0; }
+    if (v > 0) { if (v < 0x80000000) {
+      EB(S, 0xB8);
+      EB(S, v & 0xFF); EB(S, (v >> 8) & 0xFF);
+      EB(S, (v >> 16) & 0xFF); EB(S, (v >> 24) & 0xFF);
+      return 0;
+    } }
+    E2(S, 0xB848); E8(S, v); return 0;
+  }
+
+IMPACT: Compiler 136KB → 131KB (5KB saved). All generated binaries shrink.
+Requires two-step bootstrap: old cc2 → cc3 (larger), cc3 → cc4 (optimized), cc4 == cc5.
+'''
+
+[[entries]]
+name = "preprocessor_macros_implementation"
+description = "Preprocessor macros with args: define, store, expand (v1.6.7)"
+category = "cyrius"
+content = '''
+SYNTAX: #define NAME(p1, p2) body text
+INVOKE: NAME(arg1, arg2)
+
+STORAGE (in PP_PASS):
+  When #define with ( is detected:
+  - Hash name (stopping at paren) → S+0x92000 (16 name hashes)
+  - Copy entire line after #define to S+0x93000 (16KB text storage)
+  - Store text offset at S+0x92080 and length at S+0x92100
+  - Increment _pp_macro_count, advance ip via PP_SKIPLINE
+
+EXPANSION (in PP_MACRO_PASS, separate pass after all includes resolved):
+  - Scan input for uppercase identifiers matching a macro name hash
+  - Verify ( follows the identifier
+  - Parse params from stored definition text
+  - Parse args from input (comma-separated, handles nested parens)
+  - Walk body text, replace param names with arg text (word-boundary check)
+  - Write expanded text + newline to output
+
+KEY DESIGN: macros are stored during the include/ifdef pass but expanded in a
+SEPARATE pass afterward. This avoids the bug where PP_STORE_MACRO consumed
+too much input (function call boundary issue with the Cyrius compiler).
+
+LIMITATIONS:
+  - Macro names must start uppercase (A-Z) to avoid false matches
+  - Up to 16 macros
+  - Single-line body only (no multi-line macros)
+  - No nested macro expansion
+'''
+
+[[entries]]
+name = "return_comparison_fix"
+description = "return expr == expr now works: PARSE_RETURN uses PARSE_CMP_EXPR (v1.7.0)"
+category = "cyrius"
+content = '''
+BUG: return a == b; failed with "expected ';', got '=='"
+ROOT CAUSE: PARSE_RETURN called PARSE_EXPR which stops at comparison operators.
+FIX: PARSE_RETURN now calls PARSE_CMP_EXPR which handles ==, !=, <, >, <=, >=.
+
+  fn PARSE_RETURN(S) {
+    STI(S, GTI(S) + 1);
+    PARSE_CMP_EXPR(S);   # was PARSE_EXPR(S)
+    ...
+  }
+
+Comparisons already worked in if() conditions (via ECONDCMP) and in function
+arguments (via PARSE_CMP_EXPR). Only return statements were missing.
+'''
+
+[[entries]]
+name = "input_buffer_256kb"
+description = "Input buffer expanded to 256KB for large programs with many includes (v1.7.0)"
+category = "cyrius"
+content = '''
+PROBLEM: Preprocessor expands includes into output buffer (S+0x222000, 262144 bytes),
+then copies back to input buffer (S+0, 131072 bytes). Large programs with many
+includes (e.g., compiler itself at 152KB after expansion) overflowed silently,
+producing confusing parse errors or segfaults.
+
+FIX: Allow copy-back up to 262144 bytes. The overflow into codebuf (S+0x20000) is
+safe because the lexer consumes the entire source into token arrays BEFORE code
+generation starts. By the time codegen writes to codebuf, the source text is no
+longer needed at S+0.
+
+LIMITS:
+  Input (before preprocessing): 131072 bytes (read from stdin)
+  Expanded source (after preprocessing): up to 262144 bytes
+  Codebuf: 196608 bytes (with overflow check in EB)
+  Preprocess output buffer: 262144 bytes
+
+CODEBUF OVERFLOW: EB() now checks cp >= 196608 and errors:
+  "error: codebuf overflow (N/196608 bytes) — program too large"
+'''
