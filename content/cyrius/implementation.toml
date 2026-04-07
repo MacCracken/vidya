@@ -511,43 +511,33 @@ PREPROCESSOR NOTE:
 '''
 
 [[entries]]
-name = "tok_names_overflow"
-description = "Critical capacity bug: tok_names buffer overflow corrupts var_noffs silently"
+name = "tok_names_overlap_bugs"
+description = "Two tok_names overflow/overlap bugs: v1.5.2 (var_noffs corruption) and v1.7.5 (struct_ftypes corruption)"
 category = "cyrius"
 content = '''
-THE BUG:
-  tok_names buffer at 0x50000 (32768 bytes) stores ALL identifier strings.
-  LEXID appends every identifier occurrence without bounds checking.
-  When total identifier bytes exceed 32768, writes overflow into var_noffs at 0x58000.
-  Corrupted var_noffs causes FINDVAR to return wrong indices.
-  Manifests as "unexpected token" errors at RANDOM locations in unrelated code.
+BUG #1 (v1.5.2) — tok_names overflows into var_noffs:
+  tok_names at 0x50000 (32768 bytes) overflowed into var_noffs at 0x58000.
+  Fix: expanded tok_names to 65536 bytes (0x50000-0x60000), relocated var_noffs to 0x60000.
 
-WHY IT WAS HARD TO FIND:
-  - Error location (EMITELF) has nothing wrong with its code
-  - Adding/removing ANY function changes whether overflow hits critical data
-  - 12 one-liner functions compile fine; adding 1 more breaks everything
-  - Binary search for "which function breaks" gives inconsistent results
-  - The corruption is silent — no segfault, no obvious error
+BUG #2 (v1.7.5) — tok_names overlaps struct_ftypes:
+  struct_ftypes was placed at 0x59000 INSIDE the tok_names buffer (0x50000-0x60000).
+  When programs had >36864 bytes of identifier data, tok_names wrote over struct_ftypes.
+  Struct operations then zeroed out identifier strings, causing FINDVAR to fail silently.
 
-ROOT CAUSE CHAIN:
-  1. ~6000 identifiers × ~8 bytes avg = ~48000 bytes needed
-  2. tok_names capacity = 32768 bytes
-  3. Overflow at byte 32769 writes to 0x58000 (var_noffs[0])
-  4. var_noffs stores variable name offsets — now garbage
-  5. FINDVAR compares against garbage → wrong variable resolution
-  6. Parser state corrupted → "unexpected token" at random
+  Symptoms: "unexpected +" at line 2556 when including assert.cyr + bench.cyr + all
+  agnostik modules. Adding/removing ANY function near the boundary changed the error.
+  Each individual library compiled fine alone — only the combination triggered it.
 
-FIX:
-  Expanded tok_names to 65536 bytes (0x50000-0x60000)
-  Relocated var_noffs to 0x60000, var_sizes to 0x60800
-  Added bounds check in LEXID: error at 65000 bytes
-  Required updating ALL references to 0x58000/0x58800 across:
-    parse.cyr (14 occurrences)
-    fixup.cyr (2 occurrences)
-    arch/aarch64/fixup.cyr (2 occurrences)
+  Diagnosis: Added debug prints to dump var_noffs entries. Found var_noffs[340] had
+  name offset 36868, which is 0x59004 = struct_ftypes + 4. The identifier "r" was
+  being stored inside struct_ftypes and getting zeroed by struct initialization.
 
-LESSON: Adjacent fixed-size buffers with no guard bytes are time bombs.
-  Always add bounds checks on write. Always verify after relocation.
+  Fix: relocated struct_ftypes from 0x59000 to 0x8A000 (free space after output_buf,
+  before compiler state at 0x8C100). No overlap with tok_names.
+
+LESSON: NEVER place data structures inside another buffer's address range, even if
+  you think the outer buffer "won't grow that large." Add explicit non-overlap assertions
+  or use separate memory regions with guard gaps.
 '''
 
 [[entries]]
@@ -1440,31 +1430,21 @@ IMPLEMENTATION:
 
 [[entries]]
 name = "fixup_table_expansion"
-description = "Fixup table relocated from 0x8A000 to 0x262000 to support large programs (2048 entries)"
+description = "Fixup table history: 0x8A000 (528) → 0x262000 (2048) → 0x2A2000 (4096)"
 category = "cyrius"
 content = '''
-PROBLEM:
-  Fixup table at 0x8A000 had only ~528 usable entries before overlapping
-  compiler state tables starting at 0x8C100 (BL, CP, VCNT, etc.).
-  The heap map declared [16384] bytes (1024 entries) but compiler state
-  at 0x8C100 was only 0x2100 = 8448 bytes away = 528 entries.
+HISTORY:
+  v1.4.0: Relocated from 0x8A000 (528 usable) to 0x262000 (2048 entries)
+  v1.7.2: Relocated to 0x2A2000 to accommodate 512KB preprocessor buffer
+  v1.7.5: Expanded to 4096 entries (65536 bytes). fn_names/offsets/params
+          relocated to 0x2B2000/0x2B4000/0x2B6000. brk at 0x2B8000.
 
-  Programs with >500 function calls + string literals would overflow the
-  fixup table into compiler state, causing silent corruption. Manifested
-  as "unexpected token" errors on the FIRST included file because the
-  parser's internal state (token cursor, variable count) was overwritten.
-
-DIAGNOSIS:
-  Error appeared at preprocessed line 33/48 (within string.cyr) even though
-  string.cyr compiled fine alone. Binary search showed the error correlated
-  with total fixup count, not any specific function.
-
-FIX (v1.4.0):
-  1. Relocated fixup_tbl from 0x8A000 to 0x262000 (past preprocessor output buffer)
-  2. Expanded from 528 usable → 2048 entries (32768 bytes)
-  3. Extended brk from 0x262000 to 0x26A000
-  4. Updated all references in: emit.cyr, parse.cyr, fixup.cyr, aarch64/emit.cyr, aarch64/fixup.cyr
-  5. Two-step bootstrap required (heap offset change)
+CURRENT LAYOUT (v1.7.5):
+  0x2A2000  fixup_tbl     [65536]  4096 entries × 16 bytes
+  0x2B2000  fn_names      [8192]   1024 function name offsets
+  0x2B4000  fn_offsets    [8192]   1024 function code offsets
+  0x2B6000  fn_params     [8192]   1024 function param counts
+  0x2B8000  brk
 
 FIXUP ENTRY FORMAT (16 bytes each):
   [0..7]  code offset — position in codebuf where the address goes
@@ -1473,12 +1453,17 @@ FIXUP ENTRY FORMAT (16 bytes each):
     type 1 = string address (dbase + totvar + string_offset)
     type 2 = function call (relative offset for CALL instruction)
     type 3 = absolute function address (for function pointers)
+    type 4 = tail call (aarch64 B instruction, not BL)
+
+OVERFLOW CHECK (v1.7.5):
+  All fixup writers now check fc >= 4096: RECFIX, ESADDR, ECALLFIX,
+  ETAILJMP, &fn handler, closure handler. Before v1.7.5, only RECFIX
+  had the check — ESADDR/ECALLFIX/ETAILJMP bypassed it silently.
 
 SIZING GUIDE:
-  Each function call, string literal, global variable reference, and
-  function pointer generates one fixup entry. A program with 10 includes
-  (~150 functions, ~100 strings) uses ~800 entries. The 2048 limit
-  supports programs up to ~50KB of source.
+  Each function call, string literal, global var reference, and function
+  pointer generates one fixup entry. agnostik full suite (22 modules,
+  400+ functions) uses ~742 entries. 4096 limit supports ~200KB source.
 '''
 
 [[entries]]
@@ -1883,4 +1868,246 @@ LIMITS:
 
 CODEBUF OVERFLOW: EB() now checks cp >= 196608 and errors:
   "error: codebuf overflow (N/196608 bytes) — program too large"
+'''
+
+[[entries]]
+name = "dead_code_elimination"
+description = "Dead code elimination: token scan + 3-byte stubs for unreachable functions (v1.7.0)"
+category = "cyrius"
+content = '''
+APPROACH: After pass 1 (all names registered), before pass 2 (emit bodies):
+  - Scan all tokens for IDENT references (skip those preceded by FN keyword)
+  - Compare each IDENT against function name using STREQ (string comparison)
+  - Skip DCE for module-scoped functions (GMOD != 0)
+  - Skip DCE for names containing underscore (likely mangled: Type_method)
+
+PASS 2 CHECK: For each top-level fn definition:
+  if (not in module AND no underscore AND name not found in token scan):
+    emit stub instead of full body
+
+STUB (3 bytes):
+  S64(S + 0x26C000 + fi * 8, GCP(S));  # set fn_offsets to stub location
+  EB(S, 0x31); EB(S, 0xC0);            # xor eax, eax
+  EB(S, 0xC3);                          # ret
+  # Skip function body tokens (brace counting)
+
+WHY STUBS NOT SKIP: Skipping entirely leaves fn_offsets[idx] = -1.
+  Fixup type 2 computes: target(-1) - coff - 4 → wild jump → segfault.
+  Fixup type 3 computes: entry + (-1) → invalid address → segfault.
+  Stubs give fixups a valid 3-byte target that safely returns 0.
+
+KEY BUG FIXED: Initial implementation compared TOKVAL offsets (tok_names buffer
+  positions). Different tokens for the same identifier have different offsets
+  because the lexer stores each occurrence separately. Fix: use STREQ to compare
+  the actual string content at each offset.
+
+PERFORMANCE: O(F * T) where F = functions, T = tokens. For the compiler
+  (248 functions, ~20K tokens), the scan adds ~1ms. Negligible.
+
+SAVINGS: ~1.5KB on hello-world with 8 stdlib includes (unused stdlib functions
+  replaced with 3-byte stubs). Larger programs with more unused library code
+  see proportionally more savings.
+'''
+
+[[entries]]
+name = "vcnt_expansion_and_overlap_fix"
+description = "VCNT expanded to 2048, fixed var_noffs/var_sizes overlap bug (v1.7.0)"
+category = "cyrius"
+content = '''
+BUG: var_noffs at 0x60000 [4096 bytes = 512 entries] and var_sizes at 0x60800
+  [4096 bytes = 512 entries] overlapped when VCNT > 256:
+    var_noffs[256] writes to 0x60000 + 256*8 = 0x60800 → overwrites var_sizes[0]
+  This was introduced in v1.5.2 when expanding from 256 to 512 entries.
+  Worked by luck because most programs had < 256 variables.
+
+FIX: Relocated to non-overlapping regions with 2048 entries each:
+    0x60000  var_noffs [16384]  2048 entries (16KB)
+    0x64000  var_sizes [16384]  2048 entries (16KB)
+    0x68000  str_data  [8192]   string literals (8KB)
+
+IMPACT: agnostik port (12 modules, ~500 variables + ~200 enum variants)
+  now fits comfortably. Previous 512 limit hit at ~60% through modules.
+
+VCNT STILL NEVER RESETS: Each function's locals, params, and arrays permanently
+  consume slots. With 2048 slots, practical programs can have ~1500 variables
+  + ~500 enum variants. Full fix (stack-local allocation, enum constants without
+  VCNT) deferred.
+'''
+
+[[entries]]
+name = "constant_folding"
+description = "Constant folding: codegen-level NUM OP NUM → single EMOVI (v1.7.3)"
+category = "cyrius"
+content = '''
+MECHANISM:
+  PARSE_FACTOR sets _cfp (codebuf position before EMOVI) and _cfo (flag) for
+  small positive literals (0 < v < 0x80000000 → 5-byte mov eax, imm32).
+
+  PARSE_TERM checks: if _cfo == 1 AND next token is NUM AND result is also
+  small positive, rewind SCP to _cfp and emit EMOVI(folded_result).
+  The rewind replaces exactly 5 bytes with 5 bytes — no code corruption.
+
+OPERATORS: * / << >> (high-precedence, in PARSE_TERM while loop).
+  Low-precedence (+, -, &, |, ^) NOT folded (would require PARSE_EXPR changes).
+
+CRITICAL BUG (found during 4 failed attempts):
+  _cfo flag leaked from inside parenthesized subexpressions.
+  (n - 6) * 8 would fold 6 * 8 = 48 instead of (n-6) * 8.
+  The 6 inside (n - 6) set _cfo = 1, which persisted past the closing ).
+  FIX: clear _cfo after evaluating parenthesized expressions in PARSE_FACTOR.
+
+SAFETY CONSTRAINTS:
+  - Both operands must be small positive (0 < v < 0x80000000)
+  - Result must also be small positive (fits in 5-byte EMOVI)
+  - Larger constants (like 1 << 56 = 10-byte movabs) are correctly skipped
+  - This prevents SCP rewind from overwriting subsequent code
+
+SELF-HOSTING: cc3 == cc4 == cc5 == cc6 (all 140KB, identical binaries).
+  The compiler source has no NUM * NUM patterns, so no folding occurs during
+  self-compilation. User programs benefit from the optimization.
+'''
+
+[[entries]]
+name = "tail_call_optimization"
+description = "Tail call optimization: return fn(args) → epilogue + jmp (v1.7.2)"
+category = "cyrius"
+content = '''
+DETECTION (in PARSE_RETURN):
+  1. Check GINFN(S) == 1 (inside a function)
+  2. Check PEEKT(S) == IDENT and next token is LPAREN
+  3. Scan forward to matching RPAREN, verify next token is SEMI
+  4. If all checks pass: this is a tail call
+
+EMIT:
+  1. Parse args normally (PARSE_CMP_EXPR for each, push to stack)
+  2. ECALLPOPS — pop args into registers (rdi, rsi, rdx, rcx, r8, r9)
+  3. ETAILJMP — emit epilogue (mov rsp, rbp; pop rbp) + jmp rel32 with fixup
+
+  fn ETAILJMP(S, fnidx) {
+    E3(S, 0xEC8948);  # mov rsp, rbp
+    EB(S, 0x5D);       # pop rbp
+    EB(S, 0xE9);       # jmp rel32
+    ... fixup entry (type 2) ...
+  }
+
+KEY VALIDATION: step 3 checks ) is followed by ; to avoid folding
+  return fn() + expr; (which is NOT a tail call).
+
+PERFORMANCE: 1 million recursive calls without stack overflow.
+  fn count(n) { if (n == 0) { return 42; } return count(n - 1); }
+  count(1000000) returns 42 (would segfault without TCO).
+'''
+
+[[entries]]
+name = "f64_transcendentals"
+description = "x87 FPU transcendental builtins: sin, cos, exp, ln, log2, exp2 (v1.7.8)"
+category = "cyrius"
+content = '''
+BUILTINS (20 total):
+  SSE2:  f64_add, f64_sub, f64_mul, f64_div (addsd/subsd/mulsd/divsd)
+         f64_from (cvtsi2sd), f64_to (cvttsd2si)
+         f64_eq/f64_lt/f64_gt (ucomisd + setcc)
+         f64_neg (xorpd 0; subsd), f64_sqrt (sqrtsd)
+  SSE4.1: f64_floor (roundsd mode 1), f64_ceil (roundsd mode 2)
+  Integer: f64_abs (AND 0x7FFFFFFFFFFFFFFF — clear sign bit)
+  x87 FPU: f64_sin (fsin), f64_cos (fcos)
+           f64_ln (fldln2; fxch; fyl2x)
+           f64_log2 (fld1; fxch; fyl2x)
+           f64_exp (fldl2e; fmulp; fld st0; frndint; fsub; fxch; f2xm1; fld1; faddp; fscale; fstp st1)
+           f64_exp2 (same as exp without fldl2e multiply)
+
+x87 BRIDGE:
+  SSE2 value is in rax (f64 bit pattern). x87 uses its own FPU stack.
+  Transfer: sub rsp,16; mov [rsp],rax; fld qword [rsp] → compute → fstp qword [rsp]; mov rax,[rsp]; add rsp,16
+  Emit helpers: EX87PUSH(S) and EX87POP(S) in emit.cyr.
+
+USAGE:
+  All f64 builtins take and return i64 (f64 bit pattern). Values are NOT floats
+  in the Cyrius type system — they are integers that happen to hold IEEE 754 bits.
+  var pi = 0x400921FB54442D18;   # pi as f64 bits
+  var s = f64_sin(pi);           # sin(pi) ≈ 0
+  var n = f64_to(s);             # convert to integer: 0
+  var x = f64_from(42);          # 42.0 as f64 bits
+  var r = f64_sqrt(x);           # sqrt(42.0)
+
+TOKEN ASSIGNMENTS:
+  62=f64_add 63=f64_sub 64=f64_mul 65=f64_div 66=f64_from 67=f64_to
+  68=f64_eq 69=f64_lt 70=f64_gt 71=f64_neg
+  79=f64_sqrt 80=f64_abs 81=f64_floor 82=f64_ceil
+  83=f64_sin 84=f64_cos 85=f64_exp 86=f64_ln 87=f64_log2 88=f64_exp2
+'''
+
+[[entries]]
+name = "identifier_deduplication"
+description = "LEXID deduplicates identifiers in tok_names to reduce buffer usage ~50% (v1.7.8)"
+category = "cyrius"
+content = '''
+PROBLEM:
+  Every identifier occurrence stored a NEW copy in tok_names (0x50000, 64KB).
+  The compiler source itself used ~65500 bytes — at the buffer limit.
+  Adding any new feature (functions, variables) would overflow.
+
+FIX:
+  After writing a new identifier to tok_names, LEXID scans backwards through
+  all previously stored identifiers. If an identical string is found, the new
+  entry is discarded (NPOS rewound) and the token value reuses the existing offset.
+
+  Key: reuses existing LEXID local variables (bl, go, c) to avoid adding new
+  unique identifiers to tok_names (chicken-and-egg: the dedup code itself must
+  fit within the old limit to compile).
+
+BUGS FOUND DURING IMPLEMENTATION:
+  1. Variable scope: 'c' declared inside while{if{}} was at scope depth 3,
+     invisible to dedup code at scope depth 1. Fix: declare 'c' at function level.
+  2. Return value clobber: reusing 'p' (LEXID's position parameter) as a loop
+     counter set p=0, causing the main LEX loop to restart from position 0
+     (infinite token generation). Fix: use 'dc' (declared inside dedup).
+  3. klen mismatch: after dedup changes 'ws' to a distant offset, klen = npos - ws
+     was a huge number (e.g., 60000). All keywords misidentified as IDENT.
+     Fix: compute klen BEFORE dedup modifies ws.
+
+BOOTSTRAP:
+  Required two-step bootstrap because the dedup code added ~30 bytes of identifier
+  occurrences, pushing past the 65500 limit:
+  1. Rename PARSE_CMP_EXPR → PCMPE (saves 90 bytes) → compiles with old cc2
+  2. Build dedup-enabled compiler → now has ~30000 bytes headroom
+  3. Future changes have plenty of room
+
+RESULT: tok_names usage dropped from ~65500 to ~30000 bytes for the compiler source.
+'''
+
+[[entries]]
+name = "jump_table_switch"
+description = "Dense switch statements use O(1) jump table instead of O(n) compare chain (v1.7.7)"
+category = "cyrius"
+content = '''
+HEURISTIC: Pre-scan case values. If case_count >= 4 AND (max - min + 1) <= 2 * count
+  AND range < 256 → use jump table. Otherwise use compare-and-branch chain.
+
+CODEGEN (x86_64):
+  # Setup: bounds check
+  push rax; mov rax, min; mov rcx, rax; pop rax   # rcx = min
+  sub rax, rcx                                      # rax = value - min (0-based)
+  push rax; mov rax, range; mov rcx, rax; pop rax  # rcx = range
+  cmp rax, rcx                                      # bounds check
+  ja default                                        # out of range
+
+  # Table lookup
+  lea rcx, [rip + table_offset]   # table base
+  movsxd rax, [rcx + rax*4]       # load 4-byte signed offset
+  add rax, rcx                     # absolute target
+  jmp rax                          # dispatch
+
+  # Table: (range+1) entries × 4 bytes, offsets from table base
+  # Patched as case bodies are parsed. Unmatched slots → default/end.
+
+TWO-PASS WITHIN SWITCH:
+  Pass 1: scan tokens to collect case values (min/max/count). No code emitted.
+  Pass 2: emit jump table or chain based on heuristic.
+  Token index saved/restored between passes.
+
+CASE BODY PATCHING:
+  Table entries start as 0. As each case body is parsed, its code offset is
+  written to table[val - min] as a 4-byte offset from table base. After all
+  cases, unpatched (0) entries are filled with the end/default offset.
 '''

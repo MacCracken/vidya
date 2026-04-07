@@ -14,16 +14,19 @@ No Rust, no LLVM, no Python. Just sh + Linux x86_64.
 Everything is a 64-bit integer. No floats, no separate types.
 Type annotations (var x: i64 = 42) are documentation only — no enforcement.
 
-The compiler (cc2) is 131KB, ~250 functions, 7 modules. It compiles itself
+The compiler (cc2) is 141KB, ~260 functions, 7 modules. It compiles itself
 byte-identical in ~11ms. The AGNOS kernel is written entirely in Cyrius.
 
 Build: sh bootstrap/bootstrap.sh (40ms)
 Compile: echo 'var x = 42;' | ./build/cc2 > prog && chmod +x prog
-Test: sh tests/compiler.sh   (212 compiler + 51 program tests)
+Test: sh tests/compiler.sh   (216 compiler + 51 program tests)
 
 Source: src/compiler.cyr (entry) + src/cc/*.cyr (modules)
-Version: 1.7.0 — 267 tests (216 compiler + 51 programs), 0 failures, self-hosting byte-identical
-Compiler: 131KB x86_64 (down from 136KB via EMOVI optimization)
+Version: 1.7.8 — 267 tests (216 compiler + 51 programs), 0 failures, self-hosting byte-identical
+Compiler: 162KB x86_64. Constant folding (all arithmetic ops), tail call optimization, DCE,
+512KB input buffer, 256 locals, jump tables for dense switches, identifier deduplication.
+f64 builtins: add/sub/mul/div/neg/from/to/eq/lt/gt/sqrt/abs/floor/ceil/sin/cos/exp/ln/log2/exp2.
+#derive(Serialize) for auto-generated JSON serialization. Fixup table: 4096 entries.
 '''
 
 [[entries]]
@@ -121,21 +124,22 @@ COMPILATION FLOW:
     9. FIXUP: patch variable/string/function addresses
     10. EMITELF: write ELF binary to stdout
 
-HEAP LAYOUT (S = brk base, v1.6):
+HEAP LAYOUT (S = brk base, v1.7.8):
     0x00000  input_buf [131072]
     0x20000  codebuf   [196608]
-    0x50000  tok_names [65536]
-    0x59000  struct_ftypes [4096]    (32*16 field type IDs)
-    0x60000  var_noffs [4096]        (512 entries, expanded from 256 in v1.5.2)
-    0x60800  var_sizes [4096]        (512 entries, expanded from 256 in v1.5.2)
-    0x62000  str_data  [30720]       (relocated from 0x61000 in v1.5.2)
+    0x50000  tok_names [65536]       (identifiers, dedup since v1.7.8, ~50% savings)
+    0x60000  var_noffs [16384]       (2048 entries)
+    0x64000  var_sizes [16384]       (2048 entries)
+    0x68000  str_data  [8192]
     0x69800  str_pos, data_size
     0x6A000  output_buf [131072]
+    0x8A000  struct_ftypes [4096]    (32*16 field type IDs)
     0x8C100  compiler state (BL, CP, VCNT, TI, NPOS, cur_line...)
     0x8DA00  fn_count, in_function, locals, ret_patches
     0x8DE30  struct tables (names, fcounts, fnames)
     0x8F830  loop/condition/scope state
     0x90000  preprocessor scratch
+    0x97000  derive state [1288]     (#derive struct sizes/names for nested offset calc)
     0xA2000  tok_types [524288]      (65536 slots)
     0x122000 tok_values [524288]
     0x1A2000 tok_lines [524288]      (line numbers per token)
@@ -220,9 +224,9 @@ CURRENT LIMITATIONS:
     table at 0x8FA98 has 64 slots). Use enums for large constant groups.
     Enums have separate init path and don't consume gvar_toks slots.
 
-16. VARIABLE TABLE LIMIT: Max 512 variables (VCNT never resets between
-    functions — arrays inside functions are globals). Exceeding 512 silently
-    corrupts string data. Was 256, expanded to 512 in v1.5.2.
+16. VARIABLE TABLE LIMIT: Max 2048 variables (VCNT never resets between
+    functions — arrays inside functions are globals). Was 256→512→2048.
+    Fixed overlap bug between var_noffs and var_sizes in v1.7.0.
 
 17. FUNCTION TABLE LIMIT: Max 1024 functions. Clear error at limit:
     "error: function table full (1024/1024)". Was 256→512→1024.
@@ -813,4 +817,136 @@ INPUT BUFFER EXPANSION (v1.7.0):
 CODEBUF OVERFLOW CHECK (v1.7.0):
     # EB() checks cp >= 196608 and errors cleanly:
     # "error: codebuf overflow (N/196608 bytes) — program too large"
+
+DEAD CODE ELIMINATION (v1.7.0):
+    # Unreachable functions get 3-byte stub (xor eax,eax; ret) instead of full body.
+    # Scan: after pass 1, check every IDENT token (not preceded by FN keyword)
+    # against function names via STREQ string comparison.
+    # Skips: module-scoped functions and names containing underscore (mangled).
+    # Stubs give fixup entries valid targets — no segfaults.
+    # Savings: ~1.5KB on hello-world with 8 stdlib includes.
+
+VCNT EXPANSION (v1.7.0):
+    # Variable table expanded from 512 to 2048 entries.
+    # Fixed overlap bug: var_noffs at 0x60000 and var_sizes at 0x60800 overlapped
+    # when VCNT > 256 (var_noffs[256+] wrote into var_sizes[0+]).
+    # Relocated: var_sizes to 0x64000, str_data to 0x68000.
+    # 500 enum variants + 1500 variables now fit comfortably.
+
+TWO-PASS IFDEF (v1.7.0):
+    # PP_IFDEF_PASS: evaluates #ifdef/#define/#endif in already-included content
+    # without re-expanding includes. Fixes: #ifdef inside included files that was
+    # previously passed through as raw text.
+    # Pass 1: PP_PASS (includes + top-level ifdef)
+    # Pass 2: PP_IFDEF_PASS (ifdef + include in included content)
+    # Pass 3: PP_MACRO_PASS (macro expansion)
+
+PP_IFDEF_PASS WITH INCLUDES (v1.7.1):
+    # PP_IFDEF_PASS now handles include directives (not just ifdef/define/endif).
+    # This fixes: #ifdef LINUX include "syscalls_linux.cyr" #endif inside included files.
+    # Previously: PP_IFDEF_PASS only evaluated conditionals, passing include lines through
+    # as raw text → lexer couldn't parse them → "unexpected" errors.
+    # Fix: added same include expansion code as PP_PASS to PP_IFDEF_PASS.
+    #
+    # Three-pass preprocessor:
+    #   Pass 1 (PP_PASS): expand top-level includes, evaluate top-level ifdef/define
+    #   Pass 2 (PP_IFDEF_PASS): evaluate ifdef/define AND expand includes in included content
+    #   Pass 3 (PP_MACRO_PASS): expand #define NAME(params) macros
+    #
+    # Verified on:
+    #   AGNOS kernel: 97KB, 25 syscalls, 3562 lines, 30+ includes with nested ifdef
+    #   agnostik: 84KB, 12 modules, 815 functions, 58 tests passing
+    #   agnosys: 62KB, 14 modules, 20 ported from 29K lines of Rust
+
+TAIL CALL OPTIMIZATION (v1.7.2):
+    # return fn(args); → epilogue + jmp fn (instead of call + ret)
+    # Detects pattern: RETURN IDENT LPAREN ... RPAREN SEMI
+    # Verifies closing ) is followed by ; (not + expr — catches return a() + b)
+    # Epilogue: mov rsp, rbp; pop rbp; jmp rel32 (with fixup)
+    # 1 million recursive calls without stack overflow.
+    # Does NOT apply to: return a() + b; or return expr == expr;
+
+INPUT BUFFER EXPANSION (v1.7.2):
+    # Preprocessor output buffer enlarged from 256KB to 512KB (0x222000).
+    # Lexer reads directly from preprocess buffer — no copy-back to S+0.
+    # Three-pass double-buffer: PP_PASS → 0x222000, PP_IFDEF_PASS → S+0, PP_MACRO_PASS → 0x222000.
+    # Fixup/fn tables relocated: 0x262000→0x2A2000, 0x26A000→0x2AA000, etc.
+    # brk: 0x270000 → 0x2B0000.
+    # Unblocks adding more compiler features (was at 162KB of 256KB limit).
+
+CONSTANT FOLDING (v1.7.3):
+    # Codegen-level fold: NUM OP NUM → single EMOVI at parse time.
+    # Operators: * / << >> (high precedence in PARSE_TERM).
+    # Safety constraint: both operands AND result must be small positive
+    # (0 < v < 0x80000000) to guarantee same 5-byte EMOVI size.
+    # Larger constants (like 1 << 56) are correctly skipped.
+    #
+    # Mechanism: PARSE_FACTOR sets _cfp = GCP (codebuf position before EMOVI).
+    # When PARSE_TERM sees NUM OP NUM, it rewinds SCP to _cfp and emits
+    # EMOVI(folded_result) — replacing the left operand's 5-byte EMOVI in-place.
+    #
+    # Critical bug fix: _cfo flag must be cleared after parenthesized expressions.
+    # Without this, (n - 6) * 8 would fold 6 * 8 = 48 instead of (n-6) * 8.
+    # The 6 inside parens set _cfo=1 which leaked to the outer * operator.
+    #
+    # Self-hosting verified: cc3 == cc4 == cc5 == cc6 (all identical, 140KB).
+
+AARCH64 FIXUP BUG (v1.7.2):
+    # aarch64/emit.cyr had 3 stale references to old fixup table offset (0x262000).
+    # RECFIX, ESADDR, ECALLFIX wrote fixup entries to dead memory.
+    # Variable addresses were never patched → ldr x0, [x1=0] → segfault.
+    # All 26 CI aarch64 tests were failing. Fixed by updating to 0x2A2000.
+
+256 LOCALS PER FUNCTION (v1.7.4):
+    # fn_local_names relocated from 0x8DC30 to 0x91000 with 256 entries (was 64).
+    # 65th local previously overflowed into var_types. Also tightened constant
+    # folding range to 0x10000 for aarch64 EMOVI size safety.
+
+AARCH64 TAIL CALLS (v1.7.5):
+    # ETAILJMP added to aarch64/emit.cyr: mov sp, x29; ldp x29, x30, [sp], #16;
+    # B rel26 with fixup type 4 (B not BL — no link register update).
+
+TOK_NAMES/STRUCT_FTYPES OVERLAP FIX (v1.7.5):
+    # struct_ftypes was at 0x59000 INSIDE tok_names buffer (0x50000-0x60000).
+    # When programs had >36864 bytes of identifier data, identifiers stored in
+    # struct_ftypes space were zeroed by struct operations. FINDVAR failed silently.
+    # Fix: relocated struct_ftypes to 0x8A000 (free space after output_buf).
+    #
+    # Also expanded fixup table 2048→4096 entries. Added overflow checks to
+    # ESADDR, ECALLFIX, ETAILJMP, &fn handler (previously only RECFIX checked).
+    # fn_names/offsets/params relocated to 0x2B2000/0x2B4000/0x2B6000. brk 0x2B8000.
+
+CONSTANT FOLDING + - & | ^ (v1.7.7):
+    # Extended constant folding from * / << >> to all arithmetic operators.
+    # Precedence-safe: checks right operand isn't followed by higher-precedence op.
+    # Fixed _cfo leak from function call arguments and non-folding PARSE_TERM operations.
+
+JUMP TABLES FOR DENSE SWITCHES (v1.7.7):
+    # Pre-scans case values. If >=4 cases and range <= 2*count: O(1) indirect jump.
+    # lea rcx,[rip+table]; movsxd rax,[rcx+rax*4]; add rax,rcx; jmp rax
+    # Table entries are 4-byte signed offsets from table base, patched per case body.
+    # Unmatched entries jump to default/end. Sparse switches still use compare chain.
+
+DERIVE SERIALIZE (v1.7.7):
+    # #derive(Serialize) before a struct auto-generates Name_to_json(ptr, sb).
+    # Preprocessor-level text expansion — generated function goes through normal parsing.
+    # Supports nested structs (inner #derive must come first for offset calculation).
+    # Output: {"field1":val,"field2":val} via str_builder_add_cstr/str_builder_add_int.
+
+F64 BUILTINS (v1.7.7 + v1.7.8):
+    # v1.7.7: f64_sqrt (SSE2 sqrtsd), f64_abs (integer AND 0x7FFF...),
+    #         f64_floor/f64_ceil (SSE4.1 roundsd mode 1/2)
+    # v1.7.8: f64_sin/f64_cos (x87 fsin/fcos), f64_ln (fldln2; fyl2x),
+    #         f64_log2 (fld1; fyl2x), f64_exp (fldl2e; fmulp; f2xm1; fscale),
+    #         f64_exp2 (f2xm1; fscale)
+    # x87 bridge: rax→sub rsp,16; mov [rsp],rax; fld [rsp] → compute → fstp [rsp]; mov rax,[rsp]
+    # Total f64 builtins: 20 (add/sub/mul/div/neg/from/to/eq/lt/gt + sqrt/abs/floor/ceil + sin/cos/exp/ln/log2/exp2)
+
+IDENTIFIER DEDUPLICATION (v1.7.8):
+    # LEXID scans tok_names for existing identical string before storing new one.
+    # Reduces tok_names usage ~50% (compiler source: 65500→~30000 bytes).
+    # Reuses LEXID locals (bl, go, c) — zero new unique identifiers in the source.
+    # Required two-step bootstrap: rename PARSE_CMP_EXPR→PCMPE to fit under old limit.
+    # Bug found: variable 'c' declared inside while scope was invisible to dedup code.
+    # Bug found: reusing 'p' (return value) as loop counter reset lexer to position 0.
 '''

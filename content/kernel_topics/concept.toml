@@ -116,17 +116,33 @@ title = "MMIO is uncacheable — every access hits the bus"
 explanation = "MMIO regions are mapped as uncacheable (UC). Each read/write goes to the device, taking hundreds of nanoseconds. Batch operations and minimize MMIO round-trips."
 evidence = "MMIO register read: ~100-500ns. Cached memory read: ~1-4ns. 100x difference."
 
+[[best_practices]]
+title = "Use arch abstraction functions instead of inline asm in shared code"
+explanation = "Shared kernel code (VFS, syscall dispatch, shell) should never contain architecture-specific asm. Use arch_wait() and arch_halt() wrappers that each arch implements differently (x86: hlt/cli, aarch64: wfi). The aarch64 compiler validates asm mnemonics and rejects x86 instructions — this is actually good, it forces clean separation."
+
+[[best_practices]]
+title = "Factor signalfd/timerfd read into separate functions"
+explanation = "Complex VFS read handlers for special file types (signalfd, epoll, timerfd) should be in their own functions, not inline in the vfs_read switch. This avoids deep nesting, keeps each handler testable, and works around compiler limitations with complex expressions in nested blocks."
+
+[[gotchas]]
+title = "Cyrius ~ (bitwise NOT) in kernel mode requires care"
+explanation = "The ~ operator works in simple expressions but can produce 'unexpected unknown' in complex nested expressions within large if-chains. Workaround: use two's complement (0 - 1 - x) instead of ~x, or factor the expression into a local variable."
+
+[[gotchas]]
+title = "Global variable initializers don't persist in kernel mode"
+explanation = "var cpu_count = 1 may read as garbage at runtime. The kernel BSS may not be zeroed. Always explicitly initialize globals in a boot function."
+
 [[performance_notes]]
 title = "Sub-microsecond syscall dispatch in bare-metal kernel"
-explanation = "A minimal syscall dispatcher (switch on syscall number, direct function call) achieves ~306 cycles per syscall on QEMU-emulated x86_64. The overhead is dominated by the SYSCALL instruction itself (~100 cycles) plus function call overhead. No vDSO or fastpath needed at this scale."
-evidence = "AGNOS getpid syscall: 306 cycles/op. Linux getpid: ~100-200 cycles native, ~500+ in VM."
+explanation = "A minimal syscall dispatcher (switch on syscall number, direct function call) achieves ~188 cycles per syscall on QEMU-emulated x86_64. The overhead is dominated by the SYSCALL instruction itself (~100 cycles) plus function call overhead. No vDSO or fastpath needed at this scale."
+evidence = "AGNOS getpid syscall: 188 cycles/op (v1.1.0). Linux getpid: ~100-200 cycles native, ~500+ in VM."
 
 [[performance_notes]]
 title = "Slab allocator achieves microsecond-level alloc/free"
-explanation = "A simple slab allocator with 8 size classes (32-4096B) and free-list-per-class achieves ~2,565 cycles per alloc+free pair. The key optimization: pop from free list (O(1)), zero only requested bytes (not full slab block)."
-evidence = "AGNOS kmalloc(64)+kfree: 2,565 cycles. PMM page alloc+free: 2,041 cycles with next-free hint."
+explanation = "A simple slab allocator with 8 size classes (32-4096B) and free-list-per-class achieves ~1,207 cycles per alloc+free pair for 32B allocations. Larger sizes scale: 256B at 3,015 cycles, 4096B at 26,077 cycles. The key optimization: pop from free list (O(1)), zero only requested bytes (not full slab block)."
+evidence = "AGNOS v1.1.0: heap_32B 1,207cy, heap_256B 3,015cy, heap_4096B 26,077cy. PMM page alloc+free: 1,304 cycles with next-free hint."
 
 [[performance_notes]]
 title = "PMM next-free hint eliminates linear scan"
 explanation = "A bitmap PMM that scans from page 0 on every allocation is O(n) where n = total pages. Adding a 'next_free' hint that advances on alloc and retracts on free makes sequential allocations O(1). Only falls back to full scan on fragmentation."
-evidence = "AGNOS PMM: 2,041 cycles/alloc+free with hint vs ~4000+ without (scanning 512 used pages)."
+evidence = "AGNOS PMM: 1,304 cycles/alloc+free with hint (v1.1.0) vs ~4000+ without (scanning 512 used pages)."

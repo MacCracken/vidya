@@ -78,6 +78,58 @@ fn vfs_entry_size() { return 32; }
 fn initrd_magic() { return 0x52444E49; }
 fn initrd_entry_size() { return 32; }
 
+# === VFS file type constants (v1.1.0) ===
+# Types: 0=unused, 1=device, 2=memfile, 3=signalfd, 4=epoll, 5=timerfd
+fn vfs_type_device() { return 1; }
+fn vfs_type_memfile() { return 2; }
+fn vfs_type_signalfd() { return 3; }
+fn vfs_type_epoll() { return 4; }
+fn vfs_type_timerfd() { return 5; }
+
+# === Syscall dispatch pattern ===
+# Large if-chain dispatcher — each syscall number maps to a handler
+fn syscall_dispatch(num, a1, a2, a3) {
+    if (num == 0) { return 0; }          # exit
+    if (num == 1) { return a2; }         # write (return count)
+    if (num == 2) { return 42; }         # getpid
+    if (num == 3) { return 0; }          # spawn
+    if (num == 4) { return 0; }          # waitpid
+    if (num == 5) { return a2; }         # read (return count)
+    if (num == 6) { return 0; }          # close
+    if (num == 7) { return 3; }          # open (return fd)
+    return 0 - 1;                        # unknown syscall
+}
+
+# === Signal mask operations ===
+fn sig_set(mask, signum) { return mask | (1 << signum); }
+fn sig_clear(mask, signum) {
+    # Use two's complement instead of ~ for kernel safety
+    var bit = 1 << signum;
+    var inv = 0 - 1 - bit;
+    return mask & inv;
+}
+fn sig_test(mask, signum) { return (mask >> signum) & 1; }
+
+# === Arch abstraction pattern ===
+# Shared code calls these; each arch implements differently
+# x86_64: arch_wait = hlt, arch_halt = cli; hlt
+# aarch64: arch_wait = wfi, arch_halt = wfi (with interrupts masked)
+fn arch_wait_sim() { return 0; }   # simulated — real version uses asm
+fn arch_halt_sim() { return 0; }   # simulated — real version uses asm
+
+# === 3-tier benchmark pattern with rdtsc ===
+# Tier 1: Micro (single operation, <1000 cycles)
+#   e.g., syscall_getpid 188cy, syscall_getuid 726cy
+# Tier 2: Meso (alloc/free pair, 1000-10000 cycles)
+#   e.g., pmm_alloc_free 1304cy, heap_32B 1207cy, heap_256B 3015cy
+# Tier 3: Macro (multi-operation, >5000 cycles)
+#   e.g., serial_putc 7510cy, vfs_open_read_close 5912cy, heap_4096B 26077cy
+fn bench_tier(cycles) {
+    if (cycles < 1000) { return 1; }
+    if (cycles < 5000) { return 2; }
+    return 3;
+}
+
 # === Tests ===
 
 fn test_pte() {
@@ -134,6 +186,42 @@ fn test_initrd() {
     return 0;
 }
 
+fn test_vfs_types() {
+    assert_eq(vfs_type_device(), 1, "vfs device");
+    assert_eq(vfs_type_memfile(), 2, "vfs memfile");
+    assert_eq(vfs_type_signalfd(), 3, "vfs signalfd");
+    assert_eq(vfs_type_epoll(), 4, "vfs epoll");
+    assert_eq(vfs_type_timerfd(), 5, "vfs timerfd");
+    return 0;
+}
+
+fn test_syscall_dispatch() {
+    assert_eq(syscall_dispatch(2, 0, 0, 0), 42, "getpid");
+    assert_eq(syscall_dispatch(7, 0, 0, 0), 3, "open returns fd");
+    assert_eq(syscall_dispatch(99, 0, 0, 0), 0 - 1, "unknown syscall");
+    return 0;
+}
+
+fn test_signal_mask() {
+    var mask = 0;
+    mask = sig_set(mask, 2);
+    assert_eq(sig_test(mask, 2), 1, "sig 2 set");
+    assert_eq(sig_test(mask, 3), 0, "sig 3 not set");
+    mask = sig_set(mask, 5);
+    assert_eq(sig_test(mask, 5), 1, "sig 5 set");
+    mask = sig_clear(mask, 2);
+    assert_eq(sig_test(mask, 2), 0, "sig 2 cleared");
+    assert_eq(sig_test(mask, 5), 1, "sig 5 still set");
+    return 0;
+}
+
+fn test_bench_tier() {
+    assert_eq(bench_tier(188), 1, "micro tier");
+    assert_eq(bench_tier(1304), 2, "meso tier");
+    assert_eq(bench_tier(7510), 3, "macro tier");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_pte();
@@ -142,6 +230,10 @@ fn main() {
     test_syscall_msrs();
     test_proc_layout();
     test_initrd();
+    test_vfs_types();
+    test_syscall_dispatch();
+    test_signal_mask();
+    test_bench_tier();
     return assert_summary();
 }
 var exit_code = main();
