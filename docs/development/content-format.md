@@ -115,7 +115,7 @@ fn main() { }                     ← stops here
 ### OpenQASM Notes
 
 - Use `OPENQASM 2.0` (not 3.0)
-- Include `qelib1.inc` from the content directory
+- Include `qelib1.inc` — the standard gate library lives at `content/qelib1.inc` (the loader ignores non-directory entries, so it does not appear as a topic)
 - Do NOT use `swap` or `cp` gates directly — the qiskit parser doesn't support them. Decompose:
   - `swap a, b` → `cx a,b; cx b,a; cx a,b;`
   - `cp(θ) a, b` → `cu1(θ) a, b;`
