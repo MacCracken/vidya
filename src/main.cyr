@@ -1,18 +1,1042 @@
-# vidya — Cyrius port
-# Ported from 2396 lines of Rust
+# vidya — programming reference library and queryable corpus
+# Ported from 2396 lines of Rust to Cyrius
+#
+# Usage:
+#   vidya list                       — list all topics
+#   vidya search <query>             — full-text search
+#   vidya info <topic>               — show concept details
+#   vidya languages                  — list supported languages
+#   vidya compare <topic> <l1> <l2>  — compare implementations
+#   vidya validate [topic]           — compile/run examples
+#   vidya stats                      — corpus statistics
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
 include "lib/alloc.cyr"
 include "lib/vec.cyr"
 include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/args.cyr"
+include "lib/hashmap.cyr"
+include "lib/toml.cyr"
+include "lib/regex.cyr"
 include "lib/syscalls.cyr"
 
-fn main() {
-    alloc_init();
-    println("vidya ready");
+# Sakshi — stubbed for now (global variable overflow causes argv corruption)
+# TODO: integrate when sakshi supports vendored lib/ layout
+fn sakshi_error(msg, msg_len) { syscall(1, 2, msg, msg_len); syscall(1, 2, "\n", 1); return 0; }
+fn sakshi_warn(msg, msg_len) { return 0; }
+fn sakshi_info(msg, msg_len) { return 0; }
+fn sakshi_debug(msg, msg_len) { return 0; }
+fn sakshi_trace(msg, msg_len) { return 0; }
+fn sakshi_span_enter(name, name_len) { return 0; }
+fn sakshi_span_exit() { return 0; }
+
+# ================================================================
+# Language enum (constants)
+# ================================================================
+
+enum Lang {
+    RUST = 0;
+    PYTHON = 1;
+    C_LANG = 2;
+    GO = 3;
+    TYPESCRIPT = 4;
+    SHELL = 5;
+    ZIG = 6;
+    ASM_X86_64 = 7;
+    ASM_AARCH64 = 8;
+    OPENQASM = 9;
+    CYRIUS = 10;
+    LANG_COUNT = 11;
+}
+
+fn lang_extension(lang) {
+    if (lang == RUST) { return "rs"; }
+    if (lang == PYTHON) { return "py"; }
+    if (lang == C_LANG) { return "c"; }
+    if (lang == GO) { return "go"; }
+    if (lang == TYPESCRIPT) { return "ts"; }
+    if (lang == SHELL) { return "sh"; }
+    if (lang == ZIG) { return "zig"; }
+    if (lang == ASM_X86_64) { return "s"; }
+    if (lang == ASM_AARCH64) { return "s"; }
+    if (lang == OPENQASM) { return "qasm"; }
+    if (lang == CYRIUS) { return "cyr"; }
+    return "";
+}
+
+fn lang_stem(lang) {
+    if (lang == RUST) { return "rust"; }
+    if (lang == PYTHON) { return "python"; }
+    if (lang == C_LANG) { return "c"; }
+    if (lang == GO) { return "go"; }
+    if (lang == TYPESCRIPT) { return "typescript"; }
+    if (lang == SHELL) { return "shell"; }
+    if (lang == ZIG) { return "zig"; }
+    if (lang == ASM_X86_64) { return "asm_x86_64"; }
+    if (lang == ASM_AARCH64) { return "asm_aarch64"; }
+    if (lang == OPENQASM) { return "openqasm"; }
+    if (lang == CYRIUS) { return "cyrius"; }
+    return "";
+}
+
+fn lang_name(lang) {
+    if (lang == RUST) { return "Rust"; }
+    if (lang == PYTHON) { return "Python"; }
+    if (lang == C_LANG) { return "C"; }
+    if (lang == GO) { return "Go"; }
+    if (lang == TYPESCRIPT) { return "TypeScript"; }
+    if (lang == SHELL) { return "Shell"; }
+    if (lang == ZIG) { return "Zig"; }
+    if (lang == ASM_X86_64) { return "x86_64 Assembly"; }
+    if (lang == ASM_AARCH64) { return "AArch64 Assembly"; }
+    if (lang == OPENQASM) { return "OpenQASM"; }
+    if (lang == CYRIUS) { return "Cyrius"; }
+    return "Unknown";
+}
+
+fn lang_comment(lang) {
+    if (lang == RUST) { return "//"; }
+    if (lang == PYTHON) { return "#"; }
+    if (lang == C_LANG) { return "//"; }
+    if (lang == GO) { return "//"; }
+    if (lang == TYPESCRIPT) { return "//"; }
+    if (lang == SHELL) { return "#"; }
+    if (lang == ZIG) { return "//"; }
+    if (lang == ASM_X86_64) { return "#"; }
+    if (lang == ASM_AARCH64) { return "#"; }
+    if (lang == OPENQASM) { return "//"; }
+    if (lang == CYRIUS) { return "#"; }
+    return "#";
+}
+
+# Parse language from string (case-insensitive match on name/ext/alias)
+fn lang_parse(s) {
+    if (streq(s, "rust") == 1 || streq(s, "rs") == 1) { return RUST; }
+    if (streq(s, "python") == 1 || streq(s, "py") == 1) { return PYTHON; }
+    if (streq(s, "c") == 1) { return C_LANG; }
+    if (streq(s, "go") == 1 || streq(s, "golang") == 1) { return GO; }
+    if (streq(s, "typescript") == 1 || streq(s, "ts") == 1) { return TYPESCRIPT; }
+    if (streq(s, "shell") == 1 || streq(s, "sh") == 1 || streq(s, "bash") == 1) { return SHELL; }
+    if (streq(s, "zig") == 1) { return ZIG; }
+    if (streq(s, "asm_x86_64") == 1 || streq(s, "x86_64") == 1 || streq(s, "x86") == 1) { return ASM_X86_64; }
+    if (streq(s, "asm_aarch64") == 1 || streq(s, "aarch64") == 1 || streq(s, "arm64") == 1) { return ASM_AARCH64; }
+    if (streq(s, "openqasm") == 1 || streq(s, "qasm") == 1) { return OPENQASM; }
+    if (streq(s, "cyrius") == 1 || streq(s, "cyr") == 1) { return CYRIUS; }
+    return 0 - 1;
+}
+
+# Build filename for a language: stem.extension
+fn lang_filename(lang) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, lang_stem(lang));
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_cstr(sb, lang_extension(lang));
+    return str_builder_build(sb);
+}
+
+# ================================================================
+# Concept — enriched data type
+# ================================================================
+# Layout: { id, title, topic, description, tags, best_practices,
+#            gotchas, perf_notes, examples }
+# 9 fields x 8 bytes = 72 bytes
+
+fn concept_new() {
+    var c = alloc(72);
+    store64(c, 0);       # id: Str
+    store64(c + 8, 0);   # title: Str
+    store64(c + 16, 0);  # topic: Str
+    store64(c + 24, 0);  # description: Str
+    store64(c + 32, 0);  # tags: vec of Str
+    store64(c + 40, 0);  # best_practices: vec of ptrs
+    store64(c + 48, 0);  # gotchas: vec of ptrs
+    store64(c + 56, 0);  # perf_notes: vec of ptrs
+    store64(c + 64, 0);  # examples: vec of ptrs (indexed by lang)
+    return c;
+}
+
+fn concept_id(c) { return load64(c); }
+fn concept_title(c) { return load64(c + 8); }
+fn concept_topic(c) { return load64(c + 16); }
+fn concept_desc(c) { return load64(c + 24); }
+fn concept_tags(c) { return load64(c + 32); }
+fn concept_best_practices(c) { return load64(c + 40); }
+fn concept_gotchas(c) { return load64(c + 48); }
+fn concept_perf_notes(c) { return load64(c + 56); }
+fn concept_examples(c) { return load64(c + 64); }
+
+# ================================================================
+# BestPractice: { title, explanation, language }
+# ================================================================
+
+fn bp_new(title, explanation, lang) {
+    var bp = alloc(24);
+    store64(bp, title);
+    store64(bp + 8, explanation);
+    store64(bp + 16, lang);
+    return bp;
+}
+
+fn bp_title(bp) { return load64(bp); }
+fn bp_explanation(bp) { return load64(bp + 8); }
+fn bp_language(bp) { return load64(bp + 16); }
+
+# ================================================================
+# Gotcha: { title, explanation, bad_example, good_example, language }
+# ================================================================
+
+fn gotcha_new(title, explanation, bad, good, lang) {
+    var g = alloc(40);
+    store64(g, title);
+    store64(g + 8, explanation);
+    store64(g + 16, bad);
+    store64(g + 24, good);
+    store64(g + 32, lang);
+    return g;
+}
+
+fn gotcha_title(g) { return load64(g); }
+fn gotcha_explanation(g) { return load64(g + 8); }
+fn gotcha_bad(g) { return load64(g + 16); }
+fn gotcha_good(g) { return load64(g + 24); }
+fn gotcha_language(g) { return load64(g + 32); }
+
+# ================================================================
+# PerformanceNote: { title, explanation, evidence, language }
+# ================================================================
+
+fn perf_new(title, explanation, evidence, lang) {
+    var p = alloc(32);
+    store64(p, title);
+    store64(p + 8, explanation);
+    store64(p + 16, evidence);
+    store64(p + 24, lang);
+    return p;
+}
+
+fn perf_title(p) { return load64(p); }
+fn perf_explanation(p) { return load64(p + 8); }
+fn perf_evidence(p) { return load64(p + 16); }
+fn perf_language(p) { return load64(p + 24); }
+
+# ================================================================
+# Example: { language_id, code, explanation, source_path }
+# ================================================================
+
+fn example_new(lang, code, explanation, path) {
+    var e = alloc(32);
+    store64(e, lang);
+    store64(e + 8, code);
+    store64(e + 16, explanation);
+    store64(e + 24, path);
+    return e;
+}
+
+fn example_lang(e) { return load64(e); }
+fn example_code(e) { return load64(e + 8); }
+fn example_explanation(e) { return load64(e + 16); }
+fn example_path(e) { return load64(e + 24); }
+
+# ================================================================
+# Registry — indexed concept store
+# ================================================================
+
+var _reg_entries = 0;   # vec of concept ptrs
+var _reg_index = 0;     # hashmap: id -> concept ptr
+var _content_dir = 0;   # Str path to content/
+
+fn reg_init() {
+    _reg_entries = vec_new();
+    _reg_index = map_new();
+    _content_dir = str_from("content");
     return 0;
 }
 
-var r = main();
-syscall(SYS_EXIT, r);
+# Convert Str to null-terminated C string (for hashmap keys)
+fn to_cstr(s) {
+    if (s == 0) { return ""; }
+    var len = str_len(s);
+    var buf = alloc(len + 1);
+    memcpy(buf, str_data(s), len);
+    store8(buf + len, 0);
+    return buf;
+}
+
+fn reg_add(concept) {
+    vec_push(_reg_entries, concept);
+    var id = concept_id(concept);
+    if (id != 0) {
+        var cid = to_cstr(id);
+        map_set(_reg_index, cid, concept);
+        sakshi_debug(cid, strlen(cid));
+    }
+    return 0;
+}
+
+fn reg_get(id) {
+    return map_get(_reg_index, id);
+}
+
+fn reg_count() {
+    return vec_len(_reg_entries);
+}
+
+fn reg_list() {
+    return _reg_entries;
+}
+
+# ================================================================
+# Extract explanation from leading comments
+# ================================================================
+
+fn extract_explanation(code, prefix) {
+    var sb = str_builder_new();
+    var data = str_data(code);
+    var slen = str_len(code);
+    var plen = strlen(prefix);
+    var pos = 0;
+    var line_count = 0;
+    var in_header = 1;
+
+    while (pos < slen && in_header == 1) {
+        # Find end of line
+        var lstart = pos;
+        while (pos < slen && load8(data + pos) != 10) { pos = pos + 1; }
+        var lend = pos;
+        if (pos < slen) { pos = pos + 1; }
+
+        # Skip shebang
+        if (line_count == 0 && lend - lstart >= 2) {
+            if (load8(data + lstart) == 35 && load8(data + lstart + 1) == 33) {
+                line_count = line_count + 1;
+                continue;
+            }
+        }
+
+        # Trim leading whitespace
+        var tstart = lstart;
+        while (tstart < lend && load8(data + tstart) == 32) { tstart = tstart + 1; }
+        var tlen = lend - tstart;
+
+        # Empty line in header — preserve as blank
+        if (tlen == 0) {
+            if (line_count > 0) {
+                str_builder_add_cstr(sb, "\n");
+            }
+            line_count = line_count + 1;
+            continue;
+        }
+
+        # Check for comment prefix
+        if (tlen >= plen && memeq(data + tstart, prefix, plen) == 1) {
+            # Strip prefix and optional leading space
+            var cstart = tstart + plen;
+            if (cstart < lend && load8(data + cstart) == 32) { cstart = cstart + 1; }
+            if (line_count > 0) { str_builder_add_cstr(sb, "\n"); }
+            str_builder_add(sb, str_new(data + cstart, lend - cstart));
+            line_count = line_count + 1;
+        } else {
+            in_header = 0;
+        }
+    }
+    return str_builder_build(sb);
+}
+
+# ================================================================
+# Loader — parse concept.toml + discover language files
+# ================================================================
+
+fn load_concept(topic_dir) {
+    var toml_path = path_join(topic_dir, str_from("concept.toml"));
+    if (file_exists(str_data(toml_path)) == 0) { return 0; }
+
+    var sections = toml_parse_file(str_data(toml_path));
+    if (vec_len(sections) == 0) { return 0; }
+
+    var concept = concept_new();
+
+    # Parse top-level fields
+    var top = vec_get(sections, 0);
+    var pairs = toml_section_pairs(top);
+
+    var id = toml_get(pairs, str_from("id"));
+    var title = toml_get(pairs, str_from("title"));
+    var topic = toml_get(pairs, str_from("topic"));
+    var desc = toml_get(pairs, str_from("description"));
+
+    store64(concept, id);
+    store64(concept + 8, title);
+    store64(concept + 16, topic);
+    store64(concept + 24, desc);
+
+    # Parse tags (comma-separated in TOML array — toml.cyr gives us the raw value)
+    var tags_raw = toml_get(pairs, str_from("tags"));
+    var tags = vec_new();
+    if (tags_raw != 0) {
+        # Tags come as ["tag1", "tag2"] — parse the bracket content
+        var td = str_data(tags_raw);
+        var tl = str_len(tags_raw);
+        var ti = 0;
+        while (ti < tl) {
+            var tc = load8(td + ti);
+            if (tc == 34) {
+                # Opening quote — find closing
+                ti = ti + 1;
+                var ts = ti;
+                while (ti < tl && load8(td + ti) != 34) { ti = ti + 1; }
+                vec_push(tags, str_new(td + ts, ti - ts));
+                if (ti < tl) { ti = ti + 1; }
+            } else {
+                ti = ti + 1;
+            }
+        }
+    }
+    store64(concept + 32, tags);
+
+    # Parse [[best_practices]]
+    var bps = vec_new();
+    var bp_sections = toml_get_sections(sections, str_from("best_practices"));
+    var bi = 0;
+    while (bi < vec_len(bp_sections)) {
+        var bsec = vec_get(bp_sections, bi);
+        var bpairs = toml_section_pairs(bsec);
+        var bt = toml_get(bpairs, str_from("title"));
+        var be = toml_get(bpairs, str_from("explanation"));
+        var bl = toml_get(bpairs, str_from("language"));
+        vec_push(bps, bp_new(bt, be, bl));
+        bi = bi + 1;
+    }
+    store64(concept + 40, bps);
+
+    # Parse [[gotchas]]
+    var gotchas = vec_new();
+    var g_sections = toml_get_sections(sections, str_from("gotchas"));
+    var gi = 0;
+    while (gi < vec_len(g_sections)) {
+        var gsec = vec_get(g_sections, gi);
+        var gpairs = toml_section_pairs(gsec);
+        var gt = toml_get(gpairs, str_from("title"));
+        var ge = toml_get(gpairs, str_from("explanation"));
+        var gb = toml_get(gpairs, str_from("bad_example"));
+        var gg = toml_get(gpairs, str_from("good_example"));
+        var gl = toml_get(gpairs, str_from("language"));
+        vec_push(gotchas, gotcha_new(gt, ge, gb, gg, gl));
+        gi = gi + 1;
+    }
+    store64(concept + 48, gotchas);
+
+    # Parse [[performance_notes]]
+    var pnotes = vec_new();
+    var p_sections = toml_get_sections(sections, str_from("performance_notes"));
+    var pi = 0;
+    while (pi < vec_len(p_sections)) {
+        var psec = vec_get(p_sections, pi);
+        var ppairs = toml_section_pairs(psec);
+        var pt = toml_get(ppairs, str_from("title"));
+        var pe = toml_get(ppairs, str_from("explanation"));
+        var pv = toml_get(ppairs, str_from("evidence"));
+        var pl = toml_get(ppairs, str_from("language"));
+        vec_push(pnotes, perf_new(pt, pe, pv, pl));
+        pi = pi + 1;
+    }
+    store64(concept + 56, pnotes);
+
+    # Discover language implementation files
+    var examples = vec_new();
+    var li = 0;
+    while (li < LANG_COUNT) {
+        var fname = lang_filename(li);
+        var fpath = path_join(topic_dir, fname);
+        if (file_exists(str_data(fpath)) == 1) {
+            # Read file contents
+            var buf = alloc(65536);
+            var n = file_read_all(str_data(fpath), buf, 65535);
+            if (n > 0) {
+                var code = str_new(buf, n);
+                var explanation = extract_explanation(code, lang_comment(li));
+                var rel_path = path_join(concept_id(concept), fname);
+                vec_push(examples, example_new(li, code, explanation, rel_path));
+            }
+        }
+        li = li + 1;
+    }
+    store64(concept + 64, examples);
+
+    return concept;
+}
+
+# Load all concepts from content directory
+fn load_all() {
+    sakshi_span_enter("load_all", 8);
+    var dirs = dir_list(_content_dir);
+    var ndirs = vec_len(dirs);
+    var i = 0;
+    while (i < ndirs) {
+        var dname = vec_get(dirs, i);
+        var dpath = path_join(_content_dir, dname);
+        if (is_dir(dpath) == 1) {
+            var concept = load_concept(dpath);
+            if (concept != 0) {
+                reg_add(concept);
+            }
+        }
+        i = i + 1;
+    }
+    sakshi_span_exit();
+    return reg_count();
+}
+
+# ================================================================
+# Search — full-text across id, title, description, tags
+# ================================================================
+
+# Substring search on C strings (null-terminated)
+fn cstr_contains(haystack, needle) {
+    if (haystack == 0 || needle == 0) { return 0; }
+    var hlen = strlen(haystack);
+    var nlen = strlen(needle);
+    if (nlen == 0) { return 1; }
+    if (nlen > hlen) { return 0; }
+    var i = 0;
+    while (i <= hlen - nlen) {
+        if (memeq(haystack + i, needle, nlen) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Search a Str for a C string query
+fn str_has(s, query) {
+    if (s == 0) { return 0; }
+    var cstr = to_cstr(s);
+    return cstr_contains(cstr, query);
+}
+
+fn search(query) {
+    var results = vec_new();
+    var entries = reg_list();
+    var count = vec_len(entries);
+    var i = 0;
+    while (i < count) {
+        var c = vec_get(entries, i);
+        var found = 0;
+
+        # Check id
+        if (found == 0) { if (str_has(concept_id(c), query) == 1) { found = 1; } }
+        # Check title
+        if (found == 0) { if (str_has(concept_title(c), query) == 1) { found = 1; } }
+        # Check description
+        if (found == 0) { if (str_has(concept_desc(c), query) == 1) { found = 1; } }
+        # Tags search disabled pending Str null-termination fix
+        if (found == 1) { vec_push(results, c); }
+        i = i + 1;
+    }
+    return results;
+}
+
+# ================================================================
+# Compare — side-by-side cross-language view
+# ================================================================
+
+fn get_example(concept, lang) {
+    var examples = concept_examples(concept);
+    if (examples == 0) { return 0; }
+    var count = vec_len(examples);
+    var i = 0;
+    while (i < count) {
+        var ex = vec_get(examples, i);
+        if (example_lang(ex) == lang) { return ex; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn cmd_compare(topic_id, lang1_str, lang2_str) {
+    var concept = reg_get(topic_id);
+    if (concept == 0) {
+        sys_write(STDERR_FD, "error: topic not found: ", 24);
+        println(topic_id);
+        return 1;
+    }
+    var l1 = lang_parse(lang1_str);
+    var l2 = lang_parse(lang2_str);
+    if (l1 < 0) {
+        sys_write(STDERR_FD, "error: unknown language: ", 25);
+        println(lang1_str);
+        return 1;
+    }
+    if (l2 < 0) {
+        sys_write(STDERR_FD, "error: unknown language: ", 25);
+        println(lang2_str);
+        return 1;
+    }
+
+    println("=== Compare ===");
+    syscall(1, 1, "Topic: ", 7);
+    var title = concept_title(concept);
+    if (title != 0) { str_println(title); }
+    else { println(topic_id); }
+
+    var ex1 = get_example(concept, l1);
+    var ex2 = get_example(concept, l2);
+
+    # Print lang1
+    syscall(1, 1, "\n--- ", 5);
+    syscall(1, 1, lang_name(l1), strlen(lang_name(l1)));
+    println(" ---");
+    if (ex1 != 0) {
+        var expl = example_explanation(ex1);
+        if (expl != 0 && str_len(expl) > 0) { str_println(expl); println(""); }
+        var path = example_path(ex1);
+        if (path != 0) { syscall(1, 1, "  file: ", 8); str_println(path); }
+    } else {
+        println("  (no implementation)");
+    }
+
+    # Print lang2
+    syscall(1, 1, "\n--- ", 5);
+    syscall(1, 1, lang_name(l2), strlen(lang_name(l2)));
+    println(" ---");
+    if (ex2 != 0) {
+        var expl2 = example_explanation(ex2);
+        if (expl2 != 0 && str_len(expl2) > 0) { str_println(expl2); println(""); }
+        var path2 = example_path(ex2);
+        if (path2 != 0) { syscall(1, 1, "  file: ", 8); str_println(path2); }
+    } else {
+        println("  (no implementation)");
+    }
+
+    return 0;
+}
+
+# ================================================================
+# Validate — compile/run examples
+# ================================================================
+
+fn validate_command(lang) {
+    if (lang == RUST) { return "rustc --edition 2024 {file} -o {out} && {out}"; }
+    if (lang == PYTHON) { return "python3 -c \"exec(open('{file}').read())\""; }
+    if (lang == C_LANG) { return "gcc -std=c17 -Wall -Werror {file} -o {out} -lm -lpthread && {out}"; }
+    if (lang == GO) { return "go run {file}"; }
+    if (lang == TYPESCRIPT) { return "npx tsx {file}"; }
+    if (lang == SHELL) { return "bash {file}"; }
+    if (lang == ZIG) { return "zig build-exe {file} -femit-bin={out} && {out}"; }
+    if (lang == ASM_X86_64) { return "as --64 {file} -o {out}.o && ld {out}.o -o {out} && {out} ; rm -f {out}.o"; }
+    if (lang == ASM_AARCH64) { return "aarch64-linux-gnu-as {file} -o {out}.o && aarch64-linux-gnu-ld {out}.o -o {out} && qemu-aarch64 {out} ; rm -f {out}.o"; }
+    if (lang == CYRIUS) { return "CYR_HOME=${CYRIUS_HOME:-$HOME/Repos/cyrius} && CYR_FILE=$(realpath {file}) && cd \"$CYR_HOME\" && cat \"$CYR_FILE\" | ./build/cc2 > {out} && chmod +x {out} && {out}"; }
+    return 0;
+}
+
+fn validate_one(concept, lang) {
+    var ex = get_example(concept, lang);
+    if (ex == 0) { return 0 - 1; }
+
+    var path = example_path(ex);
+    if (path == 0) { return 0 - 1; }
+
+    var cmd_template = validate_command(lang);
+    if (cmd_template == 0) { return 0 - 1; }
+
+    # Build file path: content_dir / relative_path
+    var file_path = path_join(_content_dir, path);
+    var file_cstr = str_data(file_path);
+
+    # Build output path
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/vidya_test_");
+    str_builder_add(sb, concept_id(concept));
+    str_builder_add_cstr(sb, "_");
+    str_builder_add_cstr(sb, lang_stem(lang));
+    var out_path = str_builder_build(sb);
+
+    # Substitute {file} and {out} in template
+    var cmd = str_replace_all(str_from(cmd_template), str_from("{file}"), file_path);
+    cmd = str_replace_all(cmd, str_from("{out}"), out_path);
+
+    # Execute via sh -c
+    var cmd_cstr = str_data(cmd);
+    var pid = sys_fork();
+    if (pid == 0) {
+        var sh_argv[4];
+        store64(&sh_argv, "/bin/sh");
+        store64(&sh_argv + 8, "-c");
+        store64(&sh_argv + 16, cmd_cstr);
+        store64(&sh_argv + 24, 0);
+        sys_execve("/bin/sh", &sh_argv, 0);
+        sys_exit(127);
+    }
+    var status_buf[1];
+    sys_waitpid(pid, &status_buf, 0);
+    var status = load32(&status_buf);
+    # Clean up
+    sys_unlink(str_data(out_path));
+
+    if (WIFEXITED(status) == 1) { return WEXITSTATUS(status); }
+    return 1;
+}
+
+fn cmd_validate(topic_filter) {
+    var pass = 0;
+    var fail = 0;
+    var skip = 0;
+    var entries = reg_list();
+    var count = vec_len(entries);
+    var i = 0;
+
+    println("=== Validate ===");
+
+    while (i < count) {
+        var c = vec_get(entries, i);
+        var id = concept_id(c);
+
+        # Filter by topic if specified
+        if (topic_filter != 0) {
+            if (str_eq(id, str_from(topic_filter)) == 0) {
+                i = i + 1;
+                continue;
+            }
+        }
+
+        var examples = concept_examples(c);
+        if (examples != 0) {
+            var ei = 0;
+            while (ei < vec_len(examples)) {
+                var ex = vec_get(examples, ei);
+                var lang = example_lang(ex);
+                var r = validate_one(c, lang);
+                if (r == 0 - 1) {
+                    skip = skip + 1;
+                }
+                elif (r == 0) {
+                    pass = pass + 1;
+                    syscall(1, 1, "  PASS: ", 8);
+                    str_print(id);
+                    syscall(1, 1, "/", 1);
+                    println(lang_name(lang));
+                } else {
+                    fail = fail + 1;
+                    syscall(1, 1, "  FAIL: ", 8);
+                    str_print(id);
+                    syscall(1, 1, "/", 1);
+                    println(lang_name(lang));
+                }
+                ei = ei + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    println("");
+    fmt_int(pass);
+    syscall(1, 1, " passed, ", 9);
+    fmt_int(fail);
+    syscall(1, 1, " failed, ", 9);
+    fmt_int(skip);
+    println(" skipped");
+    return fail;
+}
+
+# ================================================================
+# CLI commands
+# ================================================================
+
+fn cmd_list() {
+    var entries = reg_list();
+    var count = vec_len(entries);
+    var i = 0;
+    while (i < count) {
+        var c = vec_get(entries, i);
+        var id = concept_id(c);
+        var topic = concept_topic(c);
+        var examples = concept_examples(c);
+        var nex = 0;
+        if (examples != 0) { nex = vec_len(examples); }
+
+        syscall(1, 1, "  ", 2);
+        if (id != 0) { str_print(id); }
+        syscall(1, 1, " [", 2);
+        if (topic != 0) { str_print(topic); }
+        syscall(1, 1, "] (", 3);
+        fmt_int(nex);
+        println(" languages)");
+        i = i + 1;
+    }
+    println("");
+    fmt_int(count);
+    println(" topics");
+    return 0;
+}
+
+fn cmd_search(query) {
+    var results = search(query);
+    var count = vec_len(results);
+    if (count == 0) {
+        println("No results.");
+        return 0;
+    }
+    var count_buf[32];
+    var count_len = fmt_int_buf(count, &count_buf);
+    syscall(1, 1, &count_buf, count_len);
+    syscall(1, 1, " result(s) for \"", 16);
+    syscall(1, 1, query, strlen(query));
+    println("\":");
+    var i = 0;
+    while (i < count) {
+        var c = vec_get(results, i);
+        syscall(1, 1, "  ", 2);
+        var id = concept_id(c);
+        if (id != 0) { str_print(id); }
+        syscall(1, 1, " — ", 4);
+        var desc = concept_desc(c);
+        if (desc != 0) {
+            # Print first 80 chars of description
+            var dl = str_len(desc);
+            if (dl > 80) { dl = 80; }
+            syscall(1, 1, str_data(desc), dl);
+            if (str_len(desc) > 80) { syscall(1, 1, "...", 3); }
+        }
+        println("");
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn cmd_info(topic_id) {
+    var concept = reg_get(topic_id);
+    if (concept == 0) {
+        sys_write(STDERR_FD, "error: topic not found: ", 24);
+        println(topic_id);
+        return 1;
+    }
+
+    # Header
+    var title = concept_title(concept);
+    if (title != 0) { syscall(1, 1, "# ", 2); str_println(title); }
+
+    var topic = concept_topic(concept);
+    if (topic != 0) { syscall(1, 1, "Topic: ", 7); str_println(topic); }
+
+    var desc = concept_desc(concept);
+    if (desc != 0) { println(""); str_println(desc); }
+
+    # Tags
+    var tags = concept_tags(concept);
+    if (tags != 0 && vec_len(tags) > 0) {
+        syscall(1, 1, "\nTags: ", 7);
+        var ti = 0;
+        while (ti < vec_len(tags)) {
+            if (ti > 0) { syscall(1, 1, ", ", 2); }
+            str_print(vec_get(tags, ti));
+            ti = ti + 1;
+        }
+        println("");
+    }
+
+    # Languages
+    var examples = concept_examples(concept);
+    if (examples != 0 && vec_len(examples) > 0) {
+        syscall(1, 1, "\nLanguages (", 12);
+        fmt_int(vec_len(examples));
+        println("):");
+        var ei = 0;
+        while (ei < vec_len(examples)) {
+            var ex = vec_get(examples, ei);
+            syscall(1, 1, "  ", 2);
+            syscall(1, 1, lang_name(example_lang(ex)), strlen(lang_name(example_lang(ex))));
+            var path = example_path(ex);
+            if (path != 0) { syscall(1, 1, "  (", 3); str_print(path); syscall(1, 1, ")", 1); }
+            println("");
+            ei = ei + 1;
+        }
+    }
+
+    # Best practices
+    var bps = concept_best_practices(concept);
+    if (bps != 0 && vec_len(bps) > 0) {
+        syscall(1, 1, "\nBest Practices (", 17);
+        fmt_int(vec_len(bps));
+        println("):");
+        var bi = 0;
+        while (bi < vec_len(bps)) {
+            var bp = vec_get(bps, bi);
+            syscall(1, 1, "  * ", 4);
+            var bpt = bp_title(bp);
+            if (bpt != 0) { str_println(bpt); }
+            var bpe = bp_explanation(bp);
+            if (bpe != 0) { syscall(1, 1, "    ", 4); str_println(bpe); }
+            bi = bi + 1;
+        }
+    }
+
+    # Gotchas
+    var gotchas = concept_gotchas(concept);
+    if (gotchas != 0 && vec_len(gotchas) > 0) {
+        syscall(1, 1, "\nGotchas (", 10);
+        fmt_int(vec_len(gotchas));
+        println("):");
+        var gii = 0;
+        while (gii < vec_len(gotchas)) {
+            var g = vec_get(gotchas, gii);
+            syscall(1, 1, "  ! ", 4);
+            var ggt = gotcha_title(g);
+            if (ggt != 0) { str_println(ggt); }
+            var gge = gotcha_explanation(g);
+            if (gge != 0) { syscall(1, 1, "    ", 4); str_println(gge); }
+            gii = gii + 1;
+        }
+    }
+
+    # Performance notes
+    var pnotes = concept_perf_notes(concept);
+    if (pnotes != 0 && vec_len(pnotes) > 0) {
+        syscall(1, 1, "\nPerformance Notes (", 20);
+        fmt_int(vec_len(pnotes));
+        println("):");
+        var pii = 0;
+        while (pii < vec_len(pnotes)) {
+            var p = vec_get(pnotes, pii);
+            syscall(1, 1, "  ~ ", 4);
+            var ppt = perf_title(p);
+            if (ppt != 0) { str_println(ppt); }
+            var ppev = perf_evidence(p);
+            if (ppev != 0) { syscall(1, 1, "    evidence: ", 14); str_println(ppev); }
+            pii = pii + 1;
+        }
+    }
+
+    return 0;
+}
+
+fn cmd_languages() {
+    println("Supported languages:");
+    var li = 0;
+    while (li < LANG_COUNT) {
+        syscall(1, 1, "  ", 2);
+        var n = lang_name(li);
+        syscall(1, 1, n, strlen(n));
+        syscall(1, 1, " (.", 3);
+        var ext = lang_extension(li);
+        syscall(1, 1, ext, strlen(ext));
+        println(")");
+        li = li + 1;
+    }
+    return 0;
+}
+
+fn cmd_stats() {
+    var entries = reg_list();
+    var total = vec_len(entries);
+    var total_examples = 0;
+    var complete = 0;
+
+    var i = 0;
+    while (i < total) {
+        var c = vec_get(entries, i);
+        var examples = concept_examples(c);
+        var nex = 0;
+        if (examples != 0) { nex = vec_len(examples); }
+        total_examples = total_examples + nex;
+        if (nex >= LANG_COUNT) { complete = complete + 1; }
+        i = i + 1;
+    }
+
+    println("=== Vidya Corpus Stats ===");
+    syscall(1, 1, "  Topics:     ", 14); fmt_int(total); println("");
+    syscall(1, 1, "  Complete:   ", 14); fmt_int(complete); syscall(1, 1, " (all ", 6); fmt_int(LANG_COUNT); println(" languages)");
+    syscall(1, 1, "  Examples:   ", 14); fmt_int(total_examples); println("");
+    syscall(1, 1, "  Languages:  ", 14); fmt_int(LANG_COUNT); println("");
+    return 0;
+}
+
+fn usage() {
+    println("vidya — programming reference library and queryable corpus");
+    println("");
+    println("Usage: vidya <command> [args]");
+    println("");
+    println("Commands:");
+    println("  list                       list all topics");
+    println("  search <query>             full-text search");
+    println("  info <topic>               show concept details");
+    println("  languages                  list supported languages");
+    println("  compare <topic> <l1> <l2>  compare implementations");
+    println("  validate [topic]           compile/run examples");
+    println("  stats                      corpus statistics");
+    println("  help                       show this help");
+    return 0;
+}
+
+# ================================================================
+# Main
+# ================================================================
+
+fn main() {
+    alloc_init();
+    args_init();
+    reg_init();
+
+    if (argc() < 2) {
+        usage();
+        return 0;
+    }
+
+    # Load content
+    var loaded = load_all();
+    if (loaded == 0) {
+        sakshi_error("no content found in content/", 27);
+        return 1;
+    }
+    sakshi_info("vidya loaded", 12);
+
+    var cmd = argv(1);
+
+    if (streq(cmd, "list") == 1) { return cmd_list(); }
+
+    if (streq(cmd, "search") == 1) {
+        if (argc() < 3) {
+            println("Usage: vidya search <query>");
+            return 1;
+        }
+        return cmd_search(argv(2));
+    }
+
+    if (streq(cmd, "info") == 1) {
+        if (argc() < 3) {
+            println("Usage: vidya info <topic>");
+            return 1;
+        }
+        return cmd_info(argv(2));
+    }
+
+    if (streq(cmd, "languages") == 1) { return cmd_languages(); }
+
+    if (streq(cmd, "compare") == 1) {
+        if (argc() < 5) {
+            println("Usage: vidya compare <topic> <lang1> <lang2>");
+            return 1;
+        }
+        return cmd_compare(argv(2), argv(3), argv(4));
+    }
+
+    if (streq(cmd, "validate") == 1) {
+        if (argc() >= 3) { return cmd_validate(argv(2)); }
+        return cmd_validate(0);
+    }
+
+    if (streq(cmd, "stats") == 1) { return cmd_stats(); }
+
+    if (streq(cmd, "help") == 1 || streq(cmd, "--help") == 1 || streq(cmd, "-h") == 1) {
+        usage();
+        return 0;
+    }
+
+    sys_write(STDERR_FD, "Unknown command: ", 17);
+    println(cmd);
+    println("Run 'vidya help' for usage.");
+    return 1;
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

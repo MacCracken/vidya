@@ -11,24 +11,27 @@ content = '''
 Cyrius is a self-hosting compiler that bootstraps from a 29KB binary seed.
 No Rust, no LLVM, no Python. Just sh + Linux x86_64.
 
-Everything is a 64-bit integer. No floats, no separate types.
-Type annotations (var x: i64 = 42) are documentation only — no enforcement.
+Default type is i64. Multi-width types: var x: i8 = 42; var y: i16 = 1000;
+var z: i32 = 0; — width-correct loads (movzx) and stores. sizeof(Type) operator.
+Type annotations enable width-correct codegen; untyped variables remain i64.
+f64 supported as bit patterns via 20+ f64_* builtins (SSE2/SSE4.1/x87).
 
-The compiler (cc2) is 190KB, ~280 functions, 8 modules. It compiles itself
+The compiler (cc2) is 202KB, ~280 functions, 8 modules. It compiles itself
 byte-identical in ~11ms. The AGNOS kernel is written entirely in Cyrius.
 
 Build: sh bootstrap/bootstrap.sh (40ms)
 Compile: echo 'var x = 42;' | ./build/cc2 > prog && chmod +x prog
-Test: sh tests/compiler.sh   (216 compiler + 51 program tests)
+Test: sh scripts/check.sh (self-host + heap audit + 9 .tcyr files, 107 assertions)
 
 Source: src/main.cyr (entry) + src/frontend/*.cyr + src/backend/*.cyr + src/common/*.cyr
-Version: 1.11.5 — 267 tests (216 compiler + 51 programs), 0 failures, self-hosting byte-identical
-Compiler: 190KB x86_64. Frontend/backend/common architecture (v1.8.0 restructure).
-Constant folding (all arithmetic ops), tail call optimization, DCE (bitmap O(T+N)), jump tables.
-Inline small functions (token replay, currently disabled). Return-by-value small structs (ret2/rethi).
-7 SIMD packed f64 ops. 20 f64 builtins (SSE2 + SSE4.1 + x87 FPU transcendentals).
-Overflow guards on extra_patches, continue patches, ret_patches, struct count.
-Argonaut (6257 lines, 300 tests + 39 serde + 18 benchmarks) compiles and runs.
+Version: 2.0.0 — 9 .tcyr test files (107 assertions), heap audit, self-hosting byte-identical.
+Compiler: 202KB x86_64. Frontend/backend/common architecture.
+Multi-width types (i8/i16/i32/i64/u128), sizeof, unions, bitfield builtins.
+Struct field widths, expression type propagation, narrowing warnings.
+Constant folding, tail call optimization, DCE (bitmap O(T+N)), jump tables.
+Return-by-value small structs (ret2/rethi). 7 SIMD packed f64 ops.
+Overflow guards on 6 arrays. Heap map audit tool.
+Argonaut (6257 lines, 424 tests) compiles and runs.
 #derive(Serialize), include-once semantics, identifier dedup, #ref directive. Fixup table: 4096 entries.
 '''
 
@@ -1325,4 +1328,206 @@ KEY LESSON:
     a for-loop, AND (2) the program was large enough that the corrupted
     counter caused reads past the brk boundary. Both conditions were
     required — isolated tests passed.
+'''
+
+[[entries]]
+name = "multi_width_types"
+description = "v2.0: Multi-width types (i8, i16, i32) with width-correct codegen"
+category = "cyrius"
+content = '''
+SYNTAX:
+    var x: i8 = 42;       # 1-byte variable
+    var y: i16 = 30000;   # 2-byte variable
+    var z: i32 = 100000;  # 4-byte variable
+    var w: i64 = 0;       # explicit 8-byte (same as untyped)
+    var u: u128 = 0;      # 16-byte (storage only, arithmetic TBD)
+
+SEMANTICS:
+    Type annotations control BOTH storage size AND load/store width.
+    var x: i8 = 256; → stores 0 (truncated to 1 byte).
+    Reading x back gives 0 (movzx zero-extends to rax).
+
+    Globals: var_sizes[idx] = 1/2/4/8/16 (actual byte allocation in data section).
+    Locals: 8-byte stack slots, but loads/stores use correct width within the slot.
+
+CODEGEN:
+    EVLOAD_W(S, idx, width) / EVSTORE_W(S, idx, width) for globals.
+    EFLLOAD_W(S, idx, width) / EFLSTORE_W(S, idx, width) for locals.
+    Width 1: movzx rax, byte [addr] / mov byte [addr], al
+    Width 2: movzx eax, word [addr] / mov word [addr], ax
+    Width 4: mov eax, [addr]        / mov dword [addr], eax
+    Width 8: mov rax, [addr]        / mov qword [addr], rax (default)
+
+DISAMBIGUATION:
+    Type IDs 1-8 overlap with struct IDs (also start at 1). Resolved via
+    var_sizes: if var_sizes[idx] < 8, it is a scalar type. Structs always
+    have var_sizes >= 8 (minimum 1 field × 8 bytes).
+
+BACKWARD COMPATIBLE:
+    Untyped variables remain i64. The compiler source uses no type annotations.
+    Self-hosting produces identical output. Two-step bootstrap required after
+    codegen changes (width-correct load/store functions are new code).
+'''
+
+[[entries]]
+name = "sizeof_operator"
+description = "v2.0: sizeof(Type) compile-time constant"
+category = "cyrius"
+content = '''
+SYNTAX:
+    var n = sizeof(i8);      # 1
+    var n = sizeof(i16);     # 2
+    var n = sizeof(i32);     # 4
+    var n = sizeof(i64);     # 8
+    var n = sizeof(u128);    # 16
+    var n = sizeof(Point);   # recursive struct size
+
+IMPLEMENTATION:
+    Detected in PARSE_FACTOR as an identifier matching "sizeof" (6-byte packed
+    comparison on L64 of tok_names). NOT a lexer keyword — the klen=6 lexer
+    keyword block had a code size issue that silently dropped sizeof recognition.
+    Identifier-based detection in the parser is more robust.
+
+    Parses: sizeof ( TypeName ) → EMOVI(S, size)
+    For scalars: direct byte width.
+    For structs: calls STRUCTSZ(S, sid-1) which recursively sums field widths.
+    For u128: token 105 handled as special case.
+'''
+
+[[entries]]
+name = "unions"
+description = "v2.0: union keyword — all fields at offset 0, size = max field"
+category = "cyrius"
+content = '''
+SYNTAX:
+    union Value {
+        as_int;
+        as_ptr;
+    }
+
+SEMANTICS:
+    All fields share offset 0. sizeof(Value) = max(sizeof(field)).
+    Field access: v.as_int and v.as_ptr read from the same memory.
+    Init: var v = Value { 42, 42 }; (all fields, like struct init).
+
+IMPLEMENTATION:
+    Token 101 (UNION). Parsed by PARSE_UNION_DEF — same as PARSE_STRUCT_DEF
+    but sets high bit (bit 63) of struct_fcounts as union flag.
+    ISUNION(S, si) checks bit 63. FIELDOFF returns 0 for all union fields.
+    STRUCTSZ returns max field size instead of sum.
+    Struct tables (fnames, ftypes) are shared — unions are structs internally.
+'''
+
+[[entries]]
+name = "bitfield_builtins"
+description = "v2.0: bitget/bitset/bitclr — inline bit manipulation"
+category = "cyrius"
+content = '''
+SYNTAX:
+    var pte = 0x1007;
+    var present = bitget(pte, 0, 1);    # extract 1 bit at offset 0
+    pte = bitset(pte, 12, 40, 0x2);     # set 40 bits at offset 12
+    pte = bitclr(pte, 0, 3);            # clear 3 bits at offset 0
+
+SEMANTICS:
+    bitget(val, offset, width) → (val >> offset) & ((1 << width) - 1)
+    bitset(val, offset, width, new) → (val & ~(mask << offset)) | ((new & mask) << offset)
+    bitclr(val, offset, width) → val & ~(((1 << width) - 1) << offset)
+
+IMPLEMENTATION:
+    Tokens 102-104. Handled in PARSE_SIMD_EXT.
+    bitget: inline shift/mask using ESPILL/EUNSPILL (works at top level).
+    bitset/bitclr: use EFLSTORE/EFLLOAD for temp slots (MUST be inside a function).
+    Calling bitset/bitclr at top level emits: "must be called inside a function".
+
+REPLACES:
+    Manual patterns like: var present = (pte >> 0) & 1;
+    var addr = (pte >> 12) & 0xFFFFF;
+    Used in AGNOS kernel for PTE, GDT, IDT descriptor manipulation.
+'''
+
+[[entries]]
+name = "struct_field_widths"
+description = "v2.0: Struct fields with typed widths for packed layouts"
+category = "cyrius"
+content = '''
+SYNTAX:
+    struct Packet {
+        tag: i8;       # 1 byte
+        len: i16;      # 2 bytes
+        data: i32;     # 4 bytes
+        payload;       # 8 bytes (default, untyped)
+    }
+    # sizeof(Packet) = 1 + 2 + 4 + 8 = 15
+
+IMPLEMENTATION:
+    Field type stored in struct_ftypes as negative width:
+      0  = untyped scalar (8 bytes)
+      >0 = nested struct ID
+      -1 = i8, -2 = i16, -4 = i32, -8 = explicit i64
+
+    FIELDSZ(S, ft): returns byte size from type encoding.
+    STRUCTSZ and FIELDOFF use FIELDSZ for each field.
+    Field loads: width-correct (movzx for i8/i16, mov for i32/i64).
+    Field stores: width-correct in PARSE_FIELD_STORE.
+    Struct init (EMIT_STRUCT_FIELD): still uses 8-byte stores (TODO: width-correct).
+'''
+
+[[entries]]
+name = "expression_type_propagation"
+description = "v2.0: Track expression width, warn on narrowing assignments"
+category = "cyrius"
+content = '''
+MECHANISM:
+    GEXW(S) / SEXW(S, v) at heap offset 0x903F0.
+    PARSE_FACTOR sets expr_width when loading a typed variable.
+    Assignment checks: if target width < expr_width, emit warning:
+      "warning:N: narrowing assignment (value may truncate)"
+
+EXAMPLE:
+    var big: i32 = 1000;
+    var small: i8 = 0;
+    small = big;          # warning: narrowing assignment
+
+    The assignment still succeeds (truncates to i8), but the warning
+    alerts the developer to potential data loss.
+
+SCOPE:
+    Warnings only on reassignment (PARSE_STMT assignment path), not on
+    initialization (PARSE_VAR). Initialization is an explicit choice.
+    Works for both locals (GLTYPE check) and globals (var_sizes check).
+'''
+
+[[entries]]
+name = "tcyr_bcyr_test_format"
+description = "v2.0: .tcyr/.bcyr test and bench file format with auto-discovery"
+category = "cyrius"
+content = '''
+TEST FILES (.tcyr):
+    Regular .cyr files with assert.cyr conventions.
+    `cyrb test` auto-discovers in tests/, tests/tcyr/, src/.
+    Metadata comments:
+      # skip: reason      — skip this test
+      # expect: N         — expected exit code (default 0)
+    assert_summary() output is parsed for pass/fail counts.
+    test_group("name") prints section headers.
+
+BENCH FILES (.bcyr):
+    Regular .cyr files with bench.cyr conventions.
+    `cyrb bench` auto-discovers in benches/, tests/bcyr/.
+
+RUNNER FLAGS:
+    cyrb test --verbose   — show full test output
+    cyrb test --filter X  — run only matching files
+
+BUILD OUTPUT:
+    cyrb build src.cyr out  — shows: src -> out  N bytes  Nms  [arch]
+    cyrb build -v ...       — also shows individual warnings
+
+AUDIT:
+    cyrb audit / sh scripts/check.sh
+    5 stages: self-hosting, heap map, .tcyr suite, format, lint.
+
+REPLACED: compiler.sh (216 tests), programs.sh (51 tests), assembler.sh.
+Clean break for v2.0.
 '''
