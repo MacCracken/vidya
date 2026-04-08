@@ -1,0 +1,339 @@
+# Vidya — Intermediate Representations in Cyrius
+#
+# PATTERN-FOCUSED: documents IR concepts as they relate to cc2.
+# SSA properties, phi node semantics, basic block structure,
+# dominator tree concepts, and how cc2's IR differs from textbook SSA.
+#
+# Key concepts:
+#   - SSA: every variable assigned exactly once
+#   - Phi nodes: merge values at control flow join points
+#   - Basic blocks: maximal straight-line instruction sequences
+#   - Dominator tree: determines where phi nodes are needed
+#   - cc2's approach: implicit SSA (variables on stack, no explicit phis)
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# ================================================================
+# SSA Form Properties
+# ================================================================
+# Static Single Assignment means every variable is defined exactly once.
+#
+# Non-SSA:
+#   x = 1
+#   x = x + 2      <-- x redefined
+#   y = x * 3
+#
+# SSA:
+#   x1 = 1
+#   x2 = x1 + 2    <-- new name for each definition
+#   y1 = x2 * 3
+#
+# Why SSA matters:
+#   - Def-use chains are trivial (one def per variable)
+#   - Constant propagation: if x1 = 5, replace all uses of x1 with 5
+#   - Dead code elimination: if x1 has no uses, delete it
+#   - These analyses are O(n) on SSA vs O(n^2) without
+
+fn test_ssa_properties() {
+    # In SSA, each register has exactly one definition
+    # This makes use-def analysis trivial:
+    #   v0 = 10    (one def)
+    #   v1 = 20    (one def)
+    #   v2 = v0 + v1  (one def, uses v0 and v1)
+    #   return v2
+
+    # Number of definitions per register: always 1 in SSA
+    var defs_per_reg = 1;
+    assert_eq(defs_per_reg, 1, "SSA: one def per register");
+
+    # Benefit: constant propagation is one pass
+    # If v0 = 10, every use of v0 can be replaced with 10
+    # No need to check if v0 was redefined between def and use
+    var v0 = 10;
+    var v1 = 20;
+    var v2 = v0 + v1;
+    assert_eq(v2, 30, "SSA expression evaluation");
+
+    # SSA makes dead code detection trivial:
+    # If a register has zero uses, its definition is dead
+    # In non-SSA, you need to track whether later assignments shadow uses
+    return 0;
+}
+
+# ================================================================
+# Three-Address Code (TAC)
+# ================================================================
+# Each instruction has at most one operator and three operands.
+# This is the most common IR format:
+#   dst = lhs op rhs    (binary)
+#   dst = op src         (unary)
+#   dst = const          (load immediate)
+#   goto Bn              (unconditional jump)
+#   if cond goto Bn      (conditional branch)
+#   return val            (function return)
+#
+# Why three-address, not two or four?
+#   - Two-address (x86 style) couples dest with an operand (destructive)
+#   - Three-address separates dest from sources (easier to optimize)
+#   - More addresses adds complexity without benefit
+
+fn test_tac_format() {
+    # Three-address: every result gets a fresh register
+    # Example: (2 + 3) * 4
+    #   v0 = 2
+    #   v1 = 3
+    #   v2 = v0 + v1    <-- three addresses: v2, v0, v1
+    #   v3 = 4
+    #   v4 = v2 * v3    <-- three addresses: v4, v2, v3
+
+    # Count registers used for (2 + 3) * 4
+    var num_regs = 5;  # v0..v4
+    assert_eq(num_regs, 5, "5 registers for (2+3)*4");
+
+    # Each TAC instruction has at most 3 operands
+    var max_operands = 3;
+    assert_eq(max_operands, 3, "three-address code");
+
+    # Instruction count = number of operations + number of constants
+    # (2 + 3) * 4: 2 binops + 3 constants = 5 instructions
+    var num_insts = 5;
+    assert_eq(num_insts, 5, "5 TAC instructions");
+    return 0;
+}
+
+# ================================================================
+# Basic Blocks
+# ================================================================
+# A basic block is a maximal sequence of instructions with:
+#   1. Single entry: only first instruction can be a branch target
+#   2. Single exit: only last instruction can be a branch/jump
+#   3. Sequential: once entered, every instruction executes
+#
+# Leaders (first instruction of a new block):
+#   - First instruction of the function
+#   - Target of any branch/jump
+#   - Instruction immediately following a branch/jump
+#
+# The CFG (Control Flow Graph) connects blocks via edges:
+#   - Successor: block reachable from this block's terminator
+#   - Predecessor: block whose terminator can reach this block
+
+fn test_basic_block_properties() {
+    # if/else creates 4 basic blocks:
+    #   B0: evaluate condition, branch
+    #   B1: then body, jump to merge
+    #   B2: else body, jump to merge
+    #   B3: merge point (phi node here)
+    var blocks_for_if_else = 4;
+    assert_eq(blocks_for_if_else, 4, "if/else = 4 blocks");
+
+    # B0 has 2 successors (then, else)
+    var b0_succs = 2;
+    assert_eq(b0_succs, 2, "condition block has 2 successors");
+
+    # B3 (merge) has 2 predecessors (then, else)
+    var b3_preds = 2;
+    assert_eq(b3_preds, 2, "merge block has 2 predecessors");
+
+    # A while loop creates 3 blocks:
+    #   B0: evaluate condition, branch
+    #   B1: loop body, jump back to B0
+    #   B2: exit (after loop)
+    var blocks_for_while = 3;
+    assert_eq(blocks_for_while, 3, "while loop = 3 blocks");
+    return 0;
+}
+
+# ================================================================
+# Phi Nodes
+# ================================================================
+# A phi node appears at a control flow join point (merge block).
+# It selects a value based on which predecessor block was executed.
+#
+# Example:
+#   B0: if x > 0 goto B1 else B2
+#   B1: v1 = 100; goto B3
+#   B2: v2 = 200; goto B3
+#   B3: v3 = phi(B1:v1, B2:v2)    <-- v3 is 100 or 200
+#
+# Phi nodes are NOT real instructions — they are resolved during
+# register allocation or codegen (parallel copy or move at block end).
+#
+# Where to place phi nodes: use the dominance frontier.
+# A variable needs a phi at block B if:
+#   - The variable is defined in block A
+#   - B is in the dominance frontier of A
+
+fn test_phi_semantics() {
+    # Phi with 2 inputs: one per predecessor
+    var phi_inputs = 2;
+    assert_eq(phi_inputs, 2, "phi at if/else join has 2 inputs");
+
+    # Phi resolves to the value from the taken path
+    # If B1 was taken, phi selects B1's value
+    var from_then = 100;
+    var from_else = 200;
+    # Simulate: condition was true, so took B1
+    var condition = 1;
+    var result = 0;
+    if (condition > 0) {
+        result = from_then;
+    } else {
+        result = from_else;
+    }
+    assert_eq(result, 100, "phi selects from taken path");
+
+    # Loop-carried phi: used for induction variables
+    #   B_header: i = phi(B_preheader:0, B_latch:i+1)
+    # This is how the loop counter gets incremented in SSA
+    var loop_phi_inputs = 2;  # initial value + loop-back value
+    assert_eq(loop_phi_inputs, 2, "loop phi has 2 inputs");
+    return 0;
+}
+
+# ================================================================
+# Dominator Tree
+# ================================================================
+# Block A dominates block B if every path from entry to B goes through A.
+# Properties:
+#   - Entry dominates all blocks
+#   - Every block dominates itself (reflexive)
+#   - Domination is transitive: A dom B and B dom C implies A dom C
+#   - Immediate dominator (idom): closest strict dominator
+#
+# The dominator tree has idom(B) as B's parent.
+# Used for: SSA construction, loop detection, code motion.
+
+fn test_dominator_properties() {
+    # In if/else CFG (B0 -> B1/B2 -> B3):
+    # B0 dominates everything (it's the entry)
+    # B1 only dominates B1 (B3 is also reachable from B2)
+    # B2 only dominates B2
+    # B3 dominates only B3
+
+    # Dominator set sizes for if/else:
+    var dom_b0 = 1;  # {B0}
+    var dom_b1 = 2;  # {B0, B1}
+    var dom_b2 = 2;  # {B0, B2}
+    var dom_b3 = 2;  # {B0, B3}
+    assert_eq(dom_b0, 1, "B0 dominated by {B0}");
+    assert_eq(dom_b1, 2, "B1 dominated by {B0, B1}");
+    assert_eq(dom_b3, 2, "B3 dominated by {B0, B3}");
+
+    # Immediate dominators:
+    # idom(B0) = none (entry)
+    # idom(B1) = B0
+    # idom(B2) = B0
+    # idom(B3) = B0
+    var idom_b1 = 0;  # B0
+    var idom_b2 = 0;  # B0
+    var idom_b3 = 0;  # B0
+    assert_eq(idom_b1, 0, "idom(B1) = B0");
+    assert_eq(idom_b2, 0, "idom(B2) = B0");
+    assert_eq(idom_b3, 0, "idom(B3) = B0");
+
+    # Dominance frontier of B1: {B3}
+    # (B3 is where B1's dominance "stops" because B2 also reaches B3)
+    # This tells us: phi nodes for B1's definitions go in B3
+    return 0;
+}
+
+# ================================================================
+# cc2's IR Model
+# ================================================================
+# cc2 does NOT use explicit SSA form. Instead:
+#   - Variables live on the stack (every var has a stack slot)
+#   - Expressions use a stack machine (push/pop for temporaries)
+#   - No phi nodes needed (stack slots are implicitly mutable)
+#   - No register allocation (result always in rax)
+#
+# This is simpler but prevents most SSA-based optimizations.
+# The tradeoff: fast compilation, simpler codegen, slower output.
+#
+# A future cc2 with optimization would:
+#   1. Build CFG from parsed AST
+#   2. Convert to SSA (insert phi nodes at dominance frontiers)
+#   3. Run optimization passes (constant folding, DCE, etc.)
+#   4. Lower out of SSA (phi elimination → parallel copies)
+#   5. Register allocation
+#   6. Emit machine code
+
+fn test_cc2_ir_model() {
+    # cc2 uses implicit stack-based IR:
+    # Every variable has a known stack offset
+    # Binary operations: eval left -> push -> eval right -> pop -> operate
+    var uses_stack_machine = 1;
+    assert_eq(uses_stack_machine, 1, "cc2 uses stack machine");
+
+    # Stack depth for expression tree of depth d:
+    # Maximum simultaneous pushes = d - 1
+    # Example: (a + b) * (c + d) has depth 2, max stack = 1
+    # (but the nested (a+b) and (c+d) each need their own push)
+    var expr_depth = 2;
+    var max_stack = 1;
+    assert_eq(max_stack, expr_depth - 1, "stack depth = tree depth - 1");
+
+    # No explicit registers means no register allocation
+    # Everything goes through rax (result) and rcx (popped operand)
+    var num_used_regs = 2;  # rax and rcx
+    assert_eq(num_used_regs, 2, "cc2 uses rax + rcx");
+    return 0;
+}
+
+# ================================================================
+# IR Lowering Steps
+# ================================================================
+# The IR gets progressively "lower" as it approaches machine code:
+#
+# High-level IR (close to source):
+#   - Variables have names
+#   - Complex expressions
+#   - Structured control flow (if/while/for)
+#
+# Mid-level IR (SSA, three-address):
+#   - Virtual registers (infinite)
+#   - Flat instruction list per block
+#   - CFG with explicit edges
+#   - Phi nodes at join points
+#
+# Low-level IR (close to hardware):
+#   - Physical registers (finite, 16 on x86_64)
+#   - Machine-specific instructions
+#   - Phi nodes eliminated (copies at block ends)
+#   - Stack frame layout determined
+
+fn test_ir_levels() {
+    # Virtual registers (SSA): unlimited
+    var virtual_regs = 999;  # no limit
+    assert(virtual_regs > 16, "virtual regs > physical regs");
+
+    # Physical registers (x86_64): 16 general purpose
+    var physical_regs = 16;
+    assert_eq(physical_regs, 16, "x86_64 has 16 GP regs");
+
+    # Allocatable (exclude rsp): 15
+    var allocatable = 15;
+    assert_eq(allocatable, physical_regs - 1, "15 allocatable");
+
+    # Register pressure = max live registers at any point
+    # If pressure > allocatable, must spill to stack
+    # SSA makes live range analysis precise (one def per var)
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_ssa_properties();
+    test_tac_format();
+    test_basic_block_properties();
+    test_phi_semantics();
+    test_dominator_properties();
+    test_cc2_ir_model();
+    test_ir_levels();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

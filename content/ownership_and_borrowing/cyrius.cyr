@@ -1,0 +1,203 @@
+# Ownership and Borrowing — Cyrius reference (runnable)
+#
+# Cyrius has NO ownership system. Memory is manually managed:
+# alloc() returns a pointer, the programmer tracks when to free.
+# There is no borrow checker, no lifetimes, no automatic drops.
+#
+# What the programmer must track manually:
+#   1. Every alloc() must have a matching free (or alloc_reset)
+#   2. No use-after-free: don't access memory after alloc_reset
+#   3. No double-free: don't reset twice without re-allocating
+#   4. Aliasing is unrestricted: two vars can point to same memory
+#   5. Stack vs heap lifetime: &local dies when function returns
+#
+# These are the bugs Rust's ownership system prevents at compile time.
+# In Cyrius, correctness is the programmer's responsibility.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# ================================================================
+# Manual allocation: alloc/free pattern
+# ================================================================
+# alloc(n) returns a pointer to n bytes on the bump allocator.
+# The programmer must track which pointers are live.
+
+fn test_basic_alloc() {
+    var buf = alloc(16);
+    store64(buf, 42);
+    store64(buf + 8, 99);
+    assert_eq(load64(buf), 42, "alloc slot0");
+    assert_eq(load64(buf + 8), 99, "alloc slot1");
+    # No free() call — bump allocator reclaims all at alloc_reset()
+    return 0;
+}
+
+# ================================================================
+# Pointer aliasing: two names, one allocation
+# ================================================================
+# Cyrius does not prevent aliasing. Two variables can point to the
+# same memory. Mutation through one is visible through the other.
+# This is exactly what Rust's borrow checker forbids.
+
+fn test_aliasing() {
+    var a = alloc(8);
+    store64(a, 10);
+
+    var b = a;           # alias: b points to same memory as a
+    store64(b, 20);      # mutate through alias
+    assert_eq(load64(a), 20, "alias mutation visible");
+
+    # Both a and b are valid — no ownership transfer happened.
+    # In Rust, `let b = a;` would MOVE ownership, making a unusable.
+    assert_eq(load64(b), 20, "alias still valid");
+    return 0;
+}
+
+# ================================================================
+# Stack pointer lifetime: &local is only valid in its scope
+# ================================================================
+# Taking the address of a local variable creates a pointer that
+# becomes dangling when the function returns. Cyrius has no lifetime
+# analysis — the programmer must ensure the pointer doesn't escape.
+
+fn get_stack_value() {
+    var x = 42;
+    # Returning &x would be a dangling pointer after this function
+    # returns. Instead, return the VALUE, not a pointer.
+    return x;
+}
+
+fn test_stack_lifetime() {
+    var val = get_stack_value();
+    assert_eq(val, 42, "return value not pointer");
+
+    # Safe: take address of local within the same scope
+    var y = 99;
+    var p = &y;
+    assert_eq(*p, 99, "local ptr in scope");
+    return 0;
+}
+
+# ================================================================
+# Ownership transfer pattern: convention, not enforcement
+# ================================================================
+# When a function allocates and returns a pointer, the CALLER owns
+# the memory. There's no language enforcement — just convention.
+# Document ownership in comments.
+
+# Ownership: caller owns the returned pointer
+fn make_pair(a, b) {
+    var pair = alloc(16);
+    store64(pair, a);
+    store64(pair + 8, b);
+    return pair;
+}
+
+fn pair_first(p) { return load64(p); }
+fn pair_second(p) { return load64(p + 8); }
+
+fn test_ownership_transfer() {
+    var p = make_pair(10, 20);    # we own this allocation
+    assert_eq(pair_first(p), 10, "pair.0");
+    assert_eq(pair_second(p), 20, "pair.1");
+    # We don't free individual allocs — bump allocator handles it.
+    # In a real allocator, the caller would call free(p) here.
+    return 0;
+}
+
+# ================================================================
+# Struct pattern: fields are raw memory offsets
+# ================================================================
+# Cyrius structs are laid out as contiguous 8-byte slots.
+# The programmer must track field offsets manually when using
+# raw pointers, or use struct syntax for named access.
+
+struct Resource {
+    id;
+    size;
+    active;
+}
+
+fn Resource_new(id, size) {
+    var r = alloc(24);
+    store64(r, id);           # offset 0: id
+    store64(r + 8, size);     # offset 8: size
+    store64(r + 16, 1);       # offset 16: active
+    return r;
+}
+
+fn Resource_deactivate(r) {
+    store64(r + 16, 0);
+    return 0;
+}
+
+fn test_struct_resource() {
+    var r = Resource_new(1, 64);
+    assert_eq(load64(r), 1, "resource id");
+    assert_eq(load64(r + 8), 64, "resource size");
+    assert_eq(load64(r + 16), 1, "resource active");
+
+    Resource_deactivate(r);
+    assert_eq(load64(r + 16), 0, "resource deactivated");
+    # r is still allocated — no automatic cleanup
+    return 0;
+}
+
+# ================================================================
+# Scope-based cleanup: manual RAII pattern
+# ================================================================
+# Without destructors, cleanup must be explicit. The pattern:
+#   1. Allocate at the start of a logical scope
+#   2. Do work
+#   3. Clean up before returning (especially on error paths)
+#
+# alloc_reset() is the nuclear option: free everything at once.
+
+fn test_scope_cleanup() {
+    # Track allocation usage before our "scope"
+    var before = alloc_used();
+
+    # Allocate resources
+    var buf1 = alloc(32);
+    var buf2 = alloc(64);
+    store64(buf1, 1);
+    store64(buf2, 2);
+    assert_eq(load64(buf1), 1, "scope buf1");
+    assert_eq(load64(buf2), 2, "scope buf2");
+
+    # After use, alloc_used should reflect allocations
+    var after = alloc_used();
+    assert(after > before, "alloc grew");
+
+    # In a real program, you'd free individual allocations.
+    # alloc_reset() frees everything — use only at top level.
+    return 0;
+}
+
+# ================================================================
+# What Cyrius does NOT have (vs Rust)
+# ================================================================
+#   - No move semantics: assignment copies the pointer, not ownership
+#   - No borrow checker: aliased mutable pointers are unrestricted
+#   - No lifetime annotations: dangling pointers are the programmer's problem
+#   - No Drop trait: no automatic cleanup at scope exit
+#   - No RefCell/Rc: no runtime borrow checking or reference counting
+#
+# The tradeoff: simpler compiler, faster compilation, but the
+# programmer bears full responsibility for memory safety.
+
+fn main() {
+    alloc_init();
+    test_basic_alloc();
+    test_aliasing();
+    test_stack_lifetime();
+    test_ownership_transfer();
+    test_struct_resource();
+    test_scope_cleanup();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

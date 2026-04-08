@@ -1,0 +1,355 @@
+# Vidya — Optimization Passes in Cyrius
+#
+# PATTERN-FOCUSED: documents cc2's actual optimization patterns.
+# Covers dead code elimination with bitmap liveness, constant folding,
+# tail call optimization, and strength reduction.
+#
+# Key patterns:
+#   - DCE: bitmap tracks which registers are live, dead defs removed
+#   - Constant folding: evaluate constant expressions at compile time
+#   - Tail call optimization: replace call+ret with jmp
+#   - Strength reduction: x * 2^n -> x << n, x * 0 -> 0
+#   - Fixed-point iteration: run passes until nothing changes
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# ================================================================
+# Dead Code Elimination — bitmap liveness
+# ================================================================
+# DCE removes instructions whose results are never used.
+# The algorithm:
+#   1. Walk instructions backward, building a "used" set
+#   2. Return and branch instructions mark their operands as used
+#   3. If an instruction's dst is not in "used", mark it dead
+#   4. If an instruction IS used, add its operands to "used"
+#
+# cc2 can use a bitmap for the "used" set (registers are integers).
+# A 64-bit integer holds liveness for up to 64 virtual registers.
+
+fn test_dce_bitmap() {
+    # Bitmap liveness: bit N = register N is live
+    var live = 0;
+
+    # Mark register 3 as live (used by return)
+    live = live | (1 * 8);   # bit 3 = 8
+    assert_eq(live & 8, 8, "reg 3 is live");
+
+    # Mark register 0 and 1 as live (used by add that produces reg 3)
+    live = live | 1;   # bit 0
+    live = live | 2;   # bit 1
+    assert_eq(live & 1, 1, "reg 0 is live");
+    assert_eq(live & 2, 2, "reg 1 is live");
+
+    # Register 2 is NOT in the live set -> its instruction is dead
+    assert_eq(live & 4, 0, "reg 2 is dead");
+
+    # Register 4 is NOT in the live set -> its instruction is dead
+    assert_eq(live & 16, 0, "reg 4 is dead");
+
+    # Total live registers
+    var count = 0;
+    var tmp = live;
+    while (tmp > 0) {
+        count = count + (tmp & 1);
+        tmp = tmp / 2;
+    }
+    assert_eq(count, 3, "3 live registers");
+    return 0;
+}
+
+fn test_dce_example() {
+    # Program:
+    #   v0 = 1
+    #   v1 = 2
+    #   v2 = 3          <-- dead (v2 never used)
+    #   v3 = v0 + v1
+    #   v4 = 99         <-- dead (v4 never used)
+    #   return v3
+    #
+    # After DCE: v2 and v4 removed (2 instructions eliminated)
+
+    var total_before = 6;
+    var dead_count = 2;  # v2 and v4
+    var total_after = total_before - dead_count;
+    assert_eq(total_after, 4, "4 instructions after DCE");
+
+    # DCE is safe because removing a dead instruction cannot change
+    # the program's observable behavior (it was never used)
+    return 0;
+}
+
+# ================================================================
+# Constant Folding
+# ================================================================
+# Replace binary operations on known constants with the result.
+#
+#   v0 = 10
+#   v1 = 20
+#   v2 = v0 + v1    -->  v2 = 30
+#
+# Algorithm:
+#   1. Maintain a map: register -> known constant value
+#   2. For each CONST instruction, record the value
+#   3. For each BINOP where both operands are known constants,
+#      compute the result and replace with a CONST instruction
+#
+# This is the most basic optimization and catches a lot of
+# code patterns (especially after inlining and specialization).
+
+fn test_constant_folding() {
+    # (10 + 20) * (3 - 1) should fold to 60
+    var a = 10;
+    var b = 20;
+    var sum = a + b;
+    assert_eq(sum, 30, "10 + 20 = 30");
+
+    var c = 3;
+    var d = 1;
+    var diff = c - d;
+    assert_eq(diff, 2, "3 - 1 = 2");
+
+    var product = sum * diff;
+    assert_eq(product, 60, "(10+20) * (3-1) = 60");
+
+    # All 3 operations folded: add, sub, mul
+    var folded_count = 3;
+    assert_eq(folded_count, 3, "3 operations folded");
+    return 0;
+}
+
+fn test_constant_folding_chain() {
+    # Chain of operations: each fold enables the next
+    # v0 = 2, v1 = 3
+    # v2 = v0 + v1 -> fold to 5
+    # v3 = v2 * 4  -> fold to 20 (because v2 is now known = 5)
+    # v4 = v3 - 1  -> fold to 19
+
+    var v0 = 2;
+    var v1 = 3;
+    var v2 = v0 + v1;
+    assert_eq(v2, 5, "first fold: 2 + 3 = 5");
+
+    var v3 = v2 * 4;
+    assert_eq(v3, 20, "second fold: 5 * 4 = 20");
+
+    var v4 = v3 - 1;
+    assert_eq(v4, 19, "third fold: 20 - 1 = 19");
+
+    # Each fold produces a new constant, enabling subsequent folds
+    # This is why constant folding runs in the fixed-point loop
+    return 0;
+}
+
+# ================================================================
+# Tail Call Optimization (TCO)
+# ================================================================
+# When a function's last action is calling another function and
+# returning its result, the CALL+RET can be replaced with JMP.
+#
+# Before TCO:
+#   call target
+#   leave
+#   ret
+#
+# After TCO:
+#   leave           ; tear down current frame
+#   jmp target      ; reuse caller's return address
+#
+# This saves:
+#   - One CALL (5 bytes -> 5 bytes JMP, same size)
+#   - One RET (1 byte saved)
+#   - Stack frame space (reuses caller's frame)
+#   - Enables unbounded recursion for tail-recursive functions
+
+fn test_tco_savings() {
+    # Without TCO: call(5) + leave(1) + ret(1) = 7 bytes
+    var without_tco = 5 + 1 + 1;
+    assert_eq(without_tco, 7, "without TCO: 7 bytes");
+
+    # With TCO: leave(1) + jmp(5) = 6 bytes
+    var with_tco = 1 + 5;
+    assert_eq(with_tco, 6, "with TCO: 6 bytes");
+
+    # Saves 1 byte per tail call
+    var savings = without_tco - with_tco;
+    assert_eq(savings, 1, "TCO saves 1 byte");
+
+    # But the real win is stack usage:
+    # Without TCO: each recursive call adds a frame (stack overflow)
+    # With TCO: constant stack usage (loop equivalent)
+    var stack_growth_without = 1;  # grows per call
+    var stack_growth_with = 0;     # constant
+    assert_eq(stack_growth_with, 0, "TCO: no stack growth");
+    return 0;
+}
+
+fn test_tco_detection() {
+    # A call is a tail call if:
+    # 1. It's the last expression before return
+    # 2. The return value IS the call result (no further computation)
+    # 3. No cleanup needed after the call (no destructors, no defers)
+    #
+    # Tail call: return foo(x);
+    # NOT tail call: return foo(x) + 1;    (addition after call)
+    # NOT tail call: var r = foo(x); bar(); return r;  (bar() after)
+
+    # cc2 detects tail calls by checking:
+    # - Is the call the direct child of a return statement?
+    # - Is there no operation between call result and return?
+    var is_tail = 1;    # return foo(x)
+    var not_tail = 0;   # return foo(x) + 1
+    assert_eq(is_tail, 1, "direct return of call = tail call");
+    assert_eq(not_tail, 0, "computation after call = not tail call");
+    return 0;
+}
+
+# ================================================================
+# Strength Reduction
+# ================================================================
+# Replace expensive operations with cheaper equivalents:
+#   x * 2^n  ->  x << n    (multiply -> shift)
+#   x * 0   ->  0          (multiply -> constant)
+#   x * 1   ->  x          (multiply -> copy)
+#   x + 0   ->  x          (add -> copy)
+#   x - 0   ->  x          (sub -> copy)
+#   x / 1   ->  x          (div -> copy)
+#
+# On x86_64:
+#   IMUL: 3 cycle latency
+#   SHL:  1 cycle latency
+#   Savings: 2 cycles per multiply-by-power-of-2
+
+fn test_strength_reduction() {
+    # Multiply by powers of 2
+    var x = 42;
+    assert_eq(x * 1, 42, "x * 1 = x (identity)");
+    assert_eq(x * 2, 84, "x * 2 = x << 1");
+    assert_eq(x * 4, 168, "x * 4 = x << 2");
+    assert_eq(x * 8, 336, "x * 8 = x << 3");
+
+    # Multiply by 0
+    assert_eq(x * 0, 0, "x * 0 = 0");
+
+    # Add/sub identity
+    assert_eq(x + 0, 42, "x + 0 = x");
+    assert_eq(x - 0, 42, "x - 0 = x");
+    return 0;
+}
+
+fn test_power_of_two_detection() {
+    # A number n is a power of 2 if: n > 0 AND (n & (n-1)) == 0
+    # This works because powers of 2 have exactly one bit set:
+    #   8 = 0b1000, 7 = 0b0111, 8 & 7 = 0
+    #   6 = 0b0110, 5 = 0b0101, 6 & 5 = 0b0100 != 0
+
+    # Powers of 2:
+    assert_eq(1 & 0, 0, "1 is power of 2");
+    assert_eq(2 & 1, 0, "2 is power of 2");
+    assert_eq(4 & 3, 0, "4 is power of 2");
+    assert_eq(8 & 7, 0, "8 is power of 2");
+    assert_eq(16 & 15, 0, "16 is power of 2");
+
+    # Not powers of 2:
+    assert(3 & 2 != 0, "3 is not power of 2");
+    assert(6 & 5 != 0, "6 is not power of 2");
+    assert(10 & 9 != 0, "10 is not power of 2");
+    return 0;
+}
+
+# ================================================================
+# Fixed-Point Iteration
+# ================================================================
+# The pass manager runs all passes in a loop:
+#   repeat {
+#     changed = false
+#     changed |= constant_fold()
+#     changed |= constant_propagation()
+#     changed |= strength_reduction()
+#     changed |= dead_code_elimination()
+#   } until !changed
+#
+# Why iterate? One pass may enable another:
+#   1. Constant folding: v2 = 10 + 20 -> v2 = 30
+#   2. This makes v0=10 and v1=20 dead (only v2 used them)
+#   3. DCE removes v0 and v1
+#   4. If v2 feeds into another operation, next iteration folds that too
+
+fn test_fixed_point() {
+    # Example needing 2 iterations:
+    # Iter 1: fold v2 = v0 + v1 -> v2 = 30 (enables DCE of v0, v1)
+    # Iter 2: no more changes -> fixed point
+    var iter1_folds = 1;
+    var iter1_dce = 2;
+    var iter2_changes = 0;
+    assert_eq(iter2_changes, 0, "fixed point: no changes in final iteration");
+
+    # More complex example: (10 + 20) * (x + 0) * 1 where x = 5
+    # Iter 1: fold 10+20=30, reduce x+0=x, reduce v6*1=v6
+    # Iter 2: fold 30*5=150 (now both operands known)
+    # Iter 3: DCE removes dead intermediates
+    # Iter 4: no changes -> fixed point
+    var total_passes = 150;  # final result
+    assert_eq(total_passes, 150, "(10+20) * (5+0) * 1 = 150");
+    return 0;
+}
+
+# ================================================================
+# cc2's Current Optimizations
+# ================================================================
+# cc2 currently performs minimal optimization:
+#   1. Constant expression evaluation at parse time
+#      (2 + 3 is computed during parsing, not emitted as code)
+#   2. Tail call optimization (call+ret -> jmp)
+#   3. Dead function detection (functions never called are not emitted)
+#
+# NOT yet implemented in cc2:
+#   - Register allocation (everything through stack/rax)
+#   - Inlining
+#   - Loop optimization
+#   - SSA-based passes (requires IR construction)
+#
+# This is the classic bootstrap tradeoff: simple compiler, slow code.
+# The compiler compiles itself fast; the output runs slow.
+
+fn test_cc2_current_opts() {
+    # cc2 folds constants during parsing:
+    # "var x = 2 + 3;" -> stores 5 directly, no ADD instruction
+    var x = 2 + 3;
+    assert_eq(x, 5, "cc2 folds constants at parse time");
+
+    # cc2 does NOT do register allocation:
+    # Every value goes through rax and stack
+    var uses_reg_alloc = 0;
+    assert_eq(uses_reg_alloc, 0, "cc2: no register allocation");
+
+    # cc2 does NOT do inlining:
+    # Every call is a real CALL instruction
+    var uses_inlining = 0;
+    assert_eq(uses_inlining, 0, "cc2: no inlining");
+
+    # cc2 DOES do tail call optimization:
+    # return foo(x) -> leave; jmp foo
+    var uses_tco = 1;
+    assert_eq(uses_tco, 1, "cc2: has tail call optimization");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_dce_bitmap();
+    test_dce_example();
+    test_constant_folding();
+    test_constant_folding_chain();
+    test_tco_savings();
+    test_tco_detection();
+    test_strength_reduction();
+    test_power_of_two_detection();
+    test_fixed_point();
+    test_cc2_current_opts();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

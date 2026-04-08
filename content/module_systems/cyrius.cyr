@@ -1,0 +1,194 @@
+# Module Systems — Cyrius reference (runnable)
+#
+# Cyrius has no module system. Code organization is textual:
+#   1. include — paste file contents at the inclusion point
+#   2. No module boundaries — all symbols are global
+#   3. No visibility control — everything is public
+#   4. Vendored lib/ pattern — standard library as included files
+#   5. Name collision avoidance — _ prefixes by convention
+#
+# This is simpler than Rust's module system but offers no
+# encapsulation. The programmer must use naming discipline.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/assert.cyr"
+
+# ================================================================
+# include: textual inclusion (no module boundary)
+# ================================================================
+# `include "path"` reads the file and inserts its contents.
+# There is no:
+#   - Import caching (include twice = define twice = error)
+#   - Namespace isolation (all names are global)
+#   - Selective import (you get everything in the file)
+#   - Relative import syntax (paths are relative to project root)
+#
+# Compare to Rust:
+#   include "lib/string.cyr"   ≈  use crate::string::*;
+#   (but textual, not semantic — no privacy, no namespacing)
+#
+# Include order matters: a file can only use names defined
+# ABOVE it in the inclusion chain (single-pass compilation).
+
+# ================================================================
+# Vendored lib/ pattern
+# ================================================================
+# The standard "library" is a set of .cyr files in lib/:
+#   lib/string.cyr  — string operations (str_len, str_eq, str_copy)
+#   lib/fmt.cyr     — formatted output (print, println)
+#   lib/alloc.cyr   — bump allocator (alloc, alloc_reset)
+#   lib/assert.cyr  — test assertions (assert, assert_eq)
+#   lib/vec.cyr     — dynamic array (vec_new, vec_push, vec_get)
+#   lib/tagged.cyr  — tagged unions (Ok, Err, Some, None)
+#
+# Each project copies (vendors) these files. There is no package
+# manager, no shared library path, no version resolution.
+# This is intentional: Cyrius prioritizes simplicity and
+# self-contained builds over dependency management.
+
+fn test_lib_available() {
+    # Verify standard lib functions are available via include
+    var s = "hello";
+    assert_eq(strlen(s), 5, "strlen from lib/string.cyr");
+
+    var buf = alloc(8);
+    store64(buf, 42);
+    assert_eq(load64(buf), 42, "alloc from lib/alloc.cyr");
+    return 0;
+}
+
+# ================================================================
+# Name collision avoidance: _ prefix convention
+# ================================================================
+# Since all names are global, collisions are the programmer's
+# responsibility. Convention:
+#   _helper      — internal/private (by convention only)
+#   ModuleName_func — namespaced to a logical module
+#   LIB_CONSTANT — library-level constant
+#
+# This is like C's naming convention: prefix everything.
+
+# "Private" helper — underscore prefix signals internal use
+fn _config_validate(port) {
+    if (port < 1) { return 0; }
+    if (port > 65535) { return 0; }
+    return 1;
+}
+
+# "Public" API — no prefix needed for the main module
+fn config_new(host, port) {
+    if (_config_validate(port) == 0) { return 0; }
+    var cfg = alloc(16);
+    store64(cfg, host);
+    store64(cfg + 8, port);
+    return cfg;
+}
+
+fn config_host(cfg) { return load64(cfg); }
+fn config_port(cfg) { return load64(cfg + 8); }
+
+fn test_namespace_convention() {
+    var cfg = config_new("localhost", 8080);
+    assert(cfg != 0, "config created");
+    assert(streq(config_host(cfg), "localhost") == 1, "cfg host");
+    assert_eq(config_port(cfg), 8080, "cfg port");
+
+    # Invalid port returns null (0)
+    var bad = config_new("host", 0 - 1);
+    assert_eq(bad, 0, "invalid port rejected");
+    return 0;
+}
+
+# ================================================================
+# Multi-file simulation: separate "modules"
+# ================================================================
+# In a real Cyrius project, these would be separate files:
+#   math_utils.cyr   — included first
+#   string_utils.cyr — included second
+#   main.cyr         — includes both, uses their functions
+#
+# Order matters: math_utils functions must be defined before
+# string_utils if string_utils calls them.
+
+# --- math_utils "module" ---
+fn math_abs(x) {
+    if (x < 0) { return 0 - x; }
+    return x;
+}
+
+fn math_max(a, b) {
+    if (a > b) { return a; }
+    return b;
+}
+
+fn math_clamp(x, lo, hi) {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}
+
+# --- logger "module" ---
+var _log_count = 0;
+var _log_min_level = 0;
+
+fn logger_init(min_level) {
+    _log_count = 0;
+    _log_min_level = min_level;
+    return 0;
+}
+
+fn logger_log(level, msg) {
+    if (level >= _log_min_level) {
+        _log_count = _log_count + 1;
+    }
+    return 0;
+}
+
+fn logger_count() {
+    return _log_count;
+}
+
+fn test_multi_module() {
+    # Math module
+    assert_eq(math_abs(0 - 42), 42, "abs negative");
+    assert_eq(math_abs(42), 42, "abs positive");
+    assert_eq(math_max(3, 7), 7, "max");
+    assert_eq(math_clamp(15, 0, 10), 10, "clamp high");
+    assert_eq(math_clamp(0 - 5, 0, 10), 0, "clamp low");
+
+    # Logger module
+    logger_init(2);  # min level = WARN
+    logger_log(0, "debug");   # ignored
+    logger_log(1, "info");    # ignored
+    logger_log(2, "warn");    # logged
+    logger_log(3, "error");   # logged
+    assert_eq(logger_count(), 2, "logger filtered");
+    return 0;
+}
+
+# ================================================================
+# What Cyrius does NOT have (vs Rust)
+# ================================================================
+#   - No pub/pub(crate)/pub(super) — everything is visible
+#   - No mod keyword — no declaring submodules
+#   - No use/pub use — no selective or re-export imports
+#   - No separate compilation — single translation unit
+#   - No crate boundary — no concept of "external crate"
+#   - No import caching — include is always textual
+#
+# The tradeoff: zero module system complexity.
+# The cost: naming discipline is the only encapsulation tool.
+
+fn main() {
+    alloc_init();
+    test_lib_available();
+    test_namespace_convention();
+    test_multi_module();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

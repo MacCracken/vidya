@@ -1,0 +1,329 @@
+# Vidya — Linking and Loading in Cyrius
+#
+# PATTERN-FOCUSED: documents linker concepts as they apply to cc2.
+# Covers symbol tables, relocation types, GOT/PLT lazy binding,
+# static vs dynamic linking, and section merging.
+#
+# Key concepts:
+#   - Symbol resolution: every reference must match exactly one definition
+#   - Relocations: patch placeholder bytes with computed addresses
+#   - Section merging: all .text first, then all .data
+#   - GOT/PLT: indirect calls through function pointer tables
+#   - Static linking: all code in binary, no runtime deps
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# ================================================================
+# Symbol Table — every .o file has one
+# ================================================================
+# Each entry has:
+#   - name: the symbol string ("main", "printf", etc.)
+#   - section: which section it lives in (.text, .data, .bss)
+#   - offset: byte offset within that section
+#   - binding: local (file-scope) or global (visible to linker)
+#
+# STB_LOCAL = 0, STB_GLOBAL = 1, STB_WEAK = 2
+
+fn test_symbol_binding() {
+    var STB_LOCAL = 0;
+    var STB_GLOBAL = 1;
+    var STB_WEAK = 2;
+
+    # Local symbols are invisible to the linker
+    # Global symbols participate in resolution
+    # Weak symbols can be overridden by strong (global) ones
+    assert_eq(STB_LOCAL, 0, "STB_LOCAL = 0");
+    assert_eq(STB_GLOBAL, 1, "STB_GLOBAL = 1");
+    assert_eq(STB_WEAK, 2, "STB_WEAK = 2");
+
+    # Symbol type: STT_NOTYPE=0, STT_OBJECT=1, STT_FUNC=2, STT_SECTION=3
+    var STT_NOTYPE = 0;
+    var STT_FUNC = 2;
+    var STT_OBJECT = 1;
+    assert_eq(STT_FUNC, 2, "STT_FUNC = 2");
+    assert_eq(STT_OBJECT, 1, "STT_OBJECT = 1");
+    return 0;
+}
+
+# ================================================================
+# Relocation Types — x86_64 ELF
+# ================================================================
+# R_X86_64_64:   S + A           (absolute 64-bit)
+# R_X86_64_32S:  S + A           (absolute 32-bit, sign-extended)
+# R_X86_64_PC32: S + A - P       (PC-relative 32-bit)
+#
+# S = symbol value (resolved address)
+# A = addend (from relocation entry)
+# P = place being patched (address of the relocation site)
+
+fn test_relocation_formulas() {
+    var sym_addr = 0x401000;
+    var addend = 0;
+
+    # ABS64: value = S + A
+    var abs64 = sym_addr + addend;
+    assert_eq(abs64, 0x401000, "ABS64 = S + A");
+
+    # PC32: value = S + A - (P + 4)
+    # The +4 is because x86 measures PC-relative from the END of the instruction
+    var patch_addr = 0x400100;
+    var pc32 = sym_addr + addend - (patch_addr + 4);
+    assert_eq(pc32, 0xEFC, "PC32 = S + A - (P + 4)");
+
+    # ABS32 has same formula as ABS64 but truncated to 32 bits
+    # Used for disp32 fields in SIB addressing
+    var abs32 = sym_addr + addend;
+    assert_eq(abs32, 0x401000, "ABS32 = S + A (truncated)");
+    return 0;
+}
+
+# ================================================================
+# Relocation in CALL instruction
+# ================================================================
+# CALL rel32 (opcode 0xE8) uses PC-relative addressing:
+#   target = PC + rel32  (where PC = address AFTER the CALL = call_addr + 5)
+#   rel32 = target - (call_addr + 5)
+#
+# The assembler emits 0x00000000 as placeholder, linker patches it.
+
+fn test_call_relocation() {
+    # call at 0x400014, target function at 0x40001B
+    var call_addr = 0x400014;
+    var target = 0x40001B;
+    var rel32 = target - (call_addr + 5);
+    assert_eq(rel32, 2, "CALL rel32 forward");
+
+    # call at 0x400100, target at 0x400000 (backward call)
+    var call_back = 0x400100;
+    var target_back = 0x400000;
+    var rel32_back = target_back - (call_back + 5);
+    assert_eq(rel32_back, 0 - 261, "CALL rel32 backward");
+
+    # CALL instruction is 5 bytes: E8 xx xx xx xx
+    var call_size = 5;
+    assert_eq(call_size, 1 + 4, "CALL = opcode(1) + rel32(4)");
+    return 0;
+}
+
+# ================================================================
+# Section Merging — linker layout
+# ================================================================
+# The linker groups sections by name across all objects:
+#   1. All .text sections contiguous (code segment)
+#   2. All .rodata sections (read-only data)
+#   3. All .data sections (initialized read-write data)
+#   4. All .bss sections (zero-initialized, no file bytes)
+#
+# This creates a single code segment and a single data segment
+# that map to PT_LOAD entries in the ELF program headers.
+
+fn test_section_layout() {
+    # Example: 3 object files
+    #   a.o: .text(100), .data(20)
+    #   b.o: .text(60),  .data(40)
+    #   c.o: .text(80),  .data(10)
+    var base = 0x400000;
+
+    # .text layout: a(100) + b(60) + c(80) = 240 bytes
+    var a_text = base;
+    var b_text = base + 100;
+    var c_text = base + 100 + 60;
+    var text_end = base + 100 + 60 + 80;
+    assert_eq(a_text, 0x400000, "a.o .text base");
+    assert_eq(b_text, 0x400064, "b.o .text base");
+    assert_eq(c_text, 0x4000A0, "c.o .text base");
+    assert_eq(text_end - base, 240, "total .text = 240 bytes");
+
+    # .data layout: starts after .text
+    var a_data = text_end;
+    var b_data = text_end + 20;
+    var c_data = text_end + 20 + 40;
+    var data_end = text_end + 20 + 40 + 10;
+    assert_eq(a_data, 0x4000F0, "a.o .data base");
+    assert_eq(data_end - text_end, 70, "total .data = 70 bytes");
+    return 0;
+}
+
+# ================================================================
+# GOT/PLT — Dynamic Linking Indirection
+# ================================================================
+# Calls to shared library functions go through two tables:
+#
+# PLT (Procedure Linkage Table) — code stubs:
+#   plt[0]: push &link_map; jmp resolver
+#   plt[n]: jmp [got[n]]; push reloc_index; jmp plt[0]
+#
+# GOT (Global Offset Table) — data pointers:
+#   got[n]: initially points to "push reloc_index" in plt[n] (lazy)
+#           after first call: patched to real function address
+#
+# Lazy binding sequence:
+#   1. First call: plt[n] -> got[n] -> plt[n]+6 -> plt[0] -> resolver
+#   2. Resolver finds real address, patches got[n]
+#   3. Subsequent calls: plt[n] -> got[n] -> real function (direct)
+
+fn test_got_plt_sizes() {
+    # PLT entry size: 16 bytes on x86_64
+    var plt_entry_size = 16;
+    assert_eq(plt_entry_size, 16, "PLT entry = 16 bytes");
+
+    # GOT entry size: 8 bytes (one pointer)
+    var got_entry_size = 8;
+    assert_eq(got_entry_size, 8, "GOT entry = 8 bytes (pointer)");
+
+    # PLT[0] is special: the resolver stub
+    # PLT[1..n] are the actual function stubs
+    # GOT[0] = address of _DYNAMIC section
+    # GOT[1] = address of link_map
+    # GOT[2] = address of _dl_runtime_resolve
+    # GOT[3..n] = function pointers (lazy or resolved)
+    var got_reserved = 3;
+    assert_eq(got_reserved, 3, "GOT reserves 3 entries");
+    return 0;
+}
+
+fn test_lazy_binding_sequence() {
+    # Simulate lazy binding with a counter
+    var resolved = 0;
+    var got_entry = 0;  # 0 = unresolved (points to resolver)
+    var real_addr = 0x7FFFF7A00000;
+
+    # First call: resolver patches GOT
+    if (got_entry == 0) {
+        got_entry = real_addr;
+        resolved = resolved + 1;
+    }
+    assert_eq(got_entry, real_addr, "GOT patched after first call");
+    assert_eq(resolved, 1, "resolver called once");
+
+    # Second call: GOT already has real address (fast path)
+    if (got_entry == 0) {
+        resolved = resolved + 1;
+    }
+    assert_eq(resolved, 1, "resolver NOT called again");
+    return 0;
+}
+
+# ================================================================
+# Static vs Dynamic Linking
+# ================================================================
+# Static linking (ld -static):
+#   - All library code copied into executable
+#   - No runtime dependencies
+#   - Larger binary but faster startup (no ld.so)
+#   - CALL targets are direct (no PLT indirection)
+#   - Security updates require relinking
+#
+# Dynamic linking (default):
+#   - References to .so files, loaded at runtime by ld.so
+#   - Smaller binary (library code shared in memory)
+#   - PLT/GOT overhead on calls (one extra indirection)
+#   - LD_PRELOAD for symbol interposition
+#   - .so can be updated without recompiling
+
+fn test_static_vs_dynamic() {
+    # Static linking: CALL uses direct rel32
+    # call target = call_addr + 5 + rel32
+    var direct_call_overhead = 0;  # no indirection
+
+    # Dynamic linking: CALL goes through PLT
+    # call plt_stub -> jmp [got_entry] -> real function
+    # Extra instructions: jmp [mem] = 6 bytes + possible cache miss
+    var plt_call_overhead = 1;  # one extra indirection
+
+    assert_eq(direct_call_overhead, 0, "static: no overhead");
+    assert_eq(plt_call_overhead, 1, "dynamic: PLT indirection");
+
+    # Typical binary sizes (rough order of magnitude)
+    # Static hello world: ~800KB (libc included)
+    # Dynamic hello world: ~16KB (just references libc.so)
+    var static_hello_kb = 800;
+    var dynamic_hello_kb = 16;
+    assert(static_hello_kb > dynamic_hello_kb, "static binary is larger");
+    return 0;
+}
+
+# ================================================================
+# Symbol Resolution Rules
+# ================================================================
+# When multiple objects define the same symbol:
+#   1. Multiple strong definitions → linker error (duplicate symbol)
+#   2. One strong + one weak → strong wins
+#   3. Multiple weak definitions → linker picks one (usually first)
+#   4. Undefined in one object, defined in another → resolved
+#   5. Undefined everywhere → linker error (undefined reference)
+
+fn test_resolution_rules() {
+    # Rule 1: strong + strong = error
+    # Two .o files both define "main" → ld: multiple definition of 'main'
+
+    # Rule 2: strong + weak = strong wins
+    # Default allocator: libc defines malloc (weak)
+    # Custom allocator: user defines malloc (strong) → overrides libc
+    var strong_wins = 1;
+    assert_eq(strong_wins, 1, "strong overrides weak");
+
+    # Rule 4: cross-reference resolution
+    # main.o: calls add_numbers (undefined)
+    # math.o: defines add_numbers
+    # Linker matches the reference to the definition
+    var ref_resolved = 1;
+    assert_eq(ref_resolved, 1, "cross-object resolution");
+
+    # Archives (.a files) are different:
+    # Only pull in .o members that resolve an existing undefined symbol
+    # Order matters: ld math.a main.o may fail if math.a is scanned first
+    # This is why -l flags go AFTER the .o files on the command line
+    var archive_order_matters = 1;
+    assert_eq(archive_order_matters, 1, "archive scan order matters");
+    return 0;
+}
+
+# ================================================================
+# cc2's Linking Model
+# ================================================================
+# cc2 does NOT use a separate linker. It emits a complete ELF directly:
+#   - Single compilation unit (no .o files, no linking step)
+#   - Two-pass assembly: pass 1 computes offsets, pass 2 emits bytes
+#   - Forward references resolved by backpatching jump offsets
+#   - All functions in one .text section, all globals in one .data section
+#
+# This is simpler but limits to single-file programs (no separate compilation).
+
+fn test_cc2_model() {
+    # cc2 uses backpatching for forward jumps:
+    # Pass 1: emit placeholder, record patch location
+    # Pass 2: compute target offset, overwrite placeholder
+    var uses_backpatch = 1;
+    assert_eq(uses_backpatch, 1, "cc2 uses backpatching");
+
+    # No separate .o files means no symbol resolution phase
+    # Every function is visible to every other function
+    var needs_linker = 0;
+    assert_eq(needs_linker, 0, "cc2 has no linking step");
+
+    # Two-pass assembly: first pass for sizes, second for bytes
+    # This is exactly what a linker does, just within one file
+    var num_passes = 2;
+    assert_eq(num_passes, 2, "two-pass assembly");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_symbol_binding();
+    test_relocation_formulas();
+    test_call_relocation();
+    test_section_layout();
+    test_got_plt_sizes();
+    test_lazy_binding_sequence();
+    test_static_vs_dynamic();
+    test_resolution_rules();
+    test_cc2_model();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

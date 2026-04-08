@@ -1,0 +1,235 @@
+# Trait and Typeclass Systems — Cyrius reference (runnable)
+#
+# Cyrius has no trait system. Polymorphism is manual:
+#   - Vtable pattern: struct of function pointers
+#   - trait_obj_new: create a fat pointer (data_ptr, vtable_ptr)
+#   - trait_call: dispatch through vtable by slot index
+#   - Display trait convention: StructName_display(self) returns string ptr
+#
+# This documents the trait.cyr pattern used in Cyrius programs.
+# It is the C vtable pattern expressed in Cyrius syntax.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/fnptr.cyr"
+include "lib/assert.cyr"
+
+# ================================================================
+# Manual vtable: function pointer table
+# ================================================================
+# A vtable is an array of function pointers. Each "trait method"
+# occupies a slot at a known offset.
+#
+# Layout for a Shape vtable:
+#   slot 0: area(self) -> i64 (fixed-point * 100)
+#   slot 1: name(self) -> string ptr
+
+fn vtable_new(fn_area, fn_name) {
+    var vt = alloc(16);
+    store64(vt, fn_area);      # slot 0: area
+    store64(vt + 8, fn_name);  # slot 1: name
+    return vt;
+}
+
+fn vtable_get(vt, slot) {
+    return load64(vt + slot * 8);
+}
+
+# ================================================================
+# Trait object: fat pointer (data, vtable)
+# ================================================================
+# Like Rust's dyn Trait — a pair of pointers.
+# trait_obj_new(data, vtable) creates one.
+# trait_call(obj, slot, ...) dispatches through the vtable.
+
+fn trait_obj_new(data, vtable) {
+    var obj = alloc(16);
+    store64(obj, data);       # data pointer
+    store64(obj + 8, vtable); # vtable pointer
+    return obj;
+}
+
+fn trait_obj_data(obj) { return load64(obj); }
+fn trait_obj_vtable(obj) { return load64(obj + 8); }
+
+# ================================================================
+# Circle: implements Shape
+# ================================================================
+
+fn circle_new(radius) {
+    var c = alloc(8);
+    store64(c, radius);
+    return c;
+}
+
+fn circle_radius(c) { return load64(c); }
+
+fn circle_area(self) {
+    var r = load64(self);
+    # Fixed-point: area * 100 for integer math
+    # pi ≈ 314/100, area = pi * r^2
+    return 314 * r * r / 100;
+}
+
+fn circle_name(self) {
+    return "circle";
+}
+
+# ================================================================
+# Rectangle: implements Shape
+# ================================================================
+
+fn rect_new(w, h) {
+    var r = alloc(16);
+    store64(r, w);
+    store64(r + 8, h);
+    return r;
+}
+
+fn rect_area(self) {
+    var w = load64(self);
+    var h = load64(self + 8);
+    return w * h;
+}
+
+fn rect_name(self) {
+    return "rect";
+}
+
+# ================================================================
+# Dynamic dispatch: call through vtable
+# ================================================================
+# This is what dyn Trait does at the machine level:
+#   1. Load vtable pointer from fat pointer
+#   2. Load function pointer from vtable slot
+#   3. Indirect call with data pointer as first arg
+
+fn shape_area(obj) {
+    var data = trait_obj_data(obj);
+    var vt = trait_obj_vtable(obj);
+    var fn_ptr = vtable_get(vt, 0);   # slot 0 = area
+    return fncall1(fn_ptr, data);       # indirect call
+}
+
+fn shape_name(obj) {
+    var data = trait_obj_data(obj);
+    var vt = trait_obj_vtable(obj);
+    var fn_ptr = vtable_get(vt, 1);   # slot 1 = name
+    return fncall1(fn_ptr, data);
+}
+
+# ================================================================
+# Display trait convention
+# ================================================================
+# By convention, StructName_display(self) returns a string pointer.
+# This is the Cyrius equivalent of Rust's Display trait.
+
+fn Circle_display(self) {
+    return "Circle(...)";
+}
+
+fn Rect_display(self) {
+    return "Rect(...)";
+}
+
+# ================================================================
+# Tests
+# ================================================================
+
+fn test_vtable_dispatch() {
+    # Build vtables for each "impl"
+    var circle_vt = vtable_new(&circle_area, &circle_name);
+    var rect_vt = vtable_new(&rect_area, &rect_name);
+
+    # Create trait objects (fat pointers)
+    var c = circle_new(10);
+    var r = rect_new(4, 6);
+
+    var shape_c = trait_obj_new(c, circle_vt);
+    var shape_r = trait_obj_new(r, rect_vt);
+
+    # Dynamic dispatch: same function, different behavior
+    var area_c = shape_area(shape_c);
+    var area_r = shape_area(shape_r);
+
+    # Circle(r=10): 314 * 100 / 100 = 314
+    assert_eq(area_c, 314, "circle area via vtable");
+    # Rect(4x6): 24
+    assert_eq(area_r, 24, "rect area via vtable");
+
+    return 0;
+}
+
+fn test_name_dispatch() {
+    var circle_vt = vtable_new(&circle_area, &circle_name);
+    var rect_vt = vtable_new(&rect_area, &rect_name);
+
+    var c = circle_new(5);
+    var r = rect_new(3, 7);
+
+    var shape_c = trait_obj_new(c, circle_vt);
+    var shape_r = trait_obj_new(r, rect_vt);
+
+    assert(streq(shape_name(shape_c), "circle") == 1, "circle name");
+    assert(streq(shape_name(shape_r), "rect") == 1, "rect name");
+    return 0;
+}
+
+fn test_static_dispatch() {
+    # Static dispatch: direct function call, no vtable.
+    # The compiler knows the concrete type. Like Rust's monomorphization.
+    var c = circle_new(5);
+    var area = circle_area(c);
+    # 314 * 25 / 100 = 78 (truncated integer)
+    assert_eq(area, 78, "static circle area");
+
+    var r = rect_new(3, 7);
+    assert_eq(rect_area(r), 21, "static rect area");
+    return 0;
+}
+
+fn test_polymorphic_array() {
+    # Array of trait objects — like Vec<Box<dyn Shape>> in Rust
+    var circle_vt = vtable_new(&circle_area, &circle_name);
+    var rect_vt = vtable_new(&rect_area, &rect_name);
+
+    # Store 3 trait objects in a vec — like Vec<Box<dyn Shape>> in Rust
+    var shapes = vec_new();
+    vec_push(shapes, trait_obj_new(circle_new(10), circle_vt));
+    vec_push(shapes, trait_obj_new(rect_new(4, 6), rect_vt));
+    vec_push(shapes, trait_obj_new(circle_new(5), circle_vt));
+
+    # Sum areas polymorphically
+    var total = 0;
+    var i = 0;
+    while (i < vec_len(shapes)) {
+        total = total + shape_area(vec_get(shapes, i));
+        i = i + 1;
+    }
+
+    # 314 + 24 + 78 = 416
+    assert_eq(total, 416, "polymorphic sum");
+    return 0;
+}
+
+fn test_display_convention() {
+    var c = circle_new(5);
+    var r = rect_new(3, 7);
+    assert(streq(Circle_display(c), "Circle(...)") == 1, "circle display");
+    assert(streq(Rect_display(r), "Rect(...)") == 1, "rect display");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_vtable_dispatch();
+    test_name_dispatch();
+    test_static_dispatch();
+    test_polymorphic_array();
+    test_display_convention();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);
