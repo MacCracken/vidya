@@ -52,6 +52,11 @@ pub fn validation_command(lang: Language) -> Option<&'static str> {
         Language::OpenQASM => Some(
             "QASM_PY=$(if [ -f .venv/bin/python3 ]; then echo .venv/bin/python3; else echo python3; fi) && $QASM_PY -c \"from qiskit import qasm2; import os; qc = qasm2.load('{file}', include_path=[os.path.dirname('{file}') + '/..']); print(f'valid: {{qc.num_qubits}}q depth={{qc.depth()}}')\"",
         ),
+        Language::Cyrius => {
+            // cc2 resolves includes relative to cwd; CYRIUS_HOME must point to the Cyrius repo.
+            // {file} is made absolute via realpath before cd so the path survives the cwd change.
+            Some("CYR_HOME=${CYRIUS_HOME:-$HOME/Repos/cyrius} && CYR_FILE=$(realpath {file}) && cd \"$CYR_HOME\" && cat \"$CYR_FILE\" | ./build/cc2 > {out} && chmod +x {out} && {out}")
+        }
     }
 }
 

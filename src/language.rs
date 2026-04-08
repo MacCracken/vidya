@@ -29,6 +29,8 @@ pub enum Language {
     AsmAarch64,
     /// OpenQASM (`.qasm`) — quantum circuit assembly language
     OpenQASM,
+    /// Cyrius (`.cyr`) — self-hosting systems language for AGNOS
+    Cyrius,
 }
 
 impl Language {
@@ -46,6 +48,7 @@ impl Language {
             Self::AsmX86_64 => "s",
             Self::AsmAarch64 => "s",
             Self::OpenQASM => "qasm",
+            Self::Cyrius => "cyr",
         }
     }
 
@@ -63,6 +66,7 @@ impl Language {
             Self::AsmX86_64 => "x86_64 Assembly",
             Self::AsmAarch64 => "AArch64 Assembly",
             Self::OpenQASM => "OpenQASM",
+            Self::Cyrius => "Cyrius",
         }
     }
 
@@ -82,6 +86,7 @@ impl Language {
             Self::AsmX86_64 => "asm_x86_64",
             Self::AsmAarch64 => "asm_aarch64",
             Self::OpenQASM => "openqasm",
+            Self::Cyrius => "cyrius",
         }
     }
 
@@ -91,7 +96,7 @@ impl Language {
         match self {
             Self::Rust | Self::C | Self::Go | Self::TypeScript | Self::Zig => "//",
             Self::Python | Self::Shell => "#",
-            Self::AsmX86_64 | Self::AsmAarch64 => "#",
+            Self::AsmX86_64 | Self::AsmAarch64 | Self::Cyrius => "#",
             Self::OpenQASM => "//",
         }
     }
@@ -110,6 +115,7 @@ impl Language {
             Self::AsmX86_64,
             Self::AsmAarch64,
             Self::OpenQASM,
+            Self::Cyrius,
         ]
     }
 
@@ -127,6 +133,7 @@ impl Language {
             "asm_x86_64" | "x86_64" | "x86-64" | "amd64" => Some(Self::AsmX86_64),
             "asm_aarch64" | "aarch64" | "arm64" => Some(Self::AsmAarch64),
             "openqasm" | "qasm" | "quantum" => Some(Self::OpenQASM),
+            "cyrius" | "cyr" => Some(Self::Cyrius),
             _ => None,
         }
     }
@@ -145,7 +152,7 @@ mod tests {
     #[test]
     fn all_languages() {
         let all = Language::all();
-        assert_eq!(all.len(), 10);
+        assert_eq!(all.len(), 11);
     }
 
     #[test]
