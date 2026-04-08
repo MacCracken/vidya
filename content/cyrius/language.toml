@@ -14,7 +14,7 @@ No Rust, no LLVM, no Python. Just sh + Linux x86_64.
 Everything is a 64-bit integer. No floats, no separate types.
 Type annotations (var x: i64 = 42) are documentation only — no enforcement.
 
-The compiler (cc2) is 205KB, ~280 functions, 8 modules. It compiles itself
+The compiler (cc2) is 190KB, ~280 functions, 8 modules. It compiles itself
 byte-identical in ~11ms. The AGNOS kernel is written entirely in Cyrius.
 
 Build: sh bootstrap/bootstrap.sh (40ms)
@@ -22,12 +22,13 @@ Compile: echo 'var x = 42;' | ./build/cc2 > prog && chmod +x prog
 Test: sh tests/compiler.sh   (216 compiler + 51 program tests)
 
 Source: src/main.cyr (entry) + src/frontend/*.cyr + src/backend/*.cyr + src/common/*.cyr
-Version: 1.10.0 — 267 tests (216 compiler + 51 programs), 0 failures, self-hosting byte-identical
-Compiler: 205KB x86_64. Frontend/backend/common architecture (v1.8.0 restructure).
-Constant folding (all arithmetic ops), tail call optimization, DCE, jump tables.
-Inline small functions (token replay, max depth 3). R12 spill register allocation.
-Return-by-value small structs (ret2/rethi). 7 SIMD packed f64 ops.
-20 f64 builtins (SSE2 + SSE4.1 + x87 FPU transcendentals).
+Version: 1.11.5 — 267 tests (216 compiler + 51 programs), 0 failures, self-hosting byte-identical
+Compiler: 190KB x86_64. Frontend/backend/common architecture (v1.8.0 restructure).
+Constant folding (all arithmetic ops), tail call optimization, DCE (bitmap O(T+N)), jump tables.
+Inline small functions (token replay, currently disabled). Return-by-value small structs (ret2/rethi).
+7 SIMD packed f64 ops. 20 f64 builtins (SSE2 + SSE4.1 + x87 FPU transcendentals).
+Overflow guards on extra_patches, continue patches, ret_patches, struct count.
+Argonaut (6257 lines, 300 tests + 39 serde + 18 benchmarks) compiles and runs.
 #derive(Serialize), include-once semantics, identifier dedup, #ref directive. Fixup table: 4096 entries.
 '''
 
@@ -1293,19 +1294,35 @@ IMPLEMENTATION:
     5. Compile step (i = i + 1)
     6. Patch all continue jmps to point to step expression
 
-CRITICAL BUG (v1.11.0):
-    Address 0x8F848 was ALREADY USED by the &&/|| extra-patch mechanism.
-    The continue patch counter at S+0x8F850 (which is 0x8F848 + 8) was
-    fine, but the initial design tried to use S+0x8F848 for the continue
-    flag — which collided with &&/|| patches silently.
+CRITICAL BUG (v1.11.0 — fixed v1.11.4):
+    The continue patch counter was at S+0x8F850, and the continue patch
+    array at S+0x8F858. But the &&/|| extra_patches array starts at
+    S+0x8F848 and grows upward (8 entries × 8 bytes = 64 bytes, to 0x8F888).
 
-    Symptom: the "life glider" test (which uses both continue and && in
-    the same loop) produced wrong results. No crash, no error — just
-    silently wrong behavior because the &&/|| patch data was overwritten.
+    With `a && b` (1 chained &&), ADDXP writes to 0x8F848+0*8=0x8F848 — safe.
+    With `a && b && c` (2 chained &&), ADDXP writes to 0x8F848+1*8=0x8F850 —
+    OVERWRITES the continue counter with a code buffer offset.
+
+    When the for-loop closes, it reads L64(0x8F850)-1 as the continue count.
+    The corrupted value (~36000 for large programs) causes iteration through
+    unmapped memory in EPATCH → SIGSEGV. Small programs survive because the
+    corrupted count stays within mapped heap.
+
+    Fix (v1.11.4): Relocated continue data from 0x8F850/0x8F858 to
+    0x8F8A0/0x8F8A8 — after the extra_patches region.
+
+    v1.11.5 added overflow guards: ADDXP now checks c >= 8, continue
+    patches check ci >= 8. Both error cleanly instead of silent overflow.
 
 KEY LESSON:
     The compiler uses a flat heap region for state variables. There is no
     allocation tracking — offsets are chosen manually. When adding new
     state, you MUST check what already lives at nearby addresses. A map
     of heap offset usage would prevent these silent collisions.
+
+    Bug #14 was a 16-byte overlap that went undetected across 4 releases
+    because the crash only manifested when: (1) triple && was used inside
+    a for-loop, AND (2) the program was large enough that the corrupted
+    counter caused reads past the brk boundary. Both conditions were
+    required — isolated tests passed.
 '''

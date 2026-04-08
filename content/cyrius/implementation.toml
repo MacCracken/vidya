@@ -1432,25 +1432,25 @@ IMPLEMENTATION:
 
 [[entries]]
 name = "fixup_table_expansion"
-description = "Fixup table history: 0x8A000 (528) → 0x262000 (2048) → 0x2A2000 (4096)"
+description = "Fixup table history: 0x8A000 (528) → 0x262000 (2048) → 0x2A2000 (8192)"
 category = "cyrius"
 content = '''
 HISTORY:
   v1.4.0: Relocated from 0x8A000 (528 usable) to 0x262000 (2048 entries)
   v1.7.2: Relocated to 0x2A2000 to accommodate 512KB preprocessor buffer
-  v1.7.5: Expanded to 4096 entries (65536 bytes). fn_names/offsets/params
-          relocated to 0x2B2000/0x2B4000/0x2B6000. brk at 0x2B8000.
+  v1.7.5: Expanded to 4096 entries. fn_names/offsets/params relocated.
+  v1.10.2: Expanded to 8192 entries (131072 bytes). fn_names/offsets/params
+           relocated to 0x2C2000/0x2C4000/0x2C6000. brk at 0x2CE000.
 
-CURRENT LAYOUT (v1.10.0):
-  0x2A2000  fixup_tbl     [65536]  4096 entries × 16 bytes
-  0x2B2000  fn_names      [8192]   1024 function name offsets
-  0x2B4000  fn_offsets    [8192]   1024 function code offsets
-  0x2B6000  fn_params     [8192]   1024 function param counts
+CURRENT LAYOUT (v1.11.5):
+  0x2A2000  fixup_tbl     [131072] 8192 entries × 16 bytes
+  0x2C2000  fn_names      [8192]   1024 function name offsets
+  0x2C4000  fn_offsets    [8192]   1024 function code offsets
+  0x2C6000  fn_params     [8192]   1024 function param counts
   0x2C8000  fn_body_start [8192]   1024 inline body start token indices
   0x2CA000  fn_body_end   [8192]   1024 inline body end token indices
   0x2CC000  fn_inline     [8192]   1024 inline eligibility flags
-  0x2CE000  fn_pnames     [8192]   1024 inline param name offsets
-  0x2D2000  brk
+  0x2CE000  brk
 
 FIXUP ENTRY FORMAT (16 bytes each):
   [0..7]  code offset — position in codebuf where the address goes
@@ -1461,15 +1461,14 @@ FIXUP ENTRY FORMAT (16 bytes each):
     type 3 = absolute function address (for function pointers)
     type 4 = tail call (aarch64 B instruction, not BL)
 
-OVERFLOW CHECK (v1.7.5):
-  All fixup writers now check fc >= 4096: RECFIX, ESADDR, ECALLFIX,
-  ETAILJMP, &fn handler, closure handler. Before v1.7.5, only RECFIX
-  had the check — ESADDR/ECALLFIX/ETAILJMP bypassed it silently.
+OVERFLOW CHECK:
+  All fixup writers check fc >= 8192: RECFIX, ESADDR, ECALLFIX,
+  ETAILJMP, &fn handler, closure handler.
 
 SIZING GUIDE:
   Each function call, string literal, global var reference, and function
-  pointer generates one fixup entry. agnostik full suite (22 modules,
-  400+ functions) uses ~742 entries. 4096 limit supports ~200KB source.
+  pointer generates one fixup entry. argonaut (358 functions, 6257 lines)
+  uses ~1100 entries. 8192 limit supports programs well past 20K lines.
 '''
 
 [[entries]]
@@ -2131,10 +2130,12 @@ CASE BODY PATCHING:
 '''
 
 [[entries]]
-name = "inline_small_functions"
-description = "Token replay inlining for 1-param functions with <= 6 body tokens (v1.10.0)"
+name = "inline_small_functions_design"
+description = "HISTORICAL: Token replay inlining design — disabled v1.11.3 due to I-cache regression"
 category = "cyrius"
 content = '''
+STATUS: DISABLED (v1.11.3, _INLINE_OK = 0). Design preserved for future re-enablement.
+
 DESIGN:
   Small functions (1 parameter, <= 6 body tokens) are inlined at the call site
   by replaying their body tokens in the caller's parsing context, with the
@@ -2174,11 +2175,16 @@ AARCH64:
 '''
 
 [[entries]]
-name = "r12_spill_register_allocation"
-description = "ESPILL/EUNSPILL use callee-saved R12 for first expression nesting level (v1.10.0)"
+name = "r12_spill_register_allocation_reverted"
+description = "HISTORICAL: R12 spill added v1.10.0, REVERTED v1.11.2 — 19-125% benchmark regressions"
 category = "cyrius"
 content = '''
-PROBLEM:
+STATUS: REVERTED (v1.11.2). Push rbx + push r12 added 7 bytes and 4 stack ops
+per function. Benchmarks showed 19-125% regressions on heap alloc, syscalls, I/O.
+ESPILL/EUNSPILL are now aliases for push rax / pop rax. Prologue reverted to
+push rbp; mov rbp, rsp. Stack param offset back to +16.
+
+PROBLEM (that motivated this, still unsolved):
   Expression evaluation uses push/pop to save intermediate values:
     a + b * c → eval a, push rax, eval b*c, pop rcx, add
   Each push/pop is 1+1 bytes but requires memory round-trip (stack store/load).
@@ -2461,104 +2467,24 @@ RESULT:
 '''
 
 [[entries]]
-name = "inline_small_functions"
-description = "Token replay inlining for small functions with metadata tables (v1.10.0)"
+name = "inline_small_functions_reverted"
+description = "HISTORICAL: Token replay inlining added v1.10.0, disabled v1.11.3 — I-cache pressure made code slower"
 category = "cyrius"
 content = '''
-OVERVIEW:
-  Small functions can be inlined at call sites using token replay.
-  Instead of emitting a call instruction, the compiler replays the
-  function body tokens directly into the caller, substituting
-  parameters for local variable slots.
+STATUS: DISABLED (v1.11.3, _INLINE_OK = 0). Metadata tables still allocated but unused.
 
-METADATA TABLES (0x2C8000-0x2CE000):
-  fn_body_start[N]  — token offset where function body begins
-  fn_body_end[N]    — token offset where function body ends
-  fn_inline[N]      — inline flag (GFINL != 0 means inlineable)
+Token replay inlined 1-param functions with <= 6 body tokens by replaying
+their body tokens at the call site. Generated larger code per site than
+the 5-byte `call` it replaced, hurting I-cache on real workloads.
 
-  These tables are populated during function definition. A function
-  is marked inlineable if it meets size/complexity criteria.
-
-INLINE PATH:
-  In PARSE_FNCALL, when GFINL != 0 for the target function:
-  1. Save current token position
-  2. Map callee parameter names to fresh local variable slots in caller
-  3. Evaluate arguments and store to mapped local slots
-  4. Seek to fn_body_start, replay tokens until fn_body_end
-  5. Any `return` in inlined body becomes a jmp to inline-exit label
-  6. Restore token position and continue normal compilation
-
-  Max inline depth: 3 (prevents infinite recursion for recursive functions
-  and limits code bloat).
-
-PARAMETER MAPPING:
-  Each callee parameter gets a fresh local slot in the caller's frame.
-  When the inlined body references a parameter by name, the lexer/parser
-  resolves it to the mapped local slot instead of a register argument.
-
-CRITICAL BUG:
-  PARSE_STMT had a token range check (tokens 62-92) that determined
-  which tokens were valid statement starters. New tokens added for
-  inlining were outside this range, causing them to be silently skipped.
-  The initial debugging focused on the lexer (wrong lead), but the
-  REAL bug was PARSE_STMT's range check not including the new tokens.
+CRITICAL BUG during development:
+  PARSE_STMT had a token range check (tokens 62-92) that silently skipped
+  new tokens. Initial debugging focused on lexer (wrong lead) — the real
+  bug was PARSE_STMT's range check not including new tokens.
 
 KEY LESSON:
-  When adding new tokens/keywords, check ALL range checks in the compiler.
-  PARSE_STMT, PARSE_TERM, PARSE_FACTOR all have hardcoded token ranges
-  that determine dispatch. Missing a range update causes silent failures —
-  the token is lexed correctly but never parsed.
-'''
-
-[[entries]]
-name = "register_allocation_r12"
-description = "R12 spill register and ESPILL/EUNSPILL nesting (v1.10.0)"
-category = "cyrius"
-content = '''
-OVERVIEW:
-  R12 serves as the first expression spill register. When an expression
-  needs a temporary beyond rax/rcx, the value is spilled to r12 instead
-  of pushing to the stack. This avoids push/pop overhead for common
-  binary expressions.
-
-PROLOGUE (v1.10.0+):
-  push rbx
-  push r12
-  push rbp
-  mov rbp, rsp
-
-  Three pushes + return address = 32 bytes = 16-byte aligned.
-  This is critical for System V ABI compliance (SSE instructions
-  require 16-byte stack alignment at call sites).
-
-ESPILL/EUNSPILL:
-  Counter-based nesting mechanism. Each ESPILL increments a depth
-  counter. If depth == 1, mov r12, rax (use register). If depth > 1,
-  push rax (fall back to stack). EUNSPILL reverses: depth == 1 reads
-  from r12, depth > 1 pops from stack. The counter ensures correct
-  nesting for complex expressions like f(a + b, c * d).
-
-IMPACTS OF PROLOGUE CHANGE:
-  1. ETAILJMP must emit matching epilogue:
-     pop rbp; pop r12; pop rbx; ret
-     (reverse order of prologue pushes)
-
-  2. Stack parameter offset changed from +16 to +32:
-     Parameters 7+ are on the stack. With 2 pushes (old prologue),
-     param 7 was at [rbp+16]. With 3 pushes (new prologue), it's at
-     [rbp+32] because the extra push shifts the frame.
-
-  3. aarch64 cross-compiler needs ESPILL/EUNSPILL stubs:
-     ARM doesn't use r12 the same way. The stubs are no-ops but must
-     exist so the shared frontend code compiles. Additionally,
-     _INLINE_OK must be set to 0 on aarch64 to prevent inline metadata
-     writes (the metadata addresses are x86-specific).
-
-KEY LESSON:
-  Changing the function prologue is a high-impact modification. Every
-  place that assumes stack layout must be updated: tail calls, stack
-  parameter access, frame pointer arithmetic, and cross-architecture
-  stubs. Test self-hosting AND aarch64 after any prologue change.
+  When adding new tokens/keywords, check ALL range checks: PARSE_STMT,
+  PARSE_TERM, PARSE_FACTOR all have hardcoded token ranges.
 '''
 
 [[entries]]
@@ -2610,44 +2536,6 @@ KEY LESSON:
   with new limits). The extraction pattern is the sustainable approach.
 '''
 
-[[entries]]
-name = "fixup_table_expansion"
-description = "Fixup table 4096→8192 with metadata relocation (v1.10.0)"
-category = "cyrius"
-content = '''
-PROBLEM:
-  The fixup table (used for forward references, jumps, call patches) was
-  limited to 4096 entries. As the compiler and programs grew, this limit
-  was hit, causing silent failures in jump patching.
-
-EXPANSION:
-  Doubled the fixup table from 4096 to 8192 entries.
-
-  This required relocating adjacent metadata tables that lived immediately
-  after the fixup table in memory:
-    fn_names     — moved from 0x2B2000 to 0x2C2000
-    fn_offsets   — moved correspondingly
-    fn_params    — moved correspondingly
-
-  The new layout gives the fixup table twice the space while pushing
-  function metadata to higher addresses.
-
-MIGRATION PROCESS:
-  1. Identify all references to fn_names/fn_offsets/fn_params addresses.
-     Found 24+ references across emit.cyr, parse.cyr, and other modules.
-  2. Use sed to update all hex address constants (0x2B2 → 0x2C2 pattern).
-  3. Two-step bootstrap required:
-     Step 1: Compile with old cc2 (old addresses) to get intermediate cc2
-     Step 2: Compile with intermediate cc2 (new addresses) to get final cc2
-     Step 3: Self-host verify: final cc2 compiles itself byte-identical
-
-KEY LESSON:
-  Any change to memory layout in the compiler requires a two-step bootstrap.
-  The old compiler must produce a binary that understands the new layout,
-  then that binary recompiles itself. You cannot change layout addresses
-  and self-host in a single step — the running compiler and the compiled
-  compiler would disagree on where data lives.
-'''
 
 [[entries]]
 name = "aarch64_native_self_host"
@@ -2882,4 +2770,372 @@ KEY LESSON:
   and the bug only triggers under conditions that don't currently exist.
   Document the invariant that must hold (PP passes copy back to S+0)
   and revisit if that invariant is ever broken.
+'''
+
+[[entries]]
+name = "multi_file_compilation_design"
+description = "v2.0 target: .o object files + linking — design research"
+category = "cyrius"
+content = '''
+STATUS: Design research. Implementation depends on v1.12 hardened heap.
+
+GOAL:
+  Compile individual .cyr files to ELF .o relocatable object files, then
+  link them together. Enables: separate compilation, faster rebuilds,
+  library distribution as .o/.a files.
+
+CURRENT MODEL:
+  Single compilation unit. `include "file.cyr"` textually inserts the file
+  into the input stream. The compiler sees one giant source. All symbols
+  are resolved internally via the fixup table.
+
+WHAT .o FILES NEED:
+
+  1. SYMBOL TABLE
+     Each .o needs a list of defined symbols (functions, globals) and
+     undefined symbols (external references). Currently the compiler has
+     fn_names/fn_offsets but these are internal indices, not ELF symbols.
+
+     New: emit ELF .symtab section with STT_FUNC / STT_OBJECT entries.
+     Each function gets a symbol. Each global var gets a symbol.
+
+  2. RELOCATION ENTRIES
+     Currently fixup entries are resolved internally (all addresses known).
+     With .o files, some addresses are unknown (defined in other .o files).
+     These become ELF relocation entries (R_X86_64_PC32 for calls,
+     R_X86_64_64 for absolute addresses).
+
+     The fixup table already stores the needed info (code offset + type +
+     target). Converting fixup entries to ELF relocations is mechanical.
+
+  3. SECTION HEADERS
+     Current ELF output has no sections (just a single LOAD segment).
+     .o files need: .text (code), .data (globals), .rodata (strings),
+     .symtab, .strtab, .rela.text.
+
+  4. LINKER
+     Need a minimal linker that: reads multiple .o files, resolves symbols,
+     patches relocations, emits final executable. Could be written in Cyrius.
+
+IMPLEMENTATION PLAN:
+
+  Phase 1 — ELF .o emission:
+    - Add `-c` flag to compiler: emit .o instead of executable
+    - EMITELF_OBJ function: emit proper ELF with sections
+    - Convert fixup entries to relocation entries for undefined symbols
+    - Self-test: compile one .cyr to .o, link with simple stub
+
+  Phase 2 — Minimal linker:
+    - Read ELF .o files (parse headers, sections, symbols, relocations)
+    - Symbol resolution: match undefined refs to definitions
+    - Patch relocations with final addresses
+    - Emit executable ELF (same format as current EMITELF_USER)
+
+  Phase 3 — Incremental compilation:
+    - cyrb tracks which .cyr files changed
+    - Only recompile changed files to .o
+    - Relink all .o files
+    - Faster rebuilds for large projects
+
+KEY INSIGHT:
+  The fixup table IS a relocation table. Converting it to ELF relocations
+  is straightforward:
+    fixup type 0 (var addr) → R_X86_64_64
+    fixup type 1 (string addr) → R_X86_64_64
+    fixup type 2 (fn call) → R_X86_64_PC32
+    fixup type 3 (fn pointer) → R_X86_64_64
+  The main new work is: section headers, symbol table, and the linker.
+
+SCOPE FOR v2.0:
+  Phase 1 only — emit .o files. Linker can be a separate v2.0 milestone
+  or use the system ld as an interim solution.
+'''
+
+[[entries]]
+name = "cyrius_x_bytecode_design"
+description = "v2.1 target: cyrius-x portable bytecode format — design research"
+category = "cyrius"
+content = '''
+STATUS: Design research for v2.0 scaffold, full implementation in v2.1.
+
+GOAL:
+  A portable bytecode format that compiles once, runs anywhere.
+  Not WASM — owned by Cyrius, optimized for Cyrius semantics.
+  The VM interprets or JIT-compiles cyrius-x bytecode.
+
+DESIGN DECISIONS:
+
+  1. REGISTER-BASED (not stack-based)
+     Cyrius already uses a register-first model (rax, rcx, stack spill).
+     A register VM maps 1:1 from the existing codegen. Stack-based VMs
+     (like WASM/JVM) require an extra compilation step from register IR.
+     Register VMs are also faster to interpret (fewer ops per operation).
+
+     Reference: Lua 5.0 switched from stack to register VM for 20-30% speedup.
+     Reference: Dalvik (Android) was register-based for the same reason.
+
+  2. FIXED-WIDTH INSTRUCTIONS (32-bit)
+     Each instruction is 4 bytes: opcode (8 bits) + operands (24 bits).
+     Simple to decode, cache-friendly, easy to validate.
+     Operand encoding: 8-bit register IDs (256 virtual registers),
+     16-bit signed immediates, or 24-bit branch offsets.
+
+  3. TYPE TAGS IN BYTECODE
+     Each operation specifies width: add.i8, add.i16, add.i32, add.i64.
+     The VM can validate type safety without a separate type system.
+     Maps directly to the multi-width types added in v2.0.
+
+  4. SYSCALL ABSTRACTION
+     Native syscalls are platform-specific. cyrius-x replaces them with
+     a host function table. The VM provides: read, write, open, close,
+     brk, exit, mmap, etc. Portable across Linux/macOS/Windows.
+
+INSTRUCTION SET (draft):
+
+  Arithmetic:  add, sub, mul, div, mod (with .i8/.i16/.i32/.i64 suffix)
+  Bitwise:     and, or, xor, not, shl, shr
+  Compare:     eq, ne, lt, gt, le, ge → sets register to 0/1
+  Memory:      load.N, store.N (N = 8/16/32/64)
+  Control:     jmp, jz, jnz, call, ret
+  Stack:       push, pop (for spill/restore)
+  System:      syscall N (index into host function table)
+  Immediate:   movi (load immediate into register)
+  Address:     lea (load effective address)
+
+  ~30 opcodes × 4 width variants = ~120 instruction encodings.
+
+FILE FORMAT (.cyx):
+
+  Header: magic (4 bytes "CYX\0") + version + entry_point offset
+  Code section: instruction stream
+  Data section: global variables + string literals
+  Symbol table: function names + offsets (for debugging)
+  No relocations needed — all addresses are bytecode offsets.
+
+IMPLEMENTATION PLAN:
+
+  v2.0 — Scaffold:
+    - Define instruction encoding in docs
+    - Add cyrius-x backend stub (emit.cyr for bytecode)
+    - Emit simple programs to .cyx files
+    - Write minimal interpreter in Cyrius (self-referential!)
+
+  v2.1 — Full implementation:
+    - Complete instruction set
+    - VM with full syscall abstraction
+    - All stdlib tests pass under VM
+    - Performance: target 10-50x slower than native (acceptable for portability)
+
+  v2.2 — cyrius-ts:
+    - TypeScript parser → cyrius-x bytecode
+    - JS runtime hosts cyrius-x VM (via wasm or native addon)
+
+KEY INSIGHT:
+  The existing compiler already has a clean frontend/backend split.
+  Adding a cyrius-x backend means implementing emit_cx.cyr that emits
+  bytecode instead of x86/aarch64 machine code. The frontend (lex, parse)
+  is completely reused. The fixup table handles bytecode offsets the same
+  way it handles native offsets.
+
+SELF-HOSTING POTENTIAL:
+  If the VM is fast enough, the compiler itself could run under cyrius-x.
+  This means: compile on any platform, bootstrap on any platform.
+  The 29KB seed binary becomes a cyrius-x binary + a small native VM.
+'''
+
+[[entries]]
+name = "bug14_heap_collision"
+description = "Bug #14: SIGSEGV on 6000+ line programs — heap offset collision between && patches and continue patches (v1.11.4)"
+category = "cyrius"
+content = '''
+SYMPTOM:
+  cc2 crashes with SIGSEGV (exit 139), 0-byte output, no error on stderr.
+  Only on programs > ~6000 lines after include expansion. Compiler's own
+  source (~6000 lines) compiled fine. Argonaut (6257 lines) crashed.
+
+DIAGNOSIS:
+  1. Built diagnostic compiler with stderr prints before each PARSE_FN_DEF
+  2. Identified crash inside init_current_stage function
+  3. Narrowed to line 110 (for-loop closing brace)
+  4. Found the function uses `status != A && status != B && status != C`
+     inside a for-in collection loop
+  5. Triple && works in small programs — crash is size-dependent
+
+ROOT CAUSE:
+  Heap offset collision between two arrays:
+    extra_patches (&&/|| chaining): 0x8F848, 8 entries × 8 bytes → 0x8F888
+    continue counter:               0x8F850 (INSIDE extra_patches[1])
+    continue patches:               0x8F858 (INSIDE extra_patches[2..9])
+
+  With `a && b && c`, ADDXP writes second patch to 0x8F848+1*8 = 0x8F850,
+  overwriting the continue counter with a code position (~36000).
+
+  At for-loop close: `var cfwn = L64(S + 0x8F850) - 1` reads ~36000.
+  Loop iterates 36000 times: `EPATCH(S, L64(S + 0x8F858 + i * 8))`.
+  EPATCH writes to `S + 0x20000 + off` where off is garbage from heap.
+  When garbage value exceeds brk boundary → unmapped address → SIGSEGV.
+
+WHY SIZE-DEPENDENT:
+  In small programs, code positions are small (~100-5000). The corrupted
+  continue count is small, and the EPATCH loop stays within allocated
+  heap — writes garbage to garbage but doesn't crash. In large programs,
+  code positions are ~36000+, and the loop reads past brk.
+
+FIX (v1.11.4):
+  Relocated continue data to non-overlapping region:
+    continue counter:  0x8F850 → 0x8F8A0
+    continue patches:  0x8F858 → 0x8F8A8
+
+  Verified with two-step bootstrap. All 267 tests pass. Argonaut
+  (300 tests + 39 serde + 18 benchmarks) compiles and runs.
+
+  v1.11.5 added overflow guards: ADDXP checks c >= 8, continue patches
+  check ci >= 8. Both error cleanly instead of silent overflow.
+
+KEY LESSON:
+  The compiler's flat heap layout makes offset collisions invisible.
+  Two features can independently test clean but collide when combined.
+  Bug #14 required BOTH triple && AND for-loop AND large program size.
+  A heap offset audit tool that flags overlaps would catch this class
+  of bug at commit time.
+
+  Diagnosis approach: build a diagnostic compiler variant with stderr
+  prints at key phases (preprocess, lex, pass 1, pass 2 per-function).
+  This avoids needing strace/gdb on a minimal binary with no debug info.
+'''
+
+[[entries]]
+name = "dce_bitmap_optimization"
+description = "DCE optimization from O(N×T) to O(T+N) using referenced-name bitmap (v1.11.5)"
+category = "cyrius"
+content = '''
+PROBLEM:
+  Dead code elimination in pass 2 scanned ALL tokens for every function
+  definition — O(N×T) where N=functions, T=tokens. For argonaut
+  (358 functions, 36K tokens), this was ~13M iterations per compilation.
+  For bhava (500+ functions, 100K+ tokens), it would be 50M+.
+
+OLD APPROACH (O(N×T)):
+  For each `fn name()`:
+    if name has no underscore (not mangled):
+      scan all tokens: if any IDENT == name (not after FN token): reachable
+      if not found: emit stub (xor eax,eax; ret), skip body
+
+NEW APPROACH (O(T+N)):
+  Before pass 2, build a referenced-name bitmap in one pass:
+    1. Zero 8KB bitmap in output_buf (S+0x6A000) — safe scratch, EMITELF runs later
+    2. For each token: if IDENT and not preceded by FN, set bit at name_offset
+    3. Bitmap: 65536 bits = 8192 bytes, indexed by tok_names offset
+
+  In pass 2, for each `fn name()`:
+    if name has no underscore:
+      check bitmap bit at name_offset — O(1) lookup
+      if not set: emit stub, skip body
+
+  Total: O(T) for bitmap build + O(N) for function checks = O(T+N)
+
+WHY IT WORKS:
+  Lexer deduplication guarantees identical identifier strings share the
+  same tok_names offset. So if `foo` appears as both a definition (after
+  FN) and a call (not after FN), both tokens have the same TOKVAL. The
+  bitmap marks the call's offset, and the definition checks the same offset.
+
+SCRATCH SPACE:
+  Uses output_buf (S+0x6A000, 128KB) for the 8KB bitmap. This buffer is
+  unused until EMITELF runs after all compilation is complete. No heap
+  layout change or brk extension needed.
+
+TWO-STEP BOOTSTRAP:
+  Required — the new compiler generates different code (bitmap init loop
+  before pass 2). Old cc2 → new cc2_a → cc2_b → cc2_c. cc2_b == cc2_c.
+'''
+
+[[entries]]
+name = "overflow_guards_pattern"
+description = "Pattern: adding bounds checks to flat heap arrays — v1.11.5 hardening"
+category = "cyrius"
+content = '''
+PROBLEM:
+  The compiler uses fixed-size arrays at hardcoded heap offsets. Most had
+  no bounds checking — overflow silently corrupted adjacent state. Bug #14
+  was caused by exactly this: ADDXP writing past extra_patches into
+  continue patches.
+
+PATTERN — adding a guard:
+  Before:
+    fn ADDXP(S, p) {
+        var c = GXPC(S);
+        S64(S + 0x8F848 + c * 8, p);
+        SXPC(S, c + 1);
+        return 0;
+    }
+
+  After:
+    fn ADDXP(S, p) {
+        var c = GXPC(S);
+        if (c >= 8) {
+            syscall(SYS_WRITE, 2, "error: too many && conditions (max 8)\n", 38);
+            syscall(SYS_EXIT, 1);
+        }
+        S64(S + 0x8F848 + c * 8, p);
+        SXPC(S, c + 1);
+        return 0;
+    }
+
+ARRAYS GUARDED (v1.11.5):
+  ADDXP — extra_patches for && chaining (max 8)
+  continue patches — for-loop continue (max 8)
+  ret_patches — return statements per function (max 64)
+  REGSTRUCT — struct definitions (max 32)
+
+STILL UNGUARDED (v1.12 target):
+  struct fields (16 per struct) — overflows silently into struct_count/loop state
+    Currently benign because loop state is reinitialized in pass 2.
+    Needs heap relocation to expand safely.
+  var_noffs, fn_names, fn_offsets — large arrays, unlikely to overflow
+
+KEY LESSON:
+  Every flat array needs a bounds check. The check costs 2 instructions
+  and adds ~20 bytes of code per guard. The alternative is silent heap
+  corruption that may not crash until unrelated code runs — the worst
+  kind of bug to diagnose in a system with no debugger or symbol table.
+'''
+
+[[entries]]
+name = "struct_field_overflow"
+description = "Struct field limit (16) silently overflows into loop state — needs v1.12 heap relocation"
+category = "cyrius"
+content = '''
+CURRENT LAYOUT:
+  struct_fnames at 0x8E830: 32 structs × 16 fields × 8 bytes = 4096 bytes
+  Ends at 0x8F830 (struct_count).
+  struct_ftypes at 0x8A000: same layout, 4096 bytes, ends at 0x8B000.
+
+  Indexing: si * 128 + fi * 8 (stride 128 = 16 fields × 8 bytes)
+
+THE OVERFLOW:
+  argonaut has ServiceDefinition with 21 fields. At field 17+, writes go to:
+    0x8E830 + si*128 + 16*8 = 0x8E830 + si*128 + 128 = next struct's slot
+  For the last struct (si=31): 0x8E830 + 31*128 + 128 = 0x8F830 = struct_count
+  Fields 17-21 overwrite struct_count, loop_top, break_patch, extra_patches.
+
+WHY IT DOESN'T CRASH:
+  Struct parsing happens in pass 1. Loop state (loop_top, break_patch) is
+  initialized fresh for each loop in pass 2. The overwritten values are
+  replaced before they're used. The extra_patches overwrite is benign
+  because no && conditions are being evaluated during struct parsing.
+
+FIX (v1.12):
+  Expand stride from 128 to 256 (32 fields per struct).
+  This requires moving struct_fnames to a new location — the current
+  region (0x8E830-0x8F830) only has 4096 bytes.
+  Options:
+    1. Move struct_fnames after fn_inline (0x2CE000+) and extend brk
+    2. Move loop state/extra_patches forward to make room
+  Either requires a two-step bootstrap.
+
+KEY LESSON:
+  "Benign overflow" is a time bomb. It works today because of incidental
+  ordering (pass 1 overwrites, pass 2 reinitializes). Any change to
+  compilation phases could turn this into a silent miscompilation.
 '''

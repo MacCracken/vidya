@@ -704,3 +704,95 @@ FOR CYRIUS: Start with C's model. Add warnings for mismatched types.
 Add integer promotions when multi-width codegen is done. Skip
 implicit conversions initially — require explicit casts.
 '''
+
+[[entries]]
+name = "multi_width_implementation_plan"
+description = "v2.0 implementation plan: multi-width types (i8, i16, i32) — concrete code changes"
+category = "cyrius"
+content = '''
+STATUS: v2.0.0-dev research. This is the foundational change — everything else
+(sizeof, struct padding, unions, bitfields, variadic, u128) depends on this.
+
+PRINCIPLE: Backward compatible. Untyped variables remain i64. Type annotations
+enable width-correct codegen. All existing code compiles identically.
+
+PHASE 1 — Width-correct variable allocation (storage)
+  Currently: all vars get 8 bytes in data section (var_sizes[idx] = 8).
+  Change: typed vars get their declared width.
+    var x: i8 = 42;   → var_sizes[idx] = 1
+    var y: i16 = 1000; → var_sizes[idx] = 2
+    var z: i32 = 0;    → var_sizes[idx] = 4
+    var w = 42;         → var_sizes[idx] = 8 (unchanged, default i64)
+
+  Files: parse.cyr PARSE_GVAR_REG (global registration), PARSE_VAR (local vars)
+  Impact: data section shrinks for typed programs. Fixup addresses shift.
+  Risk: Low — only new type-annotated code affected.
+
+PHASE 2 — Width-correct loads (read from memory)
+  Currently: EVLOAD always emits mov rcx, <addr>; mov rax, [rcx] (8 bytes).
+  Change: new EVLOAD_W(S, idx) checks var_types[idx] and dispatches:
+    type_id 1 (i8):  mov rcx, <addr>; movzx rax, byte [rcx]
+    type_id 2 (i16): mov rcx, <addr>; movzx eax, word [rcx]
+    type_id 4 (i32): mov rcx, <addr>; mov eax, [rcx]
+    else:            mov rcx, <addr>; mov rax, [rcx] (default i64)
+
+  For locals: EFLLOAD_W(S, idx) checks fn_local_types[idx]:
+    type_id 1: movzx rax, byte [rbp-off]
+    type_id 2: movzx eax, word [rbp-off]
+    type_id 4: mov eax, [rbp-off]
+    else:      mov rax, [rbp-off]
+
+  Files: emit.cyr (new EVLOAD_W, EFLLOAD_W), parse.cyr (call sites)
+
+PHASE 3 — Width-correct stores (write to memory)
+  Currently: EVSTORE always emits mov [rcx], rax (8 bytes).
+  Change: EVSTORE_W(S, idx) checks var_types and dispatches:
+    type_id 1: mov byte [rcx], al
+    type_id 2: mov word [rcx], ax
+    type_id 4: mov dword [rcx], eax
+    else:      mov qword [rcx], rax
+
+  For locals: EFLSTORE_W(S, idx) — same pattern.
+  Files: emit.cyr, parse.cyr
+
+PHASE 4 — Type annotation parsing extension
+  Currently: `var x: *i32` parses pointer types. `var x: StructName` parses structs.
+  Change: also parse `var x: i8`, `var x: i16`, `var x: i32`, `var x: i64`.
+    When colon + type name found:
+      "i8"  → store type_id=1 in var_types/fn_local_types
+      "i16" → store type_id=2
+      "i32" → store type_id=4
+      "i64" → store type_id=8 (explicit, same as default)
+
+  Files: parse.cyr — annotation parsing section (~line 1505-1532)
+  Note: pointer types (negative values) already work. Struct types already work.
+
+PHASE 5 — Expression type propagation
+  New state: expr_width (i64 at heap offset, e.g. 0x903F0)
+  PARSE_FACTOR sets expr_width from variable type on load.
+  Arithmetic operators check both sides:
+    - Wider type wins (i8 + i32 → i32)
+    - Warn on narrowing assignment (i64 value → i8 variable)
+  This is warnings-only initially — no compilation errors.
+
+  Files: parse.cyr (PARSE_FACTOR, PEXPR, assignment handlers)
+
+PHASE 6 — Local variable frame size
+  Currently: each local gets 8 bytes on stack ([rbp-8], [rbp-16], etc.)
+  Change for v2.0: keep 8-byte stack slots (simplest, ABI-compatible).
+  Width-correct loads/stores handle the actual data width within the slot.
+  Future optimization: pack narrow locals into fewer slots.
+
+IMPLEMENTATION ORDER:
+  4 → 1 → 2 → 3 → 5 → 6
+  (Parse the annotations first, then storage, then loads, stores, propagation)
+
+SELF-HOSTING CONSTRAINT:
+  The compiler source uses no type annotations (everything is i64).
+  All phases are backward-compatible — self-hosting is maintained throughout.
+  Two-step bootstrap needed after each codegen change.
+
+AARCH64:
+  Same pattern. aarch64/emit.cyr already has width-correct load/store opcodes.
+  Need aarch64 variants of EVLOAD_W, EFLLOAD_W, EVSTORE_W, EFLSTORE_W.
+'''

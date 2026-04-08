@@ -54,6 +54,100 @@ fn name_match(ent, name, namelen) {
 # Dispatch is by device index (no indirect function calls in Cyrius).
 # Serial = device 0: read from keyboard ring buffer, write to COM1 port.
 
+# === FAT16 Boot Sector Parsing ===
+# Boot sector is 512 bytes, fields at fixed offsets
+# All multi-byte values are little-endian
+
+fn FAT16_BPS_OFF() { return 11; }       # bytes per sector (2 bytes)
+fn FAT16_SPC_OFF() { return 13; }       # sectors per cluster (1 byte)
+fn FAT16_RSVD_OFF() { return 14; }      # reserved sectors (2 bytes)
+fn FAT16_NFATS_OFF() { return 16; }     # number of FATs (1 byte)
+fn FAT16_ROOT_CNT_OFF() { return 17; }  # root entry count (2 bytes)
+fn FAT16_TOTAL16_OFF() { return 19; }   # total sectors 16 (2 bytes)
+fn FAT16_FATSZ16_OFF() { return 22; }   # FAT size 16 (2 bytes)
+fn FAT16_DIR_ENTRY_SZ() { return 32; }  # directory entry size
+
+# Parse bytes-per-sector from boot sector (little-endian 16-bit at offset 11)
+fn fat16_parse_bps(boot_sector) {
+    var lo = load8(boot_sector + 11);
+    var hi = load8(boot_sector + 12);
+    return lo | (hi << 8);
+}
+
+# Calculate root directory start sector
+# root_start = reserved_sectors + (num_fats * fat_size_16)
+fn fat16_root_dir_sector(rsvd, nfats, fatsz) {
+    return rsvd + (nfats * fatsz);
+}
+
+# Calculate root directory size in sectors
+# root_sectors = ((root_entry_count * 32) + (bytes_per_sector - 1)) / bytes_per_sector
+fn fat16_root_dir_sectors(root_cnt, bps) {
+    return ((root_cnt * 32) + (bps - 1)) / bps;
+}
+
+# Calculate data region start sector
+fn fat16_data_start(rsvd, nfats, fatsz, root_cnt, bps) {
+    var root_sec = fat16_root_dir_sectors(root_cnt, bps);
+    return rsvd + (nfats * fatsz) + root_sec;
+}
+
+# === Pipe (VFS type 6) — Circular Buffer ===
+# Pipe entry in VFS: { type=6, head(8), tail(8), data_ptr(8) }
+# head = write position, tail = read position
+# Buffer full when (head + 1) % capacity == tail
+# Buffer empty when head == tail
+
+fn VFS_PIPE() { return 6; }
+fn PIPE_BUF_CAP() { return 4096; }
+
+fn pipe_is_empty(head, tail) {
+    if (head == tail) { return 1; }
+    return 0;
+}
+
+fn pipe_is_full(head, tail, cap) {
+    var next = head + 1;
+    if (next >= cap) { next = 0; }
+    if (next == tail) { return 1; }
+    return 0;
+}
+
+fn pipe_write_byte(buf, head, tail, cap, byte) {
+    if (pipe_is_full(head, tail, cap) == 1) { return head; }
+    store8(buf + head, byte);
+    var next = head + 1;
+    if (next >= cap) { next = 0; }
+    return next;
+}
+
+fn pipe_read_byte(buf, head, tail, cap) {
+    # Returns tail (unchanged) if empty, caller checks
+    if (pipe_is_empty(head, tail) == 1) { return tail; }
+    # Byte at buf[tail], caller reads it before calling this
+    var next = tail + 1;
+    if (next >= cap) { next = 0; }
+    return next;
+}
+
+# === VirtIO Block Device Read Pattern ===
+# VirtIO block uses 3-descriptor chains:
+#   desc[0]: request header (type=0 for read, sector number) — device-readable
+#   desc[1]: data buffer (512 * sector_count bytes) — device-writable
+#   desc[2]: status byte — device-writable
+# Queue: add desc chain to available ring, notify device, wait for used ring
+
+fn VIRTIO_BLK_T_IN() { return 0; }   # read
+fn VIRTIO_BLK_T_OUT() { return 1; }  # write
+fn VIRTIO_BLK_S_OK() { return 0; }
+fn VIRTIO_BLK_SECTOR_SIZE() { return 512; }
+
+# Build a VirtIO block read request header (16 bytes)
+# type(4) reserved(4) sector(8)
+fn virtio_blk_req_type_off() { return 0; }
+fn virtio_blk_req_sector_off() { return 8; }
+fn virtio_blk_req_size() { return 16; }
+
 # === Tests ===
 
 fn test_vfs_types() {
@@ -81,11 +175,44 @@ fn test_name_match() {
     return 0;
 }
 
+fn test_fat16() {
+    assert_eq(FAT16_BPS_OFF(), 11, "bps offset");
+    assert_eq(FAT16_DIR_ENTRY_SZ(), 32, "dir entry 32B");
+    # Typical FAT16: 2 FATs, 512 root entries, 512 bytes/sector, FAT size 128
+    var root_start = fat16_root_dir_sector(1, 2, 128);
+    assert_eq(root_start, 257, "root start sector");
+    var root_secs = fat16_root_dir_sectors(512, 512);
+    assert_eq(root_secs, 32, "root dir sectors");
+    var data_start = fat16_data_start(1, 2, 128, 512, 512);
+    assert_eq(data_start, 289, "data start sector");
+    return 0;
+}
+
+fn test_pipe() {
+    assert_eq(VFS_PIPE(), 6, "pipe type");
+    assert_eq(pipe_is_empty(0, 0), 1, "empty pipe");
+    assert_eq(pipe_is_empty(5, 0), 0, "non-empty pipe");
+    assert_eq(pipe_is_full(4095, 0, 4096), 1, "full pipe");
+    assert_eq(pipe_is_full(0, 0, 4096), 0, "not full pipe");
+    return 0;
+}
+
+fn test_virtio_blk() {
+    assert_eq(VIRTIO_BLK_T_IN(), 0, "blk read");
+    assert_eq(VIRTIO_BLK_T_OUT(), 1, "blk write");
+    assert_eq(VIRTIO_BLK_SECTOR_SIZE(), 512, "sector size");
+    assert_eq(virtio_blk_req_size(), 16, "req header size");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_vfs_types();
     test_initrd_format();
     test_name_match();
+    test_fat16();
+    test_pipe();
+    test_virtio_blk();
     return assert_summary();
 }
 var exit_code = main();
