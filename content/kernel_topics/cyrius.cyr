@@ -130,6 +130,56 @@ fn bench_tier(cycles) {
     return 3;
 }
 
+# === TCP connection state constants (v1.11.0) ===
+fn tcp_state_closed() { return 0; }
+fn tcp_state_syn_sent() { return 1; }
+fn tcp_state_established() { return 2; }
+fn tcp_state_fin_wait() { return 3; }
+
+# === Pipe buffer pattern (VFS type 6) ===
+# Circular buffer with head/tail stored in VFS entry
+# Entry: { type=6, head(8), tail(8), data(8) }
+# head advances on write, tail advances on read
+# Buffer full when (head + 1) % size == tail
+fn vfs_type_pipe() { return 6; }
+fn pipe_buf_size() { return 4096; }
+
+fn pipe_writable(head, tail, size) {
+    var next = head + 1;
+    if (next >= size) { next = 0; }
+    if (next == tail) { return 0; }
+    return 1;
+}
+
+fn pipe_readable(head, tail) {
+    if (head == tail) { return 0; }
+    return 1;
+}
+
+# === FAT16 boot sector field offsets ===
+# Offsets from start of boot sector (512 bytes)
+fn fat16_bytes_per_sector_off() { return 11; }  # 2 bytes
+fn fat16_sectors_per_cluster_off() { return 13; }  # 1 byte
+fn fat16_reserved_sectors_off() { return 14; }  # 2 bytes
+fn fat16_num_fats_off() { return 16; }  # 1 byte
+fn fat16_root_entry_count_off() { return 17; }  # 2 bytes
+fn fat16_total_sectors_16_off() { return 19; }  # 2 bytes
+fn fat16_fat_size_16_off() { return 22; }  # 2 bytes
+fn fat16_dir_entry_size() { return 32; }
+
+# === GRUB multiboot1 compatibility check ===
+# Multiboot1 magic: 0x1BADB002 (in kernel image)
+# Bootloader magic: 0x2BADB002 (in EAX at entry)
+# Flags: bit 0 = page-align modules, bit 1 = provide memory map
+fn multiboot1_magic() { return 0x1BADB002; }
+fn multiboot1_bootloader_magic() { return 0x2BADB002; }
+fn multiboot1_flags() { return 3; }  # page-align + meminfo
+
+fn multiboot1_check(eax_value) {
+    if (eax_value == 0x2BADB002) { return 1; }
+    return 0;
+}
+
 # === Tests ===
 
 fn test_pte() {
@@ -222,6 +272,42 @@ fn test_bench_tier() {
     return 0;
 }
 
+fn test_tcp_states() {
+    assert_eq(tcp_state_closed(), 0, "tcp closed");
+    assert_eq(tcp_state_syn_sent(), 1, "tcp syn_sent");
+    assert_eq(tcp_state_established(), 2, "tcp established");
+    assert_eq(tcp_state_fin_wait(), 3, "tcp fin_wait");
+    return 0;
+}
+
+fn test_pipe_buffer() {
+    assert_eq(vfs_type_pipe(), 6, "pipe type");
+    assert_eq(pipe_buf_size(), 4096, "pipe buf size");
+    # Empty buffer: head == tail
+    assert_eq(pipe_readable(0, 0), 0, "empty not readable");
+    assert_eq(pipe_writable(0, 0, 4096), 1, "empty is writable");
+    # Buffer with data: head > tail
+    assert_eq(pipe_readable(5, 0), 1, "has data");
+    # Buffer full: (head + 1) % size == tail
+    assert_eq(pipe_writable(4095, 0, 4096), 0, "full not writable");
+    return 0;
+}
+
+fn test_fat16_offsets() {
+    assert_eq(fat16_bytes_per_sector_off(), 11, "bps offset");
+    assert_eq(fat16_root_entry_count_off(), 17, "root entries offset");
+    assert_eq(fat16_dir_entry_size(), 32, "dir entry 32B");
+    return 0;
+}
+
+fn test_multiboot1_compat() {
+    assert_eq(multiboot1_magic(), 0x1BADB002, "mb1 magic");
+    assert_eq(multiboot1_bootloader_magic(), 0x2BADB002, "mb1 bl magic");
+    assert_eq(multiboot1_check(0x2BADB002), 1, "mb1 check pass");
+    assert_eq(multiboot1_check(0), 0, "mb1 check fail");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_pte();
@@ -234,6 +320,10 @@ fn main() {
     test_syscall_dispatch();
     test_signal_mask();
     test_bench_tier();
+    test_tcp_states();
+    test_pipe_buffer();
+    test_fat16_offsets();
+    test_multiboot1_compat();
     return assert_summary();
 }
 var exit_code = main();
