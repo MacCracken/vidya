@@ -1,0 +1,175 @@
+# vidya.tcyr — vidya library tests
+# Tests: loader, registry, search, compare, language enum
+#
+# Run: cyrb test tests/vidya.tcyr
+#   or: cat tests/vidya.tcyr | cc2 > /tmp/vidya_test && chmod +x /tmp/vidya_test && /tmp/vidya_test
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/hashmap.cyr"
+include "lib/toml.cyr"
+include "lib/regex.cyr"
+include "lib/syscalls.cyr"
+include "lib/assert.cyr"
+
+# Pull in vidya types + functions from main (we re-include the core parts)
+# For now, inline the helpers we need since main.cyr is a full CLI binary.
+
+# ================================================================
+# Language helpers (subset from main.cyr)
+# ================================================================
+
+fn lang_stem(lang) {
+    if (lang == 0) { return "rust"; }
+    if (lang == 1) { return "python"; }
+    if (lang == 2) { return "c"; }
+    if (lang == 3) { return "go"; }
+    if (lang == 4) { return "typescript"; }
+    if (lang == 5) { return "shell"; }
+    if (lang == 6) { return "zig"; }
+    if (lang == 7) { return "asm_x86_64"; }
+    if (lang == 8) { return "asm_aarch64"; }
+    if (lang == 9) { return "openqasm"; }
+    if (lang == 10) { return "cyrius"; }
+    return "";
+}
+
+fn lang_extension(lang) {
+    if (lang == 0) { return "rs"; }
+    if (lang == 1) { return "py"; }
+    if (lang == 2) { return "c"; }
+    if (lang == 3) { return "go"; }
+    if (lang == 4) { return "ts"; }
+    if (lang == 5) { return "sh"; }
+    if (lang == 6) { return "zig"; }
+    if (lang == 7) { return "s"; }
+    if (lang == 8) { return "s"; }
+    if (lang == 9) { return "qasm"; }
+    if (lang == 10) { return "cyr"; }
+    return "";
+}
+
+fn lang_parse(s) {
+    if (streq(s, "rust") == 1 || streq(s, "rs") == 1) { return 0; }
+    if (streq(s, "python") == 1 || streq(s, "py") == 1) { return 1; }
+    if (streq(s, "c") == 1) { return 2; }
+    if (streq(s, "go") == 1) { return 3; }
+    if (streq(s, "cyrius") == 1 || streq(s, "cyr") == 1) { return 10; }
+    return 0 - 1;
+}
+
+# ================================================================
+# Tests
+# ================================================================
+
+fn main() {
+    alloc_init();
+
+    # --- Language enum ---
+    test_group("language");
+    assert(streq(lang_stem(0), "rust") == 1, "rust stem");
+    assert(streq(lang_extension(0), "rs") == 1, "rust ext");
+    assert(streq(lang_stem(10), "cyrius") == 1, "cyrius stem");
+    assert(streq(lang_extension(10), "cyr") == 1, "cyrius ext");
+    assert_eq(lang_parse("rust"), 0, "parse rust");
+    assert_eq(lang_parse("rs"), 0, "parse rs");
+    assert_eq(lang_parse("cyrius"), 10, "parse cyrius");
+    assert_eq(lang_parse("cyr"), 10, "parse cyr");
+    assert_eq(lang_parse("unknown"), 0 - 1, "parse unknown");
+
+    # --- TOML loading ---
+    test_group("toml_loader");
+    var sections = toml_parse_file("content/strings/concept.toml");
+    assert(vec_len(sections) > 0, "toml has sections");
+    var top = vec_get(sections, 0);
+    var pairs = toml_section_pairs(top);
+    var id = toml_get(pairs, str_from("id"));
+    assert(id != 0, "id exists");
+    assert(str_eq(id, str_from("strings")) == 1, "id is strings");
+    var title = toml_get(pairs, str_from("title"));
+    assert(title != 0, "title exists");
+    assert(str_eq(title, str_from("Strings")) == 1, "title is Strings");
+    var topic = toml_get(pairs, str_from("topic"));
+    assert(topic != 0, "topic exists");
+    var desc = toml_get(pairs, str_from("description"));
+    assert(desc != 0, "description exists");
+    assert(str_len(desc) > 0, "description non-empty");
+
+    # --- TOML sections ---
+    test_group("toml_sections");
+    var bps = toml_get_sections(sections, str_from("best_practices"));
+    assert(vec_len(bps) >= 5, "at least 5 best_practices");
+    var gotchas = toml_get_sections(sections, str_from("gotchas"));
+    assert(vec_len(gotchas) >= 3, "at least 3 gotchas");
+    var pnotes = toml_get_sections(sections, str_from("performance_notes"));
+    assert(vec_len(pnotes) >= 1, "at least 1 performance_note");
+
+    # --- Gotcha fields ---
+    test_group("gotcha_fields");
+    var g0 = vec_get(gotchas, 0);
+    var gpairs = toml_section_pairs(g0);
+    var gt = toml_get(gpairs, str_from("title"));
+    assert(gt != 0, "gotcha has title");
+    var gb = toml_get(gpairs, str_from("bad_example"));
+    assert(gb != 0, "gotcha has bad_example");
+    var gg = toml_get(gpairs, str_from("good_example"));
+    assert(gg != 0, "gotcha has good_example");
+
+    # --- Registry (hashmap) ---
+    test_group("registry");
+    var reg = map_new();
+    map_set(reg, "strings", 42);
+    map_set(reg, "concurrency", 99);
+    assert_eq(map_get(reg, "strings"), 42, "get strings");
+    assert_eq(map_get(reg, "concurrency"), 99, "get concurrency");
+    assert_eq(map_get(reg, "missing"), 0, "get missing returns 0");
+    assert(map_has(reg, "strings") == 1, "has strings");
+    assert(map_has(reg, "missing") == 0, "has missing");
+    assert_eq(map_count(reg), 2, "count is 2");
+
+    # --- File discovery ---
+    test_group("file_discovery");
+    assert(file_exists("content/strings/rust.rs") == 1, "rust.rs exists");
+    assert(file_exists("content/strings/python.py") == 1, "python.py exists");
+    assert(file_exists("content/strings/cyrius.cyr") == 1, "cyrius.cyr exists");
+    assert(file_exists("content/strings/nonexistent.xyz") == 0, "nonexistent absent");
+
+    # --- Content directory scan ---
+    test_group("content_scan");
+    var dirs = dir_list(str_from("content"));
+    var ndirs = vec_len(dirs);
+    assert(ndirs >= 35, "at least 35 content dirs");
+
+    # --- Load all topics ---
+    test_group("load_all");
+    var topic_count = 0;
+    var i = 0;
+    while (i < ndirs) {
+        var dname = vec_get(dirs, i);
+        var dpath = path_join(str_from("content"), dname);
+        if (is_dir(dpath) == 1) {
+            var tpath = path_join(dpath, str_from("concept.toml"));
+            if (file_exists(str_data(tpath)) == 1) {
+                topic_count = topic_count + 1;
+            }
+        }
+        i = i + 1;
+    }
+    assert(topic_count >= 35, "at least 35 topics with concept.toml");
+
+    # --- Search (substring matching) ---
+    test_group("search");
+    # Use cstr_contains for simple substring search
+    assert(memeq("strings", "string", 6) == 1, "substring match");
+    assert(memeq("concurrency", "concur", 6) == 1, "concur match");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

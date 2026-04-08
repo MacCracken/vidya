@@ -1,0 +1,186 @@
+# vidya.bcyr — vidya benchmarks
+# Benchmarks: loader, registry lookup, search, compare
+#
+# Run: cyrb bench tests/vidya.bcyr
+#   or: cat tests/vidya.bcyr | cc2 > /tmp/vidya_bench && chmod +x /tmp/vidya_bench && /tmp/vidya_bench
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/hashmap.cyr"
+include "lib/toml.cyr"
+include "lib/fnptr.cyr"
+include "lib/bench.cyr"
+include "lib/regex.cyr"
+include "lib/syscalls.cyr"
+
+# ================================================================
+# Helpers — inline from main.cyr
+# ================================================================
+
+fn to_cstr(s) {
+    if (s == 0) { return ""; }
+    var len = str_len(s);
+    var buf = alloc(len + 1);
+    memcpy(buf, str_data(s), len);
+    store8(buf + len, 0);
+    return buf;
+}
+
+fn cstr_contains(haystack, needle) {
+    if (haystack == 0 || needle == 0) { return 0; }
+    var hlen = strlen(haystack);
+    var nlen = strlen(needle);
+    if (nlen == 0) { return 1; }
+    if (nlen > hlen) { return 0; }
+    var i = 0;
+    while (i <= hlen - nlen) {
+        if (memeq(haystack + i, needle, nlen) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Globals for benchmark callbacks
+# ================================================================
+
+var _b_reg = 0;
+var _b_sections = 0;
+
+# ================================================================
+# Benchmark functions
+# ================================================================
+
+# Load a single concept TOML
+fn bench_load_concept() {
+    var s = toml_parse_file("content/strings/concept.toml");
+    return 0;
+}
+
+# Load all concept.toml files from content/
+fn bench_load_all() {
+    var dirs = dir_list(str_from("content"));
+    var count = 0;
+    var i = 0;
+    while (i < vec_len(dirs)) {
+        var dname = vec_get(dirs, i);
+        var dpath = path_join(str_from("content"), dname);
+        if (is_dir(dpath) == 1) {
+            var tpath = path_join(dpath, str_from("concept.toml"));
+            if (file_exists(str_data(tpath)) == 1) {
+                toml_parse_file(str_data(tpath));
+                count = count + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
+# Registry lookup (hit)
+fn bench_reg_get_hit() {
+    map_get(_b_reg, "strings");
+    return 0;
+}
+
+# Registry lookup (miss)
+fn bench_reg_get_miss() {
+    map_get(_b_reg, "nonexistent_xyzzy");
+    return 0;
+}
+
+# Search: scan 35 topics for substring
+fn bench_search() {
+    var entries = map_keys(_b_reg);
+    var count = vec_len(entries);
+    var found = 0;
+    var i = 0;
+    while (i < count) {
+        var key = vec_get(entries, i);
+        if (cstr_contains(key, "string") == 1) { found = found + 1; }
+        i = i + 1;
+    }
+    return found;
+}
+
+# TOML section extraction
+fn bench_toml_sections() {
+    var bps = toml_get_sections(_b_sections, str_from("best_practices"));
+    var gs = toml_get_sections(_b_sections, str_from("gotchas"));
+    var ps = toml_get_sections(_b_sections, str_from("performance_notes"));
+    return vec_len(bps) + vec_len(gs) + vec_len(ps);
+}
+
+# ================================================================
+# Main
+# ================================================================
+
+fn main() {
+    alloc_init();
+
+    # Setup: build a registry with all topic IDs
+    _b_reg = map_new();
+    var dirs = dir_list(str_from("content"));
+    var i = 0;
+    while (i < vec_len(dirs)) {
+        var dname = vec_get(dirs, i);
+        var dpath = path_join(str_from("content"), dname);
+        if (is_dir(dpath) == 1) {
+            var tpath = path_join(dpath, str_from("concept.toml"));
+            if (file_exists(str_data(tpath)) == 1) {
+                var sections = toml_parse_file(str_data(tpath));
+                if (vec_len(sections) > 0) {
+                    var top = vec_get(sections, 0);
+                    var pairs = toml_section_pairs(top);
+                    var id_str = toml_get(pairs, str_from("id"));
+                    if (id_str != 0) {
+                        var cid = to_cstr(id_str);
+                        map_set(_b_reg, cid, 1);
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    # Setup: load strings sections for TOML bench
+    _b_sections = toml_parse_file("content/strings/concept.toml");
+
+    # Run benchmarks
+    var benches = vec_new();
+
+    var b1 = bench_new("load_concept");
+    bench_run(b1, &bench_load_concept, 100);
+    vec_push(benches, b1);
+
+    var b2 = bench_new("load_all");
+    bench_run(b2, &bench_load_all, 10);
+    vec_push(benches, b2);
+
+    var b3 = bench_new("reg_get_hit");
+    bench_run(b3, &bench_reg_get_hit, 10000);
+    vec_push(benches, b3);
+
+    var b4 = bench_new("reg_get_miss");
+    bench_run(b4, &bench_reg_get_miss, 10000);
+    vec_push(benches, b4);
+
+    var b5 = bench_new("search_text");
+    bench_run(b5, &bench_search, 1000);
+    vec_push(benches, b5);
+
+    var b6 = bench_new("toml_sections");
+    bench_run(b6, &bench_toml_sections, 1000);
+    vec_push(benches, b6);
+
+    bench_report_all(benches);
+    return 0;
+}
+
+var r = main();
+syscall(60, r);
