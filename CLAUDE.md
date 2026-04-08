@@ -7,7 +7,7 @@
 - **Type**: Flat library crate + content directory
 - **License**: GPL-3.0-only
 - **MSRV**: 1.89
-- **Version**: SemVer 1.5.0
+- **Version**: SemVer 1.6.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
