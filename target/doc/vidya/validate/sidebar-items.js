@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["run_validation","validate_all","validation_command"],"struct":["ValidationResult"]};
