@@ -55,7 +55,9 @@ pub fn validation_command(lang: Language) -> Option<&'static str> {
         Language::Cyrius => {
             // cc2 resolves includes relative to cwd; CYRIUS_HOME must point to the Cyrius repo.
             // {file} is made absolute via realpath before cd so the path survives the cwd change.
-            Some("CYR_HOME=${CYRIUS_HOME:-$HOME/Repos/cyrius} && CYR_FILE=$(realpath {file}) && cd \"$CYR_HOME\" && cat \"$CYR_FILE\" | ./build/cc2 > {out} && chmod +x {out} && {out}")
+            Some(
+                "CYR_HOME=${CYRIUS_HOME:-$HOME/Repos/cyrius} && CYR_FILE=$(realpath {file}) && cd \"$CYR_HOME\" && cat \"$CYR_FILE\" | ./build/cc2 > {out} && chmod +x {out} && {out}",
+            )
         }
     }
 }

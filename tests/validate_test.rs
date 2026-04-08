@@ -33,9 +33,12 @@ fn toolchain_available(lang: Language) -> bool {
             .status()
             .is_ok_and(|s| s.success()),
         Language::Cyrius => {
-            let cyrius_home = std::env::var("CYRIUS_HOME")
-                .unwrap_or_else(|_| format!("{}/Repos/cyrius", std::env::var("HOME").unwrap_or_default()));
-            std::path::Path::new(&cyrius_home).join("build/cc2").exists()
+            let cyrius_home = std::env::var("CYRIUS_HOME").unwrap_or_else(|_| {
+                format!("{}/Repos/cyrius", std::env::var("HOME").unwrap_or_default())
+            });
+            std::path::Path::new(&cyrius_home)
+                .join("build/cc2")
+                .exists()
         }
         _ => true,
     }
