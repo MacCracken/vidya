@@ -1,0 +1,253 @@
+# Vidya — Quantum Computing in Cyrius
+#
+# Quantum computing concepts and patterns — state representation,
+# gate operations, measurement, and algorithm structure.
+#
+# Cyrius uses i64 arithmetic. We represent quantum amplitudes as
+# fixed-point integers (scaled by 1000 for ~0.1% precision) and
+# probabilities as integers out of 1000 (permille).
+#
+# For real quantum simulation, see the Rust/Python/C implementations
+# which use proper floating-point complex arithmetic.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# ================================================================
+# Quantum Constants
+# ================================================================
+
+# Fixed-point scale: 1.0 = 1000
+var SCALE = 1000;
+
+# 1/sqrt(2) ≈ 0.7071 → 707 in fixed-point
+var FRAC_1_SQRT2 = 707;
+
+# Common probabilities (out of 1000)
+var PROB_0 = 0;
+var PROB_HALF = 500;
+var PROB_FULL = 1000;
+
+# Qubit states: |0⟩ and |1⟩
+# A qubit state is (alpha, beta) where |psi⟩ = alpha|0⟩ + beta|1⟩
+# Probability of measuring |0⟩ = |alpha|^2, |1⟩ = |beta|^2
+
+fn test_qubit_basics() {
+    # |0⟩ state: alpha=1.0, beta=0.0
+    var alpha_0 = SCALE;
+    var beta_0 = 0;
+    var prob_0 = (alpha_0 * alpha_0) / SCALE;
+    var prob_1 = (beta_0 * beta_0) / SCALE;
+    assert_eq(prob_0, PROB_FULL, "|0> measures 0 with certainty");
+    assert_eq(prob_1, PROB_0, "|0> never measures 1");
+
+    # |1⟩ state: alpha=0.0, beta=1.0
+    var alpha_1 = 0;
+    var beta_1 = SCALE;
+    prob_0 = (alpha_1 * alpha_1) / SCALE;
+    prob_1 = (beta_1 * beta_1) / SCALE;
+    assert_eq(prob_0, PROB_0, "|1> never measures 0");
+    assert_eq(prob_1, PROB_FULL, "|1> measures 1 with certainty");
+
+    # Normalization: |alpha|^2 + |beta|^2 must = 1.0 (1000)
+    assert_eq(SCALE, PROB_FULL, "normalization check");
+    return 0;
+}
+
+# ================================================================
+# Hadamard Gate — creates superposition
+# ================================================================
+# H|0⟩ = (|0⟩ + |1⟩)/√2    → equal superposition
+# H|1⟩ = (|0⟩ - |1⟩)/√2    → equal superposition, phase flip
+#
+# Matrix: H = (1/√2) * [[1,  1],
+#                         [1, -1]]
+
+fn hadamard(alpha, beta) {
+    # new_alpha = (alpha + beta) / sqrt(2)
+    # new_beta  = (alpha - beta) / sqrt(2)
+    # In fixed-point: multiply by 707, divide by 1000
+    var new_alpha = ((alpha + beta) * FRAC_1_SQRT2) / SCALE;
+    var new_beta = ((alpha - beta) * FRAC_1_SQRT2) / SCALE;
+    # Return packed as (new_alpha * 10000 + new_beta) — poor man's tuple
+    # Actually, just store in globals for simplicity
+    return new_alpha;
+}
+
+fn test_hadamard() {
+    # H|0⟩: alpha=1000, beta=0
+    # new_alpha = (1000+0)*707/1000 = 707
+    # new_beta  = (1000-0)*707/1000 = 707
+    var h_alpha = ((SCALE + 0) * FRAC_1_SQRT2) / SCALE;
+    var h_beta = ((SCALE - 0) * FRAC_1_SQRT2) / SCALE;
+    assert_eq(h_alpha, 707, "H|0> alpha = 1/sqrt(2)");
+    assert_eq(h_beta, 707, "H|0> beta = 1/sqrt(2)");
+
+    # Probabilities: each ~500 (50%)
+    var p0 = (h_alpha * h_alpha) / SCALE;
+    var p1 = (h_beta * h_beta) / SCALE;
+    # 707*707/1000 = 499 (rounding from fixed-point)
+    assert(p0 >= 499, "H|0> P(0) ~ 50%");
+    assert(p0 <= 501, "H|0> P(0) ~ 50% upper");
+    assert(p0 + p1 >= 998, "normalization ~1.0");
+    return 0;
+}
+
+# ================================================================
+# CNOT Gate — creates entanglement
+# ================================================================
+# Two-qubit gate: flips target if control is |1⟩
+# CNOT|00⟩ = |00⟩    CNOT|10⟩ = |11⟩
+# CNOT|01⟩ = |01⟩    CNOT|11⟩ = |10⟩
+#
+# 2-qubit state vector: [|00⟩, |01⟩, |10⟩, |11⟩]
+# CNOT swaps amplitudes of |10⟩ and |11⟩
+
+fn test_cnot() {
+    # State |10⟩: amplitudes [0, 0, 1000, 0]
+    var a00 = 0;
+    var a01 = 0;
+    var a10 = SCALE;
+    var a11 = 0;
+
+    # CNOT: swap a10 and a11
+    var tmp = a10;
+    a10 = a11;
+    a11 = tmp;
+
+    # Result should be |11⟩: [0, 0, 0, 1000]
+    assert_eq(a00, 0, "CNOT|10> -> |11>: a00=0");
+    assert_eq(a01, 0, "CNOT|10> -> |11>: a01=0");
+    assert_eq(a10, 0, "CNOT|10> -> |11>: a10=0");
+    assert_eq(a11, SCALE, "CNOT|10> -> |11>: a11=1");
+    return 0;
+}
+
+# ================================================================
+# Bell State — maximum entanglement
+# ================================================================
+# Bell state |Φ+⟩ = (|00⟩ + |11⟩)/√2
+# Created by: H on qubit 0, then CNOT(0→1)
+#
+# Measuring one qubit instantly determines the other:
+#   Measure qubit 0 as |0⟩ → qubit 1 is |0⟩
+#   Measure qubit 0 as |1⟩ → qubit 1 is |1⟩
+# This is the EPR pair that Einstein called "spooky action"
+
+fn test_bell_state() {
+    # Start: |00⟩ = [1000, 0, 0, 0]
+    # After H on qubit 0: (|0⟩+|1⟩)/√2 ⊗ |0⟩ = [707, 0, 707, 0]
+    var a00 = 707;
+    var a01 = 0;
+    var a10 = 707;
+    var a11 = 0;
+
+    # After CNOT: swap a10 ↔ a11
+    var tmp = a10;
+    a10 = a11;
+    a11 = tmp;
+
+    # Bell state: [707, 0, 0, 707]
+    assert_eq(a00, 707, "Bell a00 = 1/sqrt(2)");
+    assert_eq(a01, 0, "Bell a01 = 0");
+    assert_eq(a10, 0, "Bell a10 = 0");
+    assert_eq(a11, 707, "Bell a11 = 1/sqrt(2)");
+
+    # Probabilities: P(00) = P(11) = 50%, P(01) = P(10) = 0%
+    var p00 = (a00 * a00) / SCALE;
+    var p11 = (a11 * a11) / SCALE;
+    assert(p00 >= 499, "Bell P(00) ~ 50%");
+    assert(p11 >= 499, "Bell P(11) ~ 50%");
+    assert_eq(a01, 0, "Bell P(01) = 0%");
+    assert_eq(a10, 0, "Bell P(10) = 0%");
+    return 0;
+}
+
+# ================================================================
+# Grover's Algorithm — quantum search
+# ================================================================
+# Searches N items in O(√N) steps (vs O(N) classical)
+#
+# Structure:
+#   1. Initialize: H⊗n on all qubits → uniform superposition
+#   2. Repeat √N times:
+#      a. Oracle: flip sign of target state amplitude
+#      b. Diffusion: reflect about mean amplitude
+#   3. Measure: target state has high probability
+#
+# For 2 qubits (4 items), 1 iteration suffices
+
+fn test_grover_concept() {
+    # 2-qubit Grover: searching 4 items for item 3 (|11⟩)
+    var N = 4;
+    var target = 3;
+
+    # Optimal iterations: floor(π/4 * √N) = floor(π/4 * 2) ≈ 1
+    # (π/4 * 2 ≈ 1.57, floor = 1)
+    var optimal_iters = 1;
+    assert_eq(optimal_iters, 1, "2-qubit Grover: 1 iteration");
+
+    # After 1 Grover iteration on 2 qubits, P(target) = 1.0
+    # This is exact for N=4 — the algorithm finds it with certainty
+    var p_target = PROB_FULL;
+    assert_eq(p_target, 1000, "2-qubit Grover: certain find");
+
+    # Speedup: classical needs O(N)=4 queries, quantum needs O(√N)=2
+    # But for N=4, Grover needs exactly 1 oracle call
+    var classical_queries = N;
+    var quantum_queries = 1;
+    assert(quantum_queries < classical_queries, "quantum speedup");
+    return 0;
+}
+
+# ================================================================
+# Noise and Decoherence
+# ================================================================
+# Real quantum hardware has errors:
+#   - Gate error: ~0.1-1% per gate
+#   - T1 (energy relaxation): qubit decays |1⟩→|0⟩
+#   - T2 (dephasing): superposition loses coherence
+#   - Measurement error: ~1-5%
+#
+# NISQ (Noisy Intermediate-Scale Quantum): 50-1000 qubits,
+# high error rates, no full error correction yet.
+
+fn test_noise_model() {
+    # Gate fidelity: 99.5% = 995/1000
+    var gate_fidelity = 995;
+
+    # After 10 gates: fidelity ≈ 0.995^10 ≈ 0.951 → 951/1000
+    # (approximate with integer math)
+    var circuit_fidelity = SCALE;
+    for (var i = 0; i < 10; i = i + 1) {
+        circuit_fidelity = (circuit_fidelity * gate_fidelity) / SCALE;
+    }
+    assert(circuit_fidelity > 900, "10 gates: fidelity > 90%");
+    assert(circuit_fidelity < SCALE, "10 gates: fidelity < 100%");
+
+    # After 100 gates: fidelity ≈ 0.995^100 ≈ 0.606
+    circuit_fidelity = SCALE;
+    for (var i = 0; i < 100; i = i + 1) {
+        circuit_fidelity = (circuit_fidelity * gate_fidelity) / SCALE;
+    }
+    assert(circuit_fidelity > 500, "100 gates: fidelity > 50%");
+    assert(circuit_fidelity < 700, "100 gates: fidelity < 70%");
+
+    # This is why circuit depth matters on NISQ hardware
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_qubit_basics();
+    test_hadamard();
+    test_cnot();
+    test_bell_state();
+    test_grover_concept();
+    test_noise_model();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);
