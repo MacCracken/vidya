@@ -248,15 +248,17 @@ CALLER (PARSE_FNCALL):
   5. After call: adjust SP to remove stack args
 
 CALLEE (PARSE_FN_DEF):
-  1. Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size
+  1. Prologue: push rbx; push r12; push rbp; mov rbp, rsp; sub rsp, frame_size
   2. Store register params to local slots: mov [rbp-8], rdi etc.
-  3. Stack params at [rbp+16], [rbp+24], etc. (above saved rbp + return addr)
+  3. Stack params at [rbp+32], [rbp+40], etc. (above saved rbx + r12 + rbp + return addr)
   4. ESTOREPARM(pc, li, total_params) handles the addressing
 
-FRAME LAYOUT:
-  [rbp+24] = param 8 (7th, 0-indexed)
-  [rbp+16] = param 7
-  [rbp+8]  = return address
+FRAME LAYOUT (v1.10.0):
+  [rbp+40] = param 8 (7th, 0-indexed)
+  [rbp+32] = param 7
+  [rbp+24] = return address
+  [rbp+16] = saved rbx
+  [rbp+8]  = saved r12
   [rbp]    = saved rbp
   [rbp-8]  = local 0 / param 0
   [rbp-16] = local 1 / param 1
@@ -666,13 +668,13 @@ description = "How to correctly test self-hosting in compiler.sh"
 category = "cyrius"
 content = '''
 CORRECT TEST:
-  cat src/compiler.cyr | build/cc2 > /tmp/cc3
+  cat src/main.cyr | build/cc2 > /tmp/cc3
   cmp build/cc2 /tmp/cc3
   # Must be byte-identical
 
 WRONG TEST (was in compiler.sh):
-  cat src/cc_bridge.cyr | cc2 > cc2_copy
-  cat src/cc_bridge.cyr | cc2_copy > cc3
+  cat src/bridge.cyr | cc2 > cc2_copy
+  cat src/bridge.cyr | cc2_copy > cc3
   cmp cc2_copy cc3
   # This tests bridge compiler self-hosting, not cc2 self-hosting.
   # cc2 was compiled from compiler.cyr, not cc_bridge.cyr.
@@ -1247,12 +1249,12 @@ PROBLEM:
     brk:   x86=12, aarch64=214
     exit:  x86=60, aarch64=93
 
-  Shared source files (src/cc/*.cyr) use raw syscall numbers.
+  Shared source files (src/frontend/*.cyr + src/backend/*.cyr) use raw syscall numbers.
   Cross-compiler runs on x86 but generates aarch64 code.
 
 SOLUTION: SYS_* enum constants defined per-architecture.
 
-  compiler.cyr (x86):
+  main.cyr (x86):
     enum Sys { SYS_READ=0; SYS_WRITE=1; SYS_OPEN=2; SYS_CLOSE=3; SYS_BRK=12; SYS_EXIT=60; }
 
   compiler_aarch64.cyr (cross-compiler, runs on x86):
@@ -1439,12 +1441,16 @@ HISTORY:
   v1.7.5: Expanded to 4096 entries (65536 bytes). fn_names/offsets/params
           relocated to 0x2B2000/0x2B4000/0x2B6000. brk at 0x2B8000.
 
-CURRENT LAYOUT (v1.7.5):
+CURRENT LAYOUT (v1.10.0):
   0x2A2000  fixup_tbl     [65536]  4096 entries × 16 bytes
   0x2B2000  fn_names      [8192]   1024 function name offsets
   0x2B4000  fn_offsets    [8192]   1024 function code offsets
   0x2B6000  fn_params     [8192]   1024 function param counts
-  0x2B8000  brk
+  0x2C8000  fn_body_start [8192]   1024 inline body start token indices
+  0x2CA000  fn_body_end   [8192]   1024 inline body end token indices
+  0x2CC000  fn_inline     [8192]   1024 inline eligibility flags
+  0x2CE000  fn_pnames     [8192]   1024 inline param name offsets
+  0x2D2000  brk
 
 FIXUP ENTRY FORMAT (16 bytes each):
   [0..7]  code offset — position in codebuf where the address goes
@@ -1677,7 +1683,7 @@ PROBLEM:
 
 FIX:
   Moved ASM_MNEMONIC and all ASM_* helpers from parse.cyr to emit files:
-  - src/cc/emit.cyr: x86 mnemonics (cli, sti, hlt, nop, iretq, wrmsr, rdmsr, ...)
+  - src/backend/x86/emit.cyr: x86 mnemonics (cli, sti, hlt, nop, iretq, wrmsr, rdmsr, ...)
   - src/arch/aarch64/emit.cyr: aarch64 mnemonics (svc, wfi, wfe, dmb, dsb, isb, nop, ret)
 
   parse.cyr still calls ASM_MNEMONIC(S) — the function is resolved from whichever
@@ -1863,11 +1869,11 @@ longer needed at S+0.
 LIMITS:
   Input (before preprocessing): 131072 bytes (read from stdin)
   Expanded source (after preprocessing): up to 262144 bytes
-  Codebuf: 196608 bytes (with overflow check in EB)
+  Codebuf: 262144 bytes (256KB) (with overflow check in EB)
   Preprocess output buffer: 262144 bytes
 
-CODEBUF OVERFLOW: EB() now checks cp >= 196608 and errors:
-  "error: codebuf overflow (N/196608 bytes) — program too large"
+CODEBUF OVERFLOW: EB() now checks cp >= 262144 and errors:
+  "error: codebuf overflow (N/262144 bytes) — program too large"
 '''
 
 [[entries]]
@@ -1984,8 +1990,10 @@ EMIT:
   3. ETAILJMP — emit epilogue (mov rsp, rbp; pop rbp) + jmp rel32 with fixup
 
   fn ETAILJMP(S, fnidx) {
-    E3(S, 0xEC8948);  # mov rsp, rbp
-    EB(S, 0x5D);       # pop rbp
+    EB(S, 0xC9);       # leave (mov rsp,rbp; pop rbp)
+    # pop r12 (41 5C)
+    EB(S, 0x41); EB(S, 0x5C);
+    EB(S, 0x5B);       # pop rbx
     EB(S, 0xE9);       # jmp rel32
     ... fixup entry (type 2) ...
   }
@@ -2035,6 +2043,16 @@ TOKEN ASSIGNMENTS:
   68=f64_eq 69=f64_lt 70=f64_gt 71=f64_neg
   79=f64_sqrt 80=f64_abs 81=f64_floor 82=f64_ceil
   83=f64_sin 84=f64_cos 85=f64_exp 86=f64_ln 87=f64_log2 88=f64_exp2
+  89=f64v_add 90=f64v_sub 91=f64v_mul (SIMD batch, SSE2 packed)
+  92=f64_round (SSE4.1 round to nearest)
+  93=f64v_div (divpd) 94=f64v_sqrt (sqrtpd)
+  95=f64v_abs (andpd+mask) 96=f64v_fmadd (mulpd+addpd)
+  97=ret2 (return two values rax:rdx) 98=rethi (read rdx from last call)
+
+STDLIB ADDITIONS (v1.9.4):
+  fmt_float(val, decimals) — format f64 as "3.141593". Uses f64_floor + f64_round.
+  fmt_float_buf(val, buf, decimals) — write to buffer, return length.
+  getenv(name) — read env var from /proc/self/environ, heap-allocated result.
 '''
 
 [[entries]]
@@ -2110,4 +2128,758 @@ CASE BODY PATCHING:
   Table entries start as 0. As each case body is parsed, its code offset is
   written to table[val - min] as a 4-byte offset from table base. After all
   cases, unpatched (0) entries are filled with the end/default offset.
+'''
+
+[[entries]]
+name = "inline_small_functions"
+description = "Token replay inlining for 1-param functions with <= 6 body tokens (v1.10.0)"
+category = "cyrius"
+content = '''
+DESIGN:
+  Small functions (1 parameter, <= 6 body tokens) are inlined at the call site
+  by replaying their body tokens in the caller's parsing context, with the
+  parameter name mapped to the actual argument expression.
+
+METADATA TABLES (heap 0x2C8000-0x2D2000):
+  fn_body_start[1024] at 0x2C8000 — token index of body start per function
+  fn_body_end[1024] at 0x2CA000   — token index of body end per function
+  fn_inline[1024] at 0x2CC000     — 1 if function is eligible for inlining
+  fn_pnames[1024] at 0x2CE000     — param name offset per function (1-param only)
+  brk moved from 0x2C8000 to 0x2D2000.
+
+ELIGIBILITY:
+  During pass 2 (PARSE_FN_DEF), after parsing a function body:
+  - Check param count == 1
+  - Check body token count <= 6
+  - If eligible: set SFINL(fi, 1), record body start/end/pname
+
+INLINING (PARSE_FNCALL):
+  When calling a function where GFINL(fi) == 1:
+  1. Evaluate the single argument expression (already in rax)
+  2. Save current token index
+  3. Set TI to fn_body_start[fi]
+  4. Replay body tokens with parameter name remapping:
+     when the parser encounters the param name, it reads from the argument
+     location instead of a local variable slot
+  5. Restore TI after replay
+
+DEPTH LIMIT:
+  Max inline depth 3. The GIDEP(S) counter tracks current nesting.
+  If depth >= 3, fall back to normal function call.
+  Tail call optimization is disabled inside inline replay (checked via GIDEP > 0).
+
+AARCH64:
+  Same token replay mechanism — inlining is arch-independent (frontend only).
+  The replayed tokens go through normal parse/emit which uses the active backend.
+'''
+
+[[entries]]
+name = "r12_spill_register_allocation"
+description = "ESPILL/EUNSPILL use callee-saved R12 for first expression nesting level (v1.10.0)"
+category = "cyrius"
+content = '''
+PROBLEM:
+  Expression evaluation uses push/pop to save intermediate values:
+    a + b * c → eval a, push rax, eval b*c, pop rcx, add
+  Each push/pop is 1+1 bytes but requires memory round-trip (stack store/load).
+
+FIX — R12 SPILL:
+  ESPILL/EUNSPILL replace EPUSHR/EPOPR in PARSE_TERM and PEXPR.
+  First nesting level uses callee-saved R12 (register-register, zero latency).
+  Deeper levels fall back to push/pop (unchanged behavior).
+
+IMPLEMENTATION:
+  Counter: _rsl (register spill level) tracks current nesting depth.
+
+  fn ESPILL(S) {
+    var rsl = GRSL(S);
+    if (rsl == 0) {
+      # mov r12, rax (49 89 C4)
+      EB(S, 0x49); EB(S, 0x89); EB(S, 0xC4);
+    } else {
+      EPUSHR(S);  # push rax (fallback)
+    }
+    SRSL(S, rsl + 1);
+  }
+
+  fn EUNSPILL(S) {
+    var rsl = GRSL(S) - 1;
+    SRSL(S, rsl);
+    if (rsl == 0) {
+      # First: mov rcx, r12 so result stays in rax, saved value goes to rcx
+      # Actually: mov rax, r12 (4C 89 E0) then caller uses rax
+      EB(S, 0x4C); EB(S, 0x89); EB(S, 0xE0);
+    } else {
+      EPOPR(S);   # pop rcx (fallback)
+    }
+  }
+
+PROLOGUE/EPILOGUE CHANGES:
+  Old: push rbp; mov rbp, rsp
+  New: push rbx; push r12; push rbp; mov rbp, rsp
+  Old epilogue: leave; ret
+  New epilogue: leave; pop r12; pop rbx; ret
+
+  ETAILJMP updated to match: leave; pop r12; pop rbx; jmp rel32.
+
+STACK PARAM OFFSET:
+  Was: [rbp+16] for 7th param (above saved rbp + return addr)
+  Now: [rbp+32] for 7th param (above saved rbx + r12 + rbp + return addr)
+  ESTOREPARM updated accordingly.
+
+AARCH64:
+  ESPILL/EUNSPILL are stubs that always use stack (push/pop fallback).
+  ARM has plenty of callee-saved registers (x19-x28) but the optimization
+  is deferred — stack spill works correctly for now.
+'''
+
+[[entries]]
+name = "ret2_rethi_implementation"
+description = "Return-by-value small structs: ret2(a,b) returns rax:rdx, rethi() reads rdx (v1.10.0)"
+category = "cyrius"
+content = '''
+TOKENS: ret2 = 97, rethi = 98.
+
+ret2(a, b) STATEMENT:
+  Returns two values in rax (first) and rdx (second).
+  Codegen:
+    1. Evaluate b → rax
+    2. mov rdx, rax (save b in rdx)
+    3. Evaluate a → rax
+    4. Epilogue (leave; pop r12; pop rbx; ret)
+  After return: caller has a in rax, b in rdx.
+
+rethi() EXPRESSION:
+  Reads rdx from the most recent function call.
+  Codegen: mov rax, rdx (48 89 D0)
+  Returns the "high" value from the last ret2 call.
+
+USAGE PATTERN:
+  fn divmod(a, b) {
+    var q = a / b;
+    var r = a % b;
+    ret2(q, r);
+  }
+  var result = divmod(17, 5);   # rax = 3 (quotient)
+  var remainder = rethi();       # rax = 2 (remainder, was in rdx)
+
+DISPATCH:
+  Both tokens handled in PARSE_SIMD_EXT (dispatch function for tokens 93-98).
+  ret2 is also recognized in PARSE_STMT expression range 62-98.
+
+LIMITATION:
+  rethi() must be called immediately after the function that used ret2.
+  Any intervening function call or expression evaluation may clobber rdx.
+  No compiler enforcement — programmer discipline required.
+'''
+
+[[entries]]
+name = "simd_expand_v1100"
+description = "4 new packed f64 SIMD ops: div, sqrt, abs, fmadd (v1.10.0)"
+category = "cyrius"
+content = '''
+NEW OPS:
+  f64v_div(dst, a, b, n)      — divpd xmm0, xmm1 (token 93)
+  f64v_sqrt(dst, src, n)      — sqrtpd xmm0, xmm0 (token 94)
+  f64v_abs(dst, src, n)       — andpd xmm0, [mask] (token 95)
+  f64v_fmadd(dst, a, b, c, n) — mulpd + addpd (token 96)
+
+EMIT HELPERS:
+  EMIT_F64V_UNARY(S, opcode):
+    Used for sqrt (0x51) and abs (custom). Emits loop:
+      movupd xmm0, [src + i*16]
+      <op> xmm0, xmm0
+      movupd [dst + i*16], xmm0
+    Loop increment by 2 (packed f64 = 2 elements per 128-bit register).
+
+  EMIT_F64V_FMADD(S):
+    Fused multiply-add without FMA3 hardware (software emulation):
+      movupd xmm0, [a + i*16]
+      movupd xmm1, [b + i*16]
+      mulpd xmm0, xmm1
+      movupd xmm1, [c + i*16]
+      addpd xmm0, xmm1
+      movupd [dst + i*16], xmm0
+    Uses mulpd+addpd pair. True FMA3 (vfmadd231pd) deferred to future.
+
+  f64v_abs MASK:
+    andpd with 0x7FFFFFFFFFFFFFFF repeated in both lanes.
+    Clears sign bit of both packed f64 values simultaneously.
+
+DISPATCH:
+  All 4 ops dispatched via PARSE_SIMD_EXT, called from PARSE_TERM
+  when ptyp >= 93 && ptyp <= 98.
+
+TOTAL SIMD OPS: 7 (add, sub, mul from v1.9.0 + div, sqrt, abs, fmadd from v1.10.0).
+'''
+
+[[entries]]
+name = "parse_simd_ext"
+description = "PARSE_SIMD_EXT dispatch function for tokens 93-98 (v1.10.0)"
+category = "cyrius"
+content = '''
+PURPOSE:
+  Tokens 93-98 (f64v_div, f64v_sqrt, f64v_abs, f64v_fmadd, ret2, rethi) are
+  dispatched from a single function to avoid cluttering PARSE_TERM and PARSE_STMT
+  with 6 separate branches.
+
+DISPATCH:
+  fn PARSE_SIMD_EXT(S, ptyp) {
+    if (ptyp == 93) { ... f64v_div ... }
+    elif (ptyp == 94) { ... f64v_sqrt ... }
+    elif (ptyp == 95) { ... f64v_abs ... }
+    elif (ptyp == 96) { ... f64v_fmadd ... }
+    elif (ptyp == 97) { ... ret2 ... }
+    elif (ptyp == 98) { ... rethi ... }
+    return 0;
+  }
+
+CALL SITE (PARSE_TERM):
+  Early check before the main token dispatch:
+    if (ptyp >= 93) {
+      if (ptyp <= 98) {
+        return PARSE_SIMD_EXT(S, ptyp);
+      }
+    }
+  This avoids adding 6 elif branches to the already-large PARSE_TERM.
+
+PARSE_STMT INTEGRATION:
+  Expression range expanded from 62-92 to 62-98.
+  When PARSE_STMT sees a token in this range, it dispatches to expression
+  parsing (which includes PARSE_SIMD_EXT for 93-98).
+'''
+
+[[entries]]
+name = "lexkw_ext"
+description = "LEXKW_EXT helper: extended keyword checks for tokens 93-98 (v1.10.0)"
+category = "cyrius"
+content = '''
+PROBLEM:
+  LEXID identifies keywords by comparing identifier strings against known names.
+  Adding 6 more keywords (f64v_div through rethi) caused LEXID to exceed the
+  compiler's code size budget for a single function — too many string comparisons
+  in sequence.
+
+FIX:
+  Extracted extended keyword checks (tokens 93-98) into LEXKW_EXT(kw, klen, S, ws).
+  Called from LEXID after the main keyword check returns 0 (not a base keyword).
+
+  fn LEXKW_EXT(kw, klen, S, ws) {
+    # Check for f64v_div, f64v_sqrt, f64v_abs, f64v_fmadd, ret2, rethi
+    # Returns token number (93-98) or 0 if not a keyword
+    if (klen == 7) {
+      if (... matches "f64v_div" ...) { return 93; }
+      if (... matches "rethi" ...) { ... }
+    }
+    ...
+    return 0;
+  }
+
+INTEGRATION:
+  In LEXID, after the main keyword chain:
+    var ext = LEXKW_EXT(kw, klen, S, ws);
+    if (ext > 0) { ADDTOK(S, ext, ws); return ...; }
+  Falls through to normal IDENT token if ext == 0.
+
+PATTERN:
+  This is the same factoring approach used for ASM_MNEMONIC — when a single
+  function grows too large, extract a subset into a helper. The compiler has
+  no function size limit per se, but large functions push against token count
+  and identifier buffer limits during self-compilation.
+'''
+
+[[entries]]
+name = "ref_directive"
+description = "#ref preprocessor directive: load TOML key-value pairs at compile time (v1.10.0)"
+category = "cyrius"
+content = '''
+SYNTAX:
+  #ref "config.toml"
+
+EFFECT:
+  Reads the TOML file and emits var key = value; for each key-value line.
+  Skips comment lines (#), section headers ([section]), and blank lines.
+  String values are emitted as string literals. Integer values as numbers.
+
+EXAMPLE:
+  # config.toml
+  version = 42
+  name = "myapp"
+
+  # After #ref expansion, source contains:
+  var version = 42;
+  var name = "myapp";
+
+IMPLEMENTATION:
+  PP_REF_PASS runs BEFORE PP_PASS (before include expansion).
+  Scans input for lines matching #ref "...".
+  ISREF(S, ip, bl) detects the directive (similar to ISINCLUDE).
+
+  For each #ref line:
+    1. Extract filename from quotes
+    2. Read file contents via syscall(2, open) + syscall(0, read)
+    3. Parse line by line:
+       - Skip if line starts with # or [
+       - Skip blank lines
+       - Find = separator
+       - Emit: var <key> = <value>;
+    4. Write generated var declarations to output buffer
+
+PASS ORDER:
+  PP_REF_PASS → PP_PASS (includes) → PP_IFDEF_PASS → PP_MACRO_PASS → LEX
+
+USE CASE:
+  Configuration files that define constants for a program.
+  Avoids hand-maintaining duplicate var declarations.
+  Phase 1: simple key=value only. No nested tables, no arrays.
+'''
+
+[[entries]]
+name = "hashmap_simplification"
+description = "Hashmap code simplified: removed enum, extracted lookup helper, used elif (v1.10.0)"
+category = "cyrius"
+content = '''
+CHANGES:
+  1. Removed enum constants for entry states. Now uses literal values:
+     0 = empty, 1 = occupied, 2 = tombstone (was: EMPTY, OCCUPIED, TOMBSTONE).
+     Reduces identifier count and avoids enum init dependency.
+
+  2. Extracted _map_lookup(m, key) helper function:
+     Shared probe logic used by map_get, map_has, map_delete.
+     Returns slot index if found (state==1 and key matches), or -1.
+     Eliminates 3 copies of the same linear probe loop.
+
+  3. Used elif in probe loop:
+     if (state == 0) { break; }
+     elif (state == 1) { if (key matches) { return slot; } }
+     elif (state == 2) { /* skip tombstone */ }
+     Cleaner than nested if/else chains.
+
+RESULT:
+  Fewer lines, same behavior. All existing hashmap tests pass.
+  Tombstone semantics preserved (see hashmap_tombstone entry).
+'''
+
+[[entries]]
+name = "inline_small_functions"
+description = "Token replay inlining for small functions with metadata tables (v1.10.0)"
+category = "cyrius"
+content = '''
+OVERVIEW:
+  Small functions can be inlined at call sites using token replay.
+  Instead of emitting a call instruction, the compiler replays the
+  function body tokens directly into the caller, substituting
+  parameters for local variable slots.
+
+METADATA TABLES (0x2C8000-0x2CE000):
+  fn_body_start[N]  — token offset where function body begins
+  fn_body_end[N]    — token offset where function body ends
+  fn_inline[N]      — inline flag (GFINL != 0 means inlineable)
+
+  These tables are populated during function definition. A function
+  is marked inlineable if it meets size/complexity criteria.
+
+INLINE PATH:
+  In PARSE_FNCALL, when GFINL != 0 for the target function:
+  1. Save current token position
+  2. Map callee parameter names to fresh local variable slots in caller
+  3. Evaluate arguments and store to mapped local slots
+  4. Seek to fn_body_start, replay tokens until fn_body_end
+  5. Any `return` in inlined body becomes a jmp to inline-exit label
+  6. Restore token position and continue normal compilation
+
+  Max inline depth: 3 (prevents infinite recursion for recursive functions
+  and limits code bloat).
+
+PARAMETER MAPPING:
+  Each callee parameter gets a fresh local slot in the caller's frame.
+  When the inlined body references a parameter by name, the lexer/parser
+  resolves it to the mapped local slot instead of a register argument.
+
+CRITICAL BUG:
+  PARSE_STMT had a token range check (tokens 62-92) that determined
+  which tokens were valid statement starters. New tokens added for
+  inlining were outside this range, causing them to be silently skipped.
+  The initial debugging focused on the lexer (wrong lead), but the
+  REAL bug was PARSE_STMT's range check not including the new tokens.
+
+KEY LESSON:
+  When adding new tokens/keywords, check ALL range checks in the compiler.
+  PARSE_STMT, PARSE_TERM, PARSE_FACTOR all have hardcoded token ranges
+  that determine dispatch. Missing a range update causes silent failures —
+  the token is lexed correctly but never parsed.
+'''
+
+[[entries]]
+name = "register_allocation_r12"
+description = "R12 spill register and ESPILL/EUNSPILL nesting (v1.10.0)"
+category = "cyrius"
+content = '''
+OVERVIEW:
+  R12 serves as the first expression spill register. When an expression
+  needs a temporary beyond rax/rcx, the value is spilled to r12 instead
+  of pushing to the stack. This avoids push/pop overhead for common
+  binary expressions.
+
+PROLOGUE (v1.10.0+):
+  push rbx
+  push r12
+  push rbp
+  mov rbp, rsp
+
+  Three pushes + return address = 32 bytes = 16-byte aligned.
+  This is critical for System V ABI compliance (SSE instructions
+  require 16-byte stack alignment at call sites).
+
+ESPILL/EUNSPILL:
+  Counter-based nesting mechanism. Each ESPILL increments a depth
+  counter. If depth == 1, mov r12, rax (use register). If depth > 1,
+  push rax (fall back to stack). EUNSPILL reverses: depth == 1 reads
+  from r12, depth > 1 pops from stack. The counter ensures correct
+  nesting for complex expressions like f(a + b, c * d).
+
+IMPACTS OF PROLOGUE CHANGE:
+  1. ETAILJMP must emit matching epilogue:
+     pop rbp; pop r12; pop rbx; ret
+     (reverse order of prologue pushes)
+
+  2. Stack parameter offset changed from +16 to +32:
+     Parameters 7+ are on the stack. With 2 pushes (old prologue),
+     param 7 was at [rbp+16]. With 3 pushes (new prologue), it's at
+     [rbp+32] because the extra push shifts the frame.
+
+  3. aarch64 cross-compiler needs ESPILL/EUNSPILL stubs:
+     ARM doesn't use r12 the same way. The stubs are no-ops but must
+     exist so the shared frontend code compiles. Additionally,
+     _INLINE_OK must be set to 0 on aarch64 to prevent inline metadata
+     writes (the metadata addresses are x86-specific).
+
+KEY LESSON:
+  Changing the function prologue is a high-impact modification. Every
+  place that assumes stack layout must be updated: tail calls, stack
+  parameter access, frame pointer arithmetic, and cross-architecture
+  stubs. Test self-hosting AND aarch64 after any prologue change.
+'''
+
+[[entries]]
+name = "function_code_size_limits"
+description = "Compiler silently truncates large functions — extraction pattern (v1.10.0-v1.11.0)"
+category = "cyrius"
+content = '''
+PROBLEM:
+  The compiler has implicit code size limits per function. When a function
+  generates more machine code than the internal buffer/region allows,
+  the excess is silently dropped. No error message, no warning — the
+  function just produces wrong code or missing handlers.
+
+AFFECTED FUNCTIONS:
+  LEXID       — keyword recognition. Too many keywords overflowed the
+                if/elif chain. Extracted to LEXKW_EXT for extended keywords.
+  PP_PASS     — preprocessor. Too many directives. Extracted PP_REF_PASS
+                as a separate pre-pass.
+  PARSE_TERM  — term-level expression parsing. New builtins exceeded
+                capacity. Extracted to PARSE_SIMD_EXT for SIMD/math tokens.
+  PARSE_STMT  — statement parsing. Similar overflow. Range checks needed
+                expansion AND handler extraction.
+
+SOLUTION PATTERN:
+  When a function approaches its code generation limit:
+  1. Identify a logical subset of functionality (e.g., "extended keywords")
+  2. Extract to a new helper function (e.g., LEXKW_EXT)
+  3. Add a single call/branch from the original function to the helper
+  4. The helper handles the extracted cases and returns to the caller
+
+  This is the compiler equivalent of "extract method" refactoring, but
+  the motivation is code generation limits rather than readability.
+
+DETECTION:
+  Symptoms are always silent wrong behavior:
+  - New keywords not recognized (LEXID overflow)
+  - New preprocessor directives ignored (PP_PASS overflow)
+  - New builtins parse as identifiers (PARSE_TERM overflow)
+  - New statement forms silently skipped (PARSE_STMT overflow)
+
+  If a newly added feature "doesn't work" but the token is lexed correctly,
+  check whether the handling function has hit its size limit.
+
+KEY LESSON:
+  This is a fundamental constraint of the self-hosting architecture.
+  The compiler compiles itself, so the code generation limits apply to
+  the compiler's own code. There is no easy way to raise the limits
+  without a multi-step bootstrap (compile with old limits, then recompile
+  with new limits). The extraction pattern is the sustainable approach.
+'''
+
+[[entries]]
+name = "fixup_table_expansion"
+description = "Fixup table 4096→8192 with metadata relocation (v1.10.0)"
+category = "cyrius"
+content = '''
+PROBLEM:
+  The fixup table (used for forward references, jumps, call patches) was
+  limited to 4096 entries. As the compiler and programs grew, this limit
+  was hit, causing silent failures in jump patching.
+
+EXPANSION:
+  Doubled the fixup table from 4096 to 8192 entries.
+
+  This required relocating adjacent metadata tables that lived immediately
+  after the fixup table in memory:
+    fn_names     — moved from 0x2B2000 to 0x2C2000
+    fn_offsets   — moved correspondingly
+    fn_params    — moved correspondingly
+
+  The new layout gives the fixup table twice the space while pushing
+  function metadata to higher addresses.
+
+MIGRATION PROCESS:
+  1. Identify all references to fn_names/fn_offsets/fn_params addresses.
+     Found 24+ references across emit.cyr, parse.cyr, and other modules.
+  2. Use sed to update all hex address constants (0x2B2 → 0x2C2 pattern).
+  3. Two-step bootstrap required:
+     Step 1: Compile with old cc2 (old addresses) to get intermediate cc2
+     Step 2: Compile with intermediate cc2 (new addresses) to get final cc2
+     Step 3: Self-host verify: final cc2 compiles itself byte-identical
+
+KEY LESSON:
+  Any change to memory layout in the compiler requires a two-step bootstrap.
+  The old compiler must produce a binary that understands the new layout,
+  then that binary recompiles itself. You cannot change layout addresses
+  and self-host in a single step — the running compiler and the compiled
+  compiler would disagree on where data lives.
+'''
+
+[[entries]]
+name = "aarch64_native_self_host"
+description = "aarch64 native self-hosting — inline metadata segfault and _INLINE_OK fix (v1.11.0)"
+category = "cyrius"
+content = '''
+PROBLEM:
+  The aarch64 native compiler (not cross-compiler, but compiler running
+  natively on ARM hardware) segfaulted when inline function support was
+  enabled. The inline metadata tables live at fixed addresses (0x2C8000+)
+  that are within the brk region on x86_64 but generated incorrect
+  addresses when the compiler ran on ARM.
+
+SYMPTOM:
+  Segfault during compilation when the compiler tried to write inline
+  metadata (fn_body_start, fn_body_end, fn_inline) at addresses that
+  were not mapped on the ARM system.
+
+ROOT CAUSE:
+  The inline metadata code generated x86-specific absolute addresses.
+  On ARM, the memory layout differs (different brk behavior, different
+  page sizes in some cases). The addresses that worked under qemu
+  (which emulates x86 memory layout) failed on real ARM hardware.
+
+FIX:
+  Added _INLINE_OK flag. When _INLINE_OK == 0:
+  - Skip all inline metadata writes during function definition
+  - Never take the inline path in PARSE_FNCALL
+  - All functions use normal call/ret convention
+
+  The aarch64 compiler sets _INLINE_OK = 0. The x86_64 compiler
+  sets _INLINE_OK = 1 (or leaves it default-enabled).
+
+  This means aarch64 binaries are slightly larger (no inlining) but
+  correct. Inlining support for aarch64 would require porting the
+  metadata tables to ARM-appropriate addresses.
+
+KEY LESSON:
+  Always test native ARM builds on real hardware. qemu user-mode
+  emulation does not faithfully reproduce memory mapping behavior.
+  A program that works under qemu may segfault on real ARM due to
+  different brk/mmap address ranges. The _INLINE_OK pattern (feature
+  flag to disable platform-specific optimizations) is reusable for
+  any future x86-only feature.
+'''
+
+[[entries]]
+name = "derive_codegen_fixes"
+description = "Derive codegen bugs: field buffer, arg count, directive skipping (v1.10.0-v1.11.0)"
+category = "cyrius"
+content = '''
+OVERVIEW:
+  #derive(Serialize) generates _to_json() and _from_json() methods for
+  structs. Several bugs were found and fixed across v1.10.0-v1.11.0.
+
+BUG 1: Field name buffer overflow (16→32 bytes)
+  Field names longer than 16 characters overflowed the name buffer in
+  the derive code generator, corrupting adjacent data. Increased buffer
+  to 32 bytes to handle longer field names like "background_color".
+
+BUG 2: Single-arg _to_json (was 2-arg)
+  The generated _to_json function signature had 2 parameters (struct
+  pointer + output buffer), but callers only passed 1 argument (the
+  struct pointer). This caused a segfault because the second parameter
+  contained garbage from whatever was in the register.
+  Fix: changed _to_json to single-arg (struct pointer only), with the
+  output buffer allocated internally.
+
+BUG 3: PP_DERIVE_SERIALIZE must skip intervening #derive lines
+  When multiple #derive directives appear before a struct:
+    #derive(Serialize)
+    #derive(Debug)
+    struct Foo { x; y; }
+  PP_DERIVE_SERIALIZE would try to parse the second #derive as the
+  struct definition and fail. Fix: skip any #derive lines between the
+  triggering #derive(Serialize) and the actual struct keyword.
+
+BUG 4: PP_DERIVE_DESER is now no-op
+  Originally, Serialize and Deserialize were separate derive passes.
+  But PP_DERIVE_SERIALIZE already emits both _to_json and _from_json.
+  Making PP_DERIVE_DESER a no-op avoids duplicate generation.
+
+KEY LESSON:
+  Code generation (generating source code from directives) is fragile
+  because errors manifest in the GENERATED code, not where the bug
+  actually is. Debug by printing the generated source (before compilation)
+  to see what the derive pass actually produced.
+'''
+
+[[entries]]
+name = "freelist_allocator"
+description = "Segregated free-list allocator with mmap-backed arena (v1.11.0)"
+category = "cyrius"
+content = '''
+OVERVIEW:
+  A segregated free-list allocator providing fl_alloc/fl_free/fl_calloc
+  for dynamic memory management. Replaces raw mmap/munmap for small
+  allocations, reducing system call overhead.
+
+DESIGN:
+  9 size classes: 16, 32, 48, 64, 96, 128, 256, 512, 4096 bytes.
+  Each size class has its own free list (singly-linked list of blocks).
+
+  Small allocations (<=4096):
+    1. Round up requested size to the next size class
+    2. Check the free list for that class
+    3. If free list non-empty: pop head, return it
+    4. If free list empty: carve from the arena (mmap-backed region)
+
+  Large allocations (>4096):
+    Direct mmap with size rounded up to page boundary.
+    fl_free for large blocks calls munmap directly.
+
+ARENA:
+  A single large mmap region serves as the backing store for small blocks.
+  A bump pointer tracks the next free position. When the arena is exhausted,
+  a new arena is mmap'd. Old arenas are not freed (they contain live blocks
+  that will eventually be returned to free lists).
+
+fl_free:
+  1. Determine size class from block header (stored in 8 bytes before
+     the returned pointer, or passed explicitly)
+  2. Push block onto the free list head for that size class
+  3. No coalescing — freed blocks stay at their size class permanently
+
+fl_calloc:
+  fl_alloc + memset to zero. Used for arrays and structs that need
+  zero-initialization.
+
+KEY LESSON:
+  The segregated free-list avoids fragmentation within size classes
+  and makes alloc/free O(1) for the common case (free list hit).
+  The trade-off is internal fragmentation (a 17-byte request uses
+  a 32-byte block) and no coalescing (memory is not returned to the
+  OS for small blocks). For a compiler/systems context where
+  allocation patterns are predictable, this is a good trade-off.
+'''
+
+[[entries]]
+name = "thread_async_primitives"
+description = "Threads via clone+mmap, futex mutex, MPSC channels, async runtime (v1.11.0-v1.11.1)"
+category = "cyrius"
+content = '''
+OVERVIEW:
+  Low-level concurrency primitives built directly on Linux syscalls.
+  No pthreads, no libc. Everything goes through syscall instruction.
+
+THREADS:
+  Thread creation uses clone() syscall with a mmap'd stack region.
+  Each thread gets its own stack (typically 8MB mmap with MAP_STACK).
+  clone flags: CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+  CLONE_THREAD | CLONE_SYSVSEM.
+
+FUTEX MUTEX:
+  Mutex built on futex(FUTEX_WAIT, FUTEX_WAKE) syscalls.
+  Three states: 0=unlocked, 1=locked-no-waiters, 2=locked-with-waiters.
+  Lock: cmpxchg 0→1 (fast path), else set to 2 and FUTEX_WAIT.
+  Unlock: xchg to 0, if old state was 2 then FUTEX_WAKE(1).
+  This is the standard futex-based mutex algorithm.
+
+MPSC CHANNELS:
+  Multi-producer single-consumer channels using:
+  - Ring buffer for message storage
+  - Futex for consumer blocking
+  - Mutex for producer synchronization
+  Send: lock, write to ring buffer, unlock, futex_wake.
+  Recv: futex_wait until data available, read from ring buffer.
+
+ASYNC RUNTIME:
+  Event loop built on epoll + timerfd:
+  - epoll_create1 for the event loop
+  - timerfd_create + timerfd_settime for async sleep
+  - Fork-based timeout: fork(), child sleeps then exits, parent
+    continues — if parent doesn't complete, child's exit signals timeout
+
+CRITICAL BUG — pipe() stack corruption:
+  pipe(pipefd) writes two 32-bit file descriptors (8 bytes total).
+  var pipefd[2] allocates a 2-BYTE array (Cyrius arrays are byte-sized).
+  The pipe() syscall writes 8 bytes into a 2-byte buffer, corrupting
+  6 bytes of adjacent stack data.
+  Fix: var pipefd[8] (or var pipefd[16] for safety).
+
+KEY LESSON:
+  When calling Linux syscalls that write structs to user buffers, always
+  check the ACTUAL size of the struct, not the element count. pipe()
+  returns two int32s = 8 bytes. This is a class of bug that affects any
+  syscall with output parameters: stat (144 bytes), sigaction (152 bytes),
+  etc. Always allocate based on byte size, not logical element count.
+'''
+
+[[entries]]
+name = "lexhex_buffer_bug"
+description = "LEXHEX reads from raw input instead of preprocessed buffer — documented known issue (v1.11.0)"
+category = "cyrius"
+content = '''
+PROBLEM:
+  LEXHEX (hex constant lexer, handles 0x... literals) reads from S+p
+  (the raw input buffer) instead of S+0x222000+p (the preprocessed buffer).
+  All other lexer functions read from the preprocessed buffer.
+
+WHY IT WORKS TODAY:
+  PP_IFDEF_PASS copies the preprocessed content back to S+0 (the raw input
+  position) after preprocessing is complete. So by the time LEXHEX runs,
+  S+p and S+0x222000+p contain identical content.
+
+WHEN IT WOULD BREAK:
+  If any preprocessor pass removed or relocated content that contains hex
+  constants, and that pass did NOT copy results back to S+0, LEXHEX would
+  read stale/wrong data from the raw input buffer.
+
+  Example scenario: if #ifdef removed a block containing `var x = 0xFF;`
+  and the pass wrote results only to the preprocessed buffer (S+0x222000),
+  LEXHEX would still see the 0xFF in the raw buffer and try to lex it,
+  even though it was #ifdef'd out.
+
+WHY NOT FIXED:
+  Changing LEXHEX to read from S+0x222000+p requires updating every
+  address calculation in the hex lexer. There are too many references
+  to the raw buffer offset pattern, and the risk of introducing a
+  regression outweighs the benefit (since the current behavior is
+  correct for all existing preprocessor passes).
+
+STATUS:
+  Documented known issue. Not fixed. If a future preprocessor pass
+  breaks the "copy back to S+0" invariant, this will need to be
+  addressed. The fix is mechanical (add 0x222000 to all buffer offsets
+  in LEXHEX) but tedious and high-risk.
+
+KEY LESSON:
+  Sometimes the correct engineering decision is to document a latent bug
+  rather than fix it. The fix is straightforward but touches many places,
+  and the bug only triggers under conditions that don't currently exist.
+  Document the invariant that must hold (PP passes copy back to S+0)
+  and revisit if that invariant is ever broken.
 '''

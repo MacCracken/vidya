@@ -14,19 +14,21 @@ No Rust, no LLVM, no Python. Just sh + Linux x86_64.
 Everything is a 64-bit integer. No floats, no separate types.
 Type annotations (var x: i64 = 42) are documentation only — no enforcement.
 
-The compiler (cc2) is 141KB, ~260 functions, 7 modules. It compiles itself
+The compiler (cc2) is 205KB, ~280 functions, 8 modules. It compiles itself
 byte-identical in ~11ms. The AGNOS kernel is written entirely in Cyrius.
 
 Build: sh bootstrap/bootstrap.sh (40ms)
 Compile: echo 'var x = 42;' | ./build/cc2 > prog && chmod +x prog
 Test: sh tests/compiler.sh   (216 compiler + 51 program tests)
 
-Source: src/compiler.cyr (entry) + src/cc/*.cyr (modules)
-Version: 1.7.8 — 267 tests (216 compiler + 51 programs), 0 failures, self-hosting byte-identical
-Compiler: 162KB x86_64. Constant folding (all arithmetic ops), tail call optimization, DCE,
-512KB input buffer, 256 locals, jump tables for dense switches, identifier deduplication.
-f64 builtins: add/sub/mul/div/neg/from/to/eq/lt/gt/sqrt/abs/floor/ceil/sin/cos/exp/ln/log2/exp2.
-#derive(Serialize) for auto-generated JSON serialization. Fixup table: 4096 entries.
+Source: src/main.cyr (entry) + src/frontend/*.cyr + src/backend/*.cyr + src/common/*.cyr
+Version: 1.10.0 — 267 tests (216 compiler + 51 programs), 0 failures, self-hosting byte-identical
+Compiler: 205KB x86_64. Frontend/backend/common architecture (v1.8.0 restructure).
+Constant folding (all arithmetic ops), tail call optimization, DCE, jump tables.
+Inline small functions (token replay, max depth 3). R12 spill register allocation.
+Return-by-value small structs (ret2/rethi). 7 SIMD packed f64 ops.
+20 f64 builtins (SSE2 + SSE4.1 + x87 FPU transcendentals).
+#derive(Serialize), include-once semantics, identifier dedup, #ref directive. Fixup table: 4096 entries.
 '''
 
 [[entries]]
@@ -106,10 +108,10 @@ category = "cyrius"
 content = '''
 MODULES (included by cc2.cyr):
     util.cyr   — state accessors (GCP, GTI, GVCNT...), helpers (PRNUM, ERR)
-    emit.cyr   — x86_64 instruction emission (EB, EMOVI, EPUSHR, EADDR...)
+    emit.cyr   — x86_64 instruction emission (EB, EMOVI, ESPILL, EUNSPILL, EADDR...)
     jump.cyr   — conditional/unconditional jumps (EJCC, EJMP, EPATCH)
-    lex.cyr    — tokenizer (ADDTOK, LEXNUM, LEXID, LEX, PREPROCESS)
-    parse.cyr  — parser + codegen (PARSE_EXPR, PARSE_STMT, PARSE_FN_DEF...)
+    lex.cyr    — tokenizer (ADDTOK, LEXNUM, LEXID, LEXKW_EXT, LEX, PREPROCESS)
+    parse.cyr  — parser + codegen (PARSE_EXPR, PARSE_STMT, PARSE_FN_DEF, PARSE_SIMD_EXT...)
     fixup.cyr  — address fixup + ELF emission (FIXUP, EMITELF)
 
 COMPILATION FLOW:
@@ -124,10 +126,10 @@ COMPILATION FLOW:
     9. FIXUP: patch variable/string/function addresses
     10. EMITELF: write ELF binary to stdout
 
-HEAP LAYOUT (S = brk base, v1.7.8):
+HEAP LAYOUT (S = brk base, v1.8.0):
     0x00000  input_buf [131072]
-    0x20000  codebuf   [196608]
-    0x50000  tok_names [65536]       (identifiers, dedup since v1.7.8, ~50% savings)
+    0x20000  codebuf   [262144]
+    0x60000  tok_names [65536]       (identifiers, dedup since v1.7.8, ~50% savings)
     0x60000  var_noffs [16384]       (2048 entries)
     0x64000  var_sizes [16384]       (2048 entries)
     0x68000  str_data  [8192]
@@ -140,6 +142,8 @@ HEAP LAYOUT (S = brk base, v1.7.8):
     0x8F830  loop/condition/scope state
     0x90000  preprocessor scratch
     0x97000  derive state [1288]     (#derive struct sizes/names for nested offset calc)
+    0x97F00  include-once count [8]  (number of tracked filenames)
+    0x98000  include-once table [8192] (64 filenames × 128 bytes)
     0xA2000  tok_types [524288]      (65536 slots)
     0x122000 tok_values [524288]
     0x1A2000 tok_lines [524288]      (line numbers per token)
@@ -148,11 +152,17 @@ HEAP LAYOUT (S = brk base, v1.7.8):
     0x26A000 fn_names [8192]         (1024 entries, expanded from 512 in v1.6.7)
     0x26C000 fn_offsets [8192]       (1024 entries, expanded from 512 in v1.6.7)
     0x26E000 fn_params [8192]        (1024 entries, expanded from 512 in v1.6.7)
-    brk: 0x270000
+    0x2C8000 fn_body_start [8192]   inline metadata: body start per fn
+    0x2CA000 fn_body_end [8192]    inline metadata: body end per fn
+    0x2CC000 fn_inline [8192]      inline metadata: inline flag per fn
+    0x2CE000 fn_pnames [8192]      inline metadata: param name offsets per fn
+    brk: 0x2D2000
 
 CODEGEN MODEL:
-    - Stack-based expression evaluation: push lhs, eval rhs, pop lhs, operate
-    - rax = result register, rcx = scratch
+    - Expression evaluation: first nesting uses R12 spill, deeper levels push/pop
+    - rax = result register, rcx = scratch, r12 = first spill register
+    - Prologue: push rbx; push r12; push rbp; mov rbp, rsp (stack params at +32)
+    - Epilogue: leave; pop r12; pop rbx; ret
     - Variables at fixed addresses in data section (EVLOAD/EVSTORE + fixup)
     - Function calls via rel32 fixup (type 2)
     - String addresses via abs64 fixup (type 1)
@@ -224,7 +234,7 @@ CURRENT LIMITATIONS:
     table at 0x8FA98 has 64 slots). Use enums for large constant groups.
     Enums have separate init path and don't consume gvar_toks slots.
 
-16. VARIABLE TABLE LIMIT: Max 2048 variables (VCNT never resets between
+16. VARIABLE TABLE LIMIT: Max 4096 variables (VCNT never resets between
     functions — arrays inside functions are globals). Was 256→512→2048.
     Fixed overlap bug between var_noffs and var_sizes in v1.7.0.
 
@@ -815,8 +825,8 @@ INPUT BUFFER EXPANSION (v1.7.0):
     # Clear error at 256KB limit.
 
 CODEBUF OVERFLOW CHECK (v1.7.0):
-    # EB() checks cp >= 196608 and errors cleanly:
-    # "error: codebuf overflow (N/196608 bytes) — program too large"
+    # EB() checks cp >= 262144 and errors cleanly:
+    # "error: codebuf overflow (N/262144 bytes) — program too large"
 
 DEAD CODE ELIMINATION (v1.7.0):
     # Unreachable functions get 3-byte stub (xor eax,eax; ret) instead of full body.
@@ -949,4 +959,353 @@ IDENTIFIER DEDUPLICATION (v1.7.8):
     # Required two-step bootstrap: rename PARSE_CMP_EXPR→PCMPE to fit under old limit.
     # Bug found: variable 'c' declared inside while scope was invisible to dedup code.
     # Bug found: reusing 'p' (return value) as loop counter reset lexer to position 0.
+
+COMPILER RESTRUCTURE (v1.8.0):
+    # src/cc/ → src/frontend/ + src/backend/x86/ + src/common/
+    # src/arch/aarch64/ → src/backend/aarch64/
+    # compiler.cyr → main.cyr, compiler_aarch64.cyr → main_aarch64.cyr, cc_bridge.cyr → bridge.cyr
+    # Float ops extracted from emit.cyr into backend/x86/float.cyr
+    # Include order: common/util → backend/emit → backend/float → backend/jump → frontend/lex → frontend/parse → backend/fixup
+
+INCLUDE-ONCE SEMANTICS (v1.8.0):
+    # Preprocessor tracks up to 64 included filenames in a table at S+0x98000.
+    # PP_ALREADY_INCLUDED(S, fname) scans table; PP_MARK_INCLUDED(S, fname) adds entry.
+    # Duplicate include "file.cyr" directives silently skipped in both PP_PASS and PP_IFDEF_PASS.
+    # Prevents: duplicate enum errors, wasted tokens/identifiers, confused downstream projects.
+
+SIMD BATCH OPS (v1.9.0, expanded v1.10.0):
+    # f64v_add(dst, a, b, n) — SSE2 packed f64, processes 2 elements per iteration
+    # f64v_sub(dst, a, b, n) — same for subtraction
+    # f64v_mul(dst, a, b, n) — same for multiplication
+    # f64v_div(dst, a, b, n) — divpd, packed f64 division (v1.10.0)
+    # f64v_sqrt(dst, src, n) — sqrtpd, packed f64 square root (v1.10.0)
+    # f64v_abs(dst, src, n)  — andpd+mask, packed f64 absolute value (v1.10.0)
+    # f64v_fmadd(dst, a, b, c, n) — mulpd+addpd, fused multiply-add (v1.10.0)
+    # Emit: loop with movupd + op + movupd. 2x throughput vs scalar.
+    # EMIT_F64V_UNARY for sqrt/abs, EMIT_F64V_FMADD for fused multiply-add.
+    # Total: 7 SIMD ops (was 3 in v1.9.0).
+
+STACK STR_BUILDER (v1.9.0):
+    # str_builder_new() allocates 24-byte header + 64-byte inline buffer.
+    # add_cstr/add_int write directly via memcpy — no per-segment alloc.
+    # _sb_grow() doubles buffer when full (single alloc, not per-segment).
+    # str_builder_build() copies to permanent alloc. Total: 1 alloc vs N.
+
+DEPENDENCY MANAGEMENT (v1.9.1):
+    # cyrb.toml [deps] section: stdlib, path, git dependencies.
+    # cyrb build auto-resolves includes from deps before compilation.
+    # modules = ["lib/x.cyr"] filter (v1.9.2) for selective includes.
+    # git deps cloned to ~/.cyrius/deps/<name>/<tag>/, pinned by tag.
+
+CYRB PULSAR (v1.9.0):
+    # cyrb pulsar: full toolchain rebuild from source in ~410ms.
+    # Builds cc2 + cc2_aarch64 (cross) + cc2-native-aarch64 (ARM native).
+    # Installs to ~/.cyrius, purges old versions, verifies.
+    # Auto two-step bootstrap for heap layout changes.
+
+DEP MODULE FILTER (v1.9.2):
+    # [deps.agnosys] path = "../agnosys" modules = ["lib/syscalls.cyr"]
+    # Selective includes: only pull listed files from a dependency.
+    # Without modules=, all lib/*.cyr + src/*.cyr are included.
+    # Prevents pulling 20+ unused modules from large dependencies.
+
+SIMD FRAME FIX (v1.9.3):
+    # f64v_add/sub/mul stored args at hardcoded frame slots 0,1,2.
+    # Clobbered caller's local variables — heap buffers produced zeros.
+    # Fix: use GFLC() for fresh slots, pass vbase to EMIT_F64V_LOOP.
+
+F64_ROUND (v1.9.4):
+    # SSE4.1 roundsd mode 0 (round to nearest, banker's rounding).
+    # Token 92. Completes floor/ceil/round set.
+    # f64_round(3.5) → 4, f64_round(2.5) → 2.
+
+FMT_FLOAT (v1.9.4):
+    # fmt_float(val, decimals) — format f64 as "integer.fraction".
+    # fmt_float_buf(val, buf, decimals) — write to buffer, return length.
+    # Handles negatives, zero-pads fractional part.
+    # fmt_float(pi, 6) → "3.141593", fmt_float(-1/3, 4) → "-0.3333"
+
+GETENV (v1.9.4):
+    # getenv(name) — read environment variable from /proc/self/environ.
+    # Returns heap-allocated C string or 0 if not found.
+    # Required for PATH lookup in hardware detection (ai-hwaccel).
+
+DERIVE IN INCLUDES (v1.9.4):
+    # #derive(Serialize) now works inside included files.
+    # Added derive handling to PP_IFDEF_PASS (second preprocessor pass).
+    # Previously only worked in the main source file.
+    # Enables library modules to define serializable structs.
+
+F64 BUILTINS COMPLETE (v1.10.0 — 28 total):
+    # SSE2:  add sub mul div neg from to eq lt gt (10)
+    # SSE4.1: sqrt floor ceil round (4)
+    # Integer: abs (1)
+    # x87 FPU: sin cos exp ln log2 exp2 (6)
+    # SIMD: f64v_add f64v_sub f64v_mul f64v_div f64v_sqrt f64v_abs f64v_fmadd (7, SSE2 packed, 2 elements/iter)
+    # Total: 21 scalar + 7 batch = 28 f64 operations
+
+INLINE SMALL FUNCTIONS (v1.10.0):
+    # Token replay inlining for 1-param functions with <= 6 body tokens.
+    # Metadata tables at 0x2C8000-0x2D2000 (fn_body_start, fn_body_end,
+    # fn_inline, fn_pnames). Called from PARSE_FNCALL when GFINL(fi)==1.
+    # Body tokens replayed in caller context with param name mapping.
+    # Max inline depth 3. Tail call disabled inside inline replay via GIDEP counter.
+
+RETURN-BY-VALUE SMALL STRUCTS (v1.10.0):
+    # ret2(a, b)  — return two values in rax:rdx (token 97)
+    # rethi()     — read rdx from last call (mov rax, rdx) (token 98)
+    # Handled in PARSE_SIMD_EXT and PARSE_STMT range 62-98.
+    # Enables returning small structs (2 fields) without heap allocation.
+
+REGISTER ALLOCATION R12 SPILL (v1.10.0):
+    # ESPILL/EUNSPILL replace EPUSHR/EPOPR in expression evaluation.
+    # First nesting level uses callee-saved R12 (mov r12,rax / mov rax,r12).
+    # Deeper levels fall back to push/pop. Counter-based _rsl tracks nesting.
+    # Prologue: push rbx; push r12; push rbp; mov rbp, rsp.
+    # Epilogue: leave; pop r12; pop rbx; ret.
+    # ETAILJMP updated to match. Stack param offset changed from +16 to +32.
+    # aarch64 has ESPILL/EUNSPILL stubs (stack-only fallback).
+
+REF DIRECTIVE (v1.10.0):
+    # #ref "file.toml" — preprocessor directive loads TOML at compile time.
+    # PP_REF_PASS runs before PP_PASS. Reads TOML file, emits var key = value;
+    # for each key-value line. Skips comments (#), sections ([]), blank lines.
+    # ISREF() detects the directive.
+
+HASHMAP SIMPLIFIED (v1.10.0):
+    # Removed enum constants (use literal 0/1/2 for empty/occupied/tombstone).
+    # Extracted _map_lookup() helper for shared probe logic.
+    # Used elif in probe loop. Reduced code duplication.
+
+DEAD CODE REMOVAL (v1.10.0):
+    # 11 stale files removed: src/cc/ (5 files), src/cc_bridge.cyr,
+    # src/compiler.cyr, src/compiler_aarch64.cyr, src/arch/aarch64/ (3 files).
+    # All superseded by modular src/frontend/ + src/backend/ structure.
+'''
+
+[[entries]]
+name = "enum_namespacing"
+description = "Enum.VARIANT syntax — qualified enum access in all expression contexts (v1.10.0)"
+category = "cyrius"
+content = '''
+SYNTAX:
+    enum Color { RED; GREEN; BLUE; }
+    var c = Color.RED;
+    if (c == Color.BLUE) { ... }
+    fn paint(color) { return color == Color.GREEN; }
+
+SEMANTICS:
+    Enum.VARIANT works everywhere an expression is valid: assignments,
+    comparisons, function arguments, return values, array indices.
+
+    The parser resolves Enum.VARIANT by checking if the identifier after
+    the dot is a global variable (which enum variants are compiled as).
+    If it is, the dot expression is treated as an enum variant access.
+    If not, it falls back to struct field access.
+
+IMPLEMENTATION:
+    No enum metadata table needed. Enum variants are already compiled as
+    global variables (e.g., Color_RED). The parser just needs to recognize
+    the Enum.VARIANT pattern and map it to the global variable name.
+
+    This is intentionally simple — no type checking, no enum-specific
+    lookup tables. The existing global variable mechanism does all the work.
+
+KEY LESSON:
+    When the existing infrastructure (global vars) already handles the
+    underlying mechanism, the language feature is just syntactic sugar
+    in the parser. No new tables, no new passes, no new complexity.
+'''
+
+[[entries]]
+name = "relaxed_fn_ordering"
+description = "fn definitions can appear after top-level statements (v1.10.0)"
+category = "cyrius"
+content = '''
+SYNTAX:
+    var x = 42;
+    print_i64(x);      # top-level statement
+    fn helper(a) {     # fn defined AFTER top-level code
+        return a * 2;
+    }
+
+SEMANTICS:
+    Prior to v1.10.0, all fn definitions had to appear before any top-level
+    statements. Now fn definitions can be freely interleaved with top-level
+    code. Forward calls already worked (two-pass compilation), so this only
+    affected fn definitions appearing physically after executed statements.
+
+IMPLEMENTATION:
+    PARSE_PROG handles `fn` tokens by:
+    1. Emitting a jmp instruction to jump over the function body
+    2. Compiling the function body normally (same as before)
+    3. Patching the jmp to land after the function body
+
+    This is the same jmp-over pattern used for if/else blocks. The function
+    body is compiled in place but execution skips over it via the jump.
+
+KEY LESSON:
+    Non-invasive change. The jmp-over-body pattern is already well-tested
+    in the compiler for other constructs. Reusing it for fn ordering means
+    no new mechanisms and no risk to existing code generation.
+'''
+
+[[entries]]
+name = "ret2_rethi"
+description = "Return two values via rax:rdx register pair (v1.10.0)"
+category = "cyrius"
+content = '''
+SYNTAX:
+    fn divmod(a, b) {
+        var q = a / b;
+        var r = a % b;
+        ret2(q, r);        # return two values: rax=q, rdx=r
+    }
+    var result = divmod(17, 5);   # rax = 3 (quotient)
+    var remainder = rethi();      # rdx = 2 (remainder)
+
+SEMANTICS:
+    ret2(a, b) packs two values into the rax:rdx register pair and returns.
+    The first argument goes to rax (normal return), the second to rdx.
+    rethi() retrieves the second return value from rdx (mov rax, rdx).
+
+    This follows the System V AMD64 ABI convention where functions can
+    return two 64-bit values in rax and rdx.
+
+IMPLEMENTATION:
+    Tokens: ret2 = 97, rethi = 98
+    Handled in PARSE_SIMD_EXT (the extended keyword handler).
+
+    ret2(a, b):
+      1. Evaluate b → rax
+      2. mov rdx, rax    # second value in rdx
+      3. Evaluate a → rax  # first value in rax
+      4. Emit function return (epilogue + ret)
+
+    rethi():
+      1. mov rax, rdx    # move second return value to rax
+
+KEY LESSON:
+    Simple two-register return is sufficient for many cases (divmod,
+    pointer+length, success+value). No need for struct returns or
+    output parameters for the common two-value case.
+'''
+
+[[entries]]
+name = "ref_directive"
+description = "#ref directive — compile-time TOML loading (v1.10.0)"
+category = "cyrius"
+content = '''
+SYNTAX:
+    #ref "config.toml"
+    # If config.toml contains:
+    #   width = 800
+    #   height = 600
+    # Then after preprocessing, the source contains:
+    #   var width = 800;
+    #   var height = 600;
+
+SEMANTICS:
+    #ref "file.toml" loads a TOML file at compile time and emits
+    var declarations for each key-value pair. Skips comments (#),
+    section headers ([section]), and blank lines. String values
+    become string literals, numeric values become integer literals.
+
+IMPLEMENTATION:
+    PP_REF_PASS runs as a separate preprocessing pass BEFORE PP_PASS.
+    This ordering is critical — #ref must expand before #ifdef and
+    other preprocessor directives see the generated var declarations.
+
+    ISREF() detects the #ref directive in the source.
+    The pass reads the TOML file, parses key = value lines,
+    and emits `var key = value;` for each valid entry.
+
+KEY LESSON:
+    PP_PASS was already too large to add new inline code. Attempting to
+    add #ref handling inside PP_PASS hit code generation size limits.
+    The solution was a separate pre-pass (PP_REF_PASS) that runs first.
+    This is the same pattern used for PP_IFDEF_PASS and PP_DERIVE passes:
+    when a pass gets too big, split into a new pass that runs at a
+    different stage in the pipeline.
+'''
+
+[[entries]]
+name = "f64_atan_and_math_lib"
+description = "f64_atan builtin and lib/math.cyr transcendental library (v1.10.0)"
+category = "cyrius"
+content = '''
+SYNTAX:
+    var angle = f64_atan(slope);        # builtin: arctangent
+    var s = sinh(x);                     # lib/math.cyr
+    var c = cosh(x);                     # lib/math.cyr
+    var t = tanh(x);                     # lib/math.cyr
+    var p = pow(base, exp);             # lib/math.cyr
+    var v = clamp(x, lo, hi);          # lib/math.cyr
+    var m = min(a, b);                  # lib/math.cyr
+    var M = max(a, b);                  # lib/math.cyr
+
+IMPLEMENTATION:
+    f64_atan is token 99, handled in PARSE_SIMD_EXT.
+    Uses x87 FPU instructions: fld1 + fpatan.
+    This computes atan(ST(1)/ST(0)) which gives atan(x/1) = atan(x).
+
+    lib/math.cyr provides higher-level math functions composed from
+    existing builtins:
+      sinh(x) = (f64_exp(x) - f64_exp(f64_neg(x))) / 2
+      cosh(x) = (f64_exp(x) + f64_exp(f64_neg(x))) / 2
+      tanh(x) = sinh(x) / cosh(x)
+      pow(b,e) = f64_exp(f64_mul(e, f64_log(b)))
+      clamp/min/max = straightforward comparisons
+
+KEY LESSON:
+    The x87 FPU transcendentals (fpatan, fsin, fcos, fsqrt) are the most
+    compact way to implement these — single instructions vs. Taylor series
+    or lookup tables. The lib/math.cyr functions then compose from builtins,
+    keeping the compiler small while providing a rich math library.
+'''
+
+[[entries]]
+name = "continue_in_for_loops"
+description = "continue statement with forward-patch mechanism for for-loops (v1.11.0)"
+category = "cyrius"
+content = '''
+SYNTAX:
+    for (var i = 0; i < 10; i = i + 1) {
+        if (i == 5) { continue; }
+        print_i64(i);
+    }
+
+SEMANTICS:
+    continue skips the rest of the loop body and jumps to the step
+    expression (i = i + 1) in for-loops, or to the condition check
+    in while-loops.
+
+IMPLEMENTATION:
+    Forward-patch mechanism at S+0x8F850 (continue target address).
+    Array of up to 8 continue patches stored at S+0x8F858.
+
+    For-loop compilation:
+    1. Compile init (var i = 0)
+    2. Emit condition check (i < 10)
+    3. Compile body — any `continue` emits a jmp with placeholder
+       and records the patch location in the array
+    4. After body, record current position as the step expression start
+    5. Compile step (i = i + 1)
+    6. Patch all continue jmps to point to step expression
+
+CRITICAL BUG (v1.11.0):
+    Address 0x8F848 was ALREADY USED by the &&/|| extra-patch mechanism.
+    The continue patch counter at S+0x8F850 (which is 0x8F848 + 8) was
+    fine, but the initial design tried to use S+0x8F848 for the continue
+    flag — which collided with &&/|| patches silently.
+
+    Symptom: the "life glider" test (which uses both continue and && in
+    the same loop) produced wrong results. No crash, no error — just
+    silently wrong behavior because the &&/|| patch data was overwritten.
+
+KEY LESSON:
+    The compiler uses a flat heap region for state variables. There is no
+    allocation tracking — offsets are chosen manually. When adding new
+    state, you MUST check what already lives at nearby addresses. A map
+    of heap offset usage would prevent these silent collisions.
 '''

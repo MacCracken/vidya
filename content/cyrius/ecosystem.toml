@@ -24,7 +24,7 @@ Tools at: programs/{ark,cyrb}.cyr
 agnosys port: separate repo (github.com/MacCracken/agnosys), 20 modules from 29K lines of Rust
 
 Total: 267 tests (216 compiler + 51 programs), 0 failures.
-Self-hosting byte-identical. Compiler: 140KB x86_64. Version: 1.7.3.
+Self-hosting byte-identical. Compiler: 176KB x86_64. Version: 1.9.0.
 
 v1.7.2: tail call optimization, 512KB input buffer, aarch64 fixup bug fix.
 v1.7.3: constant folding (* / << >>) at codegen level. Safe same-size EMOVI rewrite.
@@ -445,7 +445,7 @@ content = '''
 Features needed for 1:1 Rust ports, identified from agnostik/nous/ark rewrites.
 Grouped by blocking priority.
 
-STATUS (as of v1.7.3):
+STATUS (as of v1.9.0):
   DONE:
     Enums with data:   enum Result { Ok(val) = 0; Err(code) = 1; } — v1.1.0
     Module system:     mod/pub/use with name mangling — v0.9.7
@@ -659,7 +659,7 @@ CYRC — CYRIUS CHECK (programs/cyrc.cyr, 22KB binary):
 cyrc vet <file>:
   Scans source file for include directives.
   Reports each dependency as OK, UNTRUST, or MISSING.
-  Trusted paths: lib/, src/cc/, src/arch/, kernel/
+  Trusted paths: lib/, src/frontend/, src/backend/, kernel/
   Returns 0 if all trusted and present, 1 otherwise.
 
 cyrc deny <file>:
@@ -860,38 +860,100 @@ No compiler change needed.
 
 [[entries]]
 name = "cyrb_dispatcher"
-description = "cyrb is a shell dispatcher routing subcommands to individual tools — like git"
+description = "cyrb is a shell dispatcher with dependency management, cross-compilation, and pulsar rebuild"
 category = "cyrius"
 content = '''
 CYRB DISPATCHER (scripts/cyrb):
 
 cyrb is a shell script that dispatches subcommands to individual tools.
-This avoids the fixup table limit (~1024 entries) that prevents a single
-large Cyrius binary from having all commands.
 
-COMMANDS:
-  Build:    cyrb build, test, bench, self
-  Project:  cyrb init, package, publish, install
-  Quality:  cyrb vet, deny (→ delegates to cyrc binary)
+COMMANDS (v1.9.2):
+  Build:    cyrb build [--aarch64 [--native]] [-D NAME]... <src> <out>
+            cyrb run [--aarch64 [--native]] [-D NAME]... <src>
+            cyrb test [--aarch64 [--native]] [-D NAME]... <test.cyr>
+            cyrb bench <bench.cyr>
+            cyrb check <source.cyr>
+            cyrb self — self-hosting check
+  Project:  cyrb init, package, publish, install, update
+            cyrb deps — show resolved dependency tree
+  Quality:  cyrb audit, fmt, lint, doc, vet, deny
+  Rebuild:  cyrb pulsar — rebuild cc2 + cc2_aarch64 + native + tools from source, install
   Info:     cyrb version, which, help
 
-TOOL RESOLUTION ORDER:
-  1. $CYRIUS_HOME/bin/cc2 (installed version)
-  2. ../build/cc2 (dev mode, relative to script)
+THREE COMPILERS:
+  cc2                  — x86→x86 (native, ~176KB)
+  cc2_aarch64          — x86→aarch64 (cross-compiler, ~163KB)
+  cc2-native-aarch64   — aarch64→aarch64 (native ARM, ~209KB)
+  --aarch64            uses cross-compiler
+  --aarch64 --native   uses native compiler (runs under qemu on x86)
 
-COMPILE HELPER:
-  compile() pipes source through cc2: cat $src | $CC > $out && chmod +x $out
-  --aarch64 flag switches to cc2_aarch64
+DEPENDENCY RESOLUTION (v1.9.1):
+  cyrb build reads [deps] from cyrb.toml and auto-resolves includes.
+  See "dependency_management" entry for details.
 
-RUN HELPER:
-  run_binary() executes directly on x86, via qemu-aarch64 on ARM
+COMPILE PIPELINE:
+  1. Read [deps] from cyrb.toml → resolve includes
+  2. Prepend #define lines from -D flags
+  3. Prepend resolved includes
+  4. Cat source file
+  5. Pipe to compiler → output binary
 
-SELF-HOSTING:
-  cyrb self finds src/compiler.cyr, compiles twice, compares with cmp.
-  Works from either the cyrius repo or a sibling project.
+PULSAR (v1.9.0):
+  cyrb pulsar rebuilds the entire toolchain from source in ~410ms:
+  1. Compile cc2 from src/main.cyr (with self-host verification)
+  2. Cross-compile cc2_aarch64 + self-host to native aarch64
+  3. Rebuild tools (cyrfmt, cyrlint, cyrdoc, cyrc, ark)
+  4. Install to ~/.cyrius/versions/<VER>/, purge old versions
+  5. Verify installed compiler works
+  Auto two-step bootstrap when heap layout changes.
+'''
 
-PATTERN: Like git — one entry point, individual tools underneath.
-Keeps each tool small, avoids compiler limits, easy to extend.
+[[entries]]
+name = "dependency_management"
+description = "cyrb.toml [deps] section: stdlib, path, and git dependencies with module filtering (v1.9.1)"
+category = "cyrius"
+content = '''
+DEPENDENCY FORMAT (cyrb.toml):
+
+  [deps]
+  stdlib = ["string", "fmt", "alloc", "vec", "str", "hashmap"]
+
+  [deps.agnosys]
+  path = "../agnosys"
+  modules = ["lib/syscalls_linux.cyr", "src/error.cyr"]
+
+  [deps.kybernet]
+  git = "https://github.com/MacCracken/kybernet"
+  tag = "0.3.0"
+  modules = ["lib/net.cyr"]
+
+THREE DEPENDENCY TYPES:
+  1. stdlib — resolved from installed Cyrius (~/.cyrius/versions/<ver>/lib/)
+     or local lib/ (dev mode). Just list module names without .cyr extension.
+  2. path — local project on disk. Absolute or relative to project root.
+  3. git — remote repository. Cloned to ~/.cyrius/deps/<name>/<tag>/.
+     Supports GitHub, GitLab, Codeberg, any git URL.
+     tag= pins to a specific release/tag. Defaults to "main" if omitted.
+
+MODULE FILTERING (v1.9.2):
+  modules = ["lib/syscalls.cyr", "src/error.cyr"]
+  If specified, only listed files are included from the dependency.
+  If omitted, ALL lib/*.cyr + src/*.cyr (except main.cyr) are included.
+  Prevents pulling in unused modules from large dependencies.
+
+RESOLUTION ORDER:
+  1. All stdlib modules (in order listed)
+  2. All path/git deps (in order listed in manifest)
+  3. Source entry file (src/main.cyr or whatever entry= specifies)
+
+INCLUDE-ONCE:
+  Duplicate includes are silently skipped (v1.8.0 include-once semantics).
+  If stdlib and a dep both provide string.cyr, only the first is processed.
+
+COMMANDS:
+  cyrb deps — show resolved dependency tree and include list
+  cyrb build — auto-resolves deps before compilation
+  cyrb update — syncs lib/ from installed stdlib (for vendored projects)
 '''
 
 [[entries]]
