@@ -1,0 +1,311 @@
+# Vidya — Binary Formats in Cyrius
+#
+# PATTERN-FOCUSED: documents cc2's binary output format.
+# cc2 emits a flat ELF with no sections, no dynamic linking,
+# no relocations. The simplest valid Linux executable.
+#
+# Binary layout:
+#   Bytes 0-63:   ELF header (64 bytes)
+#   Bytes 64-119: Program header (56 bytes, PT_LOAD)
+#   Bytes 120+:   Machine code + data
+#
+# No section headers. No symbol tables. No string tables.
+# The kernel reads the ELF header and one program header.
+# Everything else is the actual program.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# ================================================================
+# Binary Layout — cc2's output structure
+# ================================================================
+# cc2's output is the simplest valid ELF:
+#   ehdr (64B) + phdr (56B) + code (NB) + data (MB)
+# All in one PT_LOAD segment. No gaps, no alignment padding.
+
+fn test_binary_layout() {
+    var ehdr_size = 64;
+    var phdr_size = 56;
+    var header_total = ehdr_size + phdr_size;
+    assert_eq(header_total, 120, "header overhead = 120 bytes");
+
+    # Code starts at offset 120
+    var code_start = header_total;
+    assert_eq(code_start, 120, "code starts at byte 120");
+
+    # Data (string literals, variables) follows code
+    # For a seed binary with 79 bytes of code+data:
+    var seed_code_data = 79;
+    var seed_total = header_total + seed_code_data;
+    assert_eq(seed_total, 199, "seed binary = 199 bytes");
+
+    # For stage1a with constant-folded output:
+    # mov rdi, result (7B) + push rdi (1B) + 16 bytes template = 24B code
+    # But code is padded to 24B (3 qwords) for alignment
+    var stage1a_code = 24;
+    var stage1a_total = header_total + stage1a_code;
+    assert_eq(stage1a_total, 144, "stage1a output = 144 bytes");
+    return 0;
+}
+
+# ================================================================
+# ELF Header — 64 bytes, fixed template
+# ================================================================
+# cc2 stores this as a constant. Only p_filesz/p_memsz change.
+
+fn test_elf_header_constants() {
+    # Magic: \x7fELF
+    var magic_0 = 0x7F;
+    var magic_1 = 0x45;  # 'E'
+    var magic_2 = 0x4C;  # 'L'
+    var magic_3 = 0x46;  # 'F'
+    assert_eq(magic_0, 127, "0x7F");
+    assert_eq(magic_1, 69, "'E'");
+    assert_eq(magic_2, 76, "'L'");
+    assert_eq(magic_3, 70, "'F'");
+
+    # Class: ELFCLASS64 = 2
+    var elfclass64 = 2;
+    assert_eq(elfclass64, 2, "64-bit ELF");
+
+    # Data: ELFDATA2LSB = 1 (little-endian)
+    var elfdata2lsb = 1;
+    assert_eq(elfdata2lsb, 1, "little-endian");
+
+    # Type: ET_EXEC = 2 (not PIE, not shared object)
+    var et_exec = 2;
+    assert_eq(et_exec, 2, "executable");
+
+    # Machine: EM_X86_64 = 62 (0x3E)
+    var em_x86_64 = 62;
+    assert_eq(em_x86_64, 62, "x86-64");
+
+    # Entry point: always BASE + 120
+    var base = 0x400000;
+    var entry = base + 120;
+    assert_eq(entry, 0x400078, "entry = 0x400078");
+    return 0;
+}
+
+# ================================================================
+# Program Header — 56 bytes, single PT_LOAD
+# ================================================================
+# cc2 uses one segment for everything: code + data in one PT_LOAD.
+# No separate data segment. No W^X separation for bootstrap.
+
+fn test_program_header_constants() {
+    # PT_LOAD = 1 (the only segment type cc2 uses)
+    var pt_load = 1;
+    assert_eq(pt_load, 1, "PT_LOAD");
+
+    # Flags for code-only binary: R+X = 5
+    var pf_r = 4;
+    var pf_x = 1;
+    var pf_w = 2;
+    var code_flags = pf_r + pf_x;
+    assert_eq(code_flags, 5, "R+X for code-only");
+
+    # Flags for code+data binary: R+W+X = 7 (bootstrap mode)
+    var bootstrap_flags = pf_r + pf_w + pf_x;
+    assert_eq(bootstrap_flags, 7, "R+W+X for bootstrap");
+
+    # p_offset = 0 (load from start of file)
+    # p_vaddr = 0x400000 (standard static base)
+    # p_align = 0x1000 (4KB page)
+    var p_offset = 0;
+    var p_vaddr = 0x400000;
+    var p_align = 0x1000;
+    assert_eq(p_vaddr, 4194304, "base = 4MB");
+    assert_eq(p_align, 4096, "page-aligned");
+
+    # p_filesz = total binary size (varies per program)
+    # p_memsz = p_filesz + extra space for runtime variables
+    return 0;
+}
+
+# ================================================================
+# No Sections — what cc2 omits and why
+# ================================================================
+# cc2 sets e_shoff=0, e_shnum=0. No section headers.
+# Section headers are for the linker and debugger, not the kernel.
+# By omitting them, cc2 saves space and complexity.
+
+fn test_no_sections() {
+    # e_shoff = 0 means no section header table
+    var e_shoff = 0;
+    assert_eq(e_shoff, 0, "no section headers");
+
+    # e_shnum = 0 means zero sections
+    var e_shnum = 0;
+    assert_eq(e_shnum, 0, "zero sections");
+
+    # What we don't need for a static bootstrap binary:
+    # .symtab  — no symbols to look up
+    # .strtab  — no symbol names
+    # .shstrtab — no section names
+    # .rel.*   — no relocations (all addresses are absolute)
+    # .dynamic — no shared libraries
+    # .interp  — no dynamic linker
+
+    # Each section header is 64 bytes. A typical binary has ~20:
+    var shdr_size = 64;
+    var typical_count = 20;
+    var savings = shdr_size * typical_count;
+    assert_eq(savings, 1280, "saved 1280 bytes vs typical binary");
+    return 0;
+}
+
+# ================================================================
+# No Dynamic Linking — static is simplest
+# ================================================================
+# Dynamic linking adds complexity:
+#   PT_INTERP — path to ld-linux-x86-64.so.2
+#   PT_DYNAMIC — DT_NEEDED, DT_STRTAB, DT_SYMTAB entries
+#   GOT/PLT — indirection for external symbols
+#   .dynstr, .dynsym — dynamic symbol tables
+#
+# cc2 avoids all of this. Every symbol is resolved at compile time.
+# Every address is absolute. The binary is self-contained.
+
+fn test_no_dynamic_linking() {
+    # PT_INTERP = 3 (dynamic linker path segment)
+    # PT_DYNAMIC = 2 (dynamic linking info segment)
+    # cc2 never emits either of these
+    var pt_interp = 3;
+    var pt_dynamic = 2;
+
+    # cc2's program header count: always 1
+    var cc2_phnum = 1;
+    assert_eq(cc2_phnum, 1, "cc2 has exactly 1 program header");
+
+    # Dynamic binary program header count: typically 5+
+    # PT_PHDR + PT_INTERP + PT_LOAD(code) + PT_LOAD(data) + PT_DYNAMIC
+    var dynamic_phnum = 5;
+    assert(dynamic_phnum > cc2_phnum, "dynamic has more segments");
+
+    # Each additional program header = 56 bytes overhead
+    var extra_phdrs = dynamic_phnum - cc2_phnum;
+    var phdr_overhead = extra_phdrs * 56;
+    assert_eq(phdr_overhead, 224, "dynamic adds 224 bytes of phdrs");
+    return 0;
+}
+
+# ================================================================
+# No Relocations — absolute addressing
+# ================================================================
+# cc2 emits absolute addresses (BASE + offset) at compile time.
+# No relocation entries needed. No fixup pass at load time.
+# This works because:
+#   1. The binary is always loaded at BASE_ADDR (not PIE)
+#   2. All function addresses are known during compilation
+#   3. All data addresses are known after code emission
+
+fn test_absolute_addressing() {
+    var base = 0x400000;
+    var code_start = base + 120;
+
+    # Function at code offset 200:
+    var func_offset = 200;
+    var func_addr = code_start + func_offset;
+    assert_eq(func_addr, 0x400078 + 200, "absolute function address");
+
+    # Data after code (say code is 500 bytes, padded to 504 = 63 qwords):
+    var code_size = 500;
+    var code_padded = ((code_size + 7) / 8) * 8;
+    assert_eq(code_padded, 504, "padded to qword boundary");
+
+    var data_start = code_start + code_padded;
+    # Variable 0 at data_start, variable 1 at data_start + 8, etc.
+    var var0_addr = data_start;
+    var var1_addr = data_start + 8;
+    assert_eq(var1_addr - var0_addr, 8, "variables are 8 bytes apart");
+
+    # All of these addresses are constants baked into the machine code.
+    # No GOT, no PLT, no relocation table.
+    return 0;
+}
+
+# ================================================================
+# Template as Constant Data — cc2's optimization
+# ================================================================
+# cc2 stores the 120-byte ELF template as 15 qwords of constant data.
+# To emit a binary: memcpy the template, patch p_filesz and p_memsz,
+# then append code and data.
+
+fn test_template_optimization() {
+    # Template: 120 bytes = 15 qwords
+    var template_bytes = 120;
+    var template_qwords = template_bytes / 8;
+    assert_eq(template_qwords, 15, "15 qwords");
+
+    # Fields that need patching (byte offsets from start):
+    # p_filesz at offset 96 (ehdr 64 + phdr field at 32)
+    # p_memsz  at offset 104 (ehdr 64 + phdr field at 40)
+    var filesz_byte = 64 + 32;
+    var memsz_byte = 64 + 40;
+    assert_eq(filesz_byte, 96, "p_filesz at byte 96");
+    assert_eq(memsz_byte, 104, "p_memsz at byte 104");
+
+    # These are in qword 12 and qword 13 of the template
+    var filesz_qword = filesz_byte / 8;
+    var memsz_qword = memsz_byte / 8;
+    assert_eq(filesz_qword, 12, "p_filesz in qword 12");
+    assert_eq(memsz_qword, 13, "p_memsz in qword 13");
+
+    # Patching is a single MOV per field:
+    # mov [output + 96], total_file_size
+    # mov [output + 104], total_mem_size
+    return 0;
+}
+
+# ================================================================
+# Minimal Binary Sizes — comparison
+# ================================================================
+
+fn test_size_comparison() {
+    var headers = 120;
+
+    # exit(0): xor edi,edi (2B) + mov eax,60 (5B) + syscall (2B)
+    var exit_code = 2 + 5 + 2;
+    assert_eq(exit_code, 9, "exit(0) = 9 bytes");
+    var exit_binary = headers + exit_code;
+    assert_eq(exit_binary, 129, "exit binary = 129 bytes");
+
+    # exit(42): mov rdi,42 (7B) + mov rax,60 (7B) + syscall (2B)
+    var exit42_code = 7 + 7 + 2;
+    assert_eq(exit42_code, 16, "exit(42) = 16 bytes (imm64)");
+
+    # Cyrius seed: Hello, Cyrius! (write + exit)
+    var seed = 199;
+    var seed_code = seed - headers;
+    assert_eq(seed_code, 79, "seed = 79 bytes code+data");
+
+    # stage1a constant output: always 144 bytes
+    var stage1a = 144;
+    var stage1a_code = stage1a - headers;
+    assert_eq(stage1a_code, 24, "stage1a output = 24 bytes code");
+
+    # C hello (static, stripped): ~800KB
+    # That's 6200x larger than the exit binary
+    var c_static = 800000;
+    var ratio = c_static / exit_binary;
+    assert(ratio > 6000, "C static is >6000x larger");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_binary_layout();
+    test_elf_header_constants();
+    test_program_header_constants();
+    test_no_sections();
+    test_no_dynamic_linking();
+    test_absolute_addressing();
+    test_template_optimization();
+    test_size_comparison();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

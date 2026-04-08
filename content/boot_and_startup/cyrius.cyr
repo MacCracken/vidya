@@ -1,0 +1,292 @@
+# Boot and Startup — Cyrius reference (runnable)
+# Patterns: multiboot magic, GDT selectors, IDT gate format, CR0/CR4/EFER bits
+# Documents AGNOS kernel boot constants and validates them at runtime.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# ── Multiboot1 Magic Constants ────────────────────────────────────────
+# The bootloader (GRUB) looks for MAGIC_REQUEST in the kernel image.
+# At kernel entry, GRUB places MAGIC_RESPONSE in EAX to confirm.
+
+var MULTIBOOT1_MAGIC_REQUEST  = 0x1BADB002;
+var MULTIBOOT1_MAGIC_RESPONSE = 0x2BADB002;
+var MULTIBOOT1_FLAG_ALIGN     = 1;  # bit 0: align modules on page boundaries
+var MULTIBOOT1_FLAG_MEMINFO   = 2;  # bit 1: provide memory map
+
+fn test_multiboot_magic() {
+    assert_eq(MULTIBOOT1_MAGIC_REQUEST,  0x1BADB002, "multiboot request magic");
+    assert_eq(MULTIBOOT1_MAGIC_RESPONSE, 0x2BADB002, "multiboot response magic");
+    assert_eq(MULTIBOOT1_FLAG_ALIGN,  1, "align flag");
+    assert_eq(MULTIBOOT1_FLAG_MEMINFO, 2, "meminfo flag");
+
+    # Checksum: magic + flags + checksum = 0 (mod 2^32)
+    var flags = MULTIBOOT1_FLAG_ALIGN + MULTIBOOT1_FLAG_MEMINFO;
+    assert_eq(flags, 3, "combined flags");
+
+    # Verify checksum formula: -(magic + flags) & 0xFFFFFFFF
+    # In AGNOS kernel assembly: dd -(0x1BADB002 + 0x03)
+    var sum = MULTIBOOT1_MAGIC_REQUEST + flags;
+    assert_eq(sum, 0x1BADB005, "magic + flags");
+    return 0;
+}
+
+# ── GDT Segment Selectors ────────────────────────────────────────────
+# Each GDT entry is 8 bytes. Selector = index * 8.
+# AGNOS uses this standard layout:
+#   0x00 = null descriptor (required, always zero)
+#   0x08 = kernel code (64-bit, DPL=0)
+#   0x10 = kernel data (DPL=0)
+#   0x18 = user code (64-bit, DPL=3)
+#   0x20 = user data (DPL=3)
+#   0x28 = TSS descriptor (16 bytes, spans 0x28-0x2F)
+
+var GDT_NULL       = 0x00;
+var GDT_KERNEL_CS  = 0x08;
+var GDT_KERNEL_DS  = 0x10;
+var GDT_USER_CS    = 0x18;
+var GDT_USER_DS    = 0x20;
+var GDT_TSS        = 0x28;
+var GDT_ENTRY_SIZE = 8;
+
+fn test_gdt_selectors() {
+    assert_eq(GDT_NULL,      0x00, "null selector");
+    assert_eq(GDT_KERNEL_CS, 0x08, "kernel code selector");
+    assert_eq(GDT_KERNEL_DS, 0x10, "kernel data selector");
+    assert_eq(GDT_USER_CS,   0x18, "user code selector");
+    assert_eq(GDT_USER_DS,   0x20, "user data selector");
+    assert_eq(GDT_TSS,       0x28, "TSS selector");
+
+    # Selectors are index * 8
+    assert_eq(0 * GDT_ENTRY_SIZE, GDT_NULL,      "null = idx 0");
+    assert_eq(1 * GDT_ENTRY_SIZE, GDT_KERNEL_CS, "code = idx 1");
+    assert_eq(2 * GDT_ENTRY_SIZE, GDT_KERNEL_DS, "data = idx 2");
+    assert_eq(3 * GDT_ENTRY_SIZE, GDT_USER_CS,   "user_code = idx 3");
+    assert_eq(4 * GDT_ENTRY_SIZE, GDT_USER_DS,   "user_data = idx 4");
+    assert_eq(5 * GDT_ENTRY_SIZE, GDT_TSS,       "tss = idx 5");
+    return 0;
+}
+
+# ── GDT Access Byte Layout ───────────────────────────────────────────
+# Bit 7:     P  (Present) = 1
+# Bits 5-6:  DPL (Privilege Level) 0=kernel, 3=user
+# Bit 4:     S  (Descriptor type) 1=code/data
+# Bits 0-3:  Type (E=executable, RW=read/write, etc.)
+#
+# Kernel code access byte: P=1, DPL=0, S=1, E=1, R=1 = 0x9A
+# Kernel data access byte: P=1, DPL=0, S=1, W=1       = 0x92
+# User code access byte:   P=1, DPL=3, S=1, E=1, R=1  = 0xFA
+# User data access byte:   P=1, DPL=3, S=1, W=1        = 0xF2
+
+var ACCESS_KERNEL_CODE = 0x9A;
+var ACCESS_KERNEL_DATA = 0x92;
+var ACCESS_USER_CODE   = 0xFA;
+var ACCESS_USER_DATA   = 0xF2;
+
+fn test_gdt_access_bytes() {
+    # P=0x80, DPL0=0x00, DPL3=0x60, S=0x10
+    # Code type = 0x0A (E=1, R=1), Data type = 0x02 (W=1)
+    var p = 0x80;
+    var s = 0x10;
+    var dpl0 = 0x00;
+    var dpl3 = 0x60;
+    var code_type = 0x0A;
+    var data_type = 0x02;
+
+    assert_eq(p + dpl0 + s + code_type, ACCESS_KERNEL_CODE, "kernel code access");
+    assert_eq(p + dpl0 + s + data_type, ACCESS_KERNEL_DATA, "kernel data access");
+    assert_eq(p + dpl3 + s + code_type, ACCESS_USER_CODE,   "user code access");
+    assert_eq(p + dpl3 + s + data_type, ACCESS_USER_DATA,   "user data access");
+    return 0;
+}
+
+# ── IDT Gate Format ──────────────────────────────────────────────────
+# Each IDT entry in long mode is 16 bytes:
+#   offset_lo  (16 bits)  — handler address bits 0-15
+#   selector   (16 bits)  — code segment (0x08 for kernel)
+#   ist        (8 bits)   — interrupt stack table index (0-7)
+#   type_attr  (8 bits)   — P=1, DPL, gate type
+#   offset_mid (16 bits)  — handler address bits 16-31
+#   offset_hi  (32 bits)  — handler address bits 32-63
+#   reserved   (32 bits)  — must be zero
+#
+# Gate types:
+#   0x0E = interrupt gate (clears IF — disables interrupts)
+#   0x0F = trap gate (does not clear IF)
+
+var IDT_ENTRY_SIZE     = 16;
+var IDT_INTERRUPT_GATE = 0x0E;
+var IDT_TRAP_GATE      = 0x0F;
+var IDT_PRESENT        = 0x80;
+
+fn test_idt_format() {
+    assert_eq(IDT_ENTRY_SIZE, 16, "IDT entry size");
+    assert_eq(IDT_INTERRUPT_GATE, 0x0E, "interrupt gate type");
+    assert_eq(IDT_TRAP_GATE, 0x0F, "trap gate type");
+
+    # Type+attr byte for kernel interrupt gate: P=1, DPL=0, type=0xE
+    var int_gate_attr = IDT_PRESENT + IDT_INTERRUPT_GATE;
+    assert_eq(int_gate_attr, 0x8E, "kernel interrupt gate attr");
+
+    # Type+attr byte for kernel trap gate: P=1, DPL=0, type=0xF
+    var trap_gate_attr = IDT_PRESENT + IDT_TRAP_GATE;
+    assert_eq(trap_gate_attr, 0x8F, "kernel trap gate attr");
+
+    # IDT selector is always kernel code segment
+    assert_eq(GDT_KERNEL_CS, 0x08, "IDT uses kernel CS");
+
+    # Standard exception vectors
+    var DIVIDE_ERROR    = 0;
+    var DEBUG           = 1;
+    var NMI             = 2;
+    var BREAKPOINT      = 3;
+    var DOUBLE_FAULT    = 8;
+    var PAGE_FAULT      = 14;
+
+    assert_eq(DIVIDE_ERROR, 0,  "divide error vector");
+    assert_eq(DOUBLE_FAULT, 8,  "double fault vector");
+    assert_eq(PAGE_FAULT,   14, "page fault vector");
+    return 0;
+}
+
+# ── CR0/CR4/EFER Bits for Long Mode Transition ──────────────────────
+# The transition from 32-bit protected mode to 64-bit long mode:
+#
+# 1. Set CR4.PAE=1 (bit 5) — enable Physical Address Extension
+# 2. Load PML4 address into CR3
+# 3. Set EFER.LME=1 (bit 8) — enable Long Mode
+# 4. Set CR0.PG=1 (bit 31) — enable paging (activates long mode)
+# 5. Far jump to 64-bit code with CS=0x08
+#
+# CR0.PE (bit 0) is already set — we're in protected mode from GRUB.
+
+var CR0_PE = 1;           # bit 0: Protection Enable
+var CR0_PG = 0x80000000;  # bit 31: Paging
+
+var CR4_PAE = 0x20;       # bit 5: Physical Address Extension
+
+var EFER_MSR = 0xC0000080;  # Model Specific Register address
+var EFER_LME = 0x100;       # bit 8: Long Mode Enable
+var EFER_LMA = 0x400;       # bit 10: Long Mode Active (read-only)
+
+fn test_cr0_bits() {
+    assert_eq(CR0_PE, 1, "CR0.PE is bit 0");
+    assert_eq(CR0_PG, 0x80000000, "CR0.PG is bit 31");
+
+    # Protected mode: PE=1, PG=0
+    var cr0_protected = CR0_PE;
+    assert_eq(cr0_protected, 1, "protected mode CR0");
+
+    # Long mode: PE=1, PG=1
+    var cr0_long = CR0_PE + CR0_PG;
+    assert_eq(cr0_long, 0x80000001, "long mode CR0");
+    return 0;
+}
+
+fn test_cr4_bits() {
+    assert_eq(CR4_PAE, 0x20, "CR4.PAE is bit 5");
+    # PAE is REQUIRED for long mode — without it, enabling PG triple-faults
+    return 0;
+}
+
+fn test_efer_bits() {
+    assert_eq(EFER_MSR, 0xC0000080, "EFER MSR address");
+    assert_eq(EFER_LME, 0x100, "EFER.LME is bit 8");
+    assert_eq(EFER_LMA, 0x400, "EFER.LMA is bit 10");
+    return 0;
+}
+
+# ── Boot Stack Layout ────────────────────────────────────────────────
+# At kernel entry, RSP is undefined. The kernel must provide its own
+# stack before calling any functions.
+#
+# AGNOS boot stack: 64KB in .bss section
+# Stack grows DOWN — RSP starts at top (base + size)
+
+var BOOT_STACK_SIZE = 65536;  # 64KB
+var PAGE_SIZE = 4096;
+
+fn test_boot_stack() {
+    assert_eq(BOOT_STACK_SIZE, 65536, "boot stack is 64KB");
+    assert_eq(BOOT_STACK_SIZE / PAGE_SIZE, 16, "boot stack is 16 pages");
+    return 0;
+}
+
+# ── PIC Remapping Constants ──────────────────────────────────────────
+# Legacy 8259 PIC default IRQ mapping conflicts with CPU exceptions:
+#   PIC1 IRQs 0-7  → vectors 8-15  (conflicts with exceptions!)
+#   PIC2 IRQs 8-15 → vectors 112-119
+#
+# Must remap to non-conflicting vectors before setting up IDT:
+#   PIC1 IRQs 0-7  → vectors 32-39
+#   PIC2 IRQs 8-15 → vectors 40-47
+
+var PIC1_COMMAND = 0x20;
+var PIC1_DATA    = 0x21;
+var PIC2_COMMAND = 0xA0;
+var PIC2_DATA    = 0xA1;
+var PIC_IRQ_BASE = 32;  # remap to vectors 32+
+
+fn test_pic_remap() {
+    assert_eq(PIC1_COMMAND, 0x20, "PIC1 command port");
+    assert_eq(PIC1_DATA,    0x21, "PIC1 data port");
+    assert_eq(PIC2_COMMAND, 0xA0, "PIC2 command port");
+    assert_eq(PIC2_DATA,    0xA1, "PIC2 data port");
+    assert_eq(PIC_IRQ_BASE, 32,   "IRQ base after remap");
+
+    # Timer interrupt after remap
+    var TIMER_VECTOR = PIC_IRQ_BASE + 0;
+    assert_eq(TIMER_VECTOR, 32, "timer = vector 32");
+
+    # Keyboard interrupt after remap
+    var KEYBOARD_VECTOR = PIC_IRQ_BASE + 1;
+    assert_eq(KEYBOARD_VECTOR, 33, "keyboard = vector 33");
+    return 0;
+}
+
+# ── Mode Transition Summary ──────────────────────────────────────────
+# Multiboot delivers us in 32-bit protected mode (CR0.PE=1, PG=0).
+# Steps to reach 64-bit long mode:
+#
+#   1. cli                       — disable interrupts
+#   2. lgdt [gdt_descriptor]     — load GDT
+#   3. mov cr4, PAE              — enable PAE
+#   4. mov cr3, pml4_addr        — load page tables
+#   5. wrmsr EFER, LME           — enable long mode
+#   6. mov cr0, PE|PG            — enable paging (activates LM)
+#   7. jmp 0x08:long_mode_entry  — far jump to 64-bit code
+
+fn test_transition_sequence() {
+    # After step 6, CPU sets EFER.LMA automatically
+    # Verify the final register state
+    var final_cr0 = CR0_PE + CR0_PG;
+    var final_cr4 = CR4_PAE;
+    var final_efer = EFER_LME + EFER_LMA;
+
+    assert_eq(final_cr0,  0x80000001, "final CR0: PE+PG");
+    assert_eq(final_cr4,  0x20,       "final CR4: PAE");
+    assert_eq(final_efer, 0x500,      "final EFER: LME+LMA");
+
+    # Far jump selector must be kernel code
+    assert_eq(GDT_KERNEL_CS, 0x08, "far jump uses CS=0x08");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_multiboot_magic();
+    test_gdt_selectors();
+    test_gdt_access_bytes();
+    test_idt_format();
+    test_cr0_bits();
+    test_cr4_bits();
+    test_efer_bits();
+    test_boot_stack();
+    test_pic_remap();
+    test_transition_sequence();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);
