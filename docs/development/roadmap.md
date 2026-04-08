@@ -1,74 +1,96 @@
 # Vidya — Development Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-04-04
+> **Status**: Active | **Last Updated**: 2026-04-08
 >
-> **Version**: 1.5.0 | **Topics**: 36 (15 complete, 21 metadata only)
-> **Languages**: 10 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM)
+> **Version**: 1.6.0 (Cyrius port) | **Topics**: 36 (15 complete, 21 partial)
+> **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
+> **Examples**: 255 | **Binary**: 85KB Cyrius ELF
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
-> best practices, gotchas, and performance notes across 10 languages.
+> best practices, gotchas, and performance notes across 11 languages.
 
 ---
 
 ## Current State
 
-### Complete Topics (15) — all 10 languages + concept.toml
+### Complete Topics (15) — all 11 languages
 
 algorithms, concurrency, design_patterns, error_handling, input_output, iterators,
 kernel_topics, memory_management, pattern_matching, performance, quantum_computing,
 security, strings, testing, type_systems
 
-### Metadata Only (21) — concept.toml present, no language files
+### Partial Topics (20) — Rust + Python + C + Cyrius minimum, some with Go/TS/Zig/ASM
 
-These topics were scaffolded during Cyrius compiler development. They need language implementations.
+| Topic | Langs | Have | Missing |
+|-------|-------|------|---------|
+| compiler_bootstrapping | 6 | Rust, Python, C, Go, Cyrius, x86 ASM | TS, Shell, Zig, AArch64, QASM |
+| lexing_and_parsing | 6 | Rust, Python, C, Go, TypeScript, Cyrius | Shell, Zig, x86, AArch64, QASM |
+| allocators | 6 | Rust, Python, C, Go, Zig, Cyrius | TS, Shell, x86, AArch64, QASM |
+| code_generation | 5 | Rust, Python, C, Go, Cyrius | TS, Shell, Zig, x86, AArch64, QASM |
+| binary_formats | 5 | Rust, Python, C, Cyrius, x86 ASM | Go, TS, Shell, Zig, AArch64, QASM |
+| syscalls_and_abi | 5 | Rust, Python, C, Go, Cyrius | TS, Shell, Zig, x86, AArch64, QASM |
+| linking_and_loading | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| intermediate_representations | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| optimization_passes | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| instruction_encoding | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| elf_and_executable_formats | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| boot_and_startup | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| virtual_memory | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| interrupt_handling | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| process_and_scheduling | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| filesystems | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| ownership_and_borrowing | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| trait_and_typeclass_systems | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| macro_systems | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
+| module_systems | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
 
-| Topic | Domain | Priority |
-|-------|--------|----------|
-| allocators | Memory | High — bump, arena, slab, buddy |
-| binary_formats | Systems | High — ELF headers, segments, minimal binaries |
-| boot_and_startup | OS | High — UEFI, multiboot, GDT/IDT, long mode |
-| code_generation | Compiler | High — instruction selection, register alloc, stack codegen |
-| compiler_bootstrapping | Compiler | High — self-hosting, multi-stage, seed compilers |
-| elf_and_executable_formats | Systems | High — sections, DWARF, symbol tables |
-| instruction_encoding | Systems | High — x86_64 ModR/M, SIB, REX, machine code |
-| intermediate_representations | Compiler | Medium — SSA, CFG, basic blocks, phi nodes |
-| lexing_and_parsing | Compiler | High — tokenizers, recursive descent, Pratt parsing |
-| linking_and_loading | Systems | Medium — symbol resolution, GOT/PLT, dynamic linking |
-| optimization_passes | Compiler | Medium — DCE, constant folding, inlining |
-| syscalls_and_abi | OS | High — Linux syscalls, System V AMD64 ABI |
-| ownership_and_borrowing | Language | Medium — move semantics, lifetimes, borrow checking |
-| trait_and_typeclass_systems | Language | Medium — monomorphization, vtables, coherence |
-| macro_systems | Language | Medium — hygiene, declarative vs procedural |
-| module_systems | Language | Low — namespacing, visibility, separate compilation |
-| filesystems | OS | Medium — VFS, inodes, block allocation, journaling |
-| virtual_memory | OS | Medium — page tables, TLB, mmap, demand paging |
-| interrupt_handling | OS | Medium — IDT, exception handlers, IRQ routing |
-| process_and_scheduling | OS | Medium — task structs, context switching, CFS |
+### Minimal (1 language)
 
----
-
-## P0A — Crate & Infrastructure Fixes
-
-| Item | Description | Priority |
-|------|-------------|----------|
-| **Topic enum ↔ content sync** | Verify all 36 content dirs map to a Topic enum variant. `strings` → `DataTypes`? `iterators` → `DataTypes`? `design_patterns` → `Patterns`? Document the mapping or add dedicated variants | High |
-| **docs/sources.md** | Create source citations file — language spec versions (Rust Reference, Python 3.x docs, C17 standard, Go spec, ECMAScript spec, POSIX shell, Zig docs, x86_64 ISA, ARM ARM, OpenQASM 2.0 spec), algorithm textbook references, any papers cited in content | High |
-| **Content grouping plan** | Document the future subdirectory structure (fundamentals/, languages/, systems/, compiler/, networking/, data/) for when topic count exceeds ~50. Don't reorganize yet — just plan it | Low |
-| **Cross-references** | Add `related_topics` field to concept.toml spec — link allocators↔memory_management↔virtual_memory, lexing↔parsing↔code_generation, etc. | Medium |
-| **Learning paths** | Define ordered topic sequences: "Build a compiler" (lexing→parsing→IR→codegen→optimization→linking→bootstrap), "OS from scratch" (boot→kernel→virtual_memory→interrupts→process→filesystems→syscalls) | Medium |
-| **Validate coverage gaps** | Expand validate.rs to report which topics are missing language implementations, flag stale examples | Medium |
+| Topic | Langs | Notes |
+|-------|-------|-------|
+| tracing | 1 | Cyrius only — sakshi patterns |
 
 ---
 
-## P0 — Complete Existing Topics
+## P0 — Complete Partial Topics to 11/11
 
-Fill language implementations for the 21 metadata-only topics. Rust first, then fan out.
+Fill remaining languages for the 20 partial topics. Priority order by applicability:
 
-**Order**: Start with topics most relevant to active development:
-1. compiler_bootstrapping, lexing_and_parsing, code_generation, instruction_encoding (Cyrius is building these right now)
-2. allocators, syscalls_and_abi, boot_and_startup (OS self-hosting)
-3. elf_and_executable_formats, binary_formats, linking_and_loading (build pipeline)
-4. Everything else
+**Tier 1 — Add Go + Zig** (systems-relevant, broadly applicable):
+- Go: compiler_bootstrapping, code_generation, syscalls_and_abi, linking_and_loading, intermediate_representations, optimization_passes, instruction_encoding, elf_and_executable_formats, virtual_memory, interrupt_handling, process_and_scheduling, filesystems, ownership_and_borrowing, trait_and_typeclass_systems, macro_systems, module_systems
+- Zig: compiler_bootstrapping, lexing_and_parsing, code_generation, syscalls_and_abi, binary_formats, boot_and_startup + all others
+
+**Tier 2 — Add TypeScript + Shell** (where applicable):
+- TypeScript: allocators (sim), code_generation, optimization_passes, ownership_and_borrowing, trait_and_typeclass_systems, macro_systems, module_systems, lexing_and_parsing (done)
+- Shell: scripting patterns for build/test/deploy topics
+
+**Tier 3 — Add x86_64 ASM + AArch64 ASM** (systems/compiler topics):
+- x86 ASM: syscalls_and_abi, instruction_encoding, boot_and_startup, interrupt_handling, code_generation
+- AArch64 ASM: same topics, cross-platform coverage
+
+**Tier 4 — Add OpenQASM** (quantum-adjacent topics only):
+- Only where quantum computing concepts genuinely apply
+
+**Tier 5 — Expand tracing topic**:
+- Add Rust, Python, C, Go implementations for tracing/observability concepts
+
+---
+
+## P0A — Infrastructure (Done / Remaining)
+
+| Item | Status | Notes |
+|------|--------|-------|
+| ~~docs/sources.md~~ | **Done** | Created 2026-04-08 |
+| ~~Cyrius as 11th language~~ | **Done** | Language::Cyrius added, 20 content files |
+| ~~Cyrius port~~ | **Done** | src/main.cyr, 85KB binary, sakshi integrated |
+| ~~.tcyr tests~~ | **Done** | tests/vidya.tcyr — 37 tests |
+| ~~.bcyr benchmarks~~ | **Done** | tests/vidya.bcyr — 6 benchmarks |
+| ~~BENCHMARKS.md~~ | **Done** | Cyrius vs Rust comparison with charts |
+| ~~docs/usage.md~~ | **Done** | CLI usage guide |
+| Content grouping plan | Remaining | Plan subdirectory structure for 50+ topics |
+| Cross-references | Remaining | Add related_topics field to concept.toml |
+| Learning paths | Remaining | Compiler path, OS path, networking path |
+| Validate coverage gaps | Remaining | vidya validate should report missing langs |
 
 ---
 
@@ -81,7 +103,7 @@ Fill language implementations for the 21 metadata-only topics. Rust first, then 
 | **tls_and_encryption** | TLS handshake, certificate chains, cipher suites, AEAD | High |
 | **dns** | Resolution, record types, caching, DNSSEC | Medium |
 | **ipc** | Shared memory, pipes, Unix sockets, message passing, D-Bus | High |
-| **serialization** | Serde patterns, protobuf, flatbuffers, zero-copy parsing, JSON/TOML/MessagePack | High |
+| **serialization** | Serde patterns, protobuf, flatbuffers, zero-copy parsing | High |
 
 ---
 
@@ -89,10 +111,10 @@ Fill language implementations for the 21 metadata-only topics. Rust first, then 
 
 | Topic | Description | Priority |
 |-------|-------------|----------|
-| **database_fundamentals** | SQL, query planning, indexing strategies, B-trees, LSM trees | Medium |
-| **transactions_and_acid** | ACID properties, isolation levels, MVCC, write-ahead logging | Medium |
+| **database_fundamentals** | SQL, query planning, indexing, B-trees, LSM trees | Medium |
+| **transactions_and_acid** | ACID, isolation levels, MVCC, write-ahead logging | Medium |
 | **consensus** | Raft, Paxos, Byzantine fault tolerance, leader election | Medium |
-| **distributed_systems** | CAP theorem, partitioning, replication, CRDTs, eventual consistency | Medium |
+| **distributed_systems** | CAP theorem, partitioning, replication, CRDTs | Medium |
 
 ---
 
@@ -100,13 +122,13 @@ Fill language implementations for the 21 metadata-only topics. Rust first, then 
 
 | Topic | Description | Priority |
 |-------|-------------|----------|
-| **gpu_programming** | Compute shaders, Vulkan basics, GPU memory model, dispatch | Medium |
-| **render_pipelines** | Vertex/fragment shaders, rasterization, ray tracing fundamentals | Medium |
-| **audio_dsp** | FFT, convolution, filters, sampling theory, Nyquist, windowing | Medium |
-| **audio_synthesis** | Oscillators, envelopes, FM, wavetable, additive/subtractive | Medium |
-| **neural_networks** | Forward/backward pass, gradient descent, activation functions | Medium |
-| **inference** | Quantization, batching, KV cache, attention, tokenization | Medium |
-| **embeddings** | Vector representations, similarity search, dimensionality reduction | Low |
+| **gpu_programming** | Compute shaders, Vulkan basics, GPU memory model | Medium |
+| **render_pipelines** | Vertex/fragment shaders, rasterization, ray tracing | Medium |
+| **audio_dsp** | FFT, convolution, filters, sampling theory, Nyquist | Medium |
+| **audio_synthesis** | Oscillators, envelopes, FM, wavetable synthesis | Medium |
+| **neural_networks** | Forward/backward pass, gradient descent, activations | Medium |
+| **inference** | Quantization, batching, KV cache, attention | Medium |
+| **embeddings** | Vector representations, similarity search | Low |
 
 ---
 
@@ -114,9 +136,9 @@ Fill language implementations for the 21 metadata-only topics. Rust first, then 
 
 | Topic | Description | Priority |
 |-------|-------------|----------|
-| **build_systems** | Dependency graphs, incremental compilation, caching, reproducibility | Medium |
-| **package_resolution** | SAT solving, version constraints, lockfiles, diamond dependencies | Medium |
-| **reproducible_builds** | Deterministic output, content-addressed storage, build attestation | Low |
+| **build_systems** | Dependency graphs, incremental compilation, caching | Medium |
+| **package_resolution** | SAT solving, version constraints, lockfiles | Medium |
+| **reproducible_builds** | Deterministic output, content-addressed storage | Low |
 
 ---
 
@@ -124,55 +146,39 @@ Fill language implementations for the 21 metadata-only topics. Rust first, then 
 
 | Topic | Description | Priority |
 |-------|-------------|----------|
-| **functional_patterns** | Monads, functors, applicatives, algebraic data types | Low |
-| **effect_systems** | Algebraic effects, capability passing, IO monad alternatives | Low |
-| **dependent_types** | Type-level programming, proof carrying code, refinement types | Low |
+| **functional_patterns** | Monads, functors, applicatives, ADTs | Low |
+| **effect_systems** | Algebraic effects, capability passing | Low |
+| **dependent_types** | Type-level programming, refinement types | Low |
 
 ---
 
-## P6 — New Topics (Cyrius-Specific)
-
-When Cyrius matures beyond the assembler stage, vidya should document Cyrius-specific patterns:
+## P6 — Cyrius-Specific Topics
 
 | Topic | Description | Priority |
 |-------|-------------|----------|
-| **cyrius_basics** | Language syntax, types, control flow, modules | Future |
-| **cyrius_bootstrap** | Multi-stage compilation, seed retirement, byte-exact verification | Future |
-| **cyrius_agents** | Agent types as language primitives, sandbox-aware borrowing | Future |
-| **cyrius_capabilities** | Capability annotations, compile-time sandbox enforcement | Future |
-| **cyrius_ipc** | IPC as language-level constructs, channel types | Future |
+| **cyrius_basics** | Language syntax, types, control flow | Future |
+| **cyrius_bootstrap** | Multi-stage compilation, seed retirement | Future |
+| **cyrius_agents** | Agent types as language primitives | Future |
+| **cyrius_capabilities** | Capability annotations, sandbox enforcement | Future |
+| **cyrius_ipc** | IPC as language-level constructs | Future |
 
 ---
 
-## Language Coverage Goals
+## Language Coverage
 
-| Language | Current Topics | Target | Notes |
-|----------|---------------|--------|-------|
-| Rust | 15/36 | 36/36+ | Primary language — complete coverage required |
-| Python | 15/36 | 36/36+ | Full coverage target |
-| C | 15/36 | 36/36+ | Critical for OS/systems topics |
-| Go | 15/36 | 30+ | Skip low-level OS topics not applicable to Go |
-| TypeScript | 15/36 | 25+ | Skip kernel/hardware topics |
-| Shell | 15/36 | 25+ | Scripting patterns where applicable |
-| Zig | 15/36 | 36/36+ | Strong systems language, full coverage |
-| x86_64 ASM | 15/36 | 30+ | Critical for compiler/OS topics |
-| AArch64 ASM | 15/36 | 30+ | ARM64 coverage for cross-platform |
-| OpenQASM | 15/36 | 20+ | Quantum topics + algorithms where applicable |
-| **Cyrius** | 0 | Future | Add when language reaches sufficient maturity |
-
----
-
-## Crate Improvements
-
-| Item | Description | Priority |
-|------|-------------|----------|
-| **Topic enum expansion** | Current Topic enum only has 13 variants — needs to cover all 36+ topics | High |
-| **Cross-references** | Link related topics (e.g., allocators → memory_management → virtual_memory) | Medium |
-| **Difficulty levels** | Tag topics as beginner/intermediate/advanced | Low |
-| **Learning paths** | Ordered sequences: "OS from scratch", "Build a compiler", "Networking stack" | Medium |
-| **Cyrius language** | Add Cyrius as 11th language when compiler handles basic programs | Future |
-| **Interactive mode** | REPL-style query interface via agnoshi integration | Low |
-| **Content validation** | Expand validate.rs to catch more issues (missing languages, stale examples) | Medium |
+| Language | Complete | Partial | Total | Target |
+|----------|----------|---------|-------|--------|
+| Rust | 15 | 21 | 36 | 36+ |
+| Python | 15 | 20 | 35 | 36+ |
+| C | 15 | 20 | 35 | 36+ |
+| Go | 15 | 5 | 20 | 30+ |
+| TypeScript | 15 | 1 | 16 | 25+ |
+| Shell | 15 | 0 | 15 | 25+ |
+| Zig | 15 | 1 | 16 | 30+ |
+| x86_64 ASM | 15 | 2 | 17 | 25+ |
+| AArch64 ASM | 15 | 0 | 15 | 25+ |
+| OpenQASM | 15 | 0 | 15 | 20+ |
+| Cyrius | 15 | 20 | 35 | 36+ |
 
 ---
 
@@ -182,10 +188,11 @@ Vidya feeds directly into the ecosystem:
 - **agnoshi** — shell uses vidya for programming help responses
 - **hoosh** — LLM uses vidya corpus for grounded programming advice
 - **Cyrius** — vidya documents compiler patterns being implemented in real-time
+- **sakshi** — vidya uses sakshi for tracing, documents tracing patterns
 - **docs/sources.md** standard — vidya IS the source citation for programming knowledge
 
 Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-04-04*
+*Last Updated: 2026-04-08*
