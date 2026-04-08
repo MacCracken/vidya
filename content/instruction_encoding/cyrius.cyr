@@ -1,0 +1,259 @@
+# Instruction Encoding — Cyrius reference
+# Documents cc2's actual x86_64 encoding patterns:
+# REX.W prefix, register codes, ModR/M byte layout, instruction formats.
+# Pattern-focused: verify the encoding formulas that cc2 uses.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# === Register encoding ===
+# x86_64 register codes: rax=0, rcx=1, rdx=2, rbx=3, rsp=4, rbp=5, rsi=6, rdi=7
+fn reg_rax() { return 0; }
+fn reg_rcx() { return 1; }
+fn reg_rdx() { return 2; }
+fn reg_rbx() { return 3; }
+fn reg_rsp() { return 4; }
+fn reg_rbp() { return 5; }
+fn reg_rsi() { return 6; }
+fn reg_rdi() { return 7; }
+
+# Low 3 bits of register code (for ModR/M, SIB, opcode+rd)
+fn reg_low3(r) { return r & 7; }
+
+# Extended register (R8-R15) needs REX.B or REX.R
+fn reg_needs_ext(r) {
+    if (r >= 8) { return 1; }
+    return 0;
+}
+
+# === REX prefix: 0100WRXB ===
+# W = 64-bit operand size
+# R = extends ModR/M.reg field
+# X = extends SIB.index field
+# B = extends ModR/M.r/m or SIB.base field
+fn rex_byte(w, r, x, b) {
+    return 0x40 | (w * 8) | (r * 4) | (x * 2) | b;
+}
+
+# === ModR/M byte: [mod(2)][reg(3)][r/m(3)] ===
+# mod=11: register-register
+# mod=00: [r/m] memory (no displacement)
+# mod=01: [r/m + disp8]
+# mod=10: [r/m + disp32]
+fn modrm(md, reg, rm) {
+    return ((md & 3) * 64) | ((reg & 7) * 8) | (rm & 7);
+}
+
+# === SIB byte: [scale(2)][index(3)][base(3)] ===
+fn sib_byte(scale, index, base) {
+    return ((scale & 3) * 64) | ((index & 7) * 8) | (base & 7);
+}
+
+# === REX prefix tests ===
+fn test_rex() {
+    # REX.W only (64-bit operand, no extended registers)
+    assert_eq(rex_byte(1, 0, 0, 0), 0x48, "REX.W");
+    # REX.WB (64-bit + extended r/m)
+    assert_eq(rex_byte(1, 0, 0, 1), 0x49, "REX.WB");
+    # REX.WR (64-bit + extended reg)
+    assert_eq(rex_byte(1, 1, 0, 0), 0x4C, "REX.WR");
+    # REX.WRXB (all bits)
+    assert_eq(rex_byte(1, 1, 1, 1), 0x4F, "REX.WRXB");
+    # Bare REX (access spl/bpl/sil/dil byte registers)
+    assert_eq(rex_byte(0, 0, 0, 0), 0x40, "bare REX");
+    return 0;
+}
+
+# === ModR/M byte tests ===
+fn test_modrm() {
+    # mod=11, reg=rbx(3), rm=rax(0) → 0xD8
+    assert_eq(modrm(3, 3, 0), 0xD8, "modrm rbx,rax");
+    # mod=11, reg=rdx(2), rm=rcx(1) → 0xD1
+    assert_eq(modrm(3, 2, 1), 0xD1, "modrm rdx,rcx");
+    # mod=00, reg=rax(0), rm=100(SIB follows) → 0x04
+    assert_eq(modrm(0, 0, 4), 0x04, "modrm SIB");
+    # Opcode extension: mod=11, /0=ADD, rm=rsp(4) → 0xC4
+    assert_eq(modrm(3, 0, 4), 0xC4, "modrm /0 rsp");
+    # Opcode extension: mod=11, /5=SUB, rm=rax(0) → 0xE8
+    assert_eq(modrm(3, 5, 0), 0xE8, "modrm /5 rax");
+    return 0;
+}
+
+# === SIB byte tests ===
+fn test_sib() {
+    # [rsp] needs SIB(0x24): scale=0, index=rsp(none=4), base=rsp(4)
+    assert_eq(sib_byte(0, 4, 4), 0x24, "sib [rsp]");
+    # [rbx + rcx*8]: scale=3(8x), index=rcx(1), base=rbx(3)
+    assert_eq(sib_byte(3, 1, 3), 0xCB, "sib [rbx+rcx*8]");
+    return 0;
+}
+
+# === Instruction format sizes ===
+# MOV r64, imm64 = 10 bytes: REX(1) + opcode(1) + imm64(8)
+fn mov_reg_imm64_size() { return 10; }
+# MOV r64, r64 = 3 bytes: REX(1) + opcode(1) + ModR/M(1)
+fn mov_reg_reg_size() { return 3; }
+# ADD r64, r64 = 3 bytes: REX(1) + opcode(1) + ModR/M(1)
+fn add_reg_reg_size() { return 3; }
+# ADD r64, imm8 = 4 bytes: REX(1) + opcode(1) + ModR/M(1) + imm8(1)
+fn add_reg_imm8_size() { return 4; }
+# JMP rel32 = 5 bytes: opcode(1) + rel32(4)
+fn jmp_rel32_size() { return 5; }
+# CALL rel32 = 5 bytes: opcode(1) + rel32(4)
+fn call_rel32_size() { return 5; }
+# RET = 1 byte
+fn ret_size() { return 1; }
+# SYSCALL = 2 bytes: 0x0F 0x05
+fn syscall_size() { return 2; }
+
+fn test_sizes() {
+    assert_eq(mov_reg_imm64_size(), 10, "mov imm64 size");
+    assert_eq(mov_reg_reg_size(), 3, "mov reg,reg size");
+    assert_eq(add_reg_reg_size(), 3, "add reg,reg size");
+    assert_eq(add_reg_imm8_size(), 4, "add reg,imm8 size");
+    assert_eq(jmp_rel32_size(), 5, "jmp rel32 size");
+    assert_eq(call_rel32_size(), 5, "call rel32 size");
+    assert_eq(ret_size(), 1, "ret size");
+    assert_eq(syscall_size(), 2, "syscall size");
+    return 0;
+}
+
+# === Opcode values ===
+fn opcode_mov_rm64_r64() { return 0x89; }
+fn opcode_mov_r64_rm64() { return 0x8B; }
+fn opcode_add_rm64_r64() { return 0x01; }
+fn opcode_add_rm64_imm8() { return 0x83; }
+fn opcode_jmp_rel32() { return 0xE9; }
+fn opcode_call_rel32() { return 0xE8; }
+fn opcode_ret() { return 0xC3; }
+
+fn test_opcodes() {
+    assert_eq(opcode_mov_rm64_r64(), 0x89, "mov r/m64,r64 opcode");
+    assert_eq(opcode_mov_r64_rm64(), 0x8B, "mov r64,r/m64 opcode");
+    assert_eq(opcode_add_rm64_r64(), 0x01, "add r/m64,r64 opcode");
+    assert_eq(opcode_add_rm64_imm8(), 0x83, "add r/m64,imm8 opcode");
+    assert_eq(opcode_jmp_rel32(), 0xE9, "jmp rel32 opcode");
+    assert_eq(opcode_call_rel32(), 0xE8, "call rel32 opcode");
+    assert_eq(opcode_ret(), 0xC3, "ret opcode");
+    return 0;
+}
+
+# === MOV r64, imm64 encoding formula ===
+# REX.W + (0xB8 + low3(dst)) + imm64
+# Register is encoded directly in opcode byte (opcode + rd pattern)
+fn mov_imm64_opcode(dst) {
+    return 0xB8 + reg_low3(dst);
+}
+
+fn test_mov_imm64() {
+    # mov rax, imm64: opcode byte = 0xB8 + 0 = 0xB8
+    assert_eq(mov_imm64_opcode(reg_rax()), 0xB8, "mov rax opcode");
+    # mov rcx, imm64: opcode byte = 0xB8 + 1 = 0xB9
+    assert_eq(mov_imm64_opcode(reg_rcx()), 0xB9, "mov rcx opcode");
+    # mov rdi, imm64: opcode byte = 0xB8 + 7 = 0xBF
+    assert_eq(mov_imm64_opcode(reg_rdi()), 0xBF, "mov rdi opcode");
+    # R8 uses low3=0: opcode = 0xB8 (same as rax), REX.B distinguishes
+    assert_eq(mov_imm64_opcode(8), 0xB8, "mov r8 opcode (low3=0)");
+    return 0;
+}
+
+# === ADD r64, r64 encoding: REX.W + 0x01 + ModR/M(11, src, dst) ===
+fn test_add_reg_reg() {
+    # add rcx, rdx: ModR/M(11, rdx=2, rcx=1) = 0xD1
+    assert_eq(modrm(3, reg_rdx(), reg_rcx()), 0xD1, "add rcx,rdx modrm");
+    # add rax, rbx: ModR/M(11, rbx=3, rax=0) = 0xD8
+    assert_eq(modrm(3, reg_rbx(), reg_rax()), 0xD8, "add rax,rbx modrm");
+    return 0;
+}
+
+# === ADD r64, imm8 encoding: REX.W + 0x83 + ModR/M(11, /0, dst) + imm8 ===
+# /0 = ADD in the ALU opcode extension group
+# /1 = OR, /2 = ADC, /3 = SBB, /4 = AND, /5 = SUB, /6 = XOR, /7 = CMP
+fn alu_ext_add() { return 0; }
+fn alu_ext_sub() { return 5; }
+fn alu_ext_xor() { return 6; }
+fn alu_ext_cmp() { return 7; }
+
+fn test_alu_extensions() {
+    # add rsp, imm8: ModR/M(11, /0, rsp=4) = 0xC4
+    assert_eq(modrm(3, alu_ext_add(), reg_rsp()), 0xC4, "add rsp modrm");
+    # sub rax, imm8: ModR/M(11, /5, rax=0) = 0xE8
+    assert_eq(modrm(3, alu_ext_sub(), reg_rax()), 0xE8, "sub rax modrm");
+    # xor rdi, imm8: ModR/M(11, /6, rdi=7) = 0xF7
+    assert_eq(modrm(3, alu_ext_xor(), reg_rdi()), 0xF7, "xor rdi modrm");
+    # cmp rcx, imm8: ModR/M(11, /7, rcx=1) = 0xF9
+    assert_eq(modrm(3, alu_ext_cmp(), reg_rcx()), 0xF9, "cmp rcx modrm");
+    return 0;
+}
+
+# === Special encoding rules ===
+# [RBP/R13]: mod=00 + rm=101 means RIP-relative, NOT [RBP]
+#   Fix: use mod=01 with disp8=0x00
+# [RSP/R12]: rm=100 means "SIB follows", NOT [RSP]
+#   Fix: emit SIB byte 0x24 (base=RSP, index=none)
+
+fn test_special_cases() {
+    # RBP needs mod=01 (not mod=00) to avoid RIP-relative
+    assert_eq(modrm(1, 0, reg_rbp()), 0x45, "rbp mod=01");
+    # RSP: rm=100 triggers SIB interpretation
+    assert_eq(reg_low3(reg_rsp()), 4, "rsp low3=4 (SIB)");
+    assert_eq(sib_byte(0, 4, 4), 0x24, "rsp SIB fix");
+    # R13 has same low3 as RBP (both 101)
+    assert_eq(reg_low3(13), 5, "r13 low3=5 (like rbp)");
+    # R12 has same low3 as RSP (both 100)
+    assert_eq(reg_low3(12), 4, "r12 low3=4 (like rsp)");
+    return 0;
+}
+
+# === Register code tests ===
+fn test_registers() {
+    assert_eq(reg_rax(), 0, "rax=0");
+    assert_eq(reg_rcx(), 1, "rcx=1");
+    assert_eq(reg_rdx(), 2, "rdx=2");
+    assert_eq(reg_rbx(), 3, "rbx=3");
+    assert_eq(reg_rsp(), 4, "rsp=4");
+    assert_eq(reg_rbp(), 5, "rbp=5");
+    assert_eq(reg_rsi(), 6, "rsi=6");
+    assert_eq(reg_rdi(), 7, "rdi=7");
+    # Extended registers: R8=8..R15=15
+    assert_eq(reg_needs_ext(0), 0, "rax no ext");
+    assert_eq(reg_needs_ext(7), 0, "rdi no ext");
+    assert_eq(reg_needs_ext(8), 1, "r8 ext");
+    assert_eq(reg_needs_ext(15), 1, "r15 ext");
+    return 0;
+}
+
+# === Displacement addressing: rel32 is relative to NEXT instruction ===
+# JMP at address A to target T: rel32 = T - (A + 5)
+# CALL at address A to target T: rel32 = T - (A + 5)
+fn rel32_displacement(target, call_addr) {
+    return target - (call_addr + 5);
+}
+
+fn test_rel32() {
+    # CALL at 0x1000 to target 0x2000: rel32 = 0x2000 - 0x1005 = 0x0FFB
+    assert_eq(rel32_displacement(0x2000, 0x1000), 0x0FFB, "call forward");
+    # JMP at 0x2000 to target 0x1000: rel32 = 0x1000 - 0x2005 = -0x1005
+    assert_eq(rel32_displacement(0x1000, 0x2000), 0 - 0x1005, "jmp backward");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_rex();
+    test_modrm();
+    test_sib();
+    test_sizes();
+    test_opcodes();
+    test_mov_imm64();
+    test_add_reg_reg();
+    test_alu_extensions();
+    test_special_cases();
+    test_registers();
+    test_rel32();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

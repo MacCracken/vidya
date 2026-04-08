@@ -1,0 +1,64 @@
+id = "tracing"
+title = "Tracing & Structured Logging"
+topic = "Tracing"
+description = "How programs record what happened, when, and why — the observer pattern applied to execution flow. Covers log levels, structured events, spans, and zero-overhead tracing."
+tags = ["tracing", "logging", "spans", "observability", "structured-logging", "error-codes"]
+
+[[best_practices]]
+title = "Use packed error codes, not strings"
+explanation = "A packed integer (code + category in a single i64) is zero-alloc, branchless to create, and trivially comparable. String errors require allocation, formatting, and parsing."
+
+[[best_practices]]
+title = "Separate hot-path tracing from human-readable output"
+explanation = "Write binary events to a ring buffer on the hot path. Format to text only when a human reads the buffer. This decouples the cost of recording from the cost of rendering."
+
+[[best_practices]]
+title = "Include timestamps on every event"
+explanation = "Without timestamps, traces are useless for performance analysis. Use monotonic clocks (not wall time) to avoid jumps from NTP corrections."
+
+[[best_practices]]
+title = "Filter by level at the source, not the sink"
+explanation = "Check the log level before formatting the message. A filtered-out debug call should cost one comparison, not a full format+write cycle."
+
+[[gotchas]]
+title = "Heap allocation in the trace hot path"
+explanation = "Allocating memory to format a log message creates GC pressure and unpredictable latency. Use fixed-size stack buffers."
+bad_example = "var msg = str_cat(str_from(\"[ERROR] \"), str_from(details));"
+good_example = "var buf[256]; var len = _sk_fmt_line(&buf, 256, \"ERROR\", 5, msg, msg_len);"
+language = "Cyrius"
+
+[[gotchas]]
+title = "Using wall clock for span timing"
+explanation = "Wall clocks (gettimeofday) can jump backwards due to NTP. Use CLOCK_MONOTONIC or CLOCK_MONOTONIC_RAW for elapsed time measurement."
+bad_example = "var start = time_of_day();"
+good_example = "var start = _sk_now_ns(); # CLOCK_MONOTONIC_RAW"
+language = "Cyrius"
+
+[[gotchas]]
+title = "Formatting then filtering"
+explanation = "If you format the message before checking the log level, you pay the full cost of string formatting even when the message is suppressed."
+bad_example = "var msg = format(\"value=%d\", x); if (level <= max) { write(msg); }"
+good_example = "if (level > _sk_log_level) { return 0; } # early exit before any formatting"
+language = "Cyrius"
+
+[[gotchas]]
+title = "Text in ring buffers"
+explanation = "Storing formatted text in a ring buffer wastes 5-10x the space of binary events. A 4KB buffer holds ~50 text events vs ~340 binary events."
+bad_example = "# Write 40-80 byte text lines into ring buffer"
+good_example = "# Write 12-byte binary header + message bytes, decode on read"
+language = "Cyrius"
+
+[[performance_notes]]
+title = "Packed error creation is ~6ns"
+explanation = "sakshi_err_new() compiles to a single shift + OR. No branches, no memory access, no allocation."
+evidence = "sakshi benchmark: err_new 6ns avg, err_with_ctx 7ns avg (batch 10000x100 rounds)"
+
+[[performance_notes]]
+title = "Filtered-out log calls cost ~7ns"
+explanation = "A suppressed log call (level above threshold) exits after one integer comparison. No formatting, no syscall."
+evidence = "sakshi benchmark: trace_filtered 7ns avg — one branch, immediate return"
+
+[[performance_notes]]
+title = "clock_gettime via vDSO is ~430ns"
+explanation = "CLOCK_MONOTONIC_RAW via the Linux vDSO avoids a real syscall. Still the dominant cost in a trace_info call (~1us total)."
+evidence = "sakshi benchmark: timestamp 430ns avg, trace_info 1us avg (includes format + write to /dev/null)"

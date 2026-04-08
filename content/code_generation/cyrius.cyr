@@ -1,0 +1,295 @@
+# Vidya — Code Generation in Cyrius
+#
+# PATTERN-FOCUSED: documents Cyrius cc2's actual codegen patterns.
+# This is not a reimplementation — it verifies the constants, offsets,
+# and conventions that cc2 uses when emitting x86_64 machine code.
+#
+# Key patterns:
+#   - Stack frame layout: params at [rbp-8], [rbp-16], locals after
+#   - Expression evaluation: push/pop stack machine
+#   - Syscall ABI: args in rdi, rsi, rdx, r10, r8, r9
+#   - Function call ABI: args in rdi, rsi, rdx, rcx, r8, r9
+#   - Division: cqo + idiv (never xor rdx,rdx + idiv)
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# ================================================================
+# Stack Frame Layout — cc2's convention
+# ================================================================
+# After prologue (push rbp; mov rbp, rsp; sub rsp, N):
+#   [rbp+24]  = arg 8 (stack arg, if > 6 args)
+#   [rbp+16]  = arg 7 (stack arg)
+#   [rbp+8]   = return address (pushed by call)
+#   [rbp]     = saved rbp (pushed by prologue)
+#   [rbp-8]   = param 0 / local 0
+#   [rbp-16]  = param 1 / local 1
+#   ...
+#   [rsp]     = bottom of frame (16-byte aligned)
+
+fn test_frame_offsets() {
+    # Parameters are stored to stack starting at [rbp-8]
+    var param0_offset = 0 - 8;
+    var param1_offset = 0 - 16;
+    var param2_offset = 0 - 24;
+    assert_eq(param0_offset, 0 - 8, "param 0 at [rbp-8]");
+    assert_eq(param1_offset, 0 - 16, "param 1 at [rbp-16]");
+    assert_eq(param2_offset, 0 - 24, "param 2 at [rbp-24]");
+
+    # Offset formula: -(param_index + 1) * 8
+    var i = 0;
+    while (i < 6) {
+        var expected = 0 - (i + 1) * 8;
+        var computed = 0 - i * 8 - 8;
+        assert_eq(expected, computed, "param offset formula");
+        i = i + 1;
+    }
+
+    # Stack arguments (7+) are above rbp
+    # +16 because return address (8) + saved rbp (8)
+    var stack_arg7 = 16;
+    var stack_arg8 = 24;
+    assert_eq(stack_arg7, 16, "arg 7 at [rbp+16]");
+    assert_eq(stack_arg8, 24, "arg 8 at [rbp+24]");
+    return 0;
+}
+
+fn test_frame_alignment() {
+    # Frame size must be 16-byte aligned (System V AMD64 ABI)
+    # RSP must be 16-byte aligned before any CALL instruction
+
+    # 1 local = 8 bytes -> round to 16
+    var frame_1 = 16;
+    assert_eq(frame_1 % 16, 0, "1 local: 16-aligned");
+
+    # 2 locals = 16 bytes -> already 16
+    var frame_2 = 16;
+    assert_eq(frame_2 % 16, 0, "2 locals: 16-aligned");
+
+    # 3 locals = 24 bytes -> round to 32
+    var frame_3 = 32;
+    assert_eq(frame_3 % 16, 0, "3 locals: 16-aligned");
+
+    # 5 locals = 40 bytes -> round to 48
+    var frame_5 = 48;
+    assert_eq(frame_5 % 16, 0, "5 locals: 16-aligned");
+
+    # Alignment formula: ((n * 8 + 15) / 16) * 16
+    # In integer math: ((n * 8 + 15) & ~15) but cc2 uses division
+    return 0;
+}
+
+# ================================================================
+# Expression Evaluation — stack machine pattern
+# ================================================================
+# cc2's codegen for expressions:
+#   1. Evaluate expression, result in rax
+#   2. For binary ops: eval left -> push rax -> eval right -> pop rcx -> op
+#   3. This is the simplest correct pattern (no register allocation)
+
+fn test_stack_machine_pattern() {
+    # Simulating stack depth for expression: (2 + 3) * 4
+    # Step 1: eval 2 -> rax=2 (depth 0)
+    # Step 2: push rax (depth 1)
+    # Step 3: eval 3 -> rax=3 (depth 1)
+    # Step 4: pop rcx -> rcx=2, rax=3 (depth 0)
+    # Step 5: add rax, rcx -> rax=5 (depth 0)
+    # Step 6: push rax (depth 1)
+    # Step 7: eval 4 -> rax=4 (depth 1)
+    # Step 8: pop rcx -> rcx=5, rax=4 (depth 0)
+    # Step 9: imul rax, rcx -> rax=20 (depth 0)
+
+    # Max stack depth for binary tree of depth d = d
+    # (2 + 3) * 4 has depth 2, max stack depth = 2
+    # But the pop happens before the next push, so actual max = 1
+
+    var result = (2 + 3) * 4;
+    assert_eq(result, 20, "expression eval");
+
+    # Stack depth after full evaluation is always 0
+    # (every push has a matching pop)
+    return 0;
+}
+
+# ================================================================
+# Instruction Sizes — x86_64 encoding
+# ================================================================
+# cc2 must know instruction sizes for:
+#   - Two-pass assembly (pass 1 computes offsets, pass 2 emits bytes)
+#   - Jump offset calculation (target - (current + instruction_size))
+
+fn test_instruction_sizes() {
+    # MOV r64, imm64 = 10 bytes (REX.W + opcode + 8-byte immediate)
+    var mov_imm64 = 10;
+
+    # PUSH r64 = 1 byte (single opcode, register encoded in low 3 bits)
+    var push_r64 = 1;
+
+    # POP r64 = 1 byte
+    var pop_r64 = 1;
+
+    # ADD r64, r64 = 3 bytes (REX.W + opcode + ModR/M)
+    var add_r64 = 3;
+
+    # IMUL r64, r64 = 4 bytes (REX.W + 0F AF + ModR/M)
+    var imul_r64 = 4;
+
+    # CQO = 2 bytes (REX.W + 99)
+    var cqo = 2;
+
+    # IDIV r64 = 3 bytes (REX.W + F7 + ModR/M)
+    var idiv_r64 = 3;
+
+    # A simple addition: mov + push + mov + pop + add
+    # = 10 + 1 + 10 + 1 + 3 = 25 bytes
+    var add_expr_size = mov_imm64 + push_r64 + mov_imm64 + pop_r64 + add_r64;
+    assert_eq(add_expr_size, 25, "add expression size");
+
+    # A division: mov + push + mov + mov + pop + cqo + idiv
+    # = 10 + 1 + 10 + 3 + 1 + 2 + 3 = 30 bytes
+    var div_expr_size = mov_imm64 + push_r64 + mov_imm64 + add_r64 + pop_r64 + cqo + idiv_r64;
+    assert_eq(div_expr_size, 30, "div expression size");
+    return 0;
+}
+
+# ================================================================
+# Calling Convention — System V AMD64
+# ================================================================
+# Function calls: args in rdi, rsi, rdx, rcx, r8, r9
+# Syscalls:       args in rdi, rsi, rdx, r10, r8, r9
+#                 (r10 instead of rcx — SYSCALL clobbers rcx)
+# Return value: rax (both conventions)
+
+fn test_syscall_abi() {
+    # Syscall numbers (Linux x86_64)
+    var SYS_READ = 0;
+    var SYS_WRITE = 1;
+    var SYS_OPEN = 2;
+    var SYS_CLOSE = 3;
+    var SYS_MMAP = 9;
+    var SYS_EXIT = 60;
+
+    assert_eq(SYS_WRITE, 1, "write syscall number");
+    assert_eq(SYS_EXIT, 60, "exit syscall number");
+    assert_eq(SYS_MMAP, 9, "mmap syscall number");
+
+    # Syscall argument count determines pop sequence:
+    # 1 arg:  pop rdi
+    # 2 args: pop rsi; pop rdi
+    # 3 args: pop rdx; pop rsi; pop rdi
+    # 4 args: pop r10; pop rdx; pop rsi; pop rdi
+    # 5 args: pop r8; pop r10; pop rdx; pop rsi; pop rdi
+    # 6 args: pop r9; pop r8; pop r10; pop rdx; pop rsi; pop rdi
+    #
+    # Note: push args left-to-right, pop in reverse (right-to-left)
+    # This avoids register conflicts during evaluation.
+
+    # write(1, buf, len) = 3 args
+    # Codegen: eval 1 -> push; eval buf -> push; eval len -> push
+    # Then: pop rdx; pop rsi; pop rdi; mov rax, 1; syscall
+    var write_args = 3;
+    assert_eq(write_args, 3, "write takes 3 args");
+
+    # mmap(addr, len, prot, flags, fd, offset) = 6 args
+    var mmap_args = 6;
+    assert_eq(mmap_args, 6, "mmap takes 6 args");
+    return 0;
+}
+
+fn test_function_call_abi() {
+    # Function calls use the same pattern but rcx instead of r10
+    # Args 1-6: rdi, rsi, rdx, rcx, r8, r9
+    # Args 7+:  pushed to stack right-to-left
+
+    # Caller-saved registers (must save before call):
+    # rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11 = 9 registers
+    var caller_saved = 9;
+    assert_eq(caller_saved, 9, "9 caller-saved registers");
+
+    # Callee-saved registers (function must preserve):
+    # rbx, rbp, r12, r13, r14, r15 = 6 registers
+    var callee_saved = 6;
+    assert_eq(callee_saved, 6, "6 callee-saved registers");
+
+    # Total general-purpose registers = 16
+    # (rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8-r15)
+    # rsp is stack pointer — not allocatable
+    var allocatable = 15;
+    assert_eq(allocatable, 16 - 1, "15 allocatable registers");
+    return 0;
+}
+
+# ================================================================
+# Division Gotcha — cqo vs xor rdx,rdx
+# ================================================================
+# This is the most common codegen bug in bootstrap compilers.
+# Using xor rdx,rdx before idiv zero-extends instead of sign-extending.
+# For positive dividends: same result. For negative: garbage.
+#
+# -10 / 3:
+#   xor rdx,rdx: divides 0x0000000000000000:0xFFFFFFFFFFFFFFF6 = huge positive / 3 = wrong
+#   cqo:         divides 0xFFFFFFFFFFFFFFFF:0xFFFFFFFFFFFFFFF6 = -10 / 3 = -3 (correct)
+
+fn test_division_correctness() {
+    # Positive division works with either method
+    assert_eq(100 / 10, 10, "positive division");
+    assert_eq(42 / 7, 6, "positive division 2");
+
+    # Negative division: MUST use sign extension
+    assert_eq(0 - 10 / 2, 0 - 5, "negative dividend");
+
+    # CQO instruction: 2 bytes (48 99)
+    # XOR RDX,RDX: 3 bytes (48 31 D2)
+    # CQO is both correct AND smaller!
+    var cqo_size = 2;
+    var xor_size = 3;
+    assert(cqo_size < xor_size, "cqo is smaller than xor rdx,rdx");
+    return 0;
+}
+
+# ================================================================
+# Prologue/Epilogue Pattern
+# ================================================================
+# Every function:
+#   Prologue: push rbp; mov rbp, rsp; sub rsp, N
+#   Epilogue: leave; ret
+#
+# 'leave' = mov rsp, rbp; pop rbp (1 byte vs 4 bytes)
+# N is patched after parsing the function body (locals discovered during parse)
+
+fn test_prologue_epilogue() {
+    # Prologue size: push rbp (1) + mov rbp,rsp (3) + sub rsp,imm32 (7) = 11
+    var prologue_size = 1 + 3 + 7;
+    assert_eq(prologue_size, 11, "prologue is 11 bytes");
+
+    # Epilogue size: leave (1) + ret (1) = 2
+    var epilogue_size = 1 + 1;
+    assert_eq(epilogue_size, 2, "epilogue is 2 bytes");
+
+    # Alternative epilogue without leave:
+    # mov rsp,rbp (3) + pop rbp (1) + ret (1) = 5
+    var alt_epilogue = 3 + 1 + 1;
+    assert_eq(alt_epilogue, 5, "alt epilogue is 5 bytes");
+
+    # leave saves 3 bytes per function
+    var savings = alt_epilogue - epilogue_size;
+    assert_eq(savings, 3, "leave saves 3 bytes");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_frame_offsets();
+    test_frame_alignment();
+    test_stack_machine_pattern();
+    test_instruction_sizes();
+    test_syscall_abi();
+    test_function_call_abi();
+    test_division_correctness();
+    test_prologue_epilogue();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

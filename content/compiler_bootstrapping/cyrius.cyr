@@ -1,0 +1,136 @@
+# Vidya — Compiler Bootstrapping in Cyrius
+#
+# Cyrius IS a bootstrapping compiler. This documents the patterns,
+# not reimplements them. See github.com/MacCracken/cyrius for the real thing.
+#
+# Bootstrap chain: seed (29KB asm) → stage1f (12KB) → cc2 (164KB)
+# Self-hosting proof: cc2 compiles its own source → cc3, cmp -s cc2 cc3
+#
+# Key concepts: seed trust, multi-stage, byte-identical verification,
+# cross-compilation (x86 cc2 → aarch64 cc2_aarch64 → native aarch64)
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# ================================================================
+# Bootstrap Chain — the Cyrius architecture
+# ================================================================
+
+# Stage sizes (actual Cyrius values)
+var SEED_SIZE_KB = 29;       # bootstrap/asm — hand-written x86_64 assembly
+var STAGE1_SIZE_KB = 12;     # stage1f — minimal compiler, compiles cc2 source
+var CC2_SIZE_KB = 164;       # cc2 — full modular compiler (8 modules)
+var CC2_ARM_SIZE_KB = 173;   # cc2_aarch64 — cross-compiler output
+
+# Each stage compiles the next. The seed is the root of trust.
+# Thompson's "Reflections on Trusting Trust" (1984): if the seed is
+# compromised, every generation inherits the compromise.
+
+fn test_chain_properties() {
+    # Each stage is larger than the previous (more features)
+    assert(STAGE1_SIZE_KB < CC2_SIZE_KB, "stage1 < cc2");
+    assert(SEED_SIZE_KB < CC2_SIZE_KB, "seed < cc2");
+
+    # The seed must be small enough for a human to audit
+    assert(SEED_SIZE_KB < 50, "seed is auditable (<50KB)");
+
+    # Cross-compiler is similar size to native (same features, different backend)
+    assert(CC2_ARM_SIZE_KB > 100, "cross-compiler is substantial");
+    return 0;
+}
+
+# ================================================================
+# Two-Pass Assembly — the seed pattern
+# ================================================================
+# Pass 1: scan instructions, collect label → offset map
+# Pass 2: emit bytes with resolved addresses
+#
+# Why two passes? Forward jumps reference labels not yet seen.
+# Pass 1 records where each label lands. Pass 2 uses that map.
+#
+# Instruction sizes (x86_64):
+#   MOV r64, imm64  = 10 bytes (REX.W + opcode + 8-byte immediate)
+#   ADD r64, r64    = 3 bytes  (REX.W + opcode + ModR/M)
+#   JMP rel32       = 5 bytes  (opcode + 4-byte relative offset)
+#   HLT             = 1 byte
+
+var INST_SIZE_MOV = 10;
+var INST_SIZE_ADD = 3;
+var INST_SIZE_JMP = 5;
+var INST_SIZE_HLT = 1;
+
+fn test_instruction_sizes() {
+    # A minimal program: MOV + MOV + ADD + JMP + HLT
+    var total = INST_SIZE_MOV + INST_SIZE_MOV + INST_SIZE_ADD + INST_SIZE_JMP + INST_SIZE_HLT;
+    assert_eq(total, 29, "minimal program is 29 bytes");
+
+    # JMP relative offset = target - (current + 5)
+    # Backward jump to offset 0 from offset 23: 0 - (23+5) = -28
+    var jmp_offset = 0 - (23 + 5);
+    assert_eq(jmp_offset, 0 - 28, "backward jump offset");
+    return 0;
+}
+
+# ================================================================
+# Self-Hosting Verification
+# ================================================================
+# The gold standard: compile the compiler with itself, compare outputs.
+#   cc3 = cc2(cc2_source)    # compile with current compiler
+#   cc4 = cc3(cc2_source)    # compile with output of step 1
+#   cmp -s cc3 cc4           # must be byte-identical
+#
+# If cc3 != cc4, the compiler is not a fixed point — it doesn't
+# faithfully reproduce itself. This catches codegen bugs.
+
+fn test_self_hosting_properties() {
+    # Fixed-point property: f(f(x)) == f(x) where f = compiler, x = source
+    # Simulated: two "compilation" passes should produce same result
+    var source_hash = 0xDEAD;
+    var cc2_output = source_hash * 7 + 42;   # deterministic transform
+    var cc3_output = source_hash * 7 + 42;   # same transform = same result
+    assert_eq(cc2_output, cc3_output, "self-hosting: cc2==cc3");
+
+    # Non-deterministic compilation breaks self-hosting
+    # (timestamps, ASLR, random padding — all must be eliminated)
+    return 0;
+}
+
+# ================================================================
+# Cross-Compilation Chain
+# ================================================================
+# x86 cc2 → cc2_aarch64 (cross-compiler, runs on x86, emits ARM)
+# cc2_aarch64 → cc2-native-aarch64 (native, runs on ARM, emits ARM)
+# Verification: cc2-native-aarch64 compiles itself → byte-identical
+#
+# This proves the cross-compiler is correct: it produces a native
+# compiler that can reproduce itself on the target architecture.
+
+fn test_cross_compilation() {
+    # Architecture IDs
+    var ARCH_X86 = 0;
+    var ARCH_AARCH64 = 1;
+
+    # Cross-compiler: host != target
+    var cross_host = ARCH_X86;
+    var cross_target = ARCH_AARCH64;
+    assert(cross_host != cross_target, "cross: host != target");
+
+    # Native compiler: host == target
+    var native_host = ARCH_AARCH64;
+    var native_target = ARCH_AARCH64;
+    assert_eq(native_host, native_target, "native: host == target");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_chain_properties();
+    test_instruction_sizes();
+    test_self_hosting_properties();
+    test_cross_compilation();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

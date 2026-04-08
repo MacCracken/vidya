@@ -1,0 +1,334 @@
+# Vidya — Lexing and Parsing in Cyrius
+#
+# Demonstrates a complete lexer + recursive-descent parser for arithmetic
+# expressions. The pipeline mirrors what every hand-written compiler does:
+#   1. Lexer: chars -> tokens (load8 char scanning with position tracking)
+#   2. Parser: tokens -> AST (recursive descent with binding power)
+#   3. Evaluator: AST -> result (tree-walk over heap-allocated nodes)
+#
+# Supports +, -, *, /, unary minus, and parenthesized sub-expressions.
+# Token types are enum constants. AST nodes use tag + child pointers.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# ── Token kinds ────────────────────────────────────────────────────────
+
+enum TokKind {
+    TOK_NUMBER  = 0;
+    TOK_PLUS    = 1;
+    TOK_MINUS   = 2;
+    TOK_STAR    = 3;
+    TOK_SLASH   = 4;
+    TOK_LPAREN  = 5;
+    TOK_RPAREN  = 6;
+    TOK_EOF     = 7;
+}
+
+# ── Lexer state (globals) ─────────────────────────────────────────────
+# Cyrius uses flat globals for struct-like state.
+
+var lex_src = 0;       # pointer to source string
+var lex_pos = 0;       # current position
+var lex_len = 0;       # source length
+
+var tok_kind = 0;      # current token kind
+var tok_value = 0;     # numeric value (when TOK_NUMBER)
+
+fn lex_init(src) {
+    lex_src = src;
+    lex_pos = 0;
+    lex_len = strlen(src);
+    return 0;
+}
+
+fn lex_peek_char() {
+    if (lex_pos < lex_len) {
+        return load8(lex_src + lex_pos);
+    }
+    return 0;
+}
+
+fn lex_advance_char() {
+    if (lex_pos < lex_len) {
+        var c = load8(lex_src + lex_pos);
+        lex_pos = lex_pos + 1;
+        return c;
+    }
+    return 0;
+}
+
+fn is_space(c) {
+    if (c == 32) { return 1; }   # space
+    if (c == 9) { return 1; }    # tab
+    if (c == 10) { return 1; }   # newline
+    if (c == 13) { return 1; }   # carriage return
+    return 0;
+}
+
+fn is_digit(c) {
+    if (c >= 48) {
+        if (c <= 57) { return 1; }
+    }
+    return 0;
+}
+
+fn lex_skip_ws() {
+    while (lex_pos < lex_len) {
+        var c = load8(lex_src + lex_pos);
+        if (is_space(c) == 0) { return 0; }
+        lex_pos = lex_pos + 1;
+    }
+    return 0;
+}
+
+fn lex_next() {
+    lex_skip_ws();
+
+    if (lex_pos >= lex_len) {
+        tok_kind = TOK_EOF;
+        tok_value = 0;
+        return 0;
+    }
+
+    var c = lex_advance_char();
+
+    if (c == 43) { tok_kind = TOK_PLUS;   tok_value = 0; return 0; }
+    if (c == 45) { tok_kind = TOK_MINUS;  tok_value = 0; return 0; }
+    if (c == 42) { tok_kind = TOK_STAR;   tok_value = 0; return 0; }
+    if (c == 47) { tok_kind = TOK_SLASH;  tok_value = 0; return 0; }
+    if (c == 40) { tok_kind = TOK_LPAREN; tok_value = 0; return 0; }
+    if (c == 41) { tok_kind = TOK_RPAREN; tok_value = 0; return 0; }
+
+    if (is_digit(c) == 1) {
+        var val = c - 48;
+        while (is_digit(lex_peek_char()) == 1) {
+            val = val * 10 + (lex_advance_char() - 48);
+        }
+        tok_kind = TOK_NUMBER;
+        tok_value = val;
+        return 0;
+    }
+
+    # Unknown character — return EOF
+    tok_kind = TOK_EOF;
+    tok_value = 0;
+    return 0;
+}
+
+# ── AST node kinds ────────────────────────────────────────────────────
+
+enum NodeKind {
+    NODE_NUMBER     = 0;
+    NODE_UNARY_NEG  = 1;
+    NODE_BINOP      = 2;
+}
+
+# AST node layout (heap-allocated, 5 words):
+#   word 0: kind (NODE_NUMBER / NODE_UNARY_NEG / NODE_BINOP)
+#   word 1: value (number) or op char (binop)
+#   word 2: left child pointer (binop) or operand (unary)
+#   word 3: right child pointer (binop)
+#   word 4: (reserved)
+
+var NODE_SIZE = 40;    # 5 * 8 bytes
+
+fn node_new(kind, val, left, right) {
+    var n = alloc(NODE_SIZE);
+    store64(n, kind);
+    store64(n + 8, val);
+    store64(n + 16, left);
+    store64(n + 24, right);
+    return n;
+}
+
+fn node_kind(n)  { return load64(n); }
+fn node_val(n)   { return load64(n + 8); }
+fn node_left(n)  { return load64(n + 16); }
+fn node_right(n) { return load64(n + 24); }
+
+fn make_number(val) {
+    return node_new(NODE_NUMBER, val, 0, 0);
+}
+
+fn make_unary_neg(operand) {
+    return node_new(NODE_UNARY_NEG, 0, operand, 0);
+}
+
+fn make_binop(op, left, right) {
+    return node_new(NODE_BINOP, op, left, right);
+}
+
+# ── Parser ─────────────────────────────────────────────────────────────
+# Pratt-style with binding power for precedence.
+
+fn infix_lbp(kind) {
+    if (kind == TOK_PLUS)  { return 1; }
+    if (kind == TOK_MINUS) { return 1; }
+    if (kind == TOK_STAR)  { return 3; }
+    if (kind == TOK_SLASH) { return 3; }
+    return 0 - 1;
+}
+
+fn infix_rbp(kind) {
+    if (kind == TOK_PLUS)  { return 2; }
+    if (kind == TOK_MINUS) { return 2; }
+    if (kind == TOK_STAR)  { return 4; }
+    if (kind == TOK_SLASH) { return 4; }
+    return 0 - 1;
+}
+
+fn prefix_bp(kind) {
+    if (kind == TOK_MINUS) { return 5; }
+    return 0 - 1;
+}
+
+fn op_for_kind(kind) {
+    if (kind == TOK_PLUS)  { return 43; }   # '+'
+    if (kind == TOK_MINUS) { return 45; }   # '-'
+    if (kind == TOK_STAR)  { return 42; }   # '*'
+    if (kind == TOK_SLASH) { return 47; }   # '/'
+    return 0;
+}
+
+fn parse_expr(min_bp) {
+    var lhs = 0;
+
+    # ── Prefix / atoms ────────────────────────────────────────────
+    if (tok_kind == TOK_NUMBER) {
+        lhs = make_number(tok_value);
+        lex_next();
+    }
+    elif (tok_kind == TOK_LPAREN) {
+        lex_next();   # consume '('
+        lhs = parse_expr(0);
+        # expect ')'
+        lex_next();
+    }
+    elif (prefix_bp(tok_kind) >= 0) {
+        var pbp = prefix_bp(tok_kind);
+        lex_next();   # consume '-'
+        var operand = parse_expr(pbp);
+        lhs = make_unary_neg(operand);
+    }
+
+    # ── Infix loop ────────────────────────────────────────────────
+    while (1) {
+        var op_kind = tok_kind;
+        if (op_kind == TOK_EOF) { return lhs; }
+        if (op_kind == TOK_RPAREN) { return lhs; }
+
+        var lbp = infix_lbp(op_kind);
+        if (lbp < 0) { return lhs; }
+        if (lbp < min_bp) { return lhs; }
+
+        var op = op_for_kind(op_kind);
+        lex_next();   # consume operator
+        var rbp = infix_rbp(op_kind);
+        var rhs = parse_expr(rbp);
+        lhs = make_binop(op, lhs, rhs);
+    }
+
+    return lhs;
+}
+
+# ── Tree-walk evaluator ───────────────────────────────────────────────
+
+fn eval_ast(node) {
+    var kind = node_kind(node);
+
+    if (kind == NODE_NUMBER) {
+        return node_val(node);
+    }
+
+    if (kind == NODE_UNARY_NEG) {
+        return 0 - eval_ast(node_left(node));
+    }
+
+    if (kind == NODE_BINOP) {
+        var l = eval_ast(node_left(node));
+        var r = eval_ast(node_right(node));
+        var op = node_val(node);
+        if (op == 43) { return l + r; }   # '+'
+        if (op == 45) { return l - r; }   # '-'
+        if (op == 42) { return l * r; }   # '*'
+        if (op == 47) { return l / r; }   # '/'
+    }
+
+    return 0;
+}
+
+# ── Helper: parse and evaluate a string ────────────────────────────────
+
+fn parse_and_eval(src) {
+    lex_init(src);
+    lex_next();
+    var ast = parse_expr(0);
+    return eval_ast(ast);
+}
+
+# ── Tests ──────────────────────────────────────────────────────────────
+
+fn test_number() {
+    assert_eq(parse_and_eval("42"), 42, "number");
+    return 0;
+}
+
+fn test_add() {
+    assert_eq(parse_and_eval("2 + 3"), 5, "add");
+    return 0;
+}
+
+fn test_precedence() {
+    assert_eq(parse_and_eval("2 + 3 * 4"), 14, "precedence");
+    return 0;
+}
+
+fn test_parens() {
+    # Note: Cyrius string literals use the actual characters
+    var r = parse_and_eval("(2 + 3) * 4");
+    assert_eq(r, 20, "parens");
+    return 0;
+}
+
+fn test_unary_minus() {
+    # -5 + 3 = -2
+    var r = parse_and_eval("-5 + 3");
+    assert_eq(r, 0 - 2, "unary minus");
+    return 0;
+}
+
+fn test_left_assoc() {
+    # 10 - 3 - 2 = (10-3)-2 = 5
+    assert_eq(parse_and_eval("10 - 3 - 2"), 5, "left assoc");
+    return 0;
+}
+
+fn test_multi_mul() {
+    # 2*3 + 4*5 = 6 + 20 = 26
+    assert_eq(parse_and_eval("2 * 3 + 4 * 5"), 26, "multi mul");
+    return 0;
+}
+
+fn test_target() {
+    # 3 + 4 * (2 - 1) = 3 + 4*1 = 7
+    assert_eq(parse_and_eval("3 + 4 * (2 - 1)"), 7, "target expr");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_number();
+    test_add();
+    test_precedence();
+    test_parens();
+    test_unary_minus();
+    test_left_assoc();
+    test_multi_mul();
+    test_target();
+    return assert_summary();
+}
+var exit_code = main();
+syscall(60, exit_code);

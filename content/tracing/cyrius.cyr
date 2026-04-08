@@ -1,0 +1,157 @@
+# Tracing & Structured Logging — Cyrius reference (runnable)
+# Patterns: sakshi error codes, log levels, spans, output targets
+# Requires: sakshi (include "sakshi.cyr" from the sakshi project)
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+include "lib/bench.cyr"
+include "lib/fnptr.cyr"
+
+include "sakshi.cyr"
+
+alloc_init();
+
+# ================================================================
+# Pattern 1: Packed error codes
+# ================================================================
+# Error format: [context:32][category:16][code:16] in a single i64
+# Zero allocation. One shift+OR to create, one shift+AND to extract.
+
+fn example_error_codes() {
+    # Create an error — pure arithmetic, ~6ns
+    var err = sakshi_err_new(ERR_NOT_FOUND, ERR_CAT_IO);
+
+    # Extract fields
+    var code = sakshi_err_code(err);     # 3 (ERR_NOT_FOUND)
+    var cat = sakshi_err_category(err);  # 2 (ERR_CAT_IO)
+    assert_eq(code, 3, "code");
+    assert_eq(cat, 2, "category");
+
+    # With caller-defined context (source hash, span ID, etc.)
+    var err2 = sakshi_err_with_ctx(ERR_TIMEOUT, ERR_CAT_NET, 0xCAFE);
+    assert_eq(sakshi_err_context(err2), 0xCAFE, "context");
+
+    # Predicates
+    assert(sakshi_is_ok(ERR_OK) == 1, "zero is ok");
+    assert(sakshi_is_err(err) == 1, "non-zero is err");
+    return 0;
+}
+
+# ================================================================
+# Pattern 2: Log levels with runtime filtering
+# ================================================================
+# Levels: SK_ERROR(0) < SK_WARN(1) < SK_INFO(2) < SK_DEBUG(3) < SK_TRACE(4)
+# Messages above the current level are suppressed (~7ns, one comparison).
+
+fn example_log_levels() {
+    # Default level is SK_INFO — error, warn, info are visible
+    sakshi_error("disk full", 9);
+    sakshi_warn("low memory", 10);
+    sakshi_info("service started", 15);
+
+    # debug/trace suppressed at SK_INFO level
+    sakshi_debug("this won't appear", 17);
+
+    # Raise level to see debug output
+    sakshi_set_level(SK_DEBUG);
+    sakshi_debug("now visible", 11);
+
+    # Restore
+    sakshi_set_level(SK_INFO);
+    return 0;
+}
+
+# ================================================================
+# Pattern 3: File output (tee to stderr + file)
+# ================================================================
+# The slim profile tees to both stderr and file simultaneously.
+
+fn example_file_output() {
+    var fd = sakshi_output_file("/tmp/sakshi_demo.log");
+    if (fd < 0) {
+        sakshi_error("cannot open log file", 20);
+        return 1;
+    }
+
+    sakshi_info("logged to stderr AND file", 25);
+    sakshi_output_file_close();
+
+    sakshi_info("back to stderr only", 19);
+    return 0;
+}
+
+# ================================================================
+# Pattern 4: Error propagation with categories
+# ================================================================
+# Use categories to classify errors by domain. Callers switch on category.
+
+fn read_config(path) {
+    # Simulate file not found
+    var fd = syscall(2, path, 0, 0);
+    if (fd < 0) {
+        return sakshi_err_new(ERR_NOT_FOUND, ERR_CAT_CONFIG);
+    }
+    syscall(3, fd);
+    return ERR_OK;
+}
+
+fn example_error_propagation() {
+    var err = read_config("/nonexistent/config.toml");
+    if (sakshi_is_err(err)) {
+        var cat = sakshi_err_category(err);
+        if (cat == ERR_CAT_CONFIG) {
+            sakshi_warn("config missing, using defaults", 30);
+        } else {
+            sakshi_error("unexpected error", 16);
+        }
+    }
+    return 0;
+}
+
+# ================================================================
+# Pattern 5: Benchmarking sakshi operations
+# ================================================================
+
+fn _bench_err() {
+    var e = sakshi_err_new(ERR_BUSY, ERR_CAT_RUNTIME);
+    return 0;
+}
+
+fn _bench_filtered() {
+    sakshi_debug("filtered", 8);
+    return 0;
+}
+
+fn example_benchmarks() {
+    # Redirect output to /dev/null for clean benchmarking
+    var devnull = syscall(2, "/dev/null", 1, 0);
+    if (devnull >= 0) { sakshi_set_output_fd(devnull); }
+
+    var b1 = bench_new("err_new");
+    bench_run_batch(b1, &_bench_err, 10000, 100);
+    bench_report(b1);
+
+    var b2 = bench_new("trace_filtered");
+    bench_run_batch(b2, &_bench_filtered, 10000, 100);
+    bench_report(b2);
+
+    if (devnull >= 0) { syscall(3, devnull); sakshi_set_output_fd(2); }
+    return 0;
+}
+
+# ================================================================
+# Main
+# ================================================================
+fn main() {
+    example_error_codes();
+    example_log_levels();
+    example_file_output();
+    example_error_propagation();
+    example_benchmarks();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
