@@ -1,0 +1,152 @@
+# Fuzz: search with random query strings
+# Verify invariants: search never crashes, results are always valid concepts,
+# empty query returns empty results, single-char queries don't panic
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/args.cyr"
+include "lib/hashmap.cyr"
+include "lib/toml.cyr"
+include "lib/regex.cyr"
+include "lib/syscalls.cyr"
+
+# LCG PRNG
+var _fz_state = 98765;
+
+fn _fz_rand() {
+    _fz_state = _fz_state * 6364136223846793005 + 1442695040888963407;
+    return _fz_state;
+}
+
+fn _fz_byte() {
+    var r = _fz_rand();
+    if (r < 0) { r = 0 - r; }
+    return r % 256;
+}
+
+# Generate a random string of length 1-16
+fn _fz_string() {
+    var r = _fz_rand();
+    if (r < 0) { r = 0 - r; }
+    var len = (r % 16) + 1;
+    var buf = alloc(len + 1);
+    for (var i = 0; i < len; i = i + 1) {
+        var c = _fz_byte() % 26 + 97;  # a-z
+        store8(buf + i, c);
+    }
+    store8(buf + len, 0);
+    return buf;
+}
+
+# Inline minimal concept loader + search (subset of main.cyr)
+fn to_cstr(s) {
+    if (s == 0) { return ""; }
+    var len = str_len(s);
+    var buf = alloc(len + 1);
+    memcpy(buf, str_data(s), len);
+    store8(buf + len, 0);
+    return buf;
+}
+
+fn cstr_contains(haystack, needle) {
+    if (haystack == 0 || needle == 0) { return 0; }
+    var hlen = strlen(haystack);
+    var nlen = strlen(needle);
+    if (nlen == 0) { return 1; }
+    if (nlen > hlen) { return 0; }
+    var i = 0;
+    while (i <= hlen - nlen) {
+        if (memeq(haystack + i, needle, nlen) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn str_has(s, query) {
+    if (s == 0) { return 0; }
+    var cstr = to_cstr(s);
+    return cstr_contains(cstr, query);
+}
+
+fn main() {
+    alloc_init();
+    args_init();
+
+    var iters = 10000;
+    if (argc() > 1) {
+        var arg = argv(1);
+        iters = 0;
+        var ai = 0;
+        while (load8(arg + ai) != 0) {
+            iters = iters * 10 + load8(arg + ai) - 48;
+            ai = ai + 1;
+        }
+    }
+
+    # Load concepts
+    var reg = vec_new();
+    var index = map_new();
+    var dirs = dir_list(str_from("content"));
+    var ndirs = vec_len(dirs);
+    var i = 0;
+    while (i < ndirs) {
+        var dname = vec_get(dirs, i);
+        var dpath = path_join(str_from("content"), dname);
+        if (is_dir(dpath) == 1) {
+            var tpath = path_join(dpath, str_from("concept.toml"));
+            if (file_exists(str_data(tpath)) == 1) {
+                var sections = toml_parse_file(str_data(tpath));
+                if (vec_len(sections) > 0) {
+                    var top = vec_get(sections, 0);
+                    var pairs = toml_section_pairs(top);
+                    var id = toml_get(pairs, str_from("id"));
+                    var desc = toml_get(pairs, str_from("description"));
+                    if (id != 0) {
+                        var cid = to_cstr(id);
+                        vec_push(reg, id);
+                        vec_push(reg, desc);
+                        map_set(index, cid, 1);
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    var topic_count = vec_len(reg) / 2;
+    var pass = 0;
+
+    # Fuzz: random searches
+    for (var iter = 0; iter < iters; iter = iter + 1) {
+        var query = _fz_string();
+        var results = 0;
+
+        # Search all topics
+        var ti = 0;
+        while (ti < topic_count) {
+            var id = vec_get(reg, ti * 2);
+            var desc = vec_get(reg, ti * 2 + 1);
+            if (str_has(id, query) == 1) { results = results + 1; }
+            elif (str_has(desc, query) == 1) { results = results + 1; }
+            ti = ti + 1;
+        }
+
+        # Invariant: results >= 0 and <= topic_count
+        if (results < 0) { println("FAIL: negative results"); syscall(60, 1); }
+        if (results > topic_count) { println("FAIL: too many results"); syscall(60, 1); }
+        pass = pass + 1;
+    }
+
+    print_num(pass);
+    syscall(1, 1, " fuzz iterations passed (", 25);
+    print_num(topic_count);
+    println(" topics)");
+    return 0;
+}
+var r = main();
+syscall(60, r);

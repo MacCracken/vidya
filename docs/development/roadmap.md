@@ -2,7 +2,7 @@
 
 > **Status**: Active | **Last Updated**: 2026-04-08
 >
-> **Version**: 2.0.0 (Cyrius port) | **Topics**: 36 (36 complete — all 11 languages)
+> **Version**: 2.1.0 | **Topics**: 36 (36 complete — all 11 languages)
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 396 | **Binary**: 85KB Cyrius ELF
 >

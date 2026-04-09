@@ -9,6 +9,7 @@
 #   vidya compare <topic> <l1> <l2>  — compare implementations
 #   vidya validate [topic]           — compile/run examples
 #   vidya stats                      — corpus statistics
+#   vidya serve [port]               — HTTP JSON API on localhost
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -22,6 +23,9 @@ include "lib/hashmap.cyr"
 include "lib/toml.cyr"
 include "lib/regex.cyr"
 include "lib/syscalls.cyr"
+include "lib/tagged.cyr"
+include "lib/json.cyr"
+include "lib/net.cyr"
 
 # Sakshi — tracing, errors, spans (stderr-only profile, v0.5.0)
 # NOTE: calling sakshi_info/debug before argv() corrupts args (same class as fmt_int clobber bug)
@@ -1007,6 +1011,387 @@ fn cmd_gaps() {
     return 0;
 }
 
+# ================================================================
+# HTTP Server — localhost JSON API
+# ================================================================
+
+var _http_port = 8390;
+
+# Send a full HTTP response: status line + headers + body
+# Build CRLF string — Cyrius \r produces literal 'r', not CR(13)
+fn make_crlf() {
+    var buf = alloc(3);
+    store8(buf, 13);
+    store8(buf + 1, 10);
+    store8(buf + 2, 0);
+    return buf;
+}
+
+fn http_respond(cfd, status, status_text, body, body_len) {
+    var cr = make_crlf();
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "HTTP/1.1 ");
+    str_builder_add_cstr(sb, status);
+    str_builder_add_cstr(sb, " ");
+    str_builder_add_cstr(sb, status_text);
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, "Content-Type: application/json");
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, "Connection: close");
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, "Content-Length: ");
+    str_builder_add_int(sb, body_len);
+    str_builder_add_cstr(sb, cr);
+    str_builder_add_cstr(sb, cr);
+    var header = str_builder_build(sb);
+    var hdr_cstr = to_cstr(header);
+    sys_write(cfd, hdr_cstr, str_len(header));
+    sys_write(cfd, body, body_len);
+    return 0;
+}
+
+fn http_ok(cfd, body, body_len) {
+    return http_respond(cfd, "200", "OK", body, body_len);
+}
+
+fn http_not_found(cfd) {
+    var body = "{\"error\":\"not found\"}";
+    return http_respond(cfd, "404", "Not Found", body, strlen(body));
+}
+
+fn http_bad_request(cfd) {
+    var body = "{\"error\":\"bad request\"}";
+    return http_respond(cfd, "400", "Bad Request", body, strlen(body));
+}
+
+# Parse HTTP request line: "GET /path HTTP/1.1\r\n..."
+# Returns the path as a C string, or 0 on failure
+fn http_parse_path(buf, len) {
+    # Find first space (after method)
+    var i = 0;
+    while (i < len && load8(buf + i) != 32) { i = i + 1; }
+    i = i + 1;
+    if (i >= len) { return 0; }
+    var path_start = i;
+    # Find second space (before HTTP version)
+    while (i < len && load8(buf + i) != 32) { i = i + 1; }
+    var path_len = i - path_start;
+    if (path_len == 0) { return 0; }
+    var path = alloc(path_len + 1);
+    memcpy(path, buf + path_start, path_len);
+    store8(path + path_len, 0);
+    return path;
+}
+
+# Extract query parameter: /search?q=value → value
+fn http_get_param(path, name) {
+    var qmark = strchr(path, 63);  # '?'
+    if (qmark < 0) { return 0; }
+    var params = path + qmark + 1;
+    var nlen = strlen(name);
+    # Simple: find "name=" in params
+    var plen = strlen(params);
+    var i = 0;
+    while (i <= plen - nlen - 1) {
+        if (memeq(params + i, name, nlen) == 1) {
+            if (load8(params + i + nlen) == 61) {  # '='
+                var vstart = params + i + nlen + 1;
+                var vend = vstart;
+                while (load8(vend) != 0 && load8(vend) != 38) { vend = vend + 1; }  # '&' or null
+                var vlen = vend - vstart;
+                var val = alloc(vlen + 1);
+                memcpy(val, vstart, vlen);
+                store8(val + vlen, 0);
+                return val;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Extract path segment: /info/strings → strings
+fn http_path_segment(path, n) {
+    var i = 0;
+    var plen = strlen(path);
+    var seg = 0;
+    while (i < plen && seg < n) {
+        if (load8(path + i) == 47) { seg = seg + 1; }  # '/'
+        i = i + 1;
+    }
+    if (i >= plen) { return 0; }
+    var start = i;
+    while (i < plen && load8(path + i) != 47 && load8(path + i) != 63) { i = i + 1; }
+    var slen = i - start;
+    if (slen == 0) { return 0; }
+    var result = alloc(slen + 1);
+    memcpy(result, path + start, slen);
+    store8(result + slen, 0);
+    return result;
+}
+
+# JSON builders for each endpoint
+
+fn json_stats_response() {
+    var entries = reg_list();
+    var total = vec_len(entries);
+    var total_examples = 0;
+    var complete = 0;
+    var i = 0;
+    while (i < total) {
+        var c = vec_get(entries, i);
+        var examples = concept_examples(c);
+        var nex = 0;
+        if (examples != 0) { nex = vec_len(examples); }
+        total_examples = total_examples + nex;
+        if (nex >= LANG_COUNT) { complete = complete + 1; }
+        i = i + 1;
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"topics\":");
+    str_builder_add_int(sb, total);
+    str_builder_add_cstr(sb, ",\"complete\":");
+    str_builder_add_int(sb, complete);
+    str_builder_add_cstr(sb, ",\"examples\":");
+    str_builder_add_int(sb, total_examples);
+    str_builder_add_cstr(sb, ",\"languages\":");
+    str_builder_add_int(sb, LANG_COUNT);
+    str_builder_add_cstr(sb, "}");
+    return str_builder_build(sb);
+}
+
+fn json_list_response() {
+    var entries = reg_list();
+    var total = vec_len(entries);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "[");
+    var i = 0;
+    while (i < total) {
+        var c = vec_get(entries, i);
+        var id = concept_id(c);
+        var topic = concept_topic(c);
+        var examples = concept_examples(c);
+        var nex = 0;
+        if (examples != 0) { nex = vec_len(examples); }
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"id\":\"");
+        if (id != 0) { str_builder_add(sb, id); }
+        str_builder_add_cstr(sb, "\",\"topic\":\"");
+        if (topic != 0) { str_builder_add(sb, topic); }
+        str_builder_add_cstr(sb, "\",\"languages\":");
+        str_builder_add_int(sb, nex);
+        str_builder_add_cstr(sb, "}");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]");
+    return str_builder_build(sb);
+}
+
+fn json_info_response(topic_id) {
+    var concept = reg_get(topic_id);
+    if (concept == 0) { return 0; }
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"id\":\"");
+    var id = concept_id(concept);
+    if (id != 0) { str_builder_add(sb, id); }
+    str_builder_add_cstr(sb, "\",\"title\":\"");
+    var title = concept_title(concept);
+    if (title != 0) { str_builder_add(sb, title); }
+    str_builder_add_cstr(sb, "\",\"topic\":\"");
+    var topic = concept_topic(concept);
+    if (topic != 0) { str_builder_add(sb, topic); }
+    str_builder_add_cstr(sb, "\",\"description\":\"");
+    var desc = concept_desc(concept);
+    if (desc != 0) { str_builder_add(sb, desc); }
+
+    # Tags
+    str_builder_add_cstr(sb, "\",\"tags\":[");
+    var tags = concept_tags(concept);
+    if (tags != 0) {
+        var ti = 0;
+        while (ti < vec_len(tags)) {
+            if (ti > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"");
+            str_builder_add(sb, vec_get(tags, ti));
+            str_builder_add_cstr(sb, "\"");
+            ti = ti + 1;
+        }
+    }
+
+    # Languages
+    str_builder_add_cstr(sb, "],\"languages\":[");
+    var examples = concept_examples(concept);
+    if (examples != 0) {
+        var ei = 0;
+        while (ei < vec_len(examples)) {
+            var ex = vec_get(examples, ei);
+            if (ei > 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, "\"");
+            str_builder_add_cstr(sb, lang_name(example_lang(ex)));
+            str_builder_add_cstr(sb, "\"");
+            ei = ei + 1;
+        }
+    }
+
+    # Best practices count, gotchas count, perf notes count
+    var bps = concept_best_practices(concept);
+    var gotchas = concept_gotchas(concept);
+    var pnotes = concept_perf_notes(concept);
+    str_builder_add_cstr(sb, "],\"best_practices\":");
+    str_builder_add_int(sb, bps != 0 && vec_len(bps));
+    str_builder_add_cstr(sb, ",\"gotchas\":");
+    str_builder_add_int(sb, gotchas != 0 && vec_len(gotchas));
+    str_builder_add_cstr(sb, ",\"performance_notes\":");
+    str_builder_add_int(sb, pnotes != 0 && vec_len(pnotes));
+    str_builder_add_cstr(sb, "}");
+    return str_builder_build(sb);
+}
+
+fn json_search_response(query) {
+    var results = search(query);
+    var count = vec_len(results);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"query\":\"");
+    str_builder_add_cstr(sb, query);
+    str_builder_add_cstr(sb, "\",\"count\":");
+    str_builder_add_int(sb, count);
+    str_builder_add_cstr(sb, ",\"results\":[");
+    var i = 0;
+    while (i < count) {
+        var c = vec_get(results, i);
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"id\":\"");
+        var id = concept_id(c);
+        if (id != 0) { str_builder_add(sb, id); }
+        str_builder_add_cstr(sb, "\",\"description\":\"");
+        var desc = concept_desc(c);
+        if (desc != 0) { str_builder_add(sb, desc); }
+        str_builder_add_cstr(sb, "\"}");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return str_builder_build(sb);
+}
+
+fn json_languages_response() {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "[");
+    var li = 0;
+    while (li < LANG_COUNT) {
+        if (li > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"name\":\"");
+        str_builder_add_cstr(sb, lang_name(li));
+        str_builder_add_cstr(sb, "\",\"extension\":\"");
+        str_builder_add_cstr(sb, lang_extension(li));
+        str_builder_add_cstr(sb, "\"}");
+        li = li + 1;
+    }
+    str_builder_add_cstr(sb, "]");
+    return str_builder_build(sb);
+}
+
+# Route an HTTP request
+fn http_route(cfd, path) {
+    # GET /stats
+    if (streq(path, "/stats") == 1) {
+        var body = json_stats_response();
+        var bd = str_data(body);
+        return http_ok(cfd, bd, str_len(body));
+    }
+    # GET /list
+    if (streq(path, "/list") == 1) {
+        var body = json_list_response();
+        var bd = str_data(body);
+        return http_ok(cfd, bd, str_len(body));
+    }
+    # GET /languages
+    if (streq(path, "/languages") == 1) {
+        var body = json_languages_response();
+        var bd = str_data(body);
+        return http_ok(cfd, bd, str_len(body));
+    }
+    # GET /search?q=...
+    if (memeq(path, "/search", 7) == 1) {
+        var q = http_get_param(path, "q");
+        if (q == 0) { return http_bad_request(cfd); }
+        var body = json_search_response(q);
+        var bd = str_data(body);
+        return http_ok(cfd, bd, str_len(body));
+    }
+    # GET /info/{topic}
+    if (memeq(path, "/info/", 6) == 1) {
+        var topic_id = http_path_segment(path, 2);
+        if (topic_id == 0) { return http_bad_request(cfd); }
+        var body = json_info_response(topic_id);
+        if (body == 0) { return http_not_found(cfd); }
+        var bd = str_data(body);
+        return http_ok(cfd, bd, str_len(body));
+    }
+    # GET / — root → stats
+    if (streq(path, "/") == 1) {
+        var body = json_stats_response();
+        var bd = str_data(body);
+        return http_ok(cfd, bd, str_len(body));
+    }
+    return http_not_found(cfd);
+}
+
+fn cmd_serve(port) {
+    _http_port = port;
+
+    var sfd = tcp_socket();
+    if (is_err(sfd) == 1) {
+        sakshi_error("failed to create socket", 23);
+        return 1;
+    }
+    sfd = payload(sfd);
+    sock_reuse(sfd);
+
+    var br = sock_bind(sfd, INADDR_ANY(), _http_port);
+    if (is_err(br) == 1) {
+        sakshi_error("failed to bind", 14);
+        return 1;
+    }
+
+    var lr = sock_listen(sfd, 16);
+    if (is_err(lr) == 1) {
+        sakshi_error("failed to listen", 16);
+        return 1;
+    }
+
+    syscall(1, 1, "vidya serving on http://localhost:", 34);
+    var pbuf[32];
+    var plen = fmt_int_buf(_http_port, &pbuf);
+    syscall(1, 1, &pbuf, plen);
+    println("");
+    sakshi_info("server started", 14);
+
+    # Accept loop
+    while (1 == 1) {
+        var client = sock_accept(sfd);
+        if (is_err(client) == 1) { continue; }
+        var cfd = payload(client);
+
+        # Read request
+        var req_buf = alloc(4096);
+        var recv_result = sock_recv(cfd, req_buf, 4095);
+        if (is_err(recv_result) == 1) { sock_close(cfd); continue; }
+        var req_len = payload(recv_result);
+        if (req_len > 0) {
+            store8(req_buf + req_len, 0);
+            var path = http_parse_path(req_buf, req_len);
+            if (path != 0) {
+                http_route(cfd, path);
+            } else {
+                http_bad_request(cfd);
+            }
+        }
+        sock_close(cfd);
+    }
+    return 0;
+}
+
 fn usage() {
     println("vidya — programming reference library and queryable corpus");
     println("");
@@ -1021,6 +1406,7 @@ fn usage() {
     println("  validate [topic]           compile/run examples");
     println("  gaps                       show missing implementations");
     println("  stats                      corpus statistics");
+    println("  serve [port]               HTTP JSON API (default: 8390)");
     println("  help                       show this help");
     return 0;
 }
@@ -1084,6 +1470,21 @@ fn main() {
 
     if (streq(cmd, "stats") == 1) { return cmd_stats(); }
     if (streq(cmd, "gaps") == 1) { return cmd_gaps(); }
+
+    if (streq(cmd, "serve") == 1) {
+        var port = 8390;
+        if (argc() >= 3) {
+            # Parse port from argv
+            var port_str = argv(2);
+            port = 0;
+            var pi = 0;
+            while (load8(port_str + pi) != 0) {
+                port = port * 10 + load8(port_str + pi) - 48;
+                pi = pi + 1;
+            }
+        }
+        return cmd_serve(port);
+    }
 
     if (streq(cmd, "help") == 1 || streq(cmd, "--help") == 1 || streq(cmd, "-h") == 1) {
         usage();

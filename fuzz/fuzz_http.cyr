@@ -1,0 +1,123 @@
+# Fuzz: HTTP request parsing with random/malformed input
+# Verify invariants: parser never crashes, always returns a path or 0,
+# path extraction handles truncated/binary/oversized requests
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/args.cyr"
+
+# LCG PRNG
+var _fz_state = 77777;
+
+fn _fz_rand() {
+    _fz_state = _fz_state * 6364136223846793005 + 1442695040888963407;
+    return _fz_state;
+}
+
+fn _fz_byte() {
+    var r = _fz_rand();
+    if (r < 0) { r = 0 - r; }
+    return r % 256;
+}
+
+# HTTP path parser (from main.cyr)
+fn http_parse_path(buf, len) {
+    var i = 0;
+    while (i < len && load8(buf + i) != 32) { i = i + 1; }
+    i = i + 1;
+    if (i >= len) { return 0; }
+    var path_start = i;
+    while (i < len && load8(buf + i) != 32) { i = i + 1; }
+    var path_len = i - path_start;
+    if (path_len == 0) { return 0; }
+    var path = alloc(path_len + 1);
+    memcpy(path, buf + path_start, path_len);
+    store8(path + path_len, 0);
+    return path;
+}
+
+fn http_get_param(path, name) {
+    var qmark = strchr(path, 63);
+    if (qmark < 0) { return 0; }
+    var params = path + qmark + 1;
+    var nlen = strlen(name);
+    var plen = strlen(params);
+    var i = 0;
+    while (i <= plen - nlen - 1) {
+        if (memeq(params + i, name, nlen) == 1) {
+            if (load8(params + i + nlen) == 61) {
+                var vstart = params + i + nlen + 1;
+                var vend = vstart;
+                while (load8(vend) != 0 && load8(vend) != 38) { vend = vend + 1; }
+                var vlen = vend - vstart;
+                var val = alloc(vlen + 1);
+                memcpy(val, vstart, vlen);
+                store8(val + vlen, 0);
+                return val;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    args_init();
+
+    var iters = 10000;
+    if (argc() > 1) {
+        var arg = argv(1);
+        iters = 0;
+        var ai = 0;
+        while (load8(arg + ai) != 0) {
+            iters = iters * 10 + load8(arg + ai) - 48;
+            ai = ai + 1;
+        }
+    }
+
+    var pass = 0;
+
+    for (var iter = 0; iter < iters; iter = iter + 1) {
+        # Generate random HTTP-like request
+        var r = _fz_rand();
+        if (r < 0) { r = 0 - r; }
+        var len = (r % 512) + 1;
+        var buf = alloc(len + 1);
+        for (var i = 0; i < len; i = i + 1) {
+            var kind = _fz_rand() % 10;
+            if (kind < 0) { kind = 0 - kind; }
+            var c = 0;
+            if (kind < 3) { c = 32; }          # space
+            elif (kind < 5) { c = 47; }        # /
+            elif (kind < 6) { c = 63; }        # ?
+            elif (kind < 7) { c = 61; }        # =
+            elif (kind < 8) { c = 10; }        # newline
+            else { c = (_fz_byte() % 26) + 97; }  # a-z
+            store8(buf + i, c);
+        }
+        store8(buf + len, 0);
+
+        # Parse path — must not crash
+        var path = http_parse_path(buf, len);
+
+        # If we got a path, try param extraction — must not crash
+        if (path != 0) {
+            var plen = strlen(path);
+            # Invariant: path length > 0
+            if (plen == 0) { println("FAIL: empty path"); syscall(60, 1); }
+            # Try param extraction
+            http_get_param(path, "q");
+            http_get_param(path, "limit");
+        }
+
+        pass = pass + 1;
+    }
+
+    print_num(pass);
+    println(" HTTP parse fuzz iterations passed");
+    return 0;
+}
+var r = main();
+syscall(60, r);

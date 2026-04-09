@@ -1,0 +1,96 @@
+# Fuzz: TOML parser with random/malformed input
+# Verify invariants: parser never crashes on bad input,
+# always returns a vec (possibly empty), no out-of-bounds access
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/args.cyr"
+include "lib/toml.cyr"
+
+# LCG PRNG
+var _fz_state = 12345;
+
+fn _fz_rand() {
+    _fz_state = _fz_state * 6364136223846793005 + 1442695040888963407;
+    return _fz_state;
+}
+
+fn _fz_byte() {
+    var r = _fz_rand();
+    if (r < 0) { r = 0 - r; }
+    return r % 128;  # ASCII range
+}
+
+# Generate random "TOML-like" input
+fn _fz_toml_input() {
+    var r = _fz_rand();
+    if (r < 0) { r = 0 - r; }
+    var len = (r % 256) + 1;
+    var buf = alloc(len + 1);
+    for (var i = 0; i < len; i = i + 1) {
+        var c = _fz_byte();
+        # Bias toward TOML-relevant characters
+        var kind = _fz_rand() % 10;
+        if (kind < 0) { kind = 0 - kind; }
+        if (kind < 3) { c = 10; }                        # newline
+        elif (kind < 4) { c = 61; }                      # =
+        elif (kind < 5) { c = 34; }                      # "
+        elif (kind < 6) { c = 91; }                      # [
+        elif (kind < 7) { c = 93; }                      # ]
+        elif (kind < 8) { c = 35; }                      # #
+        store8(buf + i, c);
+    }
+    store8(buf + len, 0);
+    return str_new(buf, len);
+}
+
+fn main() {
+    alloc_init();
+    args_init();
+
+    var iters = 5000;
+    if (argc() > 1) {
+        var arg = argv(1);
+        iters = 0;
+        var ai = 0;
+        while (load8(arg + ai) != 0) {
+            iters = iters * 10 + load8(arg + ai) - 48;
+            ai = ai + 1;
+        }
+    }
+
+    var pass = 0;
+
+    for (var iter = 0; iter < iters; iter = iter + 1) {
+        var input = _fz_toml_input();
+
+        # Parse — must not crash
+        var sections = toml_parse(input);
+
+        # Invariant: result is always a vec (possibly empty)
+        var count = vec_len(sections);
+        if (count < 0) { println("FAIL: negative section count"); syscall(60, 1); }
+
+        # Walk all sections — must not crash
+        var si = 0;
+        while (si < count) {
+            var sec = vec_get(sections, si);
+            var name = toml_section_name(sec);
+            var pairs = toml_section_pairs(sec);
+            var npairs = vec_len(pairs);
+            if (npairs < 0) { println("FAIL: negative pair count"); syscall(60, 1); }
+            si = si + 1;
+        }
+
+        pass = pass + 1;
+    }
+
+    print_num(pass);
+    println(" TOML fuzz iterations passed");
+    return 0;
+}
+var r = main();
+syscall(60, r);

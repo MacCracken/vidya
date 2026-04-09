@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-04-09
+
+### Added
+- **HTTP service layer** — `vidya serve [port]` starts a localhost JSON API (default port 8390)
+  - Endpoints: `/stats`, `/list`, `/search?q=...`, `/info/{topic}`, `/languages`, `/`
+  - All responses are JSON, `Connection: close`, proper HTTP/1.1 headers
+  - Memory-resident: loads corpus once, serves from RAM
+  - 92KB static ELF — no framework, no runtime, no dependencies
+- `lib/tagged.cyr`, `lib/json.cyr`, `lib/net.cyr` added to vendored stdlib
+
+### Changed
+- CI/release workflows updated to Cyrius 2.7.1 (from 2.2.2)
+- Tooling renamed: `cyrb` → `cyrius`, `cyrb.toml` → `cyrius.toml`
+- `cyrius.toml` updated to `[package]`/`[build]` section format
+- Sakshi re-vendored (v0.7.0)
+- CI content validation skips `content/cyrius/` (language reference, not a topic)
+- Added `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` (missing after port)
+- All doc references updated from `cyrb`/`cc2` to `cyrius` CLI
+
 ## [2.0.0] — 2026-04-08
 
 Major version bump: vidya is no longer a Rust crate. It is a Cyrius program with a complete
