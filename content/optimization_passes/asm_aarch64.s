@@ -114,6 +114,7 @@ _start:
     b.ne    fail
 
     // max(a, b) without branching
+    cmp     w0, w1
     csel    w3, w0, w1, gt         // w3 = max(20, 13) = 20
     cmp     w3, #20
     b.ne    fail
