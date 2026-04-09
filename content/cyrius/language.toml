@@ -1686,3 +1686,103 @@ Added to CLAUDE.md. Key Principles section also added:
 Consumers section added: AGNOS kernel, agnostik, agnosys, argonaut,
   sakshi, cyrius-doom, bsp.
 '''
+
+[[entries]]
+name = "atoi_stdlib"
+description = "v2.7: atoi() added to string.cyr — parse decimal string to integer"
+category = "cyrius"
+content = '''
+fn atoi(s) — parse null-terminated decimal string to integer.
+Handles negative numbers (leading -). Returns 0 for invalid input.
+Stops at first non-digit character.
+
+Usage: var n = atoi("42");   # returns 42
+       var n = atoi("-7");   # returns -7
+       var n = atoi("12abc"); # returns 12
+       var n = atoi("abc");  # returns 0
+
+Added to lib/string.cyr. Previously every project that needed CLI arg
+parsing had to implement its own integer parser.
+'''
+
+[[entries]]
+name = "tail_call_gt6_fix"
+description = "v2.7: return fn(>6 args) tail call fix — stack args preserved"
+category = "cyrius"
+content = '''
+BUG: `return f7(1,2,3,4,5,6,7)` returned wrong value (22 instead of 28).
+The tail call optimization (ETAILJMP) destroyed the stack frame before
+jumping, clobbering the 7th argument which was on the stack.
+
+FIX: For >6 args, the parser now emits a normal call+return instead of
+tail call. ECALLPOPS moves args to registers, ECALLFIX calls the function,
+ECALLCLEAN adjusts sp, then a return-patch jump goes to the epilogue.
+
+Tail call still used for ≤6 args where all args fit in registers.
+The `var r = fn7(...); return r;` workaround is no longer needed.
+'''
+
+[[entries]]
+name = "soak_test_command"
+description = "v2.7: cyrius soak — overnight validation loop for 3.0 readiness"
+category = "cyrius"
+content = '''
+`cyrius soak [N]` runs N iterations of the full validation loop:
+  1. Two-step self-hosting (cc3 compiles cc4, cc3==cc4)
+  2. All .tcyr test suites
+  3. All .fcyr fuzz harnesses
+  4. Compile 6+ downstream repos (agnostik, agnosys, argonaut, majra, libro, cyrius-doom)
+
+Usage:
+  cyrius soak 100       # 100 iterations (quick overnight)
+  cyrius soak 1000      # 1000 iterations (full soak)
+  cyrius soak 10 "repo1 repo2"  # custom repo list
+
+For v3.0 release: require `cyrius soak 1000` with 0 failures.
+Catches: non-determinism, memory leaks, state corruption, codegen drift.
+'''
+
+[[entries]]
+name = "object_directive"
+description = "v2.6: object; directive for ELF .o relocatable output (multi-file Phase 1)"
+category = "cyrius"
+content = '''
+`object;` at the top of a .cyr file triggers ELF .o relocatable output.
+Sets kernel_mode=3. The compiler emits proper ELF with sections:
+  .text (code), .data (variables), .rodata (strings),
+  .symtab (symbols), .strtab (symbol names), .rela.text (relocations)
+
+Functions become STT_FUNC/STB_GLOBAL symbols. Fixup entries converted:
+  type 0 (var addr)   → R_X86_64_64 against .data
+  type 1 (string addr) → R_X86_64_64 against .rodata
+  type 2 (fn call)    → R_X86_64_PC32 against function symbol
+  type 3 (fn pointer) → R_X86_64_64 against function symbol
+
+Internal fixup resolution skipped — addresses left unresolved for linker.
+Verified with readelf. Phase 2 (minimal linker) planned for v3.0.
+'''
+
+[[entries]]
+name = "str_data_expansion"
+description = "v2.6-2.7: String data buffer expanded 8KB→16KB→32KB"
+category = "cyrius"
+content = '''
+The compiler's string literal buffer (at 0x68000 in the heap) was too small
+for large programs with many string literals.
+
+HISTORY:
+  v2.6.4: 8KB→16KB (str_pos relocated 0x69800→0x6C000). Fixed agnostik
+    test suite (198 tests, >8KB of assertion strings).
+  v2.7.1: 16KB→32KB (str_pos relocated 0x6C000→0x70000). Fixed libro
+    test suite (193 tests with streaming module added).
+
+DETECTION: v2.7.0 added bounds check in lexer:
+  if (spos >= 32768) { ERR("string data buffer full (32KB limit)"); }
+
+SYMPTOMS of overflow: garbled string output, wrong assertion messages,
+silent test failures that pass in isolation but fail in full suite.
+
+KEY LESSON: Buffer sizes that are "enough for now" become time bombs.
+The 8KB limit was set when the largest program had <50 string literals.
+agnostik had 500+, libro had 700+.
+'''

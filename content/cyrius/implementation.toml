@@ -3216,3 +3216,61 @@ KEY GOTCHA: `var buf[N]` in Cyrius is N BYTES, not N elements.
   For an array of 80 i64 values, you need `var buf[640]` not `var buf[80]`.
   This is documented in Known Gotchas but still catches every new project.
 '''
+
+[[entries]]
+name = "port_validation_pattern"
+description = "v2.7: Port validation sweep — compile and test all downstream repos against current cc2"
+category = "cyrius"
+content = '''
+Before each release, validate all downstream repos compile and test clean.
+
+PATTERN:
+  for repo in agnostik agnosys argonaut sakshi majra libro bsp cyrius-doom; do
+    cd ../$repo && cat src/main.cyr | cc2 > /tmp/test && ./tmp/test
+  done
+
+KEY INSIGHT: Must cd into each repo first — include paths are relative to CWD.
+Running `cat /abs/path/to/main.cyr | cc2` from the wrong directory causes
+"undefined variable" errors for all enum constants because the includes
+resolve to the wrong lib/ directory.
+
+RESULTS (v2.7.3):
+  agnostik: 223 passed   argonaut: compiles clean   libro: 193 passed
+  majra: 144 passed       bsp: 74 passed             sakshi: 12 passed
+  agnosys: compiles       cyrius-doom: compiles (129KB binary)
+  Total: 646 assertions across 5 test suites, 0 failures.
+
+AUTOMATION: `cyrius soak` runs this in a loop for overnight validation.
+'''
+
+[[entries]]
+name = "cx_syscall_address_translation"
+description = "v2.7: cyrius-x VM syscall string output — data section mapping"
+category = "cyrius"
+content = '''
+PROBLEM: syscall(1, 1, "hello", 5) in cyrius-x bytecode produces no output.
+  The string address in the bytecode is a virtual offset, but the host
+  syscall needs a real memory pointer.
+
+TWO-PART FIX:
+
+1. CX COMPILER (main_cx.cyr):
+   - Added FIXUP phase that was completely missing from cx output
+   - Computes data layout: [bytecode (cp)] [var data (totvar)] [string data (spos)]
+   - Patches movi instructions with correct data offsets:
+     string addr = code_size + total_var_size + string_offset
+     var addr = code_size + cumulative_var_offset
+   - Appends var data + string data after bytecode in .cyx file
+   - GOTCHA: fixup coff points AFTER movi, so patch at coff-2 for bytes 2-3
+
+2. CX VM (cxvm.cyr):
+   - Copies entire .cyx content into _cx_mem so bytecode offsets work as
+     memory addresses for load/store operations
+   - Syscall handler translates virtual addresses to real pointers:
+     write(1): r3 (buf) translated via _cx_mem + offset
+     read(0): r3 (buf) translated
+     open(2): r3 (path) translated
+   - Only pointer args translated, not length/flag args (would corrupt values)
+
+VERIFIED: "hello cx" prints correctly. fib(10)=55, fact(5)=120 still pass.
+'''
