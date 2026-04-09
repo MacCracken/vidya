@@ -7,7 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.6.0] — 2026-04-08
+## [2.0.0] — 2026-04-08
+
+Major version bump: vidya is no longer a Rust crate. It is a Cyrius program with a complete
+11-language corpus. The Rust implementation is preserved in `rust-old/` but is no longer the
+primary interface. This is a breaking change for anyone importing `vidya` as a Rust dependency.
+
+### Breaking
+- **Implementation language changed from Rust to Cyrius** — `Cargo.toml`, `src/*.rs` moved to `rust-old/`
+- **Binary interface changed** — vidya is now a standalone CLI tool (`build/vidya`, 85KB ELF), not a library crate
+- **11th language added** — `Language::Cyrius` variant changes the `Language` enum (was 10 variants, now 11)
+
+### Added — Cyrius Port
+- **Ported vidya from Rust to Cyrius** — 85KB static ELF binary, 600 lines of Cyrius replacing 2,396 lines of Rust
+- Cyrius CLI tool (`src/main.cyr`) with commands: `list`, `search`, `info`, `compare`, `validate`, `gaps`, `stats`, `languages`, `help`
+- TOML content loader, hashmap registry, full-text search, cross-language comparison — all in Cyrius
+- **Sakshi integration** — structured tracing and error handling via vendored `lib/sakshi.cyr` (stderr-only profile)
+- `cyrb.toml` project manifest for Cyrius build tooling
+- Vendored 29 Cyrius stdlib modules in `lib/`
+- Rust source preserved in `rust-old/` for reference
+
+### Added — Language: Cyrius
+- **Cyrius as 11th language** — `Language::Cyrius` variant with `.cyr` extension, `#` comment prefix
+- Cyrius validation command: pipes through `cc2` from `$CYRIUS_HOME`
+- 20 Cyrius content implementations across topics (pattern-focused, documenting actual Cyrius/AGNOS patterns)
+
+### Added — Content Expansion (193 → 396 examples)
+- **203 new language implementations** across all 36 topics
+- All 36 topics now complete (11/11 languages each) — up from 15 complete
+- New implementations by language:
+  - **Go**: 16 new topics (compiler, OS, language design, tracing)
+  - **Zig**: 20 new topics (compiler, OS, language design, tracing)
+  - **TypeScript**: 20 new topics (compiler, OS concepts, language design, tracing)
+  - **Shell**: 21 new topics (scripting patterns for every domain)
+  - **x86_64 Assembly**: 19 new topics (real machine-level demonstrations)
+  - **AArch64 Assembly**: 20 new topics (ARM64 cross-platform coverage)
+  - **OpenQASM**: 21 new topics (quantum analogies for classical concepts)
+  - **Python**: 20 new topics (compiler, OS, language design)
+  - **C**: 20 new topics (compiler, OS, systems)
+  - **Cyrius**: 20 new topics (AGNOS patterns, cc2 internals)
+  - **Rust**: 1 new topic (tracing)
+
+### Added — Testing & Benchmarks
+- `tests/vidya.tcyr` — 37 Cyrius-native tests (language enum, TOML loading, registry, file discovery, content scanning)
+- `tests/vidya.bcyr` — 6 benchmarks (load_concept: 28μs, load_all: 2.35ms, reg_get: 493ns, search: 4μs)
+- `BENCHMARKS.md` — Cyrius vs Rust comparison with charts (`docs/benchmarks.png`, `docs/benchmarks-tiers.png`)
+- Benchmark history: `bench-history.csv` (Cyrius), `bench-history-rust.csv` (Rust baseline)
+
+### Added — Documentation & Infrastructure
+- `docs/sources.md` — source citations for language specs, algorithms, standards
+- `docs/usage.md` — complete CLI usage guide
+- `docs/development/learning-paths.md` — 5 ordered learning paths (Compiler, OS, Systems, Language Design, Quantum)
+- `docs/development/content-grouping.md` — future subdirectory plan for 50+ topics
+- `related_topics` field added to all 36 `concept.toml` files — cross-references between topics
+- `vidya gaps` command — reports missing language implementations per topic
+- `.gitignore` updated: `*.rlib`, `rust-old/target/`
+- Documented `qelib1.inc` location in content-format.md
+
+### Changed
+- Version bump from 1.5.0 to 2.0.0 — breaking: implementation language changed from Rust to Cyrius
+- Binary: Rust crate (~800KB release) → Cyrius binary (85KB static ELF)
+- Dependencies: 8 Rust crates → 0 external deps (vendored Cyrius stdlib)
+- Total: **36 topics**, **396 examples** across **11 languages**
+
+### Performance — Cyrius vs Rust
+| Benchmark | Cyrius | Rust | Winner |
+|-----------|--------|------|--------|
+| load_all (35 topics) | 2.35ms | 3.83ms | Cyrius 1.6x |
+| load_concept | 28μs | 123μs | Cyrius 4.4x |
+| search_text | 4μs | 30μs | Cyrius 7.6x |
+| reg_get_hit | 493ns | 17ns | Rust 30x |
+| Binary size | 85KB | 800KB | Cyrius 9.4x |
 
 ## [1.5.0] — 2026-04-04
 

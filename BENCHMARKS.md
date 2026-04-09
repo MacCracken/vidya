@@ -1,6 +1,6 @@
 # Vidya Benchmarks
 
-> **Last run**: 2026-04-08 | **Version**: 1.6.0 (Cyrius port) | **Platform**: x86_64 Linux
+> **Last run**: 2026-04-08 | **Version**: 2.0.0 (Cyrius port) | **Platform**: x86_64 Linux
 >
 > Cyrius binary: 85KB static ELF | Rust binary: ~4MB (debug) / ~800KB (release)
 

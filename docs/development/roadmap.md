@@ -2,9 +2,9 @@
 
 > **Status**: Active | **Last Updated**: 2026-04-08
 >
-> **Version**: 1.6.0 (Cyrius port) | **Topics**: 36 (15 complete, 21 partial)
+> **Version**: 2.0.0 (Cyrius port) | **Topics**: 36 (36 complete — all 11 languages)
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 255 | **Binary**: 85KB Cyrius ELF
+> **Examples**: 396 | **Binary**: 85KB Cyrius ELF
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -13,84 +13,36 @@
 
 ## Current State
 
-### Complete Topics (15) — all 11 languages
+### All 36 Topics Complete — 11/11 languages each
 
-algorithms, concurrency, design_patterns, error_handling, input_output, iterators,
-kernel_topics, memory_management, pattern_matching, performance, quantum_computing,
-security, strings, testing, type_systems
+algorithms, allocators, binary_formats, boot_and_startup, code_generation,
+compiler_bootstrapping, concurrency, design_patterns, elf_and_executable_formats,
+error_handling, filesystems, input_output, instruction_encoding,
+intermediate_representations, interrupt_handling, iterators, kernel_topics,
+lexing_and_parsing, linking_and_loading, macro_systems, memory_management,
+module_systems, optimization_passes, ownership_and_borrowing, pattern_matching,
+performance, process_and_scheduling, quantum_computing, security, strings,
+syscalls_and_abi, testing, tracing, trait_and_typeclass_systems, type_systems,
+virtual_memory
 
-### Partial Topics (20) — Rust + Python + C + Cyrius minimum, some with Go/TS/Zig/ASM
-
-| Topic | Langs | Have | Missing |
-|-------|-------|------|---------|
-| compiler_bootstrapping | 6 | Rust, Python, C, Go, Cyrius, x86 ASM | TS, Shell, Zig, AArch64, QASM |
-| lexing_and_parsing | 6 | Rust, Python, C, Go, TypeScript, Cyrius | Shell, Zig, x86, AArch64, QASM |
-| allocators | 6 | Rust, Python, C, Go, Zig, Cyrius | TS, Shell, x86, AArch64, QASM |
-| code_generation | 5 | Rust, Python, C, Go, Cyrius | TS, Shell, Zig, x86, AArch64, QASM |
-| binary_formats | 5 | Rust, Python, C, Cyrius, x86 ASM | Go, TS, Shell, Zig, AArch64, QASM |
-| syscalls_and_abi | 5 | Rust, Python, C, Go, Cyrius | TS, Shell, Zig, x86, AArch64, QASM |
-| linking_and_loading | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| intermediate_representations | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| optimization_passes | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| instruction_encoding | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| elf_and_executable_formats | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| boot_and_startup | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| virtual_memory | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| interrupt_handling | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| process_and_scheduling | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| filesystems | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| ownership_and_borrowing | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| trait_and_typeclass_systems | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| macro_systems | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-| module_systems | 4 | Rust, Python, C, Cyrius | Go, TS, Shell, Zig, x86, AArch64, QASM |
-
-### Minimal (1 language)
-
-| Topic | Langs | Notes |
-|-------|-------|-------|
-| tracing | 1 | Cyrius only — sakshi patterns |
+**396 examples** across **11 languages**: Rust, Python, C, Go, TypeScript, Shell,
+Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius
 
 ---
 
-## P0 — Complete Partial Topics to 11/11
+## Completed — P0 & P0A
 
-Fill remaining languages for the 20 partial topics. Priority order by applicability:
+~~P0 — Complete all topics to 11/11 languages~~ **Done** (2026-04-08)
 
-**Tier 1 — Add Go + Zig** (systems-relevant, broadly applicable):
-- Go: compiler_bootstrapping, code_generation, syscalls_and_abi, linking_and_loading, intermediate_representations, optimization_passes, instruction_encoding, elf_and_executable_formats, virtual_memory, interrupt_handling, process_and_scheduling, filesystems, ownership_and_borrowing, trait_and_typeclass_systems, macro_systems, module_systems
-- Zig: compiler_bootstrapping, lexing_and_parsing, code_generation, syscalls_and_abi, binary_formats, boot_and_startup + all others
-
-**Tier 2 — Add TypeScript + Shell** (where applicable):
-- TypeScript: allocators (sim), code_generation, optimization_passes, ownership_and_borrowing, trait_and_typeclass_systems, macro_systems, module_systems, lexing_and_parsing (done)
-- Shell: scripting patterns for build/test/deploy topics
-
-**Tier 3 — Add x86_64 ASM + AArch64 ASM** (systems/compiler topics):
-- x86 ASM: syscalls_and_abi, instruction_encoding, boot_and_startup, interrupt_handling, code_generation
-- AArch64 ASM: same topics, cross-platform coverage
-
-**Tier 4 — Add OpenQASM** (quantum-adjacent topics only):
-- Only where quantum computing concepts genuinely apply
-
-**Tier 5 — Expand tracing topic**:
-- Add Rust, Python, C, Go implementations for tracing/observability concepts
-
----
-
-## P0A — Infrastructure (Done / Remaining)
-
-| Item | Status | Notes |
-|------|--------|-------|
-| ~~docs/sources.md~~ | **Done** | Created 2026-04-08 |
-| ~~Cyrius as 11th language~~ | **Done** | Language::Cyrius added, 20 content files |
-| ~~Cyrius port~~ | **Done** | src/main.cyr, 85KB binary, sakshi integrated |
-| ~~.tcyr tests~~ | **Done** | tests/vidya.tcyr — 37 tests |
-| ~~.bcyr benchmarks~~ | **Done** | tests/vidya.bcyr — 6 benchmarks |
-| ~~BENCHMARKS.md~~ | **Done** | Cyrius vs Rust comparison with charts |
-| ~~docs/usage.md~~ | **Done** | CLI usage guide |
-| Content grouping plan | Remaining | Plan subdirectory structure for 50+ topics |
-| Cross-references | Remaining | Add related_topics field to concept.toml |
-| Learning paths | Remaining | Compiler path, OS path, networking path |
-| Validate coverage gaps | Remaining | vidya validate should report missing langs |
+~~P0A — Infrastructure~~ **Done** (2026-04-08):
+- docs/sources.md, docs/usage.md, BENCHMARKS.md
+- Cyrius as 11th language, Cyrius port (src/main.cyr, 85KB binary)
+- Sakshi tracing integration
+- .tcyr tests (37), .bcyr benchmarks (6)
+- Content grouping plan (docs/development/content-grouping.md)
+- Cross-references (related_topics in all 36 concept.toml files)
+- Learning paths (docs/development/learning-paths.md)
+- Coverage gap reporting (vidya gaps command)
 
 ---
 
@@ -164,21 +116,21 @@ Fill remaining languages for the 20 partial topics. Priority order by applicabil
 
 ---
 
-## Language Coverage
+## Language Coverage — All Targets Met
 
-| Language | Complete | Partial | Total | Target |
-|----------|----------|---------|-------|--------|
-| Rust | 15 | 21 | 36 | 36+ |
-| Python | 15 | 20 | 35 | 36+ |
-| C | 15 | 20 | 35 | 36+ |
-| Go | 15 | 5 | 20 | 30+ |
-| TypeScript | 15 | 1 | 16 | 25+ |
-| Shell | 15 | 0 | 15 | 25+ |
-| Zig | 15 | 1 | 16 | 30+ |
-| x86_64 ASM | 15 | 2 | 17 | 25+ |
-| AArch64 ASM | 15 | 0 | 15 | 25+ |
-| OpenQASM | 15 | 0 | 15 | 20+ |
-| Cyrius | 15 | 20 | 35 | 36+ |
+| Language | Topics | Status |
+|----------|--------|--------|
+| Rust | 36/36 | Complete |
+| Python | 36/36 | Complete |
+| C | 36/36 | Complete |
+| Go | 36/36 | Complete |
+| TypeScript | 36/36 | Complete |
+| Shell | 36/36 | Complete |
+| Zig | 36/36 | Complete |
+| x86_64 ASM | 36/36 | Complete |
+| AArch64 ASM | 36/36 | Complete |
+| OpenQASM | 36/36 | Complete |
+| Cyrius | 36/36 | Complete |
 
 ---
 
