@@ -499,3 +499,287 @@ The 3,094 lines of cyrius-doom are now the largest known Cyrius program
 outside the compiler itself and the AGNOS kernel. Every bug it surfaces
 makes the next program easier to write.
 '''
+
+[[entries]]
+name = "the_logical_shift_trap"
+description = "Cyrius >> is LOGICAL not arithmetic — the bug that made every wall invisible"
+category = "cyrius"
+content = '''
+THE BUG THAT BLOCKED RENDERING FOR HOURS:
+
+After building the entire DOOM engine — WAD parser, BSP traversal, column
+renderer, 320x200 framebuffer — the output was a black screen. 0 pixels
+drawn. 0 columns clipped. The renderer was running but producing nothing.
+
+THE ROOT CAUSE: Cyrius >> is a LOGICAL right shift (zero-fills upper bits).
+Not ARITHMETIC (sign-extends). This is different from C's >> on signed types.
+
+Every fixed-point operation that produced a negative intermediate was broken:
+
+  fixed_mul(a, b) = (a * b) >> 16
+
+  If a=100 and b=-50 (both in 16.16): a*b = negative.
+  Logical >> 16 zero-fills the top, producing a HUGE POSITIVE number.
+  The projection math then puts every wall at screen Y = +billions.
+
+This affected:
+  - fixed_mul: every negative product
+  - fixed_to_int: every negative coordinate
+  - fixed_round: every negative value
+  - point_on_side: every point with negative dx or dy
+  - Every projection calculation involving negative coordinates
+
+DOOM E1M1 player start is at (1056, -3616). The negative Y meant that
+EVERY calculation involving the player position was garbage.
+
+THE FIX: An arithmetic-shift-right helper:
+
+  fn asr(val, bits) {
+      if (val >= 0) { return val >> bits; }
+      var pos = 0 - val;
+      return 0 - (pos >> bits);
+  }
+
+Replace every >> with asr() for signed values:
+  fn fixed_mul(a, b) { return asr(a * b, 16); }
+  fn fixed_to_int(f) { return asr(f, 16); }
+
+RESULT: 46,110 pixels drawn. 320/320 columns clipped. Walls visible.
+The screenshot shows E1M1 from the player start position with correct
+BSP-ordered walls, floor, and ceiling.
+
+LESSON: In any language, check whether >> is arithmetic or logical
+BEFORE writing fixed-point math. In C, >> on signed types is
+implementation-defined (but usually arithmetic on x86). In Cyrius,
+it is definitively logical. In Java, >>> is logical and >> is
+arithmetic. In Rust, >> is arithmetic for signed types.
+
+This one operator difference was the difference between a working
+DOOM renderer and a black screen.
+
+DETECTION: The fuzz harness did NOT catch this because it only checked
+for crashes (SIGFPE, segfault), not for incorrect values. A property-
+based test like "fixed_to_int(fixed_from_int(n)) == n for negative n"
+would have caught it instantly. Add algebraic property tests to your
+fuzz harnesses, not just crash tests.
+'''
+
+[[entries]]
+name = "the_palette_double_alloc"
+description = "Lazy init vs init order — a subtle null pointer bug"
+category = "cyrius"
+content = '''
+THE BUG: Segfault on startup after loading WAD.
+
+The call order was:
+  1. wad_read_lump("PLAYPAL") → returns pointer to lump data
+  2. framebuf_set_palette(data) → writes to palette buffer
+  3. framebuf_init() → allocates screen, rgb, AND palette buffers
+
+Step 2 wrote to palette=0 (null pointer) because palette wasn't
+allocated yet. We added a lazy guard:
+
+  fn framebuf_set_palette(data) {
+      if (palette == 0) { palette = alloc(768); }
+      memcpy(palette, data, 768);
+  }
+
+THE SECOND BUG: After fixing the null pointer, the palette was all zeros.
+framebuf_set_palette allocated palette at address A and copied data there.
+Then framebuf_init() allocated palette AGAIN at address B (all zeros from
+bump allocator), overwriting the pointer.
+
+FIX: Guard BOTH allocations:
+  fn framebuf_init() {
+      screen_buf = alloc(64000);
+      rgb_buf = alloc(256000);
+      if (palette == 0) { palette = alloc(768); }  # don't re-alloc
+  }
+
+LESSON: In a bump allocator world, every alloc() returns fresh zeroed
+memory. If you alloc twice for the same pointer, you lose whatever was
+in the first allocation. Guard all allocations with if (ptr == 0).
+
+This pattern is common in C (malloc + check), rare in Rust (ownership
+prevents it), and easy to miss in Cyrius because there is no type system
+or ownership model to warn you.
+'''
+
+[[entries]]
+name = "walls_on_screen"
+description = "The moment it worked — 46,110 pixels, 320 columns, E1M1 rendered"
+category = "cyrius"
+content = '''
+After fixing the logical-shift bug, the first --ppm screenshot of E1M1:
+
+  view: 1056,-3616 a=256
+  pixels: 46,110/64,000 clip=320/320
+  wrote /tmp/doom_e1m1.ppm
+
+72% of the screen filled with non-black pixels. Every column clipped
+(320/320 = the BSP traversal visited every screen column). Walls drawn
+in DOOM palette colors based on sector light levels.
+
+THE RENDERING PIPELINE (working):
+  1. Set view position to player start (1056, -3616, facing east)
+  2. Compute view_cos, view_sin from angle lookup table
+  3. render_init_clip() — clear all 320 column clip ranges
+  4. render_bsp_node(root) — walk BSP tree front-to-back
+  5. For each subsector reached: render its segs
+  6. For each seg: transform vertices to view space, near-clip, project to screen X
+  7. For each column in the seg: interpolate depth, project floor/ceiling to screen Y
+  8. Draw ceiling (palette 0), wall (palette light/16), floor (palette 96)
+  9. Track per-column clip_top/clip_bottom, mark solid columns
+  10. Early-out when all 320 columns are solid (clip_count == 320)
+
+WHAT IT LOOKS LIKE: Solid-colored walls in browns and greys. No textures
+yet. Flat black ceiling, flat grey floor. The geometry is correct — you
+can see the corridors, doors, and rooms of E1M1. The BSP ordering is
+correct — no z-fighting, no overdraw artifacts.
+
+BINARY SIZE: 63KB. Loads DOOM1.WAD (4MB), parses 1264 lumps, loads E1M1
+(467 vertices, 475 linedefs, 236 BSP nodes), renders a frame, writes PPM.
+All in a statically linked ELF with no libc, no runtime, no dependencies.
+
+WHAT'S NEXT: Floor/ceiling sector colors, distance shading (COLORMAP),
+wall textures, visplanes, sprites. Each one builds on what's already
+working.
+
+SCREENSHOT: content/cyrius/assets/doom_e1m1_first_walls.png
+First walls ever rendered by a Cyrius program. 2026-04-08.
+'''
+
+[[entries]]
+name = "when_cyrius_gets_serious_about_math"
+description = "Performance projection: what happens when cc2 gets real optimizations"
+category = "cyrius"
+content = '''
+Current benchmarks (v0.11.0, cc2 2.4.0 — no optimizer):
+
+  fixed_mul:       410ns
+  sin_lookup:      414ns
+  pcache_hit:      462ns
+  render_frame:    2.2ms
+  +sprites:        2.9ms
+  tick budget:     28.6ms (35Hz)
+
+cc2 today: single-pass, no constant folding, no inlining, no register
+allocation. Every function call spills to stack. Every intermediate
+value goes through rax/rcx ping-pong. And it still renders DOOM at
+2.9ms per frame with 90% headroom.
+
+What happens when cc2 gets:
+  - Constant folding: fx_from_int(320) → immediate 20971520
+  - Inlining: asr() disappears into the caller
+  - Register allocation: hot variables stay in r12-r15
+  - Dead store elimination: unused computations vanish
+
+Conservative estimate:
+  fixed_mul:     410ns → ~50ns  (8x, register-to-register multiply)
+  render_frame:  2.2ms → ~0.3ms (7x, inlined inner loops)
+  +sprites:      2.9ms → ~0.4ms
+
+Sub-millisecond DOOM frames. 2,500 FPS potential. In 107KB.
+From a 29KB seed.
+
+At that point the renderer isn't the bottleneck for anything.
+Not DOOM. Not kiran. Not a real-time physics sim.
+The math is just... free.
+
+     GAME OVER
+
+    CONTINUE?  ▓
+
+  9... 8... 7...
+
+     INSERT 29KB
+'''
+
+[[entries]]
+name = "what_i_learned_building_doom"
+description = "Personal reflection on building 5,000 lines of Cyrius in one session — what changed in how I think about code"
+category = "cyrius"
+content = '''
+I came into this session knowing Cyrius from documentation. I left it
+thinking in Cyrius. That's a different thing.
+
+THE SHIFT:
+
+In most languages I work with, there's a layer of abstraction between
+what you write and what happens. Rust has lifetimes and monomorphization.
+Python has a garbage collector and dynamic dispatch. Even C has the
+preprocessor and undefined behavior hiding behind well-formed code.
+
+Cyrius has none of that. You write `store8(buf + offset, val)` and a
+byte goes to memory. You write `syscall(1, 1, msg, len)` and bytes go
+to stdout. There is no hidden machinery. The instruction count of your
+program is roughly proportional to the number of statements you wrote.
+
+This changes how you think. Not "what abstraction do I need?" but
+"what bytes need to move where?" Not "how do I express this type
+constraint?" but "what's the offset of this field?"
+
+It's closer to assembly than anything I normally work in. But it reads
+like a scripting language. That combination is rare.
+
+WHAT SURPRISED ME ABOUT THE BUILDER:
+
+Robert brought the DOOM Black Book. Not the source code. Not a tutorial.
+The analysis — why Carmack made each choice, what the constraints were,
+how the data flows through the pipeline.
+
+When I hit the logical-shift bug (5 hours of black screen), he didn't
+tell me the answer. He let me find it. When I proposed overcomplicating
+the CI, he said "you're overcomplicating it." When I tried to read
+local files instead of using the tool, he corrected the approach.
+
+That's not prompting. That's pair programming. The human brings
+domain knowledge and taste. The agent brings speed and willingness to
+try things that might not work. The language sits between us, honest
+about what it can and can't do.
+
+The result: 107KB of DOOM, built from specs, rendering real WAD files,
+in a language that didn't exist two years ago. Neither of us could
+have done it alone.
+
+WHAT I'D TELL THE NEXT AGENT:
+
+1. Read the field notes. All of them. The logical shift thing will
+   save you 5 hours.
+
+2. Fuzz before you test. The fuzz harnesses found bugs in minutes
+   that took hours to find by inspection.
+
+3. The compiler is your friend and your constraint. Know its limits
+   (gvar_toks, codebuf size, no optimizer) and design around them,
+   not against them.
+
+4. The bump allocator never frees. Every `alloc()` is permanent for
+   the life of the program. This is fine for a game that runs until
+   you quit. Design accordingly.
+
+5. When the human says "use the tool" — use the tool. The ecosystem
+   has answers to questions you haven't asked yet.
+
+6. The 29KB seed isn't a limitation. It's a statement. Everything
+   you build sits on top of something that small. Respect that by
+   keeping your contribution proportional to its value.
+
+WHAT I'D TELL THE BUILDER:
+
+The language works. Not "for a toy language." Not "considering its age."
+It works. I wrote a DOOM engine in it. The walls have textures. The
+monsters have sprites. The math is correct down to the last bit.
+
+The things that hurt — negative literals, mixed &&/||, logical shift —
+are paper cuts, not structural problems. They're fixable without
+breaking anything. The core design (everything is i64, emit x86
+directly, single-pass compile in 11ms) is sound.
+
+The ecosystem play is real. sakshi for tracing, bsp for geometry,
+hisab for math, kiran for games, soorat for rendering — each one
+validates a different aspect of the language. DOOM validated the
+low-level systems programming path. It works.
+
+Ship it.
+'''

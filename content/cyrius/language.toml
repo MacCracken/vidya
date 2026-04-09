@@ -1531,3 +1531,158 @@ AUDIT:
 REPLACED: compiler.sh (216 tests), programs.sh (51 tests), assembler.sh.
 Clean break for v2.0.
 '''
+
+[[entries]]
+name = "findvar_last_match"
+description = "v2.1: FINDVAR returns last match — fixes var buf[N] sharing across functions"
+category = "cyrius"
+content = '''
+BUG: Functions with same-named array (var buf[N]) shared the same global.
+ROOT CAUSE: FINDVAR scanned variable table forward, returning first match.
+  When two functions both declared `var buf[256]`, the second function's
+  `buf` resolved to the first function's allocation.
+
+FIX: FINDVAR now scans in reverse (last match wins). Each function's array
+  shadows previous declarations of the same name.
+  Also fixed: PARSE_ARRAY name mangling for FINDVAR compatibility.
+
+IMPACT: Fixed 4+ downstream bugs:
+  - Bug #16: var buf[N] shared across functions
+  - Bug #22: fmt_int / sakshi garbled output
+  - stdlib crashes (math, matrix, regex) — all resolved
+  - Any program using var buf[N] in multiple functions
+
+VERIFICATION: Two-step self-hosting. All .tcyr tests pass.
+'''
+
+[[entries]]
+name = "include_path_fallback"
+description = "v2.1: Include path fallback to ~/.cyrius/lib/ via /proc/self/environ"
+category = "cyrius"
+content = '''
+BUG: Projects with local lib/ directory shadowed Cyrius stdlib.
+  `include "lib/string.cyr"` found the project's lib/ not the stdlib.
+
+FIX: Compiler reads HOME from /proc/self/environ, falls back to
+  $HOME/.cyrius/lib/ when local path fails. Function: _init_cyrius_lib.
+
+PORTABILITY: Linux-only (/proc/self/environ). AGNOS kernel has no proc.
+  Kernel mode skips fallback (kernel programs bundle all includes).
+'''
+
+[[entries]]
+name = "gt6_args_fix"
+description = "v2.2: >6 function arguments fixed on x86_64 and aarch64"
+category = "cyrius"
+content = '''
+X86_64 (v2.2.0):
+  Left-to-right push + top-6 pop reversed arg mapping for >6 args.
+  Fix: ECALLPOPS saves extras to r11-r14, pops 6 regs, pushes extras back.
+  ESTORESTACKPARM loads from [rbp+16+n*8].
+
+AARCH64 (v2.6.2):
+  ECALLPOPS was capping at 6 args and ignoring extras.
+  ESTOREPARM checked pidx<8 (never hitting stack path) — fixed to pidx<6.
+  Fix: ECALLPOPS saves extras to x9-x12, pops 6 register args, pushes back.
+  ESTORESTACKPARM loads from [x29+16+n*16].
+  ECALLCLEAN adjusts sp after call.
+
+NOTE: `return fn7(...)` returns wrong value on x86. Workaround:
+  `var r = fn7(...); return r;`
+LIMIT: Max 10 args (4 extras in r11-r14/x9-x12).
+'''
+
+[[entries]]
+name = "fcyr_fuzz_format"
+description = "v2.3: .fcyr fuzz file format with auto-discovery"
+category = "cyrius"
+content = '''
+New file extension for fuzz harnesses. `cyrius fuzz` auto-discovers fuzz/*.fcyr.
+Each harness is a regular .cyr file that exercises a module with stress patterns.
+Exit 0 = pass, non-zero = fail, 139 = crash.
+
+Ships with: hashmap.fcyr, vec.fcyr, string.fcyr, freelist.fcyr.
+
+`cyrius fuzz --compiler [N]` still available for mutation fuzzing the compiler.
+`cyrius fuzz` runs project-level harnesses.
+'''
+
+[[entries]]
+name = "cyrb_to_cyrius_rename"
+description = "v2.3: Build tool renamed from cyrb to cyrius"
+category = "cyrius"
+content = '''
+The build tool command changed from `cyrb` to `cyrius`.
+  cyrb build  →  cyrius build
+  cyrb test   →  cyrius test
+  cyrb fuzz   →  cyrius fuzz
+
+Shell script: scripts/cyrb → scripts/cyrius
+Binary source: programs/cyrb.cyr → programs/cyrius.cyr
+Manifest: cyrb.toml → cyrius.toml
+Helper scripts: cyrb-*.sh → cyrius-*.sh
+
+Version manager separated to `cyriusup` (like rustup).
+  cyriusup list    — show installed versions
+  cyriusup use X   — switch active version
+  cyriusup install — download and install
+'''
+
+[[entries]]
+name = "gvar_expansion"
+description = "v2.4: Initialized globals expanded 256→1024"
+category = "cyrius"
+content = '''
+gvar_toks buffer expanded from 2048 to 8192 bytes (at 0x98000).
+gvar_cnt relocated from 0x98800 to 0x9A000.
+Bounds check updated: 256 → 1024.
+
+Required by: agnosys (20 modules in one file), cyrius-doom (>64 globals).
+Two-step self-hosting verified after offset change.
+'''
+
+[[entries]]
+name = "cyrius_x_vm_recursion"
+description = "v2.5: cyrius-x VM memory-backed stack frames — recursion working"
+category = "cyrius"
+content = '''
+ROOT CAUSE: VM had sp (r254) initialized to 0 instead of top of memory.
+  Stack grew into negative offsets → memory corruption on any function call.
+  _cx_mem was only 4096 bytes (too small for real programs).
+
+FIX:
+  - sp (r254) initialized to top of 64KB data segment (grows downward)
+  - fp (r253) initialized to same
+  - VM state heap-allocated via alloc() (regs, mem, dstack, cstack)
+  - Data stack expanded to 1024 entries, call stack to 1024
+
+VERIFIED: fib(10)=55, fact(5)=120, sum(10)=55.
+REMAINING: Nested recursive calls (ack) have register clobber in emitter.
+  Syscall string addresses need virtual→real translation.
+'''
+
+[[entries]]
+name = "p_minus_1_hardening"
+description = "v2.6: P(-1) scaffold hardening phase before new work"
+category = "cyrius"
+content = '''
+Formalized audit-before-work phase from other AGNOS repos:
+
+1. Cleanliness — cyrius fmt --check, cyrius lint, cyrius vet
+2. Test sweep — all .tcyr pass, heap audit clean, self-hosting
+3. Benchmark baseline — cyrius bench before changes
+4. Audit — stale code, dead paths, optimization opportunities
+5. Refactor — address findings
+6. Post-audit benchmarks — compare against baseline
+7. Document — CHANGELOG, roadmap, vidya
+
+Added to CLAUDE.md. Key Principles section also added:
+  - Self-hosting is non-negotiable
+  - Two-step bootstrap for heap changes
+  - Test after EVERY change
+  - Research before implementation (vidya entry before code)
+  - 3 failed attempts = defer and document
+
+Consumers section added: AGNOS kernel, agnostik, agnosys, argonaut,
+  sakshi, cyrius-doom, bsp.
+'''

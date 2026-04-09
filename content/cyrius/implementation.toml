@@ -3139,3 +3139,80 @@ KEY LESSON:
   ordering (pass 1 overwrites, pass 2 reinitializes). Any change to
   compilation phases could turn this into a silent miscompilation.
 '''
+
+[[entries]]
+name = "heap_consolidation"
+description = "v2.1: Heap consolidation 6.8MB→4.7MB with 132 offset relocations"
+category = "cyrius"
+content = '''
+BEFORE: Heap grew to 6.8MB with scattered regions, many gaps.
+AFTER: Consolidated layout starting at 0xA0000 for high-heap tables.
+
+KEY RELOCATIONS:
+  fixup_tbl      → 0xA0000 (131072 bytes, 8192 entries)
+  fn_names       → 0xC0000
+  fn_offsets     → 0xC2000
+  fn_params      → 0xC4000
+  fn_body_start  → 0xC6000
+  fn_body_end    → 0xC8000
+  fn_inline      → 0xCA000
+  struct_fnames  → 0xCC000
+  output_buf     → 0xCE000 (262144 bytes)
+  var_noffs      → 0x10E000
+  var_sizes      → 0x11E000
+  var_types      → 0x12E000
+  tok_types      → 0x13E000 (131072 entries)
+  tok_values     → 0x23E000
+  tok_lines      → 0x33E000
+  preprocess_out → 0x43E000 (512KB)
+  brk            → 0x4BE000
+
+132 offset references updated across 6 source files.
+Every change requires two-step bootstrap (cc3 compiles cc4, cc3==cc4).
+'''
+
+[[entries]]
+name = "str_replace_str_api_bug"
+description = "v2.6.1: str_replace used strlen() on Str objects — silent data corruption"
+category = "cyrius"
+content = '''
+BUG: regex.cyr str_replace() called strlen(old) and strlen(new_str) on Str
+  objects. Str stores {data_ptr, length} — strlen on the Str pointer reads
+  the raw pointer bytes as ASCII until it hits a null, producing garbage length.
+
+SYMPTOM: str_replace("hello world", "world", "cyrius") returned the
+  original string unchanged — the memeq comparison at the wrong length
+  never found a match.
+
+FIX: Replace strlen(old) → str_len(old), strlen(new_str) → str_len(new_str).
+  Use str_data() to get raw pointer for memeq/memcpy.
+
+LESSON: Cyrius has two string types — C strings (char*) and Str (ptr+len).
+  Functions that accept one must not be called with the other.
+  Convention: C string params are usually named `s` or `cstr`.
+  Str params are named with type annotation or documented.
+'''
+
+[[entries]]
+name = "sha1_buffer_overflow"
+description = "v2.6.3: SHA-1 var w[80] was 80 bytes for 640 bytes of data"
+category = "cyrius"
+content = '''
+BUG: majra/src/ws.cyr sha1() declared `var w[80]` for the message schedule.
+  SHA-1 needs 80 × 32-bit words = 320 bytes minimum.
+  Code used store64/load64 (8 bytes per entry) → 80 × 8 = 640 bytes needed.
+  With only 80 bytes allocated, writes to w[10+] clobbered stack variables
+  (h0-h4, padded, block, and locals from the calling function).
+
+SYMPTOM: Garbled output after sha1() call. The `println` after sha1 produced
+  backticks and control characters because the format buffer was clobbered.
+  The SHA-1 output appeared correct by accident — the clobbered h0-h4 values
+  happened to produce the right digest through overlapping memory reads.
+
+FIX: Changed to heap allocation: `var w = alloc(640)`.
+  Updated all `&w + offset` to `w + offset`.
+
+KEY GOTCHA: `var buf[N]` in Cyrius is N BYTES, not N elements.
+  For an array of 80 i64 values, you need `var buf[640]` not `var buf[80]`.
+  This is documented in Known Gotchas but still catches every new project.
+'''
