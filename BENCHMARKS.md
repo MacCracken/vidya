@@ -57,10 +57,10 @@ Results tracked in `bench-history.csv` (Cyrius) and `bench-history-rust.csv` (Ru
 
 ```sh
 # Cyrius
-cyrb bench tests/vidya.bcyr
+cyrius bench
 
 # Or manually
-cat tests/vidya.bcyr | cc2 > /tmp/vidya_bench && chmod +x /tmp/vidya_bench && /tmp/vidya_bench
+cyrius build tests/vidya.bcyr /tmp/vidya_bench && /tmp/vidya_bench
 ```
 
 ## Notes

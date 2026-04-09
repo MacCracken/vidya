@@ -46,6 +46,27 @@ Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius
 
 ---
 
+## P0B — Service Layer (v2.x)
+
+Vidya as a localhost HTTP service — queryable by humans, agents, and other AGNOS programs without shelling out to the CLI.
+
+| Item | Description | Priority |
+|------|-------------|----------|
+| **HTTP server** | Localhost JSON API on configurable port. Endpoints: `/search`, `/info/{topic}`, `/compare`, `/list`, `/stats`, `/gaps`, `/languages`. Uses Cyrius `lib/net.cyr` TCP sockets. Static ELF, no runtime deps, resident in memory. | High |
+| **JSON responses** | All endpoints return JSON (via `lib/json.cyr`). Structured output for programmatic consumption by agnoshi, hoosh, and external tools. | High |
+| **Content hot-reload** | Watch content/ for changes, reload registry without restart. For dev workflow — edit a `.cyr` file, query immediately. | Medium |
+| **Marja integration** | When marja (AGNOS HTTP framework) lands, migrate from raw sockets to marja request handling. Same endpoints, cleaner routing. | Future |
+| **Bote/MCP integration** | When bote (MCP) supports Cyrius, expose vidya as MCP tools — search, get, compare, list. Agents query vidya through the model context protocol. Replaces the old Rust `src/mcp.rs`. | Future |
+| **Memory-resident mode** | `vidya serve` loads all content once, serves from memory. The entire corpus (~400 examples, ~2MB text) fits in RAM alongside the 85KB binary. No disk I/O after startup. | High |
+
+**Design constraints:**
+- Single static ELF — no nginx, no Python, no Node
+- All-in-memory after startup — RAM8 philosophy
+- JSON over HTTP/1.1 — simplest protocol that agents and curl both speak
+- Sakshi tracing on all requests — structured observability from day one
+
+---
+
 ## P1 — New Topics (Networking & Infrastructure)
 
 | Topic | Description | Priority |

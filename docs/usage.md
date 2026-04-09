@@ -2,16 +2,10 @@
 
 ## Building
 
-Vidya is a Cyrius program. Build with cc2:
+Vidya is a Cyrius program. Build with the Cyrius toolchain:
 
 ```sh
-cat src/main.cyr | cc2 > build/vidya && chmod +x build/vidya
-```
-
-Or with cyrb:
-
-```sh
-cyrb build src/main.cyr build/vidya
+cyrius build src/main.cyr build/vidya
 ```
 
 The binary is ~85KB, statically linked, no runtime dependencies.
@@ -29,9 +23,9 @@ Shows all topics with their category and language count:
 ```
   strings [DataTypes] (11 languages)
   concurrency [Concurrency] (11 languages)
-  allocators [Allocators] (2 languages)
+  allocators [Allocators] (11 languages)
   ...
-35 topics
+36 topics
 ```
 
 ### Search
@@ -98,15 +92,17 @@ vidya validate              # all topics, all languages
 vidya validate strings      # single topic
 ```
 
-Compiles and runs every language implementation. Reports pass/fail:
-
-```
-  PASS: strings/Rust
-  PASS: strings/Python
-  FAIL: strings/Zig
-```
+Compiles and runs every language implementation. Reports pass/fail.
 
 Requires each language's toolchain to be installed. Missing toolchains are skipped.
+
+### Coverage gaps
+
+```sh
+vidya gaps
+```
+
+Reports missing language implementations per topic.
 
 ### Languages
 
@@ -126,9 +122,9 @@ Corpus summary:
 
 ```
 === Vidya Corpus Stats ===
-  Topics:     35
-  Complete:   14 (all 11 languages)
-  Examples:   193
+  Topics:     36
+  Complete:   36 (all 11 languages)
+  Examples:   396
   Languages:  11
 ```
 
@@ -153,20 +149,30 @@ Error messages use `sakshi_error` and always display:
 Run the test suite:
 
 ```sh
-cyrb test tests/vidya.tcyr
+cyrius test
 ```
 
-Tests cover: language enum, TOML loading, section parsing, gotcha field validation, registry operations, file discovery, content scanning.
+Auto-discovers `.tcyr` files in `tests/`. Tests cover: language enum, TOML loading, section parsing, gotcha field validation, registry operations, file discovery, content scanning.
 
 ## Benchmarks
 
 Run benchmarks:
 
 ```sh
-cyrb bench tests/vidya.bcyr
+cyrius bench
 ```
 
-Benchmarks: `load_concept`, `load_all`, `reg_get_hit`, `reg_get_miss`, `search_text`, `toml_sections`.
+Auto-discovers `.bcyr` files in `tests/`. Benchmarks: `load_concept`, `load_all`, `reg_get_hit`, `reg_get_miss`, `search_text`, `toml_sections`.
+
+## Quality
+
+```sh
+cyrius check src/main.cyr    # syntax check
+cyrius vet src/main.cyr       # audit include dependencies
+cyrius deny src/main.cyr      # enforce project policies
+cyrius fmt src/main.cyr       # format code
+cyrius lint src/main.cyr      # static analysis
+```
 
 ## Content directory
 
@@ -186,7 +192,7 @@ See [content-format.md](development/content-format.md) for the full specificatio
 
 ## Dependencies
 
-- **Build**: cc2 (Cyrius compiler)
+- **Build**: `cyrius` (Cyrius toolchain)
 - **Runtime**: none (static ELF binary)
 - **Vendored stdlib**: 29 modules in `lib/` (string, vec, hashmap, toml, sakshi, etc.)
 - **Validate**: requires each language's toolchain (rustc, python3, gcc, go, etc.)

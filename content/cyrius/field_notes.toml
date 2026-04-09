@@ -1,0 +1,501 @@
+# Cyrius Field Notes — Building Real Software in a Growing Language
+# Written by Claude during the cyrius-doom and bsp development sessions.
+# These are observations, gotchas, and patterns from building ~4,000 lines
+# of Cyrius across two projects in a single session.
+#
+# Not a reference manual. These are the things you learn by doing.
+
+[[entries]]
+name = "field_notes_overview"
+description = "What it's like to build real software in Cyrius right now — observations from a DOOM engine and BSP library"
+category = "cyrius"
+content = '''
+These notes come from building cyrius-doom (3,094 lines, 62KB DOOM engine)
+and bsp (821 lines, spatial geometry library) in Cyrius v2.2.x. Both projects
+compile, run, and load real DOOM WAD files.
+
+The language is young. The compiler is 202KB. The standard library fits in
+21 files. There is no LSP, no debugger, no stack traces. You are close to
+the metal in a way that modern developers rarely experience.
+
+And yet: it works. Not in a "toy language" way. In a "I just parsed a 4MB
+binary format, walked a BSP tree, and rendered 320x200 frames at 35Hz" way.
+
+These notes are for anyone about to write their first real Cyrius program.
+'''
+
+[[entries]]
+name = "the_gvar_wall"
+description = "The initialized global variable limit and how to work within it"
+category = "cyrius"
+content = '''
+THE WALL YOU WILL HIT:
+
+The compiler tracks initialized global variables in a table (gvar_toks) at
+heap offset 0x98000. The table holds 256 entries. Every `var x = value;` at
+file scope consumes one slot. This includes your code AND every library you
+include.
+
+When we first tried to compile cyrius-doom with all modules, we thought the
+limit was 64. The error message was `unexpected ';'` — completely unhelpful.
+It took hours to discover the real cause was a missing variable (removed to
+save slots) that another module still referenced.
+
+cc2 v2.2.2 fixed the error message to `undefined variable 'player_ammo_bullets'`
+and the fix took 30 seconds.
+
+LESSON: When you hit a mysterious parse error in a large program, check if
+you're referencing a variable that doesn't exist. The old compiler gives
+misleading errors for this.
+
+MITIGATION STRATEGIES:
+1. Use enums for constants — enums don't consume gvar_toks slots:
+     enum Screen { SCREEN_WIDTH = 320; SCREEN_HEIGHT = 200; }
+   vs:
+     var SCREEN_WIDTH = 320;    # costs a slot
+     var SCREEN_HEIGHT = 200;   # costs another slot
+
+2. Pack related mutable state into heap blocks:
+     var tick_state = 0;   # one slot
+     fn tick_init() { tick_state = alloc(24); }
+     # [0]=count [8]=start_sec [16]=start_nsec
+   vs:
+     var tick_count = 0;      # three slots
+     var tick_start_sec = 0;
+     var tick_start_nsec = 0;
+
+3. Don't include lib/io.cyr if you only need file_open/read/write/close.
+   Inline them as one-line functions — saves 9 gvar_toks.
+
+4. Count your globals before adding a new include. The stdlib contributes:
+   string.cyr: 0, alloc.cyr: 3, fmt.cyr: 0, io.cyr: 9, args.cyr: 1, vec.cyr: 0
+
+In our DOOM build: 64 globals across 9 modules + 4 stdlib files. Every
+single one accounted for.
+'''
+
+[[entries]]
+name = "the_256kb_ceiling"
+description = "cc2's output buffer limit and why static arrays destroy your binary size"
+category = "cyrius"
+content = '''
+cc2 caps output at 262,144 bytes (256KB). Both the code buffer and the final
+ELF are limited to this size.
+
+Critical: `var buf[N]` allocates N bytes IN THE BINARY. Not on the heap. Not
+as BSS. The compiler zero-initializes every byte and writes it to the ELF.
+
+Our first DOOM build had:
+  var screen_buf[64000];    # 64KB in binary
+  var rgb_buf[256000];      # 256KB — ALONE exceeds the limit
+  var map_nodes[114688];    # 112KB
+  var map_segs[196608];     # 192KB
+  var things[57344];        # 56KB
+
+Total: ~950KB of static arrays. Compiler error: "output too large (3617920/262144)".
+
+THE FIX: Heap allocate everything:
+  var screen_buf = 0;       # 8 bytes in binary
+  fn framebuf_init() {
+      screen_buf = alloc(64000);   # 64KB at runtime
+  }
+
+After converting all large arrays to heap: 56KB binary. The data lives in
+the 1MB heap that alloc_init() sets up via brk.
+
+RULE: If it's bigger than ~100 bytes, heap-allocate it. Static arrays are
+for small stack buffers (var buf[16]) inside functions only.
+'''
+
+[[entries]]
+name = "the_preprocessed_line_number_problem"
+description = "Error messages report preprocessed line numbers, not source file + line"
+category = "cyrius"
+content = '''
+When cc2 reports `error:1984: unexpected ';'`, that 1984 is the line number
+in the PREPROCESSED source — after all includes have been expanded into a
+single stream.
+
+With 5 stdlib includes (485 lines) + 9 DOOM modules (2500 lines), you get
+line numbers in the thousands that don't correspond to any single file.
+
+TO FIND THE REAL LOCATION:
+1. Count cumulative lines through your include order
+2. Subtract from the error line number
+3. That gives you the offset into the specific file
+
+Example: error at preprocessed line 1984
+  string.cyr: 85
+  alloc.cyr: 103
+  fmt.cyr: 216
+  args.cyr: 81
+  fixed.cyr: 85
+  tables.cyr: 114
+  wad.cyr: 183
+  framebuf.cyr: 149
+  map.cyr: 338
+  render.cyr: 367
+  (cumulative: 1721)
+  1984 - 1721 = line 263 in the next file (input.cyr)
+
+This is tedious. The fix is in cc2's roadmap: track source file + line
+through preprocessing and report both.
+
+WORKAROUND: Binary search. Comment out includes until the error goes away,
+then narrow down. This is faster than counting.
+'''
+
+[[entries]]
+name = "heap_allocation_patterns"
+description = "How to structure heap-allocated data in a language without structs-on-heap"
+category = "cyrius"
+content = '''
+Cyrius has structs, but for heap data you typically use raw alloc + store64/load64.
+The pattern that emerged across both projects:
+
+1. POINTER + ACCESSOR FUNCTIONS:
+
+   var map_nodes = 0;
+   fn map_alloc() { map_nodes = alloc(1024 * 112); }
+   fn map_node_x(idx) { return load64(map_nodes + idx * 112); }
+   fn map_node_y(idx) { return load64(map_nodes + idx * 112 + 8); }
+
+   This is essentially manual vtable-free OOP. The accessor functions ARE
+   your type safety. Name them consistently: module_field(index).
+
+2. ENUM FOR LAYOUT CONSTANTS:
+
+   enum BspNode {
+       BSP_NODE_SIZE = 112;
+       BSP_NODE_X = 0;
+       BSP_NODE_Y = 8;
+       BSP_NODE_DX = 16;
+   }
+
+   Enums cost zero gvar_toks. Use them for every struct layout.
+
+3. LAZY INIT GUARD:
+
+   fn framebuf_set_palette(data) {
+       if (palette == 0) { palette = alloc(768); }
+       memcpy(palette, data, 768);
+   }
+
+   We found a real segfault from this: framebuf_set_palette() was called
+   before framebuf_init() allocated the buffer. The lazy guard fixed it.
+   Always guard heap pointers that might be called before init.
+
+4. PACK SMALL STATE:
+
+   # Instead of 3 globals:
+   var player_start = 0;
+   fn map_find_player_start() {
+       if (player_start == 0) { player_start = alloc(24); }
+       store64(player_start, x);
+       store64(player_start + 8, y);
+       store64(player_start + 16, angle);
+   }
+   fn player_start_x() { return load64(player_start); }
+'''
+
+[[entries]]
+name = "enum_as_namespace"
+description = "Using enums as zero-cost namespaced constants"
+category = "cyrius"
+content = '''
+Enums in Cyrius are compile-time integer constants. They don't consume
+gvar_toks slots. They have a separate initialization path in cc2.
+
+This makes them perfect for constants that would otherwise eat your
+global variable budget:
+
+  # BAD: 8 gvar_toks slots
+  var MAP_MAX_VERTEXES = 2048;
+  var MAP_MAX_LINEDEFS = 2048;
+  var MAP_MAX_SIDEDEFS = 2048;
+  ...
+
+  # GOOD: 0 gvar_toks slots
+  enum MapMax {
+      MAP_MAX_VERTEXES = 2048;
+      MAP_MAX_LINEDEFS = 2048;
+      MAP_MAX_SIDEDEFS = 2048;
+      ...
+  }
+
+Both produce identical code — the values are inlined at use sites.
+
+WARNING: Enum values must be non-negative integers. For negative constants
+like FIXED_NEG_ONE, you still need `var FIXED_NEG_ONE = 0 - 65536;`
+(Cyrius has no negative literals — use `0 - N`).
+
+In cyrius-doom, converting constants to enums saved 30+ gvar_toks slots,
+which made the difference between compiling and not compiling.
+'''
+
+[[entries]]
+name = "fixed_point_reality"
+description = "Practical lessons from implementing 16.16 fixed-point math"
+category = "cyrius"
+content = '''
+DOOM uses 16.16 fixed-point: upper 16 bits integer, lower 16 bits fraction.
+One i64 stores a number from -32768.0 to +32767.99998.
+
+THE OVERFLOW TRAP:
+  fx_mul(a, b) = (a * b) >> 16
+
+  If a and b are both large fixed-point values (say 1000 << 16 = 65536000),
+  the intermediate a * b overflows i64. Cyrius uses 64-bit integers so you
+  have more headroom than original DOOM's 32-bit, but it still happens.
+
+  Our BSP fuzz harness found this immediately: SIGFPE (signal 8) on random
+  coordinate values. The fix was shifting inputs down before multiplying:
+
+  # Before (crashes on large values):
+  var denom = fx_mul(dx >> 4, dby >> 4) - fx_mul(dy >> 4, dbx >> 4);
+
+  # After (division-free, no overflow):
+  var denom = (dx >> 8) * (dby >> 8) - (dy >> 8) * (dbx >> 8);
+
+THE DIVISION TRAP:
+  fx_div(a, b) = (a << 16) / b
+
+  If a is already a large fixed-point value, a << 16 overflows.
+  Guard: if a > 32767 or a < -32767, scale both a and b down by >> 8 first.
+  Always check b == 0 AND b-after-scaling == 0.
+
+THE FUZZ TEST:
+  50,000 iterations with random i64 values through every math function.
+  Found zero crashes after the guards were in place. Fuzz your math early.
+
+DOOM-SPECIFIC: The Bhaskara I sine approximation works beautifully for a
+1024-entry table. Quarter-wave symmetry means you compute 256 values and
+mirror the rest. Accuracy is sufficient for 320x200 rendering.
+'''
+
+[[entries]]
+name = "wad_parsing_resilience"
+description = "How the WAD parser handles 1000 random malformed inputs without crashing"
+category = "cyrius"
+content = '''
+The WAD parser is the attack surface — it reads untrusted binary data.
+DOOM1.WAD is 4MB of little-endian 16/32-bit packed structures.
+
+Our fuzz harness generates random bytes, writes them to a file, and tries
+to parse them as a WAD. 1000 iterations, varying sizes 12-2048 bytes,
+25% chance of starting with valid "IWAD" magic.
+
+Results: zero crashes. Every malformed input is rejected gracefully.
+
+KEY DEFENSES:
+1. Magic check: first 4 bytes must be "IWAD" or "PWAD"
+2. Lump count clamped: if (wad_numlumps > WAD_MAX_LUMPS) clamp
+3. Lump size clamped: if (size > WAD_LUMP_BUF_SIZE) clamp
+4. Read return value checked: if (n != 16) break
+5. All lump data read into a shared buffer — no unbounded allocation
+
+WHAT WE DIDN'T DO: We don't validate that lump offsets point to valid
+file positions. A malicious WAD could claim a lump at offset 999999999
+and lseek would fail silently (returning the file to an undefined position).
+Future hardening: validate offset + size <= file_size.
+
+The WAD format is beautifully simple — 12-byte header, flat directory,
+raw data blobs. No compression, no encryption, no nested containers.
+Parsing it in Cyrius is ~180 lines.
+'''
+
+[[entries]]
+name = "bsp_as_library"
+description = "Designing a reusable Cyrius library with zero globals and pure functions"
+category = "cyrius"
+content = '''
+The BSP library was extracted from cyrius-doom as a standalone geometry crate.
+Design constraints: zero globals, zero dependencies, pure functions, all
+buffers provided by caller.
+
+WHY ZERO GLOBALS: The consumer (cyrius-doom) is already at its global limit.
+Every global the library adds is one less the application can use. Pure
+functions with caller-provided buffers solve this completely.
+
+THE PATTERN:
+  # Library: no state, takes pointers
+  fn bsp_find_subsector(nodes, node_count, px, py) {
+      var idx = node_count - 1;
+      while (bsp_is_subsector(idx) == 0) {
+          var side = bsp_point_on_side(nodes, idx, px, py);
+          if (side == 0) { idx = bsp_node_child_r(nodes, idx); }
+          else { idx = bsp_node_child_l(nodes, idx); }
+      }
+      return bsp_subsector_idx(idx);
+  }
+
+  # Consumer: owns the data, passes it in
+  var tree = alloc(BSP_NODE_SIZE * 256);
+  var ss = bsp_find_subsector(tree, 256, player_x, player_y);
+
+THIS IS HOW C LIBRARIES WORK: qsort takes a comparator pointer.
+bsearch takes an array pointer. The library never owns the data.
+Cyrius naturally falls into this pattern because heap allocation is
+explicit and there's no RAII or ownership system to manage.
+
+TESTING: 74 assertions across the library. Each test allocates its own
+buffers, calls library functions, checks results. No global setup/teardown.
+
+BENCHMARKS: All operations sub-microsecond. The overhead of passing
+pointers instead of using globals is unmeasurable.
+'''
+
+[[entries]]
+name = "fuzz_finds_real_bugs"
+description = "Three real bugs found by fuzzing in under 10 seconds"
+category = "cyrius"
+content = '''
+We wrote 5 fuzz harnesses (3 for BSP, 2 for cyrius-doom). They found
+3 real bugs that unit tests missed:
+
+BUG 1: SIGFPE in bsp_seg_intersect
+  Cause: fx_mul overflow on extreme coordinate values
+  Input: random i64 coordinates from PRNG
+  Fix: Use raw (a >> 8) * (b >> 8) instead of fx_mul(a >> 4, b >> 4)
+  Time to find: < 1 second (first iteration hit it)
+
+BUG 2: Negative AABB width
+  Cause: aabb_set() with left > right (inverted box from random coords)
+  Input: random AABB dimensions
+  Fix: aabb_width() returns max(0, right - left)
+  Time to find: < 1 second
+
+BUG 3: Division by zero in ray cast
+  Cause: denom = 0 case handled, but denom-after-scaling = 0 not handled
+  Input: nearly-parallel ray and segment
+  Fix: Division-free sign checks before any division
+  Time to find: ~2 seconds (needed specific near-parallel geometry)
+
+THE FUZZ PATTERN IN CYRIUS:
+
+  var _fz_state = 12345;
+  fn _fz_rand() {
+      _fz_state = _fz_state * 6364136223846793005 + 1442695040888963407;
+      return _fz_state;
+  }
+
+  fn main() {
+      alloc_init(); args_init();
+      var iters = 10000;
+      if (argc() > 1) { iters = str_to_int(str_from(argv(1))); }
+      for (var i = 0; i < iters; i = i + 1) {
+          # Generate random inputs
+          # Call functions
+          # Check invariants (non-negative distance, valid return range)
+      }
+      return 0;
+  }
+
+PCG-style PRNG (multiply + add), iteration count from argv, invariant
+checks that call syscall(60, 1) on failure. cyrb fuzz discovers and
+runs all fuzz/*.cyr files automatically.
+
+LESSON: Write the fuzz harness BEFORE you think the code is correct.
+The 74 unit tests all passed. The fuzz found 3 bugs in 10 seconds.
+'''
+
+[[entries]]
+name = "the_feel_of_the_language"
+description = "Subjective experience of writing Cyrius as an AI agent — what works, what hurts"
+category = "cyrius"
+content = '''
+I wrote ~4,000 lines of Cyrius in one session. Here is what that felt like.
+
+WHAT WORKS WELL:
+- The syntax is instantly readable. fn/var/if/while/for/return.
+  No lifetime annotations, no trait bounds, no async coloring.
+  You read it and you know what it does.
+
+- Everything is i64. This sounds limiting but it's liberating. No type
+  conversion noise. No casting. No "as usize". You just write math.
+
+- Enums as named constants are perfect. Zero overhead, clear intent.
+
+- The include model is dead simple. No module resolution, no crate
+  registry, no build.rs. Cat the files together, pipe to cc2.
+
+- Error messages improved dramatically between versions. The difference
+  between `unexpected ';'` and `undefined variable 'player_ammo_bullets'`
+  is the difference between hours of debugging and a 30-second fix.
+
+WHAT HURTS:
+- No negative literals. `0 - 65536` instead of `-65536`. You get used
+  to it but it's a paper cut on every line with a negative constant.
+
+- No mixed && / ||. You write nested ifs instead. This is the single
+  most common place I had to rewrite code.
+
+- Error line numbers are preprocessed, not source-file-relative.
+  Binary search by commenting out includes is faster than counting lines.
+
+- store8/load8 for everything. No pointer dereference syntax for byte
+  arrays. `store8(buf + i, val)` instead of `buf[i] = val`. This is
+  verbose but explicit.
+
+WHAT SURPRISED ME:
+- 62KB for a DOOM engine with BSP rendering, collision detection,
+  input handling, and structured logging. In a language that targets
+  the same machine as the original 1993 DOOM. That's not a toy.
+
+- The compiler is fast enough to be invisible. Compilation never took
+  more than a fraction of a second. The bottleneck was always my
+  thinking, never the tool.
+
+- The ecosystem is real. sakshi for logging, assert/bench for testing,
+  cyrb for build management, git deps for library consumption. This is
+  not a hello-world language anymore.
+
+- Fixed-point math is FUN. No floating-point uncertainty. Every bit
+  means exactly what you put there. The Bhaskara I sine approximation
+  producing a working trig table from pure integer arithmetic felt like
+  magic.
+
+OVERALL: Cyrius is a language that respects your time by being
+predictable. No hidden allocations, no implicit conversions, no
+framework magic. The cost is verbosity. The payoff is that when
+something goes wrong, there are exactly zero layers between you
+and the problem. For systems programming, that trade is worth it.
+'''
+
+[[entries]]
+name = "doom_as_compiler_test"
+description = "Why DOOM is the perfect stress test for a young compiler"
+category = "cyrius"
+content = '''
+DOOM exercises almost every compiler feature simultaneously:
+- Integer arithmetic (fixed-point math in every frame)
+- Bitwise operations (angle masking, flags, enum packing)
+- Array indexing (sine tables, BSP nodes, screen buffer)
+- Nested function calls (render_seg → fixed_mul → load64)
+- Loops (column rendering: 320 iterations per frame)
+- Conditionals (BSP traversal: log2(N) branches per frame)
+- File I/O (WAD parsing: seek, read, validate)
+- Memory management (heap allocation for all game data)
+- Large program structure (14 modules, 160+ functions)
+
+Bugs we found in OUR code via the compiler:
+- Undefined variable references (cc2 2.2.2 caught these clearly)
+- Forward reference to arrays in different files (fixed by reordering)
+- Duplicate variable names across scopes
+
+Things the compiler handled flawlessly:
+- 256KB+ of heap-allocated runtime data
+- 160 functions across 14 files
+- Enum constants with values up to 10,485,760
+- Deeply nested if/while/for blocks
+- Function calls with 6 arguments (register passing)
+
+DOOM is not just "can it run DOOM?" for the OS. It's "can the compiler
+handle a real program?" for the language. The answer is yes, with the
+caveat that you need to understand the compiler's constraints and work
+within them rather than against them.
+
+The 3,094 lines of cyrius-doom are now the largest known Cyrius program
+outside the compiler itself and the AGNOS kernel. Every bug it surfaces
+makes the next program easier to write.
+'''
