@@ -160,19 +160,24 @@ _start:
     // 4. Build a PTE from physical address + flags
     // ════════════════════════════════════════════════════════════════
     // make_pte(phys=0x300000, flags=USER_RW)
-    mov     x0, #0x300000       // physical address (page-aligned)
-    movk    x0, #0, lsl #48    // ensure top bits clear
-    orr     x0, x0, PTE_USER_RW // add flags
+    mov     x0, #0x0000
+    movk    x0, #0x30, lsl #16  // x0 = 0x300000 (physical, page-aligned)
+    adr     x4, user_rw_flags
+    ldr     x1, [x4]
+    orr     x0, x0, x1           // add flags
     // Verify the PTE
     and     x1, x0, #0xFFF      // extract low 12 bits (flags)
-    mov     x2, PTE_USER_RW
+    adr     x4, user_rw_flags
+    ldr     x2, [x4]
     and     x2, x2, #0xFFF
     cmp     x1, x2
     b.ne    fail
 
-    mov     x1, PHYS_ADDR_MASK
+    adr     x4, phys_mask
+    ldr     x1, [x4]
     and     x1, x0, x1
-    mov     x2, #0x300000
+    mov     x2, #0x0000
+    movk    x2, #0x30, lsl #16  // x2 = 0x300000
     cmp     x1, x2
     b.ne    fail
 

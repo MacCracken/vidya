@@ -211,20 +211,20 @@ _start:
     // ── Test 6: Verify exception frame layout ─────────────────────
     adr     x3, exception_frame
     ldr     x0, [x3]            // x0 from frame
-    mov     x1, #0xAAAA000000000001
-    movk    x1, #0xAAAA, lsl #48
-    movk    x1, #0x0000, lsl #32
-    movk    x1, #0x0000, lsl #16
-    movk    x1, #0x0001
+    // Build 0xAAAA000000000001 using movz + movk
+    movz    x1, #0x0001              // bits [15:0]
+    movk    x1, #0x0000, lsl #16     // bits [31:16]
+    movk    x1, #0x0000, lsl #32     // bits [47:32]
+    movk    x1, #0xAAAA, lsl #48     // bits [63:48]
     cmp     x0, x1
     b.ne    fail
 
     ldr     x0, [x3, #8]        // x1 from frame
-    mov     x1, #0xAAAA000000000002
-    movk    x1, #0xAAAA, lsl #48
-    movk    x1, #0x0000, lsl #32
+    // Build 0xAAAA000000000002
+    movz    x1, #0x0002
     movk    x1, #0x0000, lsl #16
-    movk    x1, #0x0002
+    movk    x1, #0x0000, lsl #32
+    movk    x1, #0xAAAA, lsl #48
     cmp     x0, x1
     b.ne    fail
 
