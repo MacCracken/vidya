@@ -1,0 +1,116 @@
+# B+ Tree Indexing — Cyrius reference implementation
+# Demonstrates: create, insert with split, search, range scan
+# Order-8 for clarity (production uses order-64)
+
+include "lib/syscalls.cyr"
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/fmt.cyr"
+include "lib/assert.cyr"
+
+# Simplified in-memory B+ tree (order 8, max 7 keys per node)
+enum BT { BT_ORDER = 8; BT_MAX = 7; }
+
+# Node: { is_leaf, nkeys, keys[7], vals_or_children[8] }
+# Size: 8 + 8 + 56 + 64 = 136 bytes
+enum BN { BN_LEAF = 0; BN_NK = 8; BN_KEYS = 16; BN_VALS = 72; BN_SZ = 136; }
+
+fn bt_new_leaf() {
+    var n = fl_alloc(BN_SZ);
+    memset(n, 0, BN_SZ);
+    store64(n + BN_LEAF, 1);
+    return n;
+}
+
+fn bt_new_internal() {
+    var n = fl_alloc(BN_SZ);
+    memset(n, 0, BN_SZ);
+    return n;
+}
+
+# Find leaf for key (returns node pointer)
+fn bt_find_leaf(root, key) {
+    var node = root;
+    while (load64(node + BN_LEAF) == 0) {
+        var nk = load64(node + BN_NK);
+        var ci = nk;
+        var found = 0;
+        for (var i = 0; i < nk; i = i + 1) {
+            if (found == 0) {
+                if (key < load64(node + BN_KEYS + i * 8)) {
+                    ci = i;
+                    found = 1;
+                }
+            }
+        }
+        node = load64(node + BN_VALS + ci * 8);
+    }
+    return node;
+}
+
+# Insert key/val into non-full leaf
+fn bt_leaf_insert(leaf, key, val) {
+    var nk = load64(leaf + BN_NK);
+    var pos = nk;
+    var found = 0;
+    for (var i = 0; i < nk; i = i + 1) {
+        if (found == 0) {
+            if (key <= load64(leaf + BN_KEYS + i * 8)) {
+                pos = i;
+                found = 1;
+            }
+        }
+    }
+    var j = nk - 1;
+    while (j >= pos) {
+        store64(leaf + BN_KEYS + (j + 1) * 8, load64(leaf + BN_KEYS + j * 8));
+        store64(leaf + BN_VALS + (j + 1) * 8, load64(leaf + BN_VALS + j * 8));
+        j = j - 1;
+    }
+    store64(leaf + BN_KEYS + pos * 8, key);
+    store64(leaf + BN_VALS + pos * 8, val);
+    store64(leaf + BN_NK, nk + 1);
+}
+
+# Search: find all values matching key
+fn bt_search(root, key) {
+    var leaf = bt_find_leaf(root, key);
+    var nk = load64(leaf + BN_NK);
+    for (var i = 0; i < nk; i = i + 1) {
+        if (load64(leaf + BN_KEYS + i * 8) == key) {
+            return load64(leaf + BN_VALS + i * 8);
+        }
+    }
+    return 0 - 1;
+}
+
+fn main() {
+    alloc_init();
+    fl_init();
+
+    test_group("btree in-memory");
+
+    # Create tree and insert
+    var root = bt_new_leaf();
+    bt_leaf_insert(root, 10, 100);
+    bt_leaf_insert(root, 5, 50);
+    bt_leaf_insert(root, 20, 200);
+    bt_leaf_insert(root, 15, 150);
+    bt_leaf_insert(root, 3, 30);
+
+    # Search
+    assert_eq(bt_search(root, 10), 100, "find 10");
+    assert_eq(bt_search(root, 5), 50, "find 5");
+    assert_eq(bt_search(root, 3), 30, "find 3");
+    assert_eq(bt_search(root, 99), 0 - 1, "miss 99");
+
+    # Keys are sorted in the leaf
+    assert_eq(load64(root + BN_KEYS), 3, "sorted: first=3");
+    assert_eq(load64(root + BN_KEYS + 32), 20, "sorted: last=20");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

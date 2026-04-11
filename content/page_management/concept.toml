@@ -1,0 +1,44 @@
+id = "page_management"
+title = "Page Management"
+topic = "OperatingSystems"
+description = "Fixed-size page abstraction for database storage — allocating, reading, writing, and recycling 4KB pages within a single file. Pages are the unit of I/O and the building block for B-trees, data tables, and free lists."
+tags = ["page", "4kb", "database", "storage", "free-list", "alloc", "disk-io", "buffer"]
+related_topics = ["btree_indexing", "filesystems", "memory_management"]
+
+[[best_practices]]
+title = "Use a header page for metadata"
+explanation = "The first page (offset 0) stores the file magic, version, page count, free list head, and table directory. All other pages start at offset 4096. This separates metadata from data and makes file validation a single 4KB read."
+
+[[best_practices]]
+title = "Reserve page 0 as a null sentinel"
+explanation = "Start the page counter at 1 so page 0 is never allocated for data. Use 0 as the 'no page' value for next-page pointers and free list terminators. Eliminates a class of sentinel-vs-valid-value bugs."
+
+[[best_practices]]
+title = "Free list as a stack of pages"
+explanation = "When a page is freed, write the old free-list head into the page body, then set the free-list head to this page. On alloc, read the free page's stored next pointer, update the head. O(1) alloc and free, no external data structure needed."
+
+[[best_practices]]
+title = "Cache the last data page for INSERT"
+explanation = "INSERT typically appends to the last data page. Walking the entire page chain on every insert is O(pages). Cache the last page number per table in memory. Invalidate on DELETE (which may compact pages)."
+
+[[gotchas]]
+title = "Free list page read errors must be checked"
+explanation = "When allocating from the free list, the page read can fail (corrupt page, truncated file). If the error is ignored, the free list pointer becomes garbage and subsequent allocations corrupt the file."
+bad_example = "page_read(fd, fh, buf);  # return value ignored  var next = load64(buf + FP_NEXT);"
+good_example = "if (page_read(fd, fh, buf) != OK) { fl_free(buf); return 0; }  var next = load64(buf + FP_NEXT);"
+
+[[gotchas]]
+title = "Header must be written after page_count changes"
+explanation = "page_alloc increments the in-memory header's page_count. If the program crashes before writing the header back to disk, the file has orphaned pages beyond the recorded count. Always write the header after mutations."
+bad_example = "page_alloc(fd, hdr);  # increments hdr.page_count in memory  # ... crash before hdr_write → orphaned page"
+good_example = "page_alloc(fd, hdr);  # ... do work ...  hdr_write(fd, hdr);  # persist before unlock"
+
+[[performance_notes]]
+title = "Page alloc throughput"
+explanation = "Extending the file (new page) requires a seek + write of 4096 zeros. Reusing a free page requires a seek + read (to get next pointer) + no write. Free list reuse is faster than extension."
+evidence = "Patra benchmark: page_alloc 1K pages at 13us/op (sequential extension). With free list reuse: same cost per alloc but no file growth."
+
+[[performance_notes]]
+title = "Last-page cache eliminates chain walks"
+explanation = "Without caching, INSERT on a table with N data pages reads N pages to find the last one. With a cached last-page pointer, INSERT reads 1 page."
+evidence = "Patra benchmark: INSERT 1K rows dropped from 33us/op to 20us/op (39% faster) after adding last-page cache."

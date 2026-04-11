@@ -1,0 +1,50 @@
+id = "jsonl_format"
+title = "JSON Lines Format"
+topic = "DataFormats"
+description = "JSON Lines (JSONL) — one JSON object per line, newline-delimited. The simplest structured log format: human-readable, append-friendly, streamable, and trivially parseable. Each line is independent — no framing, no headers, no state between lines."
+tags = ["jsonl", "json-lines", "ndjson", "log", "append-only", "streaming", "audit", "structured-logging"]
+related_topics = ["concurrent_file_access", "page_management"]
+
+[[best_practices]]
+title = "Escape newlines in string values"
+explanation = "Since newline is the record delimiter, string values containing literal newlines must be JSON-escaped as \\n. Without escaping, a newline in a value splits one record into two invalid fragments."
+
+[[best_practices]]
+title = "Use O_APPEND + flock for concurrent writes"
+explanation = "Open with O_APPEND for atomic append positioning. Wrap each write with flock(LOCK_EX) to prevent interleaving of partial lines from concurrent writers. One syscall for positioning, one for safety."
+
+[[best_practices]]
+title = "Build JSON in a fixed buffer"
+explanation = "For structured logging with known fields, build the JSON string in a pre-allocated buffer rather than using a dynamic JSON library. Walk the key-value pairs, write opening brace, key-colon-value with proper quoting, closing brace. Fixed 4KB buffer handles any practical log entry."
+
+[[best_practices]]
+title = "Read all lines then index"
+explanation = "To read a JSONL file: read the entire file into memory, scan for newlines to build a line index (pointer + length per line). This gives random access to any line without re-scanning. Free everything with one deallocation."
+
+[[gotchas]]
+title = "Last line may not have trailing newline"
+explanation = "JSONL files may or may not end with a trailing newline. The reader must handle both: count lines by newlines, but also check if the last byte is not a newline (meaning there's one more line)."
+bad_example = "# Count lines by counting newlines — misses last line if no trailing newline"
+good_example = "# Count newlines, then: if (size > 0 && last_byte != newline) { count += 1; }"
+
+[[gotchas]]
+title = "String escaping must cover all special characters"
+explanation = "JSON string escaping must handle: \" → \\\", \\ → \\\\, newline → \\n, tab → \\t, carriage return → \\r. Missing any of these can produce invalid JSON or break the line-delimited format."
+bad_example = "# Only escape quotes — a backslash in the value produces invalid JSON"
+good_example = "# Escape: \" \\ \\n \\t \\r — covers all JSON-required escapes for printable ASCII"
+
+[[gotchas]]
+title = "Bounds check during escape expansion"
+explanation = "Escaping can double the string length (every character becomes a 2-byte escape sequence). The output buffer must be at least 2x the input length. Without bounds checking, long strings with many special characters overflow the buffer."
+bad_example = "fn escape(dst, src, len) { for i in 0..len { if (src[i] == '\"') { dst[w] = '\\'; dst[w+1] = '\"'; w += 2; } } }  # no bounds check"
+good_example = "fn escape(dst, src, len) { var cap = len * 2; for i in 0..len { if (w + 2 > cap) { return w; } ... } }"
+
+[[performance_notes]]
+title = "JSONL append throughput"
+explanation = "Appending a single JSON line is one write syscall (data + newline). With O_APPEND, no seek is needed. The kernel extends the file and writes atomically."
+evidence = "Patra benchmark: jsonl_append 2us/op (500K appends/sec). Reading 1K lines back: 58us total."
+
+[[performance_notes]]
+title = "JSONL vs binary storage"
+explanation = "JSONL is ~3-5x larger than binary encoding for the same data (JSON key names, quotes, commas). But it's human-readable, greppable, and tooling-friendly (jq, awk, tail -f). Use binary (pages + B-tree) for queryable data, JSONL for audit logs and append-only streams."
+evidence = "Patra: binary SELECT over 1K rows: 445us. JSONL read 1K lines: 58us. JSONL is faster for sequential reads but has no query capability."

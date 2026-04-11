@@ -1,0 +1,40 @@
+id = "write_ahead_logging"
+title = "Write-Ahead Logging (WAL)"
+topic = "DataStructures"
+description = "Write-ahead logging ensures database durability and crash recovery. Before modifying any data page, write the intended change to a sequential log. On crash, replay the log to restore consistency. The log is append-only and sequential — fast on spinning disks and SSDs alike."
+tags = ["wal", "write-ahead-log", "crash-recovery", "durability", "database", "journal", "redo", "undo", "checkpoint", "fsync"]
+related_topics = ["page_management", "btree_indexing", "concurrent_file_access", "filesystems"]
+
+[[best_practices]]
+title = "Log before data — never the reverse"
+explanation = "Write the log record BEFORE modifying the data page. If crash occurs after log but before data write, the log can redo the change. If crash occurs before log, no change was recorded — data is unchanged. This is the WAL rule: log-before-data."
+
+[[best_practices]]
+title = "Use checkpoints to bound recovery time"
+explanation = "Without checkpoints, recovery replays the entire log from the beginning. Periodically flush all dirty pages to disk and record a checkpoint. Recovery only needs to replay from the last checkpoint."
+
+[[best_practices]]
+title = "Sequential log writes are fast"
+explanation = "The WAL is append-only — one sequential write per transaction. This is 10-100x faster than random writes to scattered data pages. Batch the expensive random page writes; let the log handle durability."
+
+[[gotchas]]
+title = "fsync is required for durability"
+explanation = "write() returns before data reaches disk — the OS may buffer in page cache. Without fsync, a power failure can lose 'committed' data. Call fsync on the WAL file after each commit to guarantee durability."
+bad_example = "write(wal_fd, record, len);  return OK;  # data may be in OS cache, not on disk"
+good_example = "write(wal_fd, record, len);  fsync(wal_fd);  return OK;  # guaranteed on disk"
+
+[[gotchas]]
+title = "Double-write problem"
+explanation = "If a crash occurs mid-write of a 4KB data page, the page may be partially written (torn page). The WAL must store enough information to reconstruct the full page — either the complete before-image (undo) or the complete after-image (redo)."
+bad_example = "# WAL stores only 'set field X to 42' — if page is torn, applying the delta to a corrupt page makes it worse"
+good_example = "# WAL stores full page image before modification — on recovery, restore the clean page first, then apply redo"
+
+[[performance_notes]]
+title = "WAL amortizes sync cost"
+explanation = "Without WAL, every data page modification requires an fsync. With WAL, only the sequential log requires fsync — data pages are flushed lazily at checkpoint. For 100 random page writes, WAL does 1 sequential fsync vs 100 random fsyncs."
+evidence = "SQLite WAL mode: 10-50x faster than rollback journal for write-heavy workloads. The sequential vs random I/O difference dominates."
+
+[[performance_notes]]
+title = "Log record size matters"
+explanation = "Smaller log records = more records per page = fewer I/O operations. Store logical operations (key, value, page number) rather than full page images when possible. Full page images only needed for first modification after checkpoint (to handle torn pages)."
+evidence = "Typical log record: 32-64 bytes (operation type, page number, offset, old/new values). Full page image: 4096 bytes. Logical logging is 64-128x smaller per operation."

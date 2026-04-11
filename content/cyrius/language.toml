@@ -16,18 +16,21 @@ var z: i32 = 0; — width-correct loads (movzx) and stores. sizeof(Type) operato
 Type annotations enable width-correct codegen; untyped variables remain i64.
 f64 supported as bit patterns via 20+ f64_* builtins (SSE2/SSE4.1/x87).
 
-The compiler (cc2) is 202KB, ~280 functions, 8 modules. It compiles itself
-byte-identical in ~11ms. The AGNOS kernel is written entirely in Cyrius.
+The compiler (cc3) is 243KB, ~280 functions, 8 modules. It compiles itself
+byte-identical. The AGNOS kernel is written entirely in Cyrius.
 
 Build: sh bootstrap/bootstrap.sh (40ms)
-Compile: echo 'var x = 42;' | ./build/cc2 > prog && chmod +x prog
-Test: sh scripts/check.sh (self-host + heap audit + 9 .tcyr files, 107 assertions)
+Compile: echo 'var x = 42;' | ./build/cc3 > prog && chmod +x prog
+Test: sh scripts/check.sh (self-host + heap audit + 31 .tcyr files, 375 assertions)
 
 Source: src/main.cyr (entry) + src/frontend/*.cyr + src/backend/*.cyr + src/common/*.cyr
-Version: 2.0.0 — 9 .tcyr test files (107 assertions), heap audit, self-hosting byte-identical.
-Compiler: 202KB x86_64. Frontend/backend/common architecture.
-Multi-width types (i8/i16/i32/i64/u128), sizeof, unions, bitfield builtins.
+Version: 3.4.0 — 31 .tcyr test files (375 assertions), 4 fuzz harnesses, heap audit,
+self-hosting byte-identical. 34 stdlib modules + 4 deps (sakshi, patra, sigil).
+Compiler: 243KB x86_64, 211KB aarch64 cross. Frontend/backend/common architecture.
+Multi-width types (i8/i16/i32/i64), sizeof, unions, bitfield builtins, defer.
 Struct field widths, expression type propagation, narrowing warnings.
+512KB codebuf, 64KB tok_names, 2048 functions, multi-break (linked-list).
+Dependencies via cyrius.toml [deps] — git fetch + symlink into lib/.
 Constant folding, tail call optimization, DCE (bitmap O(T+N)), jump tables.
 Return-by-value small structs (ret2/rethi). 7 SIMD packed f64 ops.
 Overflow guards on 6 arrays. Heap map audit tool.
@@ -1785,4 +1788,436 @@ silent test failures that pass in isolation but fail in full suite.
 KEY LESSON: Buffer sizes that are "enough for now" become time bombs.
 The 8KB limit was set when the largest program had <50 string literals.
 agnostik had 500+, libro had 700+.
+'''
+
+[[entries]]
+name = "base64_module"
+description = "v2.9/3.0: lib/base64.cyr — RFC 4648 base64 encode/decode"
+category = "cyrius"
+content = '''
+base64_encode(buf, len) → null-terminated base64 string
+base64_decode(encoded, enc_len) → {data_ptr, length} pair
+
+Uses standard alphabet (A-Z, a-z, 0-9, +/) with = padding.
+Lookup table in string literal (64 bytes). Decode table built
+on first call via alloc(256).
+
+Module #32. 12 assertions in base64.tcyr.
+Unblocks: API clients, HTTP auth, data serialization.
+'''
+
+[[entries]]
+name = "chrono_module"
+description = "v2.9/3.0: lib/chrono.cyr — time, duration, and sleep utilities"
+category = "cyrius"
+content = '''
+Clock functions:
+  clock_now_ns()     — monotonic nanoseconds (clock_gettime CLOCK_MONOTONIC)
+  clock_now_ms()     — monotonic milliseconds
+  clock_epoch_secs() — wall clock epoch seconds (CLOCK_REALTIME)
+  clock_epoch_ns()   — wall clock epoch nanoseconds
+
+Duration struct {secs, nsecs}:
+  dur_new(secs, nsecs), dur_secs(d), dur_nsecs(d)
+  dur_to_ms(d), dur_to_ns(d), dur_between(start_ns, end_ns)
+
+Blocking: sleep_ms(ms) via nanosleep syscall.
+
+Module #33. 8 assertions in chrono.tcyr.
+Replaces: inline now_ns() in bench.cyr and sakshi.
+'''
+
+[[entries]]
+name = "file_locking"
+description = "v2.7: flock(2) wrappers in lib/io.cyr — concurrency-safe file I/O"
+category = "cyrius"
+content = '''
+fn file_lock(fd)         — exclusive blocking lock (flock LOCK_EX)
+fn file_unlock(fd)       — release lock (flock LOCK_UN)
+fn file_trylock(fd)      — non-blocking exclusive (returns -1 if locked)
+fn file_lock_shared(fd)  — shared/read lock (flock LOCK_SH)
+fn file_append_locked(path, buf, len) — atomic append: open O_APPEND, lock, write, unlock, close
+
+Constants: LOCK_SH=1, LOCK_EX=2, LOCK_UN=8, LOCK_NB=4
+
+Usage: libro audit chain — JSON Lines + flock = tamper-proof append-only log
+without a database, without a server, without a dependency.
+
+Two functions. Two syscalls. That is the entire concurrency-safe
+append-only log foundation.
+'''
+
+[[entries]]
+name = "constant_fold_identity"
+description = "v2.9/3.0: Constant folding for x+0, x*1, x*0 identity operations"
+category = "cyrius"
+content = '''
+x + 0 → elided (no EADDR emitted, constant fold stays active)
+x * 1 → elided (identity, constant fold stays active)
+x * 0 → EMOVI(S, 0) (replace entire expression with zero)
+
+Added to existing constant fold infrastructure in PARSE_ADDITIVE and PARSE_TERM.
+Each check is 1-2 lines: test crv == 0 or crv == 1, then skip or replace.
+
+Combined with existing a+b and a*b numeric folding, the compiler now handles
+all common identity/annihilation cases for addition and multiplication.
+'''
+
+[[entries]]
+name = "cyrius_watch"
+description = "v2.9/3.0: cyrius watch — file watcher with auto-recompile"
+category = "cyrius"
+content = '''
+`cyrius watch [src] [out]` — polls .cyr files, recompiles on change.
+
+Default: cyrius watch src/main.cyr build/app
+Interval: CYRIUS_WATCH_INTERVAL env var (default 1 second)
+
+Uses `find . -name "*.cyr" -newer /tmp/cyrius_watch_stamp` to detect changes.
+Prints timestamp + binary size on each rebuild. Exits on Ctrl+C.
+
+Shell script implementation (scripts/cyrius-watch.sh). No inotify needed —
+polling is simple, portable, and sufficient for development workflows.
+'''
+
+[[entries]]
+name = "v3_release"
+description = "v3.0: Cyrius 3.0 release — sovereign self-hosting systems language"
+category = "cyrius"
+content = '''
+CYRIUS 3.0 RELEASE STATS:
+  Compiler: 231KB, self-hosting on x86_64 + aarch64
+  Stdlib: 33 modules, 200+ functions
+  Tests: 27 suites, 345 assertions, 4 fuzz harnesses
+  Bugs: 0 open (#14-#31 all resolved)
+  Downstream: 8 repos pass (964+ combined assertions)
+  Soak test: clean
+  Quality: format/lint/doc 100% clean
+
+KEY FEATURES SINCE v2.0:
+  - Multi-width types, sizeof, unions, bitfields
+  - ELF .o relocatable output (multi-file Phase 1)
+  - cyrius-x bytecode VM with recursion + syscall strings
+  - base64, chrono, flock, hashmap_fast full API
+  - cyrius build tool with test/fuzz/soak/watch/deps
+  - P(-1) scaffold hardening formalized
+  - 186 vidya entries
+
+BOOTSTRAP CHAIN:
+  bootstrap/asm (29KB) → stage1f → bridge → cc2 (231KB) → cc2_aarch64
+  No Rust. No LLVM. No Python. Just sh + Linux.
+'''
+
+[[entries]]
+name = "defer_statement"
+description = "v3.2: defer { body } — execute cleanup code at function return (LIFO)"
+category = "cyrius"
+content = '''
+defer { body } executes body when the enclosing function returns.
+Multiple defers execute in LIFO order (last declared = first to run).
+Return value preserved (push/pop rax around defer chain).
+
+IMPLEMENTATION:
+  Token 106. Deferred blocks compiled inline (jumped over during
+  normal flow). At function epilogue, emit jmp→block→jmp→block→epilogue
+  chain. Each block's end-jmp patched to return to the chain.
+
+USAGE:
+  fn process_file(path) {
+      var fd = file_open(path, O_RDONLY, 0);
+      defer { file_close(fd); }
+      defer { file_unlock(fd); }
+      file_lock(fd);
+      # ... work with file ...
+      return result;  # defers run: unlock, then close
+  }
+
+Max 8 defer blocks per function. Zig/Odin parity.
+'''
+
+[[entries]]
+name = "csv_module"
+description = "v3.1: lib/csv.cyr — RFC 4180 CSV parse/write"
+category = "cyrius"
+content = '''
+csv_parse_line(line) — parse CSV line into vec of field strings
+csv_escape(field)    — quote field if it contains comma, quote, or newline
+csv_write_line(fields) — write vec of fields as CSV line with escaping
+
+Handles: quoted fields, escaped quotes (""), commas within quotes.
+Module #34.
+'''
+
+[[entries]]
+name = "http_module"
+description = "v3.1: lib/http.cyr — minimal HTTP/1.0 client"
+category = "cyrius"
+content = '''
+http_get(url) — HTTP GET, returns response struct {status, body_ptr, body_len}
+http_status(resp), http_body(resp), http_body_len(resp) — accessors
+
+Internal: _http_parse_url, _http_build_request, _http_parse_response
+Uses net.cyr TCP sockets. No TLS (planned for future).
+Module #35.
+'''
+
+[[entries]]
+name = "patra_module"
+description = "v3.2: lib/patra.cyr — sovereign SQL database in stdlib"
+category = "cyrius"
+content = '''
+Patra: structured storage and SQL queries. Zero external dependencies.
+Single-file distribution (2496 lines) of Patra v0.8.0.
+
+SQL: CREATE TABLE, INSERT, SELECT (WHERE, ORDER BY, LIMIT), UPDATE, DELETE
+Storage: B-tree indexed pages in .patra files, flock concurrency
+Types: INT (i64) and STR (fixed-size, null-terminated)
+
+API:
+  patra_init()
+  patra_open(path) → db handle
+  patra_exec(db, sql) → status code
+  patra_query(db, sql) → result set
+  patra_result_count/get_int/get_str/col_name/col_type
+  patra_close(db)
+
+Same distribution pattern as sakshi: patra repo is source of truth,
+lib/patra.cyr is a stdlib snapshot. 212 assertions in patra repo.
+Module #36.
+'''
+
+[[entries]]
+name = "strstr_function"
+description = "v3.2: strstr() in string.cyr — substring search using memeq"
+category = "cyrius"
+content = '''
+fn strstr(haystack, needle) — find substring, returns index or -1.
+Both args are null-terminated C strings. Uses memeq internally.
+
+Added as workaround for the nested while loop codegen bug:
+manual byte-by-byte comparison in inner while loops produces wrong
+results due to expression register clobbering. Using memeq (a single
+function call) avoids the nested loop pattern entirely.
+
+Also available: strchr (single byte), memchr (byte in buffer).
+'''
+
+[[entries]]
+name = "derive_str_fields"
+description = "v3.2: #derive(Serialize) supports Str field type annotations"
+category = "cyrius"
+content = '''
+Fields annotated `: Str` in structs with #derive(Serialize) now serialize
+as quoted JSON strings instead of raw pointer addresses.
+
+BEFORE (v3.2.1):
+  struct Agent { id; name: Str; }
+  Agent_to_json(&a) → {"id":42,"name":140234567890}  # pointer!
+
+AFTER (v3.2.3):
+  Agent_to_json(&a) → {"id":42,"name":"alice"}  # correct
+
+_from_json also handles Str fields: stores via str_from(v).
+Integer fields (no type annotation) serialize as bare numbers.
+
+Detection: preprocessor checks if field type bytes match "Str\0"
+(83, 116, 114, 0). Simple byte comparison, no string table lookup.
+'''
+
+[[entries]]
+name = "function_table_2048"
+description = "v3.2: Function table expanded 1024→2048"
+category = "cyrius"
+content = '''
+Six function tables (names, offsets, params, body_start, body_end, inline)
+each doubled from 8192 to 16384 bytes. All downstream heap regions relocated:
+  struct_fnames: 0xCC000 → 0xD8000
+  output_buf:    0xCE000 → 0xDA000
+  var_noffs:     0x10E000 → 0x11A000
+  var_sizes:     0x11E000 → 0x12A000
+  var_types:     0x12E000 → 0x13A000
+  tok_types:     0x13E000 → 0x14A000
+  tok_values:    0x23E000 → 0x24A000
+  tok_lines:     0x33E000 → 0x34A000
+  preprocess:    0x43E000 → 0x44A000
+  brk:           0x4BE000 → 0x4CA000
+
+Required by agnostik (852 src functions + 84 test + stdlib).
+Two-step bootstrap verified after all offset changes.
+'''
+
+[[entries]]
+name = "nested_while_codegen_bug"
+description = "v3.2: Known gotcha #6 — load8 comparisons fail in nested while loops"
+category = "cyrius"
+content = '''
+BUG: Byte-by-byte comparisons using load8 inside inner while loops
+produce wrong results. The expression register (rax) gets clobbered
+by the loop condition evaluation.
+
+EXAMPLE (fails):
+  while (k < nlen) {
+      if (load8(hay + i + k) != load8(needle + k)) { match = 0; break; }
+      k = k + 1;
+  }
+
+WORKAROUNDS (all correct):
+  1. memeq(hay + i, needle, nlen)  — single function call
+  2. strchr(s, byte)               — single byte search
+  3. strstr(haystack, needle)      — substring search
+  4. Break-free pattern: use flag variable + k=nlen instead of break
+
+ROOT CAUSE: Expression evaluation in nested loop bodies interferes
+with the outer loop's condition registers. Not yet fixed — workarounds
+are efficient and recommended regardless.
+
+Affects: substring search, JSON parsing, protocol parsing.
+Documented as Known Gotcha #6 in roadmap.
+'''
+
+[[entries]]
+name = "derive_integers_fix"
+description = "v3.2: #derive(Serialize) emits bare integers (42 not \"42\")"
+category = "cyrius"
+content = '''
+BEFORE (v3.2.1): All scalar fields wrapped in quotes: {"x":"42"}
+AFTER (v3.2.2): Scalar fields as bare JSON numbers: {"x":42}
+
+Root cause: PP_DERIVE_SERIALIZE codegen emitted quote-wrapping:
+  str_builder_add_cstr(sb, "\"");
+  str_builder_add_int(sb, ...);
+  str_builder_add_cstr(sb, "\"");
+
+Fix: removed quote-wrapping for scalar fields. Just:
+  str_builder_add_int(sb, load64(ptr + offset));
+
+Combined with v3.2.3 Str field support, derive now generates
+correct JSON for all field types.
+'''
+
+[[entries]]
+name = "platform_stubs"
+description = "v3.1: Mach-O and PE/COFF emitter stubs scaffolded"
+category = "cyrius"
+content = '''
+src/backend/macho/emit.cyr — macOS x86_64 + aarch64 output stub
+src/backend/pe/emit.cyr    — Windows x86_64 output stub
+
+Both contain: format documentation, difference from ELF, 3-phase
+implementation plan, stub functions that error with clear message.
+
+Mach-O phases: .o → executable → macOS syscall shim (or libSystem)
+PE phases: .obj → executable → kernel32 imports
+
+Scaffolded for v3.1+. No functional code yet — call either stub
+and get: "error: Mach-O/PE output not yet implemented"
+'''
+
+[[entries]]
+name = "doc_serve"
+description = "v3.2: cyrius doc --serve — local HTTP server for generated docs"
+category = "cyrius"
+content = '''
+`cyrius doc --serve [port]` generates HTML docs for all .cyr files
+and serves locally via Python http.server.
+
+Creates build/docs/ with index.html linking to per-module HTML.
+Default port 8080. Ctrl+C to stop.
+
+Requires python3 on the host. Future: replace with Cyrius HTTP
+server (lib/http.cyr) for zero-dep doc serving.
+'''
+
+[[entries]]
+name = "cc3_rename"
+description = "v3.2.5: Compiler binary renamed cc2→cc3 for the 3.x generation"
+category = "cyrius"
+content = '''
+cc2 → cc3. cc2_aarch64 → cc3_aarch64. cc2cx → cc3cx.
+cc2-native-aarch64 → cc3-native-aarch64.
+
+Bootstrap chain: asm (29KB) → stage1f → bridge → cc3 (233KB)
+
+Naming convention: cc = cyrius compiler, N = generation.
+  cc1 = never existed (stage1f was the first)
+  cc2 = second gen (modular, 8 includes)
+  cc3 = third gen (3.x era, defer, 2048 fns, 36 stdlib modules)
+
+Backward compat: ~/.cyrius/bin/cc2 symlinks to cc3.
+.gitignore updated: !/build/cc3 (was !/build/cc2).
+162+ references updated in cyrius repo, 10 downstream workflow files.
+Same propagation pattern as cyrb→cyrius rename.
+'''
+
+[[entries]]
+name = "patra_stdlib_module"
+description = "v3.2.5: lib/patra.cyr v0.11.1 — sovereign SQL database in stdlib"
+category = "cyrius"
+content = '''
+Patra: structured storage, SQL queries, transactions. Zero dependencies.
+Single-file distribution (3197 lines) of Patra v0.11.1.
+
+v0.11 FEATURES (over v0.8):
+  - SHA-256 hash (FIPS 180-4 verified)
+  - Write-ahead logging (WAL) with crash recovery
+  - Transaction API: patra_begin/commit/rollback
+  - fdatasync on commit for durability
+  - 243 test assertions (up from 212)
+
+SQL: CREATE TABLE, INSERT, SELECT (WHERE, ORDER BY, LIMIT), UPDATE, DELETE
+Storage: B-tree indexed 4KB pages in .patra file
+Concurrency: flock (advisory file locking)
+Types: INT (i64) and STR (fixed-size)
+
+Same distribution pattern as sakshi: patra repo develops, cyrius
+stdlib gets a snapshot. `include "lib/patra.cyr"` and go.
+
+Module #36. Unblocks libro SQL backend.
+'''
+
+[[entries]]
+name = "minimum_version_concept"
+description = "v3.2.5: First true minimum version — cc3, 2048 fns, defer, Str derive"
+category = "cyrius"
+content = '''
+v3.2.5 is the first release designated as a TRUE MINIMUM VERSION.
+Every downstream project should pin to >= 3.2.5 because:
+
+BREAKING CHANGES FROM OLDER VERSIONS:
+  - cc3 binary name (cc2 no longer in tarball)
+  - Function table 2048 (agnostik needs >1024)
+  - #derive(Serialize) integers (42 not "42")
+  - #derive(Serialize) Str fields ("alice" not pointer)
+  - defer statement (new keyword, token 106)
+  - String data 32KB (libro/agnostik need >16KB)
+  - strstr() in string.cyr
+  - lib/patra.cyr, lib/csv.cyr, lib/http.cyr, lib/base64.cyr, lib/chrono.cyr
+
+For 3.3.0: `cyrius.toml` will support:
+  cyrius = "3.2.5"    # minimum compiler version
+  `cyrius build` checks and errors early.
+
+PATTERN: Like Rust's rust-version in Cargo.toml, Go's go directive
+in go.mod, Zig's minimum_zig_version in build.zig.zon.
+'''
+
+[[entries]]
+name = "nested_while_codegen_documented"
+description = "v3.2.4: Known Gotcha #6 — load8 in nested while loops, workarounds provided"
+category = "cyrius"
+content = '''
+BUG: load8 comparisons inside inner while loops produce wrong results.
+Expression register clobbered by loop condition evaluation.
+
+STDLIB WORKAROUNDS:
+  strstr(hay, needle)  — substring search via memeq
+  strchr(s, byte)      — single byte search
+  memeq(a, b, n)       — byte comparison
+
+DOWNSTREAM IMPACT:
+  agnostik: wrote break-free JSON extractors (_json_int, _json_str)
+  version_from_str: used strchr instead of manual byte loop
+  All documented in Known Gotchas section of roadmap.
+
+ROOT CAUSE: Not yet fixed. Workarounds are efficient and recommended.
 '''

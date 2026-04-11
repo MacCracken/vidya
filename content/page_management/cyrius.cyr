@@ -1,0 +1,112 @@
+# Page Management — Cyrius reference implementation
+# Demonstrates: header init/verify, page alloc with free list, read/write
+
+include "lib/syscalls.cyr"
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/fmt.cyr"
+include "lib/io.cyr"
+include "lib/assert.cyr"
+
+enum PG { PAGE_SZ = 4096; MAGIC = 0x50415452; }
+enum HD { H_MAGIC = 0; H_PGCOUNT = 8; H_FREEHEAD = 16; }
+
+fn hdr_init(buf) {
+    memset(buf, 0, PAGE_SZ);
+    store32(buf, MAGIC);
+    store64(buf + H_PGCOUNT, 1);
+}
+
+fn hdr_verify(buf) {
+    return load32(buf) == MAGIC;
+}
+
+fn page_offset(num) { return PAGE_SZ + num * PAGE_SZ; }
+
+fn page_read(fd, num, buf) {
+    syscall(SYS_LSEEK, fd, page_offset(num), 0);
+    return syscall(SYS_READ, fd, buf, PAGE_SZ);
+}
+
+fn page_write(fd, num, buf) {
+    syscall(SYS_LSEEK, fd, page_offset(num), 0);
+    return syscall(SYS_WRITE, fd, buf, PAGE_SZ);
+}
+
+fn page_alloc(fd, hdr) {
+    var fh = load64(hdr + H_FREEHEAD);
+    if (fh != 0) {
+        var buf = fl_alloc(PAGE_SZ);
+        page_read(fd, fh, buf);
+        store64(hdr + H_FREEHEAD, load64(buf + 8));
+        fl_free(buf);
+        return fh;
+    }
+    var num = load64(hdr + H_PGCOUNT);
+    store64(hdr + H_PGCOUNT, num + 1);
+    var buf = fl_alloc(PAGE_SZ);
+    memset(buf, 0, PAGE_SZ);
+    page_write(fd, num, buf);
+    fl_free(buf);
+    return num;
+}
+
+fn page_free(fd, hdr, num) {
+    var buf = fl_alloc(PAGE_SZ);
+    memset(buf, 0, PAGE_SZ);
+    store64(buf + 8, load64(hdr + H_FREEHEAD));
+    page_write(fd, num, buf);
+    store64(hdr + H_FREEHEAD, num);
+    fl_free(buf);
+}
+
+fn main() {
+    alloc_init();
+    fl_init();
+
+    var path = "/tmp/vidya_page_test.bin";
+    syscall(SYS_UNLINK, path);
+
+    # Create file with header
+    var fd = syscall(SYS_OPEN, path, 194, 420);
+    var hdr = fl_alloc(PAGE_SZ);
+    hdr_init(hdr);
+    syscall(SYS_LSEEK, fd, 0, 0);
+    syscall(SYS_WRITE, fd, hdr, PAGE_SZ);
+
+    test_group("page management");
+
+    assert(hdr_verify(hdr), "magic ok");
+    assert_eq(load64(hdr + H_PGCOUNT), 1, "pgcount starts at 1");
+
+    # Alloc pages
+    var p1 = page_alloc(fd, hdr);
+    assert_eq(p1, 1, "first alloc = 1");
+    var p2 = page_alloc(fd, hdr);
+    assert_eq(p2, 2, "second alloc = 2");
+
+    # Write and read back
+    var buf = fl_alloc(PAGE_SZ);
+    memset(buf, 0, PAGE_SZ);
+    store64(buf, 42);
+    page_write(fd, p1, buf);
+    memset(buf, 0, PAGE_SZ);
+    page_read(fd, p1, buf);
+    assert_eq(load64(buf), 42, "read back 42");
+
+    # Free and reuse
+    page_free(fd, hdr, p2);
+    var p3 = page_alloc(fd, hdr);
+    assert_eq(p3, 2, "reused freed page");
+
+    fl_free(buf);
+    fl_free(hdr);
+    syscall(SYS_CLOSE, fd);
+    syscall(SYS_UNLINK, path);
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

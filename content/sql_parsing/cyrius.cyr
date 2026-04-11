@@ -1,0 +1,144 @@
+# SQL Parsing — Cyrius reference implementation
+# Demonstrates: tokenizer, case-insensitive keywords, token classification
+
+include "lib/syscalls.cyr"
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/fmt.cyr"
+include "lib/assert.cyr"
+
+enum Tok {
+    T_EOF = 0; T_IDENT = 1; T_INT = 2; T_STAR = 3;
+    T_EQ = 4; T_LPAREN = 5; T_RPAREN = 6; T_COMMA = 7;
+    T_SELECT = 10; T_FROM = 11; T_WHERE = 12;
+}
+
+var _toks = 0;
+var _ntoks = 0;
+
+fn _tset(i, t, p, l) {
+    store64(_toks + i * 24, t);
+    store64(_toks + i * 24 + 8, p);
+    store64(_toks + i * 24 + 16, l);
+}
+fn _tt(i) { return load64(_toks + i * 24); }
+
+fn _upper(c) { if (c >= 97) { if (c <= 122) { return c - 32; } } return c; }
+
+fn _is_alpha(c) {
+    if (c >= 65) { if (c <= 90)  { return 1; } }
+    if (c >= 97) { if (c <= 122) { return 1; } }
+    if (c == 95) { return 1; }
+    return 0;
+}
+
+fn _is_alnum(c) {
+    if (_is_alpha(c)) { return 1; }
+    if (c >= 48) { if (c <= 57) { return 1; } }
+    return 0;
+}
+
+fn _kw(p, l, kw) {
+    var kl = strlen(kw);
+    if (l != kl) { return 0; }
+    for (var i = 0; i < l; i = i + 1) {
+        if (_upper(load8(p + i)) != load8(kw + i)) { return 0; }
+    }
+    return 1;
+}
+
+fn _classify(p, l) {
+    if (_kw(p, l, "SELECT")) { return T_SELECT; }
+    if (_kw(p, l, "FROM"))   { return T_FROM; }
+    if (_kw(p, l, "WHERE"))  { return T_WHERE; }
+    return T_IDENT;
+}
+
+# Scan identifier length from position
+fn _scan_ident(sql, start, slen) {
+    var pos = start;
+    var done = 0;
+    while (done == 0) {
+        if (pos >= slen) { done = 1; continue; }
+        if (_is_alnum(load8(sql + pos)) == 0) { done = 1; continue; }
+        pos = pos + 1;
+    }
+    return pos;
+}
+
+fn tokenize(sql) {
+    var pos = 0;
+    var n = 0;
+    var slen = strlen(sql);
+    while (pos < slen) {
+        var c = load8(sql + pos);
+        if (c == 32) { pos = pos + 1; continue; }
+        if (c == 9)  { pos = pos + 1; continue; }
+
+        if (_is_alpha(c)) {
+            var end = _scan_ident(sql, pos, slen);
+            _tset(n, _classify(sql + pos, end - pos), sql + pos, end - pos);
+            n = n + 1;
+            pos = end;
+            continue;
+        }
+
+        if (c >= 48) {
+            if (c <= 57) {
+                var end = pos;
+                var d2 = 0;
+                while (d2 == 0) {
+                    if (end >= slen) { d2 = 1; continue; }
+                    var dc = load8(sql + end);
+                    if (dc < 48) { d2 = 1; continue; }
+                    if (dc > 57) { d2 = 1; continue; }
+                    end = end + 1;
+                }
+                _tset(n, T_INT, sql + pos, end - pos);
+                n = n + 1;
+                pos = end;
+                continue;
+            }
+        }
+
+        if (c == 42) { _tset(n, T_STAR, sql + pos, 1); }
+        elif (c == 61) { _tset(n, T_EQ, sql + pos, 1); }
+        elif (c == 40) { _tset(n, T_LPAREN, sql + pos, 1); }
+        elif (c == 41) { _tset(n, T_RPAREN, sql + pos, 1); }
+        elif (c == 44) { _tset(n, T_COMMA, sql + pos, 1); }
+        n = n + 1;
+        pos = pos + 1;
+    }
+    _tset(n, T_EOF, 0, 0);
+    _ntoks = n;
+    return n;
+}
+
+fn main() {
+    alloc_init();
+    fl_init();
+    _toks = fl_alloc(1536);
+
+    test_group("sql tokenizer");
+
+    tokenize("SELECT * FROM users WHERE id = 1");
+    assert_eq(_tt(0), T_SELECT, "SELECT");
+    assert_eq(_tt(1), T_STAR, "*");
+    assert_eq(_tt(2), T_FROM, "FROM");
+    assert_eq(_tt(3), T_IDENT, "users");
+    assert_eq(_tt(4), T_WHERE, "WHERE");
+    assert_eq(_tt(5), T_IDENT, "id");
+    assert_eq(_tt(6), T_EQ, "=");
+    assert_eq(_tt(7), T_INT, "1");
+
+    # Case insensitive
+    tokenize("select * from T");
+    assert_eq(_tt(0), T_SELECT, "lowercase select");
+    assert_eq(_tt(2), T_FROM, "lowercase from");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

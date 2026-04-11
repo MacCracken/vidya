@@ -3274,3 +3274,163 @@ TWO-PART FIX:
 
 VERIFIED: "hello cx" prints correctly. fib(10)=55, fact(5)=120 still pass.
 '''
+
+[[entries]]
+name = "prefix_sum_fixup"
+description = "v2.9/3.0: O(n²)→O(n) fixup optimization with prefix-sum variable offsets"
+category = "cyrius"
+content = '''
+BEFORE: Each variable address fixup computed cumulative offset by scanning
+  all preceding variables: while (vi < idx) { cumul += var_sizes[vi]; }
+  With 4096 fixups and 256 variables = O(1M) operations.
+
+AFTER: Precompute prefix sums in one O(n) pass before the fixup loop.
+  Store in scratch area (output_buf tail, safe since ELF not written yet).
+  Each fixup now does a single L64(pfx + idx * 8) lookup.
+
+Added bounds check: if (idx < vcnt) before the prefix sum lookup.
+Prevents silent corruption from invalid fixup entries.
+'''
+
+[[entries]]
+name = "bug31_prline_segfault"
+description = "v2.8.2: Bug #31 — struct field on undefined var segfaults due to nonexistent PRLINE function"
+category = "cyrius"
+content = '''
+BUG: `var r = q.x;` where q is undefined caused SIGSEGV instead of error.
+
+ROOT CAUSE: Four error handlers in PARSE_FIELD_LOAD and PARSE_FIELD_STORE
+  called `PRLINE(S)` — a function that was never defined. The compiler
+  silently generated a call to address 0 (unresolved function), causing
+  SIGSEGV when the error handler tried to print the line number.
+
+FIX: Replaced all 4 instances with the correct pattern:
+  syscall(SYS_WRITE, 2, "error:", 6);
+  PRNUM(GTLINE(S, GTI(S)));
+  syscall(SYS_WRITE, 2, ": undefined variable ...");
+
+LESSON: The compiler does not error on undefined function calls at compile
+  time — it emits a warning but generates a call to offset 0. This is by
+  design (forward references), but means typos in internal function names
+  produce silent runtime crashes, not compile errors.
+'''
+
+[[entries]]
+name = "hashmap_fast_api_parity"
+description = "v2.8/3.0: hashmap_fast.cyr API parity — delete, keys, values, clear"
+category = "cyrius"
+content = '''
+hashmap_fast.cyr (SIMD Swiss table) was missing 4 functions that hashmap.cyr had:
+  fhm_delete(m, key) — tombstone slot (set metadata byte to 0xFF)
+  fhm_keys(m)        — scan metadata, collect non-empty/non-tombstone keys
+  fhm_values(m)      — same for values
+  fhm_clear(m)       — memset metadata to 0, reset count
+
+All 4 follow the same metadata scan pattern: iterate cap slots,
+check load8(meta + i) != 0 && != 255 for occupied entries.
+
+8 new assertions in hashmap_ext.tcyr (delete, keys count, values count, clear).
+'''
+
+[[entries]]
+name = "output_too_large_diagnostics"
+description = "v2.8.1: Improved output-too-large error with code/data/strings breakdown"
+category = "cyrius"
+content = '''
+BEFORE:
+  error: output too large (280000/262144 bytes)
+
+AFTER:
+  error: output too large (280000/262144 bytes)
+    code: 180000 data: 95000 strings: 5000
+    tip: heap-allocate large var buf[N] arrays
+
+PLUS: Warning at >128KB static data:
+  warning: large static data (140000 bytes) — consider alloc() for buffers >4KB
+
+Triggered by argonaut adding sakshi_full (4.5KB static arrays) on top of
+a 64KB load_env_file buffer. The agent fix was correct: heap-allocate
+large buffers. The compiler now tells you proactively.
+'''
+
+[[entries]]
+name = "defer_implementation"
+description = "v3.2: defer statement codegen — inline blocks with epilogue chain"
+category = "cyrius"
+content = '''
+DESIGN:
+  defer { body } compiles the block inline (jumped over during normal flow).
+  At function return, a chain of jmp instructions routes through each
+  deferred block in LIFO order before reaching EFNEPI.
+
+CODEGEN:
+  1. When `defer {` parsed: emit JMP-OVER, record block start + end-jmp
+  2. Parse block body (compiled inline like any statement block)
+  3. Emit JMP placeholder (end-jmp, patched at epilogue time)
+  4. Store {block_start, end_jmp} in defer table (max 8 per function)
+  5. Patch JMP-OVER to skip past the block
+
+  At epilogue:
+  1. Return patches land here
+  2. Save return value: EPUSHR (push rax)
+  3. For each defer LIFO: emit EJMP(block_start), EPATCH(end_jmp)
+  4. Restore return value: EPOPR (pop rax)
+  5. EFNEPI (normal epilogue)
+
+HEAP: defer_count at 0x8F900, defer_addrs at 0x8F908 (16 bytes/entry)
+TOKEN: 106 for `defer` keyword
+LIMIT: 8 defer blocks per function (same as continue patches)
+
+KEY DECISION: Return value must be preserved across defer chain.
+  Without push/pop rax, `return 42;` with defer returns 0.
+'''
+
+[[entries]]
+name = "derive_str_implementation"
+description = "v3.2: #derive(Serialize) Str field detection in preprocessor"
+category = "cyrius"
+content = '''
+The preprocessor detects `: Str` type annotations by checking 4 bytes:
+  if (load8(&field_types + fi * 32) == 83)       # 'S'
+    if (load8(&field_types + fi * 32 + 1) == 116) # 't'
+      if (load8(&field_types + fi * 32 + 2) == 114) # 'r'
+        if (load8(&field_types + fi * 32 + 3) == 0)  # null terminator
+
+For _to_json: Str fields emit:
+  str_builder_add_cstr(sb, "\"");
+  str_builder_add_cstr(sb, str_data(load64(ptr + offset)));
+  str_builder_add_cstr(sb, "\"");
+
+For _from_json: Str fields emit:
+  if (v != 0) { store64(ptr + offset, str_from(v)); }
+
+LIMITATION: Only "Str" is recognized as a string type.
+  Custom string types need manual _to_json/_from_json.
+
+BEFORE: All fields treated as i64 → Str fields showed pointer addresses.
+AFTER: Str fields show quoted string content in JSON output.
+'''
+
+[[entries]]
+name = "function_table_expansion_3x"
+description = "v3.2: Function table 1024→2048 — 15 heap offset relocations"
+category = "cyrius"
+content = '''
+agnostik hit the 1024 function limit with 852 src + 84 test + stdlib functions.
+Expanding required doubling all 6 function tables from 8KB to 16KB each.
+
+IMPACT: 15 heap regions shifted. Every offset reference across 12 source files updated.
+  fn_offsets: 0xC2000 → 0xC4000 (11 occurrences in parse.cyr alone)
+  fn_params:  0xC4000 → 0xC8000
+  fn_body_*:  shifted by +4000 each
+  All downstream: struct_fnames, output_buf, var tables, token arrays
+
+PATTERN: Same as every heap expansion — two-step bootstrap required.
+  The offsets are baked into the compiled cc2 binary. Changing them means
+  cc2 (compiled with old offsets) produces cc3 (with new offsets),
+  then cc3 produces cc4 (also with new offsets), and cc3==cc4.
+
+LESSON: Function count grows faster than expected in downstream projects.
+  agnostik went from 200 functions (v0.91) to 850+ (v0.97) in one month.
+  Each #derive(Serialize) generates 2 functions per struct.
+'''

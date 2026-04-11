@@ -1,0 +1,50 @@
+id = "sql_parsing"
+title = "SQL Parsing"
+topic = "CompilerDesign"
+description = "Tokenizing and parsing SQL statements with a recursive descent parser — handling keywords, operators, string literals, and structured output for a database execution engine. Covers CREATE, INSERT, SELECT, UPDATE, DELETE with WHERE clauses, ORDER BY, and LIMIT."
+tags = ["sql", "parser", "tokenizer", "recursive-descent", "database", "query", "where", "lexer"]
+related_topics = ["lexing_and_parsing", "btree_indexing", "page_management"]
+
+[[best_practices]]
+title = "Case-insensitive keywords via uppercase comparison"
+explanation = "SQL keywords are traditionally case-insensitive. Convert each character to uppercase before comparing against known keywords. Store keywords in uppercase in the classifier. This handles CREATE, create, Create uniformly."
+
+[[best_practices]]
+title = "Separate tokenization from parsing"
+explanation = "First pass: tokenize into (type, pointer, length) triples. Second pass: recursive descent over the token array. This separates concerns — the tokenizer handles character-level details (whitespace, string escaping, multi-char operators), the parser handles grammar."
+
+[[best_practices]]
+title = "Use a flat parse result buffer"
+explanation = "Instead of heap-allocating AST nodes, use a fixed-size buffer (4096 bytes) with well-defined offsets for each field. Statement type, table name, column definitions, WHERE conditions — all at known positions. Zero allocation, easy to read."
+
+[[best_practices]]
+title = "Store token pointers into the original SQL string"
+explanation = "Tokens don't need to copy strings. Store a pointer into the original SQL input and a length. The input string stays alive for the duration of parsing and execution. Zero-copy tokenization."
+
+[[gotchas]]
+title = "Multi-character operators need lookahead"
+explanation = "Operators like !=, <=, >= require checking the next character. Handle them before single-character operators in the tokenizer to avoid consuming = as a standalone token."
+bad_example = "if (c == 60) { emit(LT); }  # then  if (c == 61) { emit(EQ); }  — '<=' becomes LT followed by EQ"
+good_example = "if (c == 60) { if (next == 61) { emit(LTE); skip(2); } else { emit(LT); skip(1); } }"
+
+[[gotchas]]
+title = "Mixed AND/OR in WHERE"
+explanation = "Supporting both AND and OR in a single WHERE clause requires operator precedence (AND binds tighter than OR) or parentheses. A simpler approach: allow only uniform join — all AND or all OR, reject mixed. This avoids precedence ambiguity entirely."
+bad_example = "WHERE a = 1 AND b = 2 OR c = 3  — ambiguous without precedence rules"
+good_example = "WHERE a = 1 AND b = 2 AND c = 3  — uniform join, unambiguous"
+
+[[gotchas]]
+title = "Unterminated string literals"
+explanation = "If a string literal has no closing quote, the tokenizer may scan to end of input. The token still gets created with content up to EOF. The parser should handle this gracefully — the incomplete token may cause a parse error downstream."
+bad_example = "INSERT INTO t VALUES ('hello  — no closing quote, tokenizer runs to EOF"
+good_example = "# Tokenizer: scan until quote or EOF. If EOF, token has content to that point. Parser rejects incomplete statement."
+
+[[performance_notes]]
+title = "Token buffer sizing"
+explanation = "Simple SQL statements rarely exceed 50 tokens. A fixed buffer of 128 tokens (128 × 24 bytes = 3KB) handles all practical queries. No dynamic allocation needed."
+evidence = "Patra: tokenizer uses 128-slot buffer. CREATE TABLE with 32 columns produces ~70 tokens. SELECT with WHERE + ORDER BY + LIMIT: ~15 tokens."
+
+[[performance_notes]]
+title = "SQL parse throughput"
+explanation = "A recursive descent parser over a pre-tokenized array is very fast — no backtracking, single pass, O(n) in tokens."
+evidence = "Patra benchmark: sql_tokenize 1us, full parse (tokenize + parse) 12-13us per statement."

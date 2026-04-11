@@ -1,0 +1,44 @@
+id = "concurrent_file_access"
+title = "Concurrent File Access"
+topic = "Concurrency"
+description = "Safe multi-process access to database files using advisory file locking (flock). Shared locks for readers, exclusive locks for writers. Simple, correct, and portable — the foundation for concurrent database access without complex MVCC machinery."
+tags = ["flock", "locking", "concurrency", "advisory-lock", "shared-lock", "exclusive-lock", "multi-process", "database", "reader-writer"]
+related_topics = ["concurrency", "page_management", "write_ahead_logging"]
+
+[[best_practices]]
+title = "Shared for reads, exclusive for writes"
+explanation = "Use LOCK_SH (shared) before reading — multiple readers can hold shared locks simultaneously. Use LOCK_EX (exclusive) before writing — only one writer at a time, and no readers during the write. Unlock (LOCK_UN) after the operation completes."
+
+[[best_practices]]
+title = "Re-read header after acquiring lock"
+explanation = "Another process may have modified the file between your last read and acquiring the lock. Always re-read the header (or relevant metadata) after acquiring the lock to get the current state."
+
+[[best_practices]]
+title = "Hold locks for the minimum duration"
+explanation = "Lock, read/write, unlock — don't hold locks while doing computation. Build the result set in memory, then release the lock. Other processes can proceed while you format output or process results."
+
+[[best_practices]]
+title = "Use O_APPEND for append-only files"
+explanation = "For log files (JSONL, audit trails), open with O_APPEND. The kernel guarantees that each write appends atomically to the end. Combined with flock, this provides safe concurrent appends."
+
+[[gotchas]]
+title = "Advisory locks are cooperative"
+explanation = "flock is advisory — processes that don't call flock can read/write the file freely, bypassing all locking. All processes accessing the database must participate in the locking protocol. There's no enforcement by the kernel."
+bad_example = "# Process A uses flock(LOCK_EX); Process B opens and writes without flock — data corruption"
+good_example = "# All processes must call flock before any I/O. Document the protocol. Enforce in the library API."
+
+[[gotchas]]
+title = "Lock granularity tradeoffs"
+explanation = "File-level flock locks the entire file. Only one writer at a time, even if they're modifying different tables. Page-level or row-level locking is more concurrent but far more complex. File-level is correct and simple — optimize only when contention is measured."
+bad_example = "# Implementing page-level locking with flock requires one fd per page — impractical"
+good_example = "# Use file-level flock. If contention becomes a bottleneck, consider moving to MVCC or row-level locks."
+
+[[performance_notes]]
+title = "flock overhead is negligible"
+explanation = "The flock syscall itself takes ~1us. The real cost is contention — writers block all readers and other writers. For read-heavy workloads, shared locks allow full concurrency."
+evidence = "Patra: flock adds ~1-2us per operation. Total roundtrip (open, create, insert, query, close) is 194us — flock is <1% of total time."
+
+[[performance_notes]]
+title = "O_APPEND JSONL is very fast"
+explanation = "Append-only writes with O_APPEND are sequential I/O — the fastest pattern for both HDDs and SSDs. No seeks, no page management, no free lists. Just write and move on."
+evidence = "Patra benchmark: jsonl_append 2us/op (500K appends/sec). The kernel handles file extension and offset tracking."

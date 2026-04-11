@@ -1,0 +1,50 @@
+id = "btree_indexing"
+title = "B+ Tree Indexing"
+topic = "DataStructures"
+description = "B+ tree indexes for database storage engines — order-N trees where internal nodes store routing keys and leaf nodes store key-value pairs. All data lives in leaves, enabling efficient range scans. Each node fits in a single disk page (typically 4KB), minimizing I/O for lookups."
+tags = ["btree", "b-plus-tree", "index", "database", "page", "disk", "range-scan", "insert", "split", "search"]
+related_topics = ["algorithms", "page_management", "sql_parsing"]
+
+[[best_practices]]
+title = "Choose order based on page size"
+explanation = "The B+ tree order determines how many keys fit per node. For 4KB pages with 8-byte keys: max keys = (4096 - header) / 16 ≈ 250. Using order 64 (63 keys) is practical — leaves room for metadata and keeps splits manageable."
+
+[[best_practices]]
+title = "Use path tracking instead of parent pointers"
+explanation = "Parent pointers in each node require updating on every split. Instead, record the path from root to leaf during descent (an array of page numbers). On split, walk the path backwards to find the parent. Max depth for order-64 with 1B keys is ~5 levels — trivial stack."
+
+[[best_practices]]
+title = "Handle duplicate keys explicitly"
+explanation = "When all keys in a leaf are identical, the split produces a separator equal to the search key. The range scan must use strict < (not <=) when choosing the first child to visit, otherwise it skips the left subtree containing duplicates."
+
+[[best_practices]]
+title = "Verify B-tree results against actual data"
+explanation = "After DELETE, B-tree leaf values may point to moved or deleted rows. Rather than maintaining the index on every mutation (complex rebalancing), verify each result by reading the actual row and checking the key matches. Stale refs are filtered cheaply."
+
+[[gotchas]]
+title = "Leaf split separator with duplicate keys"
+explanation = "If all keys in a leaf are the same value K, splitting produces separator K. A search for K then only visits the right child (keys >= K), missing entries in the left child."
+bad_example = "# Range scan first-child: if (key[i] <= lo) { first = i + 1; }  — skips left child when key == lo"
+good_example = "# Range scan first-child: if (key[i] < lo) { first = i + 1; }  — visits left child when key == lo"
+
+[[gotchas]]
+title = "Break statement bugs in insert loops"
+explanation = "In some languages, break inside a while loop with variable declarations may not work correctly. Use a flag variable with continue instead of break when iterating through keys during insertion."
+bad_example = "while (pos <= max) { var tt = get(pos); if (tt == END) { break; } ... }  — break may not exit"
+good_example = "var done = 0; while (done == 0) { if (pos > max) { done = 1; continue; } var tt = get(pos); if (tt == END) { done = 1; continue; } ... }"
+
+[[gotchas]]
+title = "Page 0 as null sentinel"
+explanation = "If page numbers start at 0, you cannot use 0 as 'no page' sentinel for free lists and next-page pointers. Reserve page 0 (start page_count at 1) so 0 always means 'none'."
+bad_example = "store64(hdr + HDR_PGCOUNT, 0);  # first alloc returns page 0, same as null sentinel"
+good_example = "store64(hdr + HDR_PGCOUNT, 1);  # reserve page 0, first alloc returns page 1"
+
+[[performance_notes]]
+title = "Indexed equality lookup vs full scan"
+explanation = "B+ tree search is O(log_N(rows)) page reads vs O(pages) for a full scan. For order-64 with 1K rows, search reads ~2 pages; full scan reads ~15+ pages."
+evidence = "Patra benchmark: indexed SELECT 198us vs full scan 235us on 500 rows (16% faster). B-tree search alone: 2us/op (500K lookups/sec)."
+
+[[performance_notes]]
+title = "Lazy deletion outperforms full rebalancing"
+explanation = "B-tree delete with rebalancing (merge underflow nodes, redistribute keys) is complex and touches multiple pages. Lazy deletion (set value to sentinel, filter during search) is O(1) per delete and keeps the tree structure intact."
+evidence = "Patra: lazy delete adds zero overhead to DELETE. Search filters invalid refs during where_eval verification (already required for correctness)."
