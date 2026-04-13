@@ -16,26 +16,42 @@ var z: i32 = 0; — width-correct loads (movzx) and stores. sizeof(Type) operato
 Type annotations enable width-correct codegen; untyped variables remain i64.
 f64 supported as bit patterns via 20+ f64_* builtins (SSE2/SSE4.1/x87).
 
-The compiler (cc3) is 243KB, ~280 functions, 8 modules. It compiles itself
+The compiler (cc3) is ~303KB, ~280 functions, 8 modules. It compiles itself
 byte-identical. The AGNOS kernel is written entirely in Cyrius.
 
 Build: sh bootstrap/bootstrap.sh (40ms)
-Compile: echo 'var x = 42;' | ./build/cc3 > prog && chmod +x prog
-Test: sh scripts/check.sh (self-host + heap audit + 31 .tcyr files, 375 assertions)
+Compile: cyrius build src/main.cyr build/myapp   (auto-resolves deps from cyrius.toml)
+Test: cyrius test src/test.cyr
+Audit: sh scripts/check.sh (self-host + heap + 36 .tcyr + fmt + lint)
+Version: cc3 --version → "cc3 4.0.0\n"
+
+IMPORTANT: Never use raw `cat file | cc3` for projects. Always use `cyrius build`
+which resolves deps from cyrius.toml and auto-prepends includes. Raw cc3 misses
+namespaced deps (lib/{depname}_{basename}) and produces undefined variable errors.
+Raw cc3 is only for: compiler self-hosting, one-liner tests, bootstrap chain.
 
 Source: src/main.cyr (entry) + src/frontend/*.cyr + src/backend/*.cyr + src/common/*.cyr
-Version: 3.4.0 — 31 .tcyr test files (375 assertions), 4 fuzz harnesses, heap audit,
-self-hosting byte-identical. 34 stdlib modules + 4 deps (sakshi, patra, sigil).
-Compiler: 243KB x86_64, 211KB aarch64 cross. Frontend/backend/common architecture.
-Multi-width types (i8/i16/i32/i64), sizeof, unions, bitfield builtins, defer.
+Version: 4.0.0 — 36 .tcyr test files, 5 fuzz harnesses, 10 benchmarks, heap audit,
+self-hosting byte-identical. 41 stdlib modules + 5 deps (sakshi, patra, sigil, yukti, mabda).
+Compiler: 303KB x86_64 (302,824 bytes), 268KB aarch64 cross. Frontend/backend/common architecture.
+Compound assignment (+=, -=, *=), negative literals (-1, -x), undefined function diagnostic.
+Multi-width types (i8/i16/i32/i64), sizeof, unions, bitfield builtins, defer (all exit paths, per-flag).
 Struct field widths, expression type propagation, narrowing warnings.
-512KB codebuf, 64KB tok_names, 2048 functions, multi-break (linked-list).
-Dependencies via cyrius.toml [deps] — git fetch + symlink into lib/.
-Constant folding, tail call optimization, DCE (bitmap O(T+N)), jump tables.
+1MB codebuf, 64KB tok_names, 2048 functions, 8192 variables, multi-break (linked-list).
+262K tokens, 512KB input, 256KB str_data, 16384 fixups, 64 structs.
+Heap map: brk 0xECA000 (14.8MB), aarch64 synced to match x86.
+Dependencies via cyrius.toml [deps] — git fetch + symlink into lib/. yukti-style single-file
+dist bundle is the stdlib-dep convention (dist/<name>.cyr).
+Constant folding (all arith, 32/64-bit results), tail call opt, DCE (bitmap O(T+N)),
+jump tables (dense switches), dead-store elimination (post-emit pass).
 Return-by-value small structs (ret2/rethi). 7 SIMD packed f64 ops.
-Overflow guards on 6 arrays. Heap map audit tool.
-Argonaut (6257 lines, 424 tests) compiles and runs.
-#derive(Serialize), include-once semantics, identifier dedup, #ref directive. Fixup table: 4096 entries.
+Inline small fns (2 params, 16 tokens via token replay).
+PIC codegen for object; mode (LEA + R_X86_64_PC32, no DT_TEXTREL — glibc 2.38+ dlopen-safe).
+_cyrius_init export wraps top-level code as a callable function in object; mode.
+Overflow guards on 6 arrays. argonaut (6257 lines, 424 tests) + libro (240 tests) compile.
+#derive(Serialize) with _from_json_str single-pass deserializer (O(json_length)).
+include-once semantics, identifier dedup, #ref directive. Fixup table: 8192 entries.
+Dynamic library loading: lib/dynlib.cyr (pure Cyrius ELF .so loader via mmap, no libc).
 '''
 
 [[entries]]
@@ -209,74 +225,94 @@ KEY LESSONS:
 
 [[entries]]
 name = "known_limitations"
-description = "Current limitations and gotchas when writing Cyrius code (updated v1.1)"
+description = "Current limitations and gotchas when writing Cyrius code (updated v4.0.0)"
 category = "cyrius"
 content = '''
-FIXED (no longer limitations):
-  - Block scoping: FIXED in v0.9.5. Variables in if/while/for blocks are scoped.
-  - Var in loop: FIXED in v0.9.5. Same var name can be used in different scopes.
-  - Comparisons in args: FIXED in v0.9.0. f(x == 1) works.
+FIXED (no longer limitations — do NOT work around these):
+  - Block scoping: FIXED in v0.9.5.
+  - Var in loop: FIXED in v0.9.5.
+  - Comparisons in args: FIXED in v0.9.0, plus v3.4.10 fixed `_cfo` leak across
+    comparison operators inside function call arguments (`assert(ps != 0, "msg")`
+    now generates correct code).
+  - Mixed &&/||: FIXED for parenthesized forms. `if (a > 0 && (b > 0 || c > 0))`
+    works since v1.0-era parenthesized-comparison support. The only remaining
+    limitation is precedence-based disambiguation — explicit parens required.
+  - Global var init limit: EXPANDED to 1024 (gvar_toks at 0x98000, 8192 bytes
+    = 1024 slots). Was 64/256 historically.
+  - Variable table: EXPANDED to 8192 (was 256→512→2048→4096→8192).
+  - Function table: EXPANDED to 2048 in v3.2.2.
+  - Multi-break in nested loops: FIXED in v3.3.15 via linked-list through codebuf
+    rel32 fields. Multiple `break` statements per loop all patch correctly.
+  - Nested while + load8 (Gotcha #6): RESOLVED in v3.4.6-3.4.9. Was caused by
+    single-slot break that corrupted codegen for large programs; multi-break
+    linked-list fix resolved it. CSV-style byte-by-byte nested-loop parsing
+    works now.
+  - Hex literal buffer bug (Bug #33): FIXED in v3.3.17. LEXHEX was reading
+    from the raw input buffer instead of the preprocessed buffer — broke hex
+    literals in programs where the preprocessed offset exceeded raw size.
+  - Large multi-lib SIGSEGV (Bug #35): FIXED in v3.4.7. Ifdef copy-back
+    overwrote str_pos/data_size; re-init after preprocessing solved it.
+  - Comparisons in fn args (Bug #36): FIXED in v3.4.10. `_cfo` leaked across
+    comparison operators in fn call arguments.
+  - `#derive(Serialize)` duplicate variable (Bug #34): FIXED in v3.4.4.
+    Multi-integer/string field structs now generate correct JSON codegen.
 
 CURRENT LIMITATIONS:
-1. NO MIXED &&/||: Cannot write (a && b || c). Use nested ifs instead.
+1. MIXED &&/|| REQUIRES EXPLICIT PARENS: `a > 0 && b > 0 || c > 0` fails to
+   parse — no precedence-based disambiguation. Write `a > 0 && (b > 0 || c > 0)`
+   or `(a > 0 && b > 0) || c > 0` instead. All parenthesized forms work.
 
 2. FOR LOOP STEP: Must be simple assignment (i = i + 1), not complex expr.
+   No `+=`/`-=` syntax. No `i++`/`++i`.
 
 3. EXIT CODE TRUNCATION: Linux exit codes wrap at 256. Use print_num for
    values > 255.
 
-4. STRING LITERAL COMPARISON: streq("abc", "xyz") works via null-terminated
-   comparison. strlen works on all string literals.
+4. NO NEGATIVE LITERALS: Use (0 - N) instead of -N. For constants in enums,
+   this means `enum E { NEG = 0 - 1; }` or a `var` at global scope.
 
-5. NO NEGATIVE LITERALS: Use (0 - N) instead of -N.
+5. INLINE ASM REGISTER STATE: asm blocks operate on the register state at
+   that point. The compiler may have values in rax/rcx. Use push/pop to
+   save state if needed. CAUTION: `[rbp-N]` clobbers params — use globals
+   or dummy locals.
 
-6. INLINE ASM REGISTER STATE: asm blocks operate on the register state
-   at that point. The compiler may have values in rax/rcx. Use push/pop
-   to save state if needed.
+6. NO CLOSURES CAPTURING VARIABLES: Pure fn pointers only — &fn_name works
+   (fncall0-6 from fnptr.cyr), but lexical capture does not. Use named
+   functions + globals for shared state.
 
-9. COMPARISONS IN FUNCTION ARGS: FIXED (v0.9.0). f(x == 1) now works via
-   PARSE_CMP_EXPR + ESETCC codegen. Produces 0/1 via x86 setCC + movzx.
+7. LARGE var buf[N] EXHAUSTS OUTPUT BUFFER: Anything over ~4KB in binary data
+   should be alloc()'d at runtime, not declared as `var buf[N]` (which writes
+   N zeros into the ELF). Use `var buf = 0; fn init() { buf = alloc(N); }`.
 
-10. GLOBAL VAR INIT LIMIT: Max ~64 global vars with initializers (gvar_toks
-    table at 0x8FA98 has 64 slots). Use enums for large constant groups.
-    Enums have separate init path and don't consume gvar_toks slots.
+8. ENUM INIT ORDERING: Enum init runs BEFORE gvar init in main.cyr. If you
+   modify the compiler, do NOT reorder these — gvar init may call functions
+   that reference enum values.
 
-16. VARIABLE TABLE LIMIT: Max 4096 variables (VCNT never resets between
-    functions — arrays inside functions are globals). Was 256→512→2048.
-    Fixed overlap bug between var_noffs and var_sizes in v1.7.0.
+9. var buf[N] IS BYTES: var buf[N] allocates N BYTES, not N i64 elements.
+   var buf[8] = 8 bytes (1 i64). var buf[120] = 120 bytes (15 i64s).
 
-17. FUNCTION TABLE LIMIT: Max 1024 functions. Clear error at limit:
-    "error: function table full (1024/1024)". Was 256→512→1024.
-
-18. var buf[N] IS BYTES: var buf[N] allocates N BYTES, not N i64 elements.
-    var buf[8] = 8 bytes (1 i64). var buf[120] = 120 bytes (15 i64s).
-    Writing past the allocated size silently corrupts adjacent data.
-
-19. INCLUDE IN KERNEL MODE: Not supported. kernel; mode blocks require
-    single-file source or external concatenation. Main blocker for AGNOS
-    multi-arch kernel split.
-
-11. ENUM INIT ORDERING: Enum init runs before gvar init in cc2.cyr.
-    If you modify the compiler, do NOT reorder these — functions called
-    during gvar init depend on enum values being set.
-
-12. FUNCTION POINTERS: &fn_name IS supported (fixup type 3). Use fncall0/1/2
-    from fnptr.cyr for indirect calls. The earlier limitation was removed.
+10. INCLUDE IN KERNEL MODE: Not supported. kernel; mode blocks require
+    single-file source or external concatenation.
 
 GOTCHAS (expected behavior, not bugs):
-13. DYNAMIC LOOP BOUNDS: for (var i = 0; i < GLOBAL; i = i + 1) re-evaluates
-    GLOBAL each iteration. If the loop body modifies GLOBAL (directly or via
-    function call), the loop count changes dynamically.
-    FIX: var limit = GLOBAL; for (var i = 0; i < limit; i = i + 1) { ... }
-    EXAMPLE: pmm_alloc() decrements free_count inside a loop bounded by
-    free_count → loop runs half the expected iterations.
+11. DYNAMIC LOOP BOUNDS: `for (var i = 0; i < GLOBAL; i = i + 1)` re-evaluates
+    GLOBAL each iteration. If the loop body modifies GLOBAL, the loop count
+    changes dynamically. FIX: snapshot to a local first.
 
-14. BLOCK CLOSURES AT GLOBAL SCOPE: |x| { return x; } works inside functions
-    but produces wrong results at global scope. Always use closures inside fns.
-
-15. OPERATOR OVERLOADING + ALLOC: Type_add(a, b) works for value types.
+12. OPERATOR OVERLOADING + ALLOC: Type_add(a, b) works for value types.
     For pointer-based types (Str), the function receives the pointer value.
     For stack-allocated structs (Point), it receives the first field value.
+
+13. SUB-µs BENCHMARKS: bench_start/end has ~120ns clock_gettime overhead + 6ns
+    fncall dispatch. For operations under 1µs, use `bench_batch_start` /
+    `bench_batch_stop` with `batch_size >= 1000`. The cyrius-doom "2x
+    regression" in 3.3.12 turned out to be 2× clock_gettime overhead, not a
+    codegen issue — documented in v3.3.13-14 bench.cyr notes.
+
+14. OBJECT-MODE GLOBALS: In `object;` mode, top-level code (enum values,
+    global var inits) is wrapped in a callable `_cyrius_init()` function.
+    C launchers MUST call `_cyrius_init()` before `alloc_init()` before any
+    application function, or enum-value globals will be zero. (v3.4.14 fix.)
 '''
 
 [[entries]]
@@ -322,34 +358,61 @@ TESTING:
 
 [[entries]]
 name = "stdlib"
-description = "Cyrius standard library: 8 core + 15 ecosystem libraries, 150+ functions"
+description = "Cyrius standard library: 41 modules + 5 deps, 200+ functions (v4.0.0)"
 category = "cyrius"
 content = '''
 CORE LIBRARIES (lib/):
 
-string.cyr   — strlen, streq, memeq, memcpy, memset, memchr, strchr, print_num, println
-alloc.cyr    — alloc_init, alloc, alloc_reset, alloc_used (bump allocator from brk)
-str.cyr      — Str struct (data+len): str_from, str_len, str_eq, str_cat, str_sub, str_contains, str_split, str_trim
-vec.cyr      — Dynamic array: vec_new, vec_push, vec_pop, vec_get, vec_set, vec_len, vec_find, vec_remove
-io.cyr       — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists
-fmt.cyr      — Formatting: fmt_int, fmt_hex, fmt_hex0x, fmt_bool, fmt_byte, fmt_pad, fmt_int_buf, sprintf
-args.cyr     — CLI args: args_init, argc, argv (reads /proc/self/cmdline)
-fnptr.cyr    — Function pointers: fncall0, fncall1, fncall2 (indirect call via inline asm)
-tagged.cyr   — Tagged unions: packed Result (Ok/Err via bit 63), heap-based Option (Some/None)
-hashmap.cyr  — String→i64 map: map_new, map_set, map_get, map_has, map_delete, map_keys
-fs.cyr       — Filesystem: is_dir, dir_list, sys_mkdir, sys_unlink, sys_chmod
-process.cyr  — Subprocess: run, run_capture, spawn, exec_vec, exec_env, exec_capture
-syscalls.cyr — 50+ syscall numbers, wrappers (fork, waitpid, pipe, dup2, epoll, timerfd)
-net.cyr      — Socket wrappers
-json.cyr     — Minimal JSON: json_parse, json_get, json_get_int, json_build
-trait.cyr    — Manual vtable dispatch: display_vtable, trait_obj_new
-regex.cyr    — Pattern matching
-assert.cyr   — Test assertions: assert_eq, assert_ne, assert_true
-bench.cyr    — Benchmarking: bench_start, bench_end, bench_report
-bounds.cyr   — Array bounds checking
-callback.cyr — Callback patterns: fork_with_pre_exec
+string.cyr      — strlen, streq, memeq, memcpy, memset, memchr, strchr, strstr, print_num, println
+alloc.cyr       — alloc_init, alloc, alloc_reset, alloc_used (bump allocator from brk)
+str.cyr         — Str struct (data+len): str_from, str_len, str_eq, str_cat, str_sub, str_contains, str_split, str_trim
+vec.cyr         — Dynamic array: vec_new, vec_push, vec_pop, vec_get, vec_set, vec_len, vec_find, vec_remove
+io.cyr          — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists
+fmt.cyr         — Formatting: fmt_int, fmt_hex, fmt_hex0x, fmt_bool, fmt_byte, fmt_pad, fmt_int_buf, sprintf
+args.cyr        — CLI args: args_init, argc, argv (reads /proc/self/cmdline)
+fnptr.cyr       — Function pointers: fncall0–fncall6 (indirect call via inline asm, 0-6 args)
+tagged.cyr      — Tagged unions: packed Result (Ok/Err via bit 63), heap Option (Some/None)
+hashmap.cyr     — String→i64 map: map_new, map_set, map_get, map_has, map_delete, map_keys
+hashmap_fast.cyr— SIMD-attempted hashmap (API parity with hashmap.cyr; scalar is faster for small maps)
+fs.cyr          — Filesystem: is_dir, dir_list, sys_mkdir, sys_unlink, sys_chmod
+process.cyr     — Subprocess: run, run_capture, spawn, exec_vec, exec_env, exec_capture
+syscalls.cyr    — 50+ syscall numbers, wrappers (fork, waitpid, pipe, dup2, epoll, timerfd)
+net.cyr         — TCP socket wrappers
+http.cyr        — Minimal HTTP/1.0 client (GET, URL parser, response extraction)
+ws.cyr          — WebSocket client (RFC 6455 — handshake, framing, masking, ping/pong)
+tls.cyr         — TLS 1.3 client scaffold (RFC 8446 — record layer + ClientHello; X25519 pending)
+json.cyr        — Minimal JSON: json_parse, json_get, json_get_int, json_build
+toml.cyr        — TOML parser
+csv.cyr         — RFC 4180 CSV parse/write (quoted fields, escaped quotes, commas-in-quotes)
+base64.cyr      — Base64 encode/decode
+bigint.cyr      — 256-bit unsigned integers (4-limb, for cryptography — add/sub/mul/mod/cmp/shr1/addmod/mulmod)
+math.cyr        — Extended math (f64_atan and friends, transcendentals)
+matrix.cyr      — Matrix operations
+regex.cyr       — Pattern matching
+trait.cyr       — Manual vtable dispatch: display_vtable, trait_obj_new
+assert.cyr      — Test assertions: assert_eq, assert_ne, assert_true
+bench.cyr       — Benchmarking: bench_start/end/report AND bench_batch_start/stop (for sub-µs ops)
+bounds.cyr      — Array bounds checking
+callback.cyr    — Callback patterns: fork_with_pre_exec
+thread.cyr      — Threads (clone+mmap), mutex (futex), MPSC channels
+async.cyr       — Async primitives
+freelist.cyr    — Freelist allocator (O(1) alloc/free)
+chrono.cyr      — Time: ISO-8601 format/parse, epoch↔date, leap year, is_leap_year
+log.cyr         — Structured logging wrapper over sakshi (ISO-8601 timestamps, level filtering)
+audio.cyr       — ALSA PCM audio via direct ioctls (no libasound, no C FFI)
+mmap.cyr        — Memory-mapped I/O: cyr_mmap, cyr_munmap, cyr_mprotect, mmap_file_ro/rw/anon
+dynlib.cyr      — Pure Cyrius ELF .so loader via mmap (GNU hash table, no libc, no dlopen)
+vidya.cyr       — Vidya knowledge-base access
 
-Total: 21 library modules, 200+ functions.
+DEPS (fetched via cyrius deps — git + symlink, single-file dist bundles):
+sakshi (0.9.0)  — Tracing/logging (slim + full profiles)
+patra  (0.14.0) — SQL database (B-tree, WAL, transactions)
+sigil  (2.0.1)  — Trust verification (Ed25519, SHA-256/512, HMAC, integrity)
+yukti  (1.2.0)  — Device abstraction (USB, optical, block, GPU via /sys/class/drm, network, udev)
+mabda  (2.1.2, activated in Cyrius 3.6.3) — GPU foundation via wgpu-native
+                  C shim (transitional — backend swap to pure Cyrius planned)
+
+Total: 41 stdlib modules + 5 deps, 200+ functions.
 
 USAGE PATTERN:
     include "lib/alloc.cyr"
@@ -358,7 +421,7 @@ USAGE PATTERN:
     var v = vec_new();
     vec_push(v, 42);
 
-INCLUDE ORDER FOR FULL STACK:
+INCLUDE ORDER FOR FULL STACK (dependency-safe):
     include "lib/string.cyr"
     include "lib/fmt.cyr"
     include "lib/alloc.cyr"
@@ -1888,7 +1951,7 @@ content = '''
 CYRIUS 3.0 RELEASE STATS:
   Compiler: 231KB, self-hosting on x86_64 + aarch64
   Stdlib: 33 modules, 200+ functions
-  Tests: 27 suites, 345 assertions, 4 fuzz harnesses
+  Tests: 27 suites, 345 assertions, 5 fuzz harnesses
   Bugs: 0 open (#14-#31 all resolved)
   Downstream: 8 repos pass (964+ combined assertions)
   Soak test: clean
@@ -2136,10 +2199,10 @@ content = '''
 cc2 → cc3. cc2_aarch64 → cc3_aarch64. cc2cx → cc3cx.
 cc2-native-aarch64 → cc3-native-aarch64.
 
-Bootstrap chain: asm (29KB) → stage1f → bridge → cc3 (233KB)
+Bootstrap chain: asm (29KB) → stage1f (now cyrc) → bridge → cc3 (233KB)
 
 Naming convention: cc = cyrius compiler, N = generation.
-  cc1 = never existed (stage1f was the first)
+  cc1 = never existed (stage1f → cyrc was the first, renamed v3.9.5)
   cc2 = second gen (modular, 8 includes)
   cc3 = third gen (3.x era, defer, 2048 fns, 36 stdlib modules)
 
@@ -2219,5 +2282,348 @@ DOWNSTREAM IMPACT:
   version_from_str: used strchr instead of manual byte loop
   All documented in Known Gotchas section of roadmap.
 
-ROOT CAUSE: Not yet fixed. Workarounds are efficient and recommended.
+STATUS: RESOLVED in v3.4.6-3.4.9. The underlying cause was single-slot break
+patching corrupting codegen for large nested-loop programs. Multi-break
+linked-list fix in v3.3.15 removed the corruption, and the nested-while
+pattern works again. See "v3_3_v3_4_release_arc" below.
+'''
+
+[[entries]]
+name = "v3_3_v3_4_release_arc"
+description = "The 3.3–3.4 arc: compiler stabilization, dep system, stdlib growth, cleanup (v3.2.5 → v3.6.3)"
+category = "cyrius"
+content = '''
+20 patch releases from v3.2.6 to v3.6.3 (inclusive) — a stabilization and
+stdlib-growth arc, not a language expansion. This entry captures the
+through-line so you don't have to read every CHANGELOG.md block.
+
+=== MAJOR THEMES ===
+
+1. DEP SYSTEM MATURED (v3.3.6)
+   - `cyrius deps` resolves git deps: fetches repos, symlinks dist bundles into lib/.
+   - `cyrius.toml` [deps.<name>] entries with { git, tag, modules }.
+   - Single-file dist/<name>.cyr convention (yukti, patra, sigil, sakshi, mabda).
+   - Vendored lib/ copies replaced by symlinks; projects track the toolchain stdlib.
+   - Dep fetches fail gracefully — missing tags warn, don't crash.
+
+2. STDLIB GREW from 34 → 40 modules + 5 deps
+   Added: csv, base64, http, chrono, bigint, audio (ALSA direct ioctl),
+          log (structured via sakshi), ws (WebSocket RFC 6455),
+          tls (TLS 1.3 scaffold — X25519 pending), mmap, dynlib (pure Cyrius
+          ELF .so loader), matrix, vidya
+   Deps:  sakshi, patra, sigil, yukti, mabda (activated v3.6.3)
+
+3. COMPILER STABILIZATION
+   - Multi-break in nested loops (v3.3.15): linked-list break patching via codebuf
+     rel32 fields. Each `break` chains the previous break's patch offset into its
+     jmp placeholder; loop exit walks the chain. Zero extra heap. Fixed the oldest
+     open compiler bug from v3.2.6.
+   - tok_names 32→64KB (v3.3.17): moved str_data from 0x68000 (nested) to 0x40000,
+     reclaiming the full 64KB. Unblocked shravan (~35KB names for audio codec).
+   - Hex literal buffer fix (v3.3.17 Bug #33): LEXHEX was reading from raw input
+     buffer instead of preprocessed buffer — masked for years because cc3's own
+     source was small enough to overlap.
+   - 7+ arg stack offset (v3.3.11 Bug #32): push r12 added to prologue had shifted
+     stack frame; ESTORESTACKPARM still read [rbp+16] instead of [rbp+24].
+   - r12 loop var cache REVERTED (v3.3.12): 2x perf regression in doom benchmarks
+     from push/pop r12 on every function call — cost of the opt vastly exceeded
+     the savings from caching one loop counter. Filed as lesson: test perf, not
+     just correctness.
+   - Large multi-lib SIGSEGV (v3.4.7 Bug #35): ifdef copy-back overwrote
+     str_pos/data_size. Re-init after preprocessing fixed it.
+   - _cfo leak in fn call args (v3.4.10 Bug #36): constant folding optimization
+     flag leaked across comparison operators inside arguments. Fixed `assert(ps
+     != 0, "msg")` pattern that crashed in large binaries.
+   - #derive(Serialize) duplicate vars (v3.4.4 Bug #34): multi-field structs
+     generated `var _iv`/`var _vs` inside each branch → duplicate on second
+     field. Moved declarations to function top.
+   - PIC codegen for `object;` mode (v3.4.12): LEA [rip+disp32] + R_X86_64_PC32
+     relocs instead of MOV imm64 + R_X86_64_64. Eliminates DT_TEXTREL — glibc
+     2.38+ refuses dlopen of TEXTREL binaries. Unblocked mabda GPU port.
+   - `_cyrius_init` export in object mode (v3.4.14): top-level code (enum
+     values, global var inits) wrapped in a callable function C launchers can
+     invoke before any application function.
+
+4. OPTIMIZATIONS SHIPPED
+   - Dead Store Elimination (v3.3.2): post-emit pass scans codebuf for
+     consecutive stores to same [rbp-N]; first store NOPped.
+   - Constant folding expanded (v3.3.1): 16-bit result limit removed; any
+     non-negative fold accepted. `50 * 1000 = 50000` folds at compile time.
+     `x - 0` identity added.
+   - Inlining expanded (v3.3.5): 2-param fns + 16-token bodies (was 1-param /
+     6-token). `u256_limb(a, i)` now inlines.
+   - DCE via name bitmap (pre-existing, validated): O(T+N) unreferenced-fn
+     removal.
+
+5. CLEANUP (v3.4.15-3.6.3)
+   - Doc sweep: 233KB → 250KB canonical binary size across README, benchmarks,
+     ADRs, architecture docs. Test counts aligned to 32 suites / 442 assertions.
+     Stdlib counts aligned to 40 + 5 deps.
+   - scripts/check.sh + cyrius audit dispatcher deduplicated: extracted shared
+     fmt/lint walkers into scripts/lib/audit-walk.sh, both paths source it.
+   - cyriusup → cyriusly rename ("Language Yare"): version manager renamed
+     from rustup-style `-up` to the nautical sense of "quick, agile, responsive —
+     the ship answers the helm."
+   - Dead code removal (v3.4.16): GLVR/SLVR (reverted r12 cache), GFBE, GPUB/SPUB
+     (scaffolded pub check never wired up), TWIDTH (inlined at call sites).
+     -16 bytes off the compiler binary.
+   - Heap gap closure (v3.4.16): 8-byte gap at 0x8F898 eliminated by moving
+     continue_count/continue_patches down. Heap audit: 48 regions/1 warning →
+     47 regions/0 warnings.
+   - Stale --version bug (v3.4.16): cc3 --version reported "3.4.10" for five
+     releases (3.4.11 through 3.4.15) because `scripts/version-bump.sh` used an
+     exact-match sed that silently failed on drift. Fixed the version string to
+     the current release and hardened the sed to a permissive regex with
+     auto-computed syscall-write length.
+   - mabda stdlib inclusion landed in v3.6.3 (single release absorbing
+     three rounds of in-flight work — internal tags 3.4.17 and 3.4.18
+     never shipped publicly). Mabda is the GPU foundation layer; backend
+     is transitional (C shim over wgpu-native), public API is the
+     stability contract that survives the eventual swap to pure Cyrius.
+     The release arc on the mabda side:
+       v2.0.0 — Rust → Cyrius port
+       v2.1.0 — feature-complete against Rust v1.0 (290 assertions, full
+                FFI path for texture + render pipeline + surface)
+       v2.1.1 — stdlib-inclusion release (dist/mabda.cyr bundle,
+                [lib] manifest, # @public / # @internal surface marking)
+       v2.1.2 — repo hygiene (rust-old reference tree removed)
+     Cyrius 3.6.3 activates `[deps.mabda] = 2.1.2` in cyrius.toml.
+   - input_buf expanded 128KB → 256KB + explicit truncation error (v3.6.3):
+     the blocking cc3 change that enabled mabda inclusion. The 141KB
+     dist/mabda.cyr bundle could not fit the old 128KB stdin buffer; the
+     read loop silently stopped at 131072 bytes, producing confusing parse
+     errors far from the actual truncation point. The expansion fills the
+     adjacent reclaimable slot at 0x20000 (free since v3.3.7) without
+     shifting any downstream offsets. New read loop probes for a trailing
+     byte after the buffer fills and errors out explicitly — silent
+     truncation is never an acceptable failure mode. Binary grew +232
+     bytes for the probe + error message. Heap audit still 47 regions /
+     0 warnings.
+
+=== RECOMMENDED MINIMUM ===
+
+Projects should pin to >= 3.4.0 for:
+  - 512KB codebuf (needed for large binaries — libro+patra, shravan)
+  - 64KB tok_names (enough for ~6500+ identifiers)
+  - Multi-break linked-list (nested break correctness)
+  - Hex parser fix
+
+Projects needing mabda GPU integration should pin >= 3.6.3:
+  - PIC codegen for object mode (v3.4.12)
+  - _cyrius_init export (v3.4.14)
+  - input_buf 256KB + truncation error (v3.6.3)
+  - [deps.mabda] activation (v3.6.3)
+'''
+
+[[entries]]
+name = "v3_5_v3_6_release_arc"
+description = "The 3.5–3.6 arc: expression power, string unification, scale limits raised (v3.5.0 → v3.6.3)"
+category = "cyrius"
+content = '''
+14 patch/minor releases from v3.5.0 to v3.6.3 — a language-feature and
+scale-expansion arc. Every item shipped with regression tests.
+
+=== EXPRESSION POWER (v3.5.0) ===
+
+1. EXPRESSION-POSITION COMPARISONS
+   ==, !=, <, >, <=, >= now return 0/1 as values in ANY expression position:
+   var init, function call arguments, store values, return, &&/|| chains.
+   Before: var r = 0; if (a == b) { r = 1; }
+   After:  var r = (a == b);
+   81 PEXPR→PCMPE call sites upgraded in parse.cyr.
+
+2. #ASSERT COMPILE-TIME CHECK
+   #assert sizeof(Point) == 16, "Point layout changed"
+   Evaluates constant expression at parse time, aborts with line + message.
+   Token 107, _EVAL_CONST_ATOM evaluator.
+
+3. SYSCALL ARITY WARNINGS
+   40-entry lookup table of Linux x86_64 syscall number → expected args.
+   Warns at compile time: syscall(1, 1) → "syscall arity mismatch".
+
+4. AARCH64 ESETCC FIX
+   GT, LE, GE condition codes were wrong in the cset instruction encoding.
+   Pre-existing since the aarch64 backend was written, exposed by PCMPE-
+   everywhere routing all comparisons through ESETCC.
+
+=== STRING UNIFICATION (v3.6.0-3.6.1) ===
+
+5. STR/CSTR AUTO-COERCION (v3.6.0)
+   Functions with : Str parameter annotations auto-wrap string literal
+   arguments in str_from() at call sites. fn_param_str_mask table at
+   0xDC000 (2048 entries). lib/str.cyr annotated: str_eq, str_cat,
+   str_contains, str_starts_with, str_ends_with, str_split, str_join,
+   str_builder_add. 748 str_from("literal") wrappers now eliminable
+   across argonaut (382), libro (291), stdlib (75).
+
+6. COMPILE-TIME STRING INTERNING (v3.6.1)
+   Identical string literals share the same address. "hello" == "hello"
+   is true. Always-on dedup in the lexer. Pointer comparison is 30%
+   faster than streq, 44% faster than str_eq. Classification chains
+   (if cmd == "get" ... elif cmd == "set" ...) now use 1-cycle pointer
+   comparison instead of memcmp.
+
+7. LIB/CFFI.CYR (v3.6.3)
+   C struct layout helpers: cffi_struct_new, cffi_field, cffi_offset,
+   cffi_sizeof. Computes field offsets with C alignment/padding rules.
+   18 functions, 23 test assertions. Module #41. Needed for tarang
+   codec ports and mabda wgpu descriptor builders.
+
+=== SCALE LIMITS RAISED (v3.5.1-3.6.2) ===
+
+  - READFILE include-read cap: 512KB → 1MB (v3.5.1)
+  - Codebuf: 512KB → 1MB, output_buf shifted (v3.5.2)
+  - Token limit: 131,072 → 262,144, arrays relocated past brk (v3.6.2)
+  - Preprocess_out cap: 512KB → 1MB (v3.4.20, stale check fixed)
+  - Input_buf: 128KB → 256KB (v3.4.19, with truncation error)
+  - Brk: 7.3MB → 13.3MB (token array relocation)
+
+=== KNOWN ISSUES (at v3.6.3, some since fixed) ===
+
+  - Ifdef copy-back >256KB — fixed in v3.6.5 with mmap temp buffer.
+  - Libro PatraStore stack corruption in >300KB binaries — gated in
+    libro 1.0.3. Root cause suspected: codegen/stack frame issue.
+    May surface during v3.10.0 register allocation work.
+
+=== STATS AT v3.6.3 ===
+
+  cc3: 290KB (290,040 bytes), self-hosting byte-identical
+  41 stdlib modules + 5 deps
+  33 test suites, 491 assertions
+  5 fuzz harnesses, 10 benchmarks
+  Token limit: 262,144
+  Heap: 13.3MB (brk at 0xD4A000)
+'''
+
+[[entries]]
+name = "v3_7_v4_0_release_arc"
+description = "The 3.7-4.0 arc: features, safety, tooling, ecosystem (v3.7.0 → v4.0.0)"
+category = "cyrius"
+content = '''
+30+ releases from v3.7.0 to v4.0.0 — language features, compiler safety, tooling,
+and internal refactoring.
+
+=== BUG FIXES (v3.7.0) ===
+
+1. FLOAT LITERAL LEXER FIX
+   Float detection read load8(S + np) instead of load8(S + 0x44A000 + np).
+   Same bug family as LEXHEX (Bug #33). Worked in small programs by
+   coincidence, failed in large programs (avatara 695KB). Fixed in lex.cyr.
+
+2. FIXUP TABLE EXPANDED 8192 -> 16384
+   avatara's 709 functions exceeded the limit. Table relocated from
+   0xA0000 to 0xE4A000 (past brk). Brk extended to 0xECA000 (14.8MB).
+
+=== FEATURES (v3.7.1-v3.7.4) ===
+
+3. #DERIVE(ACCESSORS) (v3.7.1)
+   Auto-generate getters/setters for heap-allocated structs:
+   #derive(accessors) struct Point { x; y; }
+   Generates: Point_x(p), Point_set_x(p, v), Point_y(p), Point_set_y(p, v)
+   Same preprocessor codegen pattern as #derive(Serialize).
+
+4. NATIVE MULTI-RETURN (v3.7.2)
+   return (a, b) -> rax:rdx register pair.
+   var x, y = fn() -> destructure from rax:rdx.
+   Eliminates alloc(16) pair-struct workaround. ret2/rethi still work.
+   Parser scans ahead for comma at paren depth 1.
+
+5. SWITCH CASE BLOCKS (v3.7.4)
+   case N: { ... } block bodies in switch statements.
+   Bare { ... } block statement support in PARSE_STMT.
+   Pre-scan brace depth tracking for block bodies.
+
+=== SAFETY (v3.8.0) ===
+
+6. DEFER ON ALL EXIT PATHS
+   Per-defer runtime flags (hidden locals). Each defer sets a flag to 1
+   when reached. At epilogue, flag is checked before running the block.
+   Unreached defers are skipped. Fixes: early return before defer
+   statement still triggered cleanup (resource double-free class).
+   Backpatch trampoline: after body, emit flag zeroing, jmp to body start.
+
+7. AARCH64 ARCH-AGNOSTIC CODEGEN
+   Raw x86 bytes in parse.cyr replaced with backend helpers:
+   ETESTAZ (test rax==0), EMOVRDXRAX (mov rdx,rax), EMOVRA_RDX (mov rax,rdx).
+   Added to all 5 backends (x86, aarch64, cx, bridge, cc). Fixed 5 aarch64
+   CI test failures.
+
+=== TOOLING (v3.8.0-v3.8.1) ===
+
+8. CYRIUS BUILD -V (verbose flag)
+   Displays compiler path, source/output, defines, binary size on stderr.
+
+9. CYRLINT #SKIP-LINT + LINE LIMIT 100->120
+   Lines containing #skip-lint exempt from all lint rules.
+   Brace tracker skips string literals and comments (fixes false positives).
+
+=== REFACTORING (v3.9.0-v3.9.5) ===
+
+10. DSE PASS EXTRACTED
+    Dead-store elimination moved from inline PARSE_FN_DEF (250 lines)
+    to standalone DSE_PASS(S, fn_start) function.
+
+11. DERIVE STRUCT PARSER DEDUP
+    PP_PARSE_STRUCT_DEF shared function: struct name parsing, field
+    extraction, offset computation, derive table registration. Used by
+    PP_DERIVE_SERIALIZE and PP_DERIVE_ACCESSORS. -147 lines, -5.4KB binary.
+    Results passed via heap state (S+0x97400..S+0x97950).
+
+12. AARCH64 HEAP MAP SYNC
+    main_aarch64.cyr fully rewritten to match main.cyr v3.9.5.
+    All limits synced: input 512KB, codebuf 1MB, tokens 262K, str_data 256KB,
+    fixups 16384, structs 64, brk 0xECA000.
+
+=== DEPENDENCY SYSTEM (v3.9.2-v3.9.5) ===
+
+13. CYRIUS DEPS COMMAND (v3.9.2)
+    `cyrius deps` reads cyrius.toml [deps] section:
+    - stdlib = ["string", "fmt", ...] → copies from installed cyrius stdlib
+    - [deps.name] path = "../repo" modules = [...] → copies from sibling repos
+    Stream-copies in 32KB chunks (handles 131KB sigil bundle).
+    Size-based freshness check — skips files already present and same size.
+
+14. AUTO-DEPS ON BUILD (v3.9.2)
+    `cyrius build/run/test/bench/check` auto-resolves deps before compilation
+    when cyrius.toml has a [deps] section. First build prints summary,
+    subsequent builds are silent.
+
+15. NAMESPACED DEP RESOLUTION (v4.0.0)
+    All named deps prefixed: lib/{depname}_{basename}. No collision possible.
+    agnostik src/types.cyr → lib/agnostik_types.cyr
+    argonaut src/types.cyr → lib/argonaut_types.cyr
+    Stdlib remains unprefixed: lib/string.cyr
+
+16. AUTO-INCLUDE FROM CYRIUS.TOML (v4.0.0)
+    Build tool prepends include statements for all resolved deps into a temp
+    file before compilation. Developers declare deps in cyrius.toml and write
+    ONLY project-specific includes in source. Like cargo build or go build.
+
+=== LASE INVESTIGATION (deferred) ===
+
+    Load-after-store elimination investigated as peephole optimizer.
+    Adjacent store+load of same [rbp-N] unsafe without jump-target analysis —
+    loop back-edges make the load a branch target. Deferred to v3.10.0+
+    with proper basic-block analysis.
+
+=== STATS AT v4.0.0 ===
+
+  cc3: 303KB (302,824 bytes), self-hosting byte-identical
+  aarch64 cross: 268KB, 0 undefined functions
+  41 stdlib modules + 5 deps
+  36 test suites, 102 regression assertions
+  5 fuzz harnesses
+  Token limit: 262,144. Fixup limit: 16,384. Struct limit: 64.
+  Heap: 14.8MB (brk at 0xECA000), aarch64 synced
+  check.sh: 5/5 (self-host + tests + heap + format + lint)
+  Self-compile: 117ms
+  cyrius build: auto-resolve deps, auto-include, --dry-run, -v
+  cyrius init: scaffolds project with .cyrius-toolchain + CI/release workflows
+  Undefined function diagnostic: catches typos at fixup time
+  Compound assignment: +=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=
+  Negative literals: -1, -x, -(expr)
+  Downstream (6 projects on 4.0.0):
+    kybernet 1.0.1 (140 tests), argonaut 1.2.0 (27 test suites)
+    hadara 1.0.0 (329 tests), ai-hwaccel 2.0.0 (491 tests)
+    hoosh 2.0.0, avatara 2.3.0 (362 profiles, 24 traditions)
 '''

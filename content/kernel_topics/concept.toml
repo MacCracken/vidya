@@ -136,17 +136,17 @@ explanation = "var cpu_count = 1 may read as garbage at runtime. The kernel BSS 
 [[performance_notes]]
 title = "Sub-microsecond syscall dispatch in bare-metal kernel"
 explanation = "A minimal syscall dispatcher (switch on syscall number, direct function call) achieves ~188 cycles per syscall on QEMU-emulated x86_64. The overhead is dominated by the SYSCALL instruction itself (~100 cycles) plus function call overhead. No vDSO or fastpath needed at this scale."
-evidence = "AGNOS getpid syscall: 188 cycles/op (v1.1.0). Linux getpid: ~100-200 cycles native, ~500+ in VM."
+evidence = "AGNOS getpid syscall: 261 cycles/op (v1.21.0, correctly sized buffers). Was 188cy at v1.1.0 with undersized binary. Linux getpid: ~100-200 cycles native, ~500+ in VM."
 
 [[performance_notes]]
 title = "Slab allocator achieves microsecond-level alloc/free"
 explanation = "A simple slab allocator with 8 size classes (32-4096B) and free-list-per-class achieves ~1,207 cycles per alloc+free pair for 32B allocations. Larger sizes scale: 256B at 3,015 cycles, 4096B at 26,077 cycles. The key optimization: pop from free list (O(1)), zero only requested bytes (not full slab block)."
-evidence = "AGNOS v1.1.0: heap_32B 1,207cy, heap_256B 3,015cy, heap_4096B 26,077cy. PMM page alloc+free: 1,304 cycles with next-free hint."
+evidence = "AGNOS v1.21.0: heap_32B 1,338cy, heap_256B 3,358cy, heap_4096B 28,097cy. PMM page alloc+free: 1,467cy. Numbers from correctly sized 220KB binary; earlier v1.1.0 numbers (1,207/3,015/26,077) were from undersized buffers."
 
 [[performance_notes]]
 title = "PMM next-free hint eliminates linear scan"
 explanation = "A bitmap PMM that scans from page 0 on every allocation is O(n) where n = total pages. Adding a 'next_free' hint that advances on alloc and retracts on free makes sequential allocations O(1). Only falls back to full scan on fragmentation."
-evidence = "AGNOS PMM: 1,304 cycles/alloc+free with hint (v1.1.0) vs ~4000+ without (scanning 512 used pages)."
+evidence = "AGNOS PMM: 1,467 cycles/alloc+free with hint (v1.21.0) vs ~4000+ without (scanning 512 used pages)."
 
 [[best_practices]]
 title = "Pin compiler version for kernel builds — benchmark every upgrade"
@@ -170,4 +170,27 @@ explanation = "Some self-hosted GitHub Actions runners have /tmp mounted read-on
 
 [[gotchas]]
 title = "Compiler release tarballs may ship stale binaries"
-explanation = "The cyrb binary in a release tarball may be compiled from an older source than the cc2 in the same tarball. Version strings can match while behavior differs (e.g., -D flag support missing). Always verify tarball binaries match expected behavior, not just version strings. Compare binary sizes."
+explanation = "The cyrius binary in a release tarball may be compiled from an older source than the cc3 in the same tarball. Version strings can match while behavior differs (e.g., -D flag support missing). Always verify tarball binaries match expected behavior, not just version strings. Compare binary sizes."
+
+[[gotchas]]
+title = "var buf[N] is N BYTES, not N entries — the #1 kernel bug class"
+explanation = "In Cyrius, var buf[N] allocates N bytes. If each entry is 32 bytes and you want 16 entries, you need var buf[512], not var buf[16]. Three audit passes of AGNOS (v1.11.0 to v1.21.0) found 14 buffer overflow bugs — all from this same pattern. The kernel functioned because overflowed data landed in adjacent globals that happened to be writable. IDT was 512 bytes for 4096 needed. proc_table was 336 bytes for 2688 needed. The fix increased binary from 143KB to 220KB — the honest size."
+bad_example = "var proc_table[336];  # 336 bytes, fits only 2 procs (168B each), allows 16"
+good_example = "var proc_table[2688];  # 16 processes x 168 bytes each"
+
+[[gotchas]]
+title = "Stdlib modules use Linux syscalls — strip before vendoring into kernel"
+explanation = "Cyrius stdlib string.cyr, fmt.cyr etc. contain print_num(), println() and other functions that call syscall(1,1,...) for Linux write. Including unmodified stdlib in a kernel; build injects Linux syscall instructions into bare-metal code. Vendor kernel-safe subsets: copy the file, remove syscall-using functions, add kernel wrappers that output via serial_print()."
+
+[[best_practices]]
+title = "Gate test code behind #ifdef TEST to keep production binary clean"
+explanation = "A 106-assertion kernel test suite adds ~13KB to the binary and measurably increases cache pressure (5-18% benchmark regression). Use #ifdef TEST to conditionally include test code. Production builds compile without -D TEST. The test runner script (ktest.sh) passes -D TEST when building the test binary, runs on QEMU, and discards it."
+
+[[best_practices]]
+title = "Use version-bump.sh with auto-computed serial_println byte lengths"
+explanation = "Kernel boot banners use serial_println('AGNOS kernel vX.Y.Z', N) where N is the byte length of the string. When the version changes, N must change too. The version-bump.sh script computes this automatically: KSTR='AGNOS kernel v$NEW'; KLEN=${#KSTR}. One script updates 9 files atomically — VERSION, cyrius.toml, CLAUDE.md, kernel source, CHANGELOG.md, roadmap."
+
+[[performance_notes]]
+title = "Correctly sized buffers cost ~54% binary size but zero performance regression"
+explanation = "AGNOS v1.21.0 fixed 14 undersized buffers (IDT 512->4096, proc_table 336->2688, vfs_table 128->1024, etc.), growing the binary from 143KB to 220KB. Benchmark impact was within QEMU noise — no meaningful regression. The 143KB binary was only that small because data structures were silently overwriting each other."
+evidence = "AGNOS v1.21.0: 220KB binary, pmm_alloc_free 1,467cy (was 1,391), heap_32B 1,338cy (was 1,460 — actually faster), syscall_getpid 261cy (was 247). All within QEMU rdtsc variance."

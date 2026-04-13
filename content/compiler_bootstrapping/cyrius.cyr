@@ -3,11 +3,18 @@
 # Cyrius IS a bootstrapping compiler. This documents the patterns,
 # not reimplements them. See github.com/MacCracken/cyrius for the real thing.
 #
-# Bootstrap chain: seed (29KB asm) → stage1f (12KB) → cc2 (164KB)
-# Self-hosting proof: cc2 compiles its own source → cc3, cmp -s cc2 cc3
+# Bootstrap chain: seed (29KB asm) → stage1f (12KB) → bridge (transitional) → cc3 (~250KB)
+# Self-hosting proof: cc3 compiles its own source → cc4, cmp -s cc3 cc4
 #
 # Key concepts: seed trust, multi-stage, byte-identical verification,
-# cross-compilation (x86 cc2 → aarch64 cc2_aarch64 → native aarch64)
+# cross-compilation (x86 cc3 → aarch64 cc3_aarch64 → native aarch64)
+#
+# Current state (Cyrius v3.4.17):
+#   cc3       = 250,304 bytes (x86_64, 8 modules, ~280 fns)
+#   cc3_arm   = 211 KB (aarch64 cross, same frontend, aarch64 backend)
+#   40 stdlib modules + 5 deps, 32 test suites (442 assertions)
+#   Heap audit: 47 regions, 0 overlaps, 0 warnings
+#   `./build/cc3 --version` → "cc3 3.4.17"
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -18,26 +25,34 @@ include "lib/assert.cyr"
 # Bootstrap Chain — the Cyrius architecture
 # ================================================================
 
-# Stage sizes (actual Cyrius values)
-var SEED_SIZE_KB = 29;       # bootstrap/asm — hand-written x86_64 assembly
-var STAGE1_SIZE_KB = 12;     # stage1f — minimal compiler, compiles cc2 source
-var CC2_SIZE_KB = 164;       # cc2 — full modular compiler (8 modules)
-var CC2_ARM_SIZE_KB = 173;   # cc2_aarch64 — cross-compiler output
+# Stage sizes (actual Cyrius values, v3.4.17)
+var SEED_SIZE_KB = 29;       # bootstrap/asm — hand-written x86_64 assembly (auditable)
+var STAGE1_SIZE_KB = 12;     # stage1f — minimal compiler, compiles the bridge language
+var BRIDGE_SIZE_KB = 45;     # bridge — stepping-stone compiler, lives in src/bridge.cyr
+var CC3_SIZE_KB = 250;       # cc3 — full modular compiler (8 modules)
+var CC3_ARM_SIZE_KB = 211;   # cc3_aarch64 — cross-compiler output (x86→aarch64)
 
 # Each stage compiles the next. The seed is the root of trust.
 # Thompson's "Reflections on Trusting Trust" (1984): if the seed is
 # compromised, every generation inherits the compromise.
+#
+# The bridge exists because stage1f's language subset is too limited to
+# compile the full cc3 source directly. bridge.cyr is written in stage1f's
+# subset AND can compile the full cc3 language. It is the conceptual
+# fixed-point between "what the seed can produce" and "what the real
+# compiler looks like."
 
 fn test_chain_properties() {
     # Each stage is larger than the previous (more features)
-    assert(STAGE1_SIZE_KB < CC2_SIZE_KB, "stage1 < cc2");
-    assert(SEED_SIZE_KB < CC2_SIZE_KB, "seed < cc2");
+    assert(STAGE1_SIZE_KB < BRIDGE_SIZE_KB, "stage1 < bridge");
+    assert(BRIDGE_SIZE_KB < CC3_SIZE_KB, "bridge < cc3");
+    assert(SEED_SIZE_KB < CC3_SIZE_KB, "seed < cc3");
 
     # The seed must be small enough for a human to audit
     assert(SEED_SIZE_KB < 50, "seed is auditable (<50KB)");
 
-    # Cross-compiler is similar size to native (same features, different backend)
-    assert(CC2_ARM_SIZE_KB > 100, "cross-compiler is substantial");
+    # Cross-compiler is similar size to native (same frontend, different backend)
+    assert(CC3_ARM_SIZE_KB > 100, "cross-compiler is substantial");
     return 0;
 }
 
@@ -77,20 +92,25 @@ fn test_instruction_sizes() {
 # Self-Hosting Verification
 # ================================================================
 # The gold standard: compile the compiler with itself, compare outputs.
-#   cc3 = cc2(cc2_source)    # compile with current compiler
-#   cc4 = cc3(cc2_source)    # compile with output of step 1
-#   cmp -s cc3 cc4           # must be byte-identical
+#   cat src/main.cyr | ./build/cc3 > /tmp/cc3a && chmod +x /tmp/cc3a
+#   cat src/main.cyr | /tmp/cc3a > /tmp/cc3b && chmod +x /tmp/cc3b
+#   cmp -s /tmp/cc3a /tmp/cc3b    # must be byte-identical
 #
-# If cc3 != cc4, the compiler is not a fixed point — it doesn't
+# If cc3a != cc3b, the compiler is not a fixed point — it doesn't
 # faithfully reproduce itself. This catches codegen bugs.
+#
+# For heap-layout changes that may shift offsets, use a three-step or
+# four-step bootstrap: chain from the prior released binary through
+# several self-compile iterations until the output stabilizes. The
+# final iteration must be byte-identical to its predecessor.
 
 fn test_self_hosting_properties() {
     # Fixed-point property: f(f(x)) == f(x) where f = compiler, x = source
     # Simulated: two "compilation" passes should produce same result
     var source_hash = 0xDEAD;
-    var cc2_output = source_hash * 7 + 42;   # deterministic transform
-    var cc3_output = source_hash * 7 + 42;   # same transform = same result
-    assert_eq(cc2_output, cc3_output, "self-hosting: cc2==cc3");
+    var cc3a_output = source_hash * 7 + 42;   # deterministic transform
+    var cc3b_output = source_hash * 7 + 42;   # same transform = same result
+    assert_eq(cc3a_output, cc3b_output, "self-hosting: cc3a==cc3b");
 
     # Non-deterministic compilation breaks self-hosting
     # (timestamps, ASLR, random padding — all must be eliminated)
@@ -100,9 +120,9 @@ fn test_self_hosting_properties() {
 # ================================================================
 # Cross-Compilation Chain
 # ================================================================
-# x86 cc2 → cc2_aarch64 (cross-compiler, runs on x86, emits ARM)
-# cc2_aarch64 → cc2-native-aarch64 (native, runs on ARM, emits ARM)
-# Verification: cc2-native-aarch64 compiles itself → byte-identical
+# x86 cc3 → cc3_aarch64 (cross-compiler, runs on x86, emits ARM)
+# cc3_aarch64 → cc3-native-aarch64 (native, runs on ARM, emits ARM)
+# Verification: cc3-native-aarch64 compiles itself → byte-identical
 #
 # This proves the cross-compiler is correct: it produces a native
 # compiler that can reproduce itself on the target architecture.

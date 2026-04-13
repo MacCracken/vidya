@@ -119,16 +119,25 @@ fn arch_halt_sim() { return 0; }   # simulated — real version uses asm
 
 # === 3-tier benchmark pattern with rdtsc ===
 # Tier 1: Micro (single operation, <1000 cycles)
-#   e.g., syscall_getpid 188cy, syscall_getuid 726cy
+#   e.g., syscall_getpid 261cy, syscall_getuid 1160cy
 # Tier 2: Meso (alloc/free pair, 1000-10000 cycles)
-#   e.g., pmm_alloc_free 1304cy, heap_32B 1207cy, heap_256B 3015cy
+#   e.g., pmm_alloc_free 1467cy, heap_32B 1338cy, heap_256B 3358cy
 # Tier 3: Macro (multi-operation, >5000 cycles)
-#   e.g., serial_putc 7510cy, vfs_open_read_close 5912cy, heap_4096B 26077cy
+#   e.g., serial_putc 5046cy, vfs_open_read_close 6543cy, heap_4096B 28097cy
 fn bench_tier(cycles) {
     if (cycles < 1000) { return 1; }
     if (cycles < 5000) { return 2; }
     return 3;
 }
+
+# === Kernel stdlib vendoring pattern (v1.21.0) ===
+# Bare-metal kernels can't use stdlib directly (syscall dependencies).
+# Vendor kernel-safe subsets: strip syscall-using functions, keep pure logic.
+# kstring.cyr: strlen, streq, memeq, memcpy, memset, memchr, strchr, atoi, strstr
+# kfmt.cyr: fmt_int_buf, fmt_hex_buf + kernel wrappers (kfmt_int, kfmt_hex, kfmt_byte)
+# Gate test code behind #ifdef TEST to exclude from production binary.
+fn kernel_stdlib_modules() { return 2; }  # kstring + kfmt
+fn kernel_test_assertions() { return 106; }
 
 # === TCP connection state constants (v1.11.0) ===
 fn tcp_state_closed() { return 0; }
@@ -308,6 +317,25 @@ fn test_multiboot1_compat() {
     return 0;
 }
 
+fn test_kernel_stdlib() {
+    assert_eq(kernel_stdlib_modules(), 2, "2 vendored stdlib modules");
+    assert_eq(kernel_test_assertions(), 106, "106 kernel test assertions");
+    return 0;
+}
+
+fn test_buffer_sizing() {
+    # v1.21.0 lesson: var name[N] is N BYTES, not N entries.
+    # If entries are 32 bytes each and you want 16 entries, N = 16 * 32 = 512.
+    # These are the correct sizes found during 3 audit passes:
+    assert_eq(168 * 16, 2688, "proc_table: 16 procs x 168B");
+    assert_eq(32 * 32, 1024, "vfs_table: 32 fds x 32B");
+    assert_eq(16 * 32, 512, "dev_table: 16 devs x 32B");
+    assert_eq(32 * 32, 1024, "pci_devs: 32 slots x 32B");
+    assert_eq(256 * 16, 4096, "idt: 256 vectors x 16B");
+    assert_eq(8 * 80, 640, "tcp_conns: 8 conns x 80B");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_pte();
@@ -324,6 +352,8 @@ fn main() {
     test_pipe_buffer();
     test_fat16_offsets();
     test_multiboot1_compat();
+    test_kernel_stdlib();
+    test_buffer_sizing();
     return assert_summary();
 }
 var exit_code = main();
