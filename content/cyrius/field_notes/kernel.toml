@@ -1,0 +1,79 @@
+# Cyrius Field Notes — Kernel Experiences
+# Lessons from building and hardening the AGNOS kernel in Cyrius.
+
+[[entries]]
+name = "the_143kb_lie"
+description = "How 14 buffer overflows made a kernel look smaller than it was — the AGNOS v1.11.0 to v1.21.0 hardening story"
+category = "cyrius"
+content = '''
+THE 143KB LIE
+
+AGNOS kernel v1.11.0 was 143KB. It booted, ran 10 benchmarks, passed every CI
+check, served TCP connections, read FAT16 filesystems, and dropped you into an
+interactive shell with 18 commands. It looked correct.
+
+It was riddled with buffer overflows.
+
+Three audit passes — each one finding critical bugs the previous one missed —
+revealed 14 undersized buffers. The pattern was always the same: `var buf[N]`
+where N was the number of ENTRIES, not the number of BYTES. Cyrius allocates
+bytes. If each entry is 32 bytes and you want 16 entries, you need var buf[512].
+The kernel had var buf[16].
+
+THE HIGHLIGHTS:
+
+  proc_table[336]    — fits 2 procs (168B each), allowed 16. Overflow: 2352 bytes.
+  idt[512]           — fits 32 vectors (16B each), needs 256. Overflow: 3584 bytes.
+  vfs_table[128]     — fits 4 file descriptors (32B each), used 32. Overflow: 864 bytes.
+  tcp_conns[80]      — fits 1 connection (80B each), allowed 8. Overflow: 560 bytes.
+  sc_normal[16]      — fits 16 scancode entries (1B each), indexed by 128. Overflow: 112 bytes.
+  sh_buf[16]         — 16 bytes for a shell command buffer that accepted 126 chars.
+  gdt[8]             — 8 bytes for a 56-byte Global Descriptor Table.
+  tss[16]            — 16 bytes for a 104-byte Task State Segment.
+
+The kernel worked because Cyrius lays out globals sequentially and the overflowed
+data landed in adjacent variables that happened to tolerate being overwritten.
+The IDT was overwriting the ISR stub, the GDT pointer, and part of the TSS — but
+those were initialized later in the boot sequence, so the overwrite was invisible.
+The proc_table was overwriting the signal arrays — but signals weren't used during
+the benchmarks that validated correctness.
+
+WHAT IT TOOK TO FIND THEM:
+
+Pass 1: Found proc_table, vfs_create_pipe leak, signal bounds, ELF loader failures.
+        The obvious stuff. Fixed 19 items.
+
+Pass 2: Found sh_buf, tcp_conns, proc_create_address_space rollback.
+        Harder to spot — required tracing computed indices through function calls.
+
+Pass 3: The systematic one. For every `var name[N]`, computed max access offset
+        and compared to N. Found gdt, tss, idt, kb_isr, sc_normal, sc_shifted,
+        vfs_table, dev_table, pci_devs. The big ones.
+
+THE COST OF CORRECTNESS:
+
+  Before: 143KB, "all tests pass", benchmarks look great
+  After:  220KB, all tests still pass, benchmarks within noise
+
+The binary grew 54%. That's the honest size of a kernel with 33 subsystems, 26
+syscalls, TCP/IP, FAT16, VirtIO, SMP, an ELF loader, and an interactive shell.
+The 143KB number was a lie told by buffer overflows.
+
+Benchmark impact was negligible. Heap_32B actually got faster (1,460 → 1,338
+cycles) because the slab allocator's free lists were no longer corrupted by
+adjacent overflows. The I/O paths slowed ~15% from larger data segment cache
+pressure — the cost of having correctly sized interrupt descriptor tables.
+
+LESSON:
+
+In Cyrius, `var buf[N]` is N bytes. Not N entries. Not N elements. Bytes.
+Every buffer declaration is a contract: "I need exactly this many bytes."
+Break the contract and everything works until it doesn't. The kernel will
+boot, the tests will pass, the benchmarks will look good. But the data
+structures are eating each other alive, and the only sign is a binary
+that's suspiciously small.
+
+220KB for a fully functional kernel is hard to beat. 143KB was too good
+to be true — and it was.
+'''
+

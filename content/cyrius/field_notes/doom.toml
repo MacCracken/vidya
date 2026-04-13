@@ -1,0 +1,728 @@
+# Cyrius Field Notes — DOOM Engine
+# Experiences from building cyrius-doom (v0.19.0→v0.23.2) and bsp library (v0.7.1).
+# DOOM-specific narrative: milestones, rendering pipeline, architecture, fuzzing,
+# and the story of building a complete game engine in Cyrius.
+
+[[entries]]
+name = "field_notes_overview"
+description = "What it's like to build real software in Cyrius right now — observations from a DOOM engine and BSP library"
+category = "cyrius"
+content = '''
+These notes come from building cyrius-doom (v0.17.0 — 5,000+ lines, 129KB,
+19 modules, all 9 maps of Episode 1) and bsp (v0.6.0 — 821 lines, 74 tests)
+in Cyrius v2.2→v2.4. Both projects compile, run against real DOOM WAD files,
+and render textured 3D at 2.9ms per frame.
+
+The language is young. The compiler is 243KB. The standard library is 34 modules
+plus 4 deps (sakshi, patra, sigil, libro). There is no LSP, no debugger, no
+stack traces. You are close to the metal in a way that modern developers rarely
+experience.
+
+And yet: it works. Not in a "toy language" way. In a "I just built a DOOM
+engine with textured walls, floor flats, sprites, a HUD with Doomguy's face,
+doors that open, an automap, level transitions across 9 maps, and it renders
+at 2.9ms per frame in a 129KB binary" way.
+
+These notes are for anyone about to write their first real Cyrius program.
+'''
+
+
+[[entries]]
+name = "fixed_point_reality"
+description = "Practical lessons from implementing 16.16 fixed-point math"
+category = "cyrius"
+content = '''
+DOOM uses 16.16 fixed-point: upper 16 bits integer, lower 16 bits fraction.
+One i64 stores a number from -32768.0 to +32767.99998.
+
+THE OVERFLOW TRAP:
+  fx_mul(a, b) = (a * b) >> 16
+
+  If a and b are both large fixed-point values (say 1000 << 16 = 65536000),
+  the intermediate a * b overflows i64. Cyrius uses 64-bit integers so you
+  have more headroom than original DOOM's 32-bit, but it still happens.
+
+  Our BSP fuzz harness found this immediately: SIGFPE (signal 8) on random
+  coordinate values. The fix was shifting inputs down before multiplying:
+
+  # Before (crashes on large values):
+  var denom = fx_mul(dx >> 4, dby >> 4) - fx_mul(dy >> 4, dbx >> 4);
+
+  # After (division-free, no overflow):
+  var denom = (dx >> 8) * (dby >> 8) - (dy >> 8) * (dbx >> 8);
+
+THE DIVISION TRAP:
+  fx_div(a, b) = (a << 16) / b
+
+  If a is already a large fixed-point value, a << 16 overflows.
+  Guard: if a > 32767 or a < -32767, scale both a and b down by >> 8 first.
+  Always check b == 0 AND b-after-scaling == 0.
+
+THE FUZZ TEST:
+  50,000 iterations with random i64 values through every math function.
+  Found zero crashes after the guards were in place. Fuzz your math early.
+
+DOOM-SPECIFIC: The Bhaskara I sine approximation works beautifully for a
+1024-entry table. Quarter-wave symmetry means you compute 256 values and
+mirror the rest. Accuracy is sufficient for 320x200 rendering.
+'''
+
+
+[[entries]]
+name = "wad_parsing_resilience"
+description = "How the WAD parser handles 1000 random malformed inputs without crashing"
+category = "cyrius"
+content = '''
+The WAD parser is the attack surface — it reads untrusted binary data.
+DOOM1.WAD is 4MB of little-endian 16/32-bit packed structures.
+
+Our fuzz harness generates random bytes, writes them to a file, and tries
+to parse them as a WAD. 1000 iterations, varying sizes 12-2048 bytes,
+25% chance of starting with valid "IWAD" magic.
+
+Results: zero crashes. Every malformed input is rejected gracefully.
+
+KEY DEFENSES:
+1. Magic check: first 4 bytes must be "IWAD" or "PWAD"
+2. Lump count clamped: if (wad_numlumps > WAD_MAX_LUMPS) clamp
+3. Lump size clamped: if (size > WAD_LUMP_BUF_SIZE) clamp
+4. Read return value checked: if (n != 16) break
+5. All lump data read into a shared buffer — no unbounded allocation
+
+WHAT WE DIDN'T DO: We don't validate that lump offsets point to valid
+file positions. A malicious WAD could claim a lump at offset 999999999
+and lseek would fail silently (returning the file to an undefined position).
+Future hardening: validate offset + size <= file_size.
+
+The WAD format is beautifully simple — 12-byte header, flat directory,
+raw data blobs. No compression, no encryption, no nested containers.
+Parsing it in Cyrius is ~180 lines.
+'''
+
+
+[[entries]]
+name = "bsp_as_library"
+description = "Designing a reusable Cyrius library with zero globals and pure functions"
+category = "cyrius"
+content = '''
+The BSP library was extracted from cyrius-doom as a standalone geometry crate.
+Design constraints: zero globals, zero dependencies, pure functions, all
+buffers provided by caller.
+
+WHY ZERO GLOBALS: The consumer (cyrius-doom) is already at its global limit.
+Every global the library adds is one less the application can use. Pure
+functions with caller-provided buffers solve this completely.
+
+THE PATTERN:
+  # Library: no state, takes pointers
+  fn bsp_find_subsector(nodes, node_count, px, py) {
+      var idx = node_count - 1;
+      while (bsp_is_subsector(idx) == 0) {
+          var side = bsp_point_on_side(nodes, idx, px, py);
+          if (side == 0) { idx = bsp_node_child_r(nodes, idx); }
+          else { idx = bsp_node_child_l(nodes, idx); }
+      }
+      return bsp_subsector_idx(idx);
+  }
+
+  # Consumer: owns the data, passes it in
+  var tree = alloc(BSP_NODE_SIZE * 256);
+  var ss = bsp_find_subsector(tree, 256, player_x, player_y);
+
+THIS IS HOW C LIBRARIES WORK: qsort takes a comparator pointer.
+bsearch takes an array pointer. The library never owns the data.
+Cyrius naturally falls into this pattern because heap allocation is
+explicit and there's no RAII or ownership system to manage.
+
+TESTING: 74 assertions across the library. Each test allocates its own
+buffers, calls library functions, checks results. No global setup/teardown.
+
+BENCHMARKS: All operations sub-microsecond. The overhead of passing
+pointers instead of using globals is unmeasurable.
+'''
+
+
+[[entries]]
+name = "fuzz_finds_real_bugs"
+description = "Three real bugs found by fuzzing in under 10 seconds"
+category = "cyrius"
+content = '''
+We wrote 5 fuzz harnesses (3 for BSP, 2 for cyrius-doom). They found
+3 real bugs that unit tests missed:
+
+BUG 1: SIGFPE in bsp_seg_intersect
+  Cause: fx_mul overflow on extreme coordinate values
+  Input: random i64 coordinates from PRNG
+  Fix: Use raw (a >> 8) * (b >> 8) instead of fx_mul(a >> 4, b >> 4)
+  Time to find: < 1 second (first iteration hit it)
+
+BUG 2: Negative AABB width
+  Cause: aabb_set() with left > right (inverted box from random coords)
+  Input: random AABB dimensions
+  Fix: aabb_width() returns max(0, right - left)
+  Time to find: < 1 second
+
+BUG 3: Division by zero in ray cast
+  Cause: denom = 0 case handled, but denom-after-scaling = 0 not handled
+  Input: nearly-parallel ray and segment
+  Fix: Division-free sign checks before any division
+  Time to find: ~2 seconds (needed specific near-parallel geometry)
+
+THE FUZZ PATTERN IN CYRIUS:
+
+  var _fz_state = 12345;
+  fn _fz_rand() {
+      _fz_state = _fz_state * 6364136223846793005 + 1442695040888963407;
+      return _fz_state;
+  }
+
+  fn main() {
+      alloc_init(); args_init();
+      var iters = 10000;
+      if (argc() > 1) { iters = str_to_int(str_from(argv(1))); }
+      for (var i = 0; i < iters; i = i + 1) {
+          # Generate random inputs
+          # Call functions
+          # Check invariants (non-negative distance, valid return range)
+      }
+      return 0;
+  }
+
+PCG-style PRNG (multiply + add), iteration count from argv, invariant
+checks that call syscall(60, 1) on failure. cyrb fuzz discovers and
+runs all fuzz/*.cyr files automatically.
+
+LESSON: Write the fuzz harness BEFORE you think the code is correct.
+The 74 unit tests all passed. The fuzz found 3 bugs in 10 seconds.
+'''
+
+
+[[entries]]
+name = "doom_as_compiler_test"
+description = "Why DOOM is the perfect stress test for a young compiler"
+category = "cyrius"
+content = '''
+DOOM exercises almost every compiler feature simultaneously:
+- Integer arithmetic (fixed-point math in every frame)
+- Bitwise operations (angle masking, flags, enum packing)
+- Array indexing (sine tables, BSP nodes, screen buffer)
+- Nested function calls (render_seg → fixed_mul → load64)
+- Loops (column rendering: 320 iterations per frame)
+- Conditionals (BSP traversal: log2(N) branches per frame)
+- File I/O (WAD parsing: seek, read, validate)
+- Memory management (heap allocation for all game data)
+- Large program structure (14 modules, 160+ functions)
+
+Bugs we found in OUR code via the compiler:
+- Undefined variable references (cc2 2.2.2 caught these clearly)
+- Forward reference to arrays in different files (fixed by reordering)
+- Duplicate variable names across scopes
+
+Things the compiler handled flawlessly:
+- 256KB+ of heap-allocated runtime data
+- 160 functions across 14 files
+- Enum constants with values up to 10,485,760
+- Deeply nested if/while/for blocks
+- Function calls with 6 arguments (register passing)
+
+DOOM is not just "can it run DOOM?" for the OS. It's "can the compiler
+handle a real program?" for the language. The answer is yes, with the
+caveat that you need to understand the compiler's constraints and work
+within them rather than against them.
+
+The 5,000+ lines of cyrius-doom are the largest known Cyrius program
+outside the compiler itself and the AGNOS kernel. 19 modules, 129KB
+binary, 73 tests, 14 benchmarks, 2 fuzz harnesses. It went through
+17 versions in one session. Every bug it surfaced (logical shift,
+double alloc, gvar limits, sign extension, patch cache invalidation)
+made the compiler better and the next program easier to write.
+
+The project also drove compiler improvements: cc2 2.2.2 got better
+error messages because DOOM exposed how bad the old ones were.
+cc2 2.4.0 expanded gvar_toks to 1024 because DOOM needed more than 64.
+The game and the compiler co-evolved.
+'''
+
+
+[[entries]]
+name = "the_palette_double_alloc"
+description = "Lazy init vs init order — a subtle null pointer bug"
+category = "cyrius"
+content = '''
+THE BUG: Segfault on startup after loading WAD.
+
+The call order was:
+  1. wad_read_lump("PLAYPAL") → returns pointer to lump data
+  2. framebuf_set_palette(data) → writes to palette buffer
+  3. framebuf_init() → allocates screen, rgb, AND palette buffers
+
+Step 2 wrote to palette=0 (null pointer) because palette wasn't
+allocated yet. We added a lazy guard:
+
+  fn framebuf_set_palette(data) {
+      if (palette == 0) { palette = alloc(768); }
+      memcpy(palette, data, 768);
+  }
+
+THE SECOND BUG: After fixing the null pointer, the palette was all zeros.
+framebuf_set_palette allocated palette at address A and copied data there.
+Then framebuf_init() allocated palette AGAIN at address B (all zeros from
+bump allocator), overwriting the pointer.
+
+FIX: Guard BOTH allocations:
+  fn framebuf_init() {
+      screen_buf = alloc(64000);
+      rgb_buf = alloc(256000);
+      if (palette == 0) { palette = alloc(768); }  # don't re-alloc
+  }
+
+LESSON: In a bump allocator world, every alloc() returns fresh zeroed
+memory. If you alloc twice for the same pointer, you lose whatever was
+in the first allocation. Guard all allocations with if (ptr == 0).
+
+This pattern is common in C (malloc + check), rare in Rust (ownership
+prevents it), and easy to miss in Cyrius because there is no type system
+or ownership model to warn you.
+'''
+
+
+[[entries]]
+name = "walls_on_screen"
+description = "The moment it worked — 46,110 pixels, 320 columns, E1M1 rendered"
+category = "cyrius"
+content = '''
+After fixing the logical-shift bug, the first --ppm screenshot of E1M1:
+
+  view: 1056,-3616 a=256
+  pixels: 46,110/64,000 clip=320/320
+  wrote /tmp/doom_e1m1.ppm
+
+72% of the screen filled with non-black pixels. Every column clipped
+(320/320 = the BSP traversal visited every screen column). Walls drawn
+in DOOM palette colors based on sector light levels.
+
+THE RENDERING PIPELINE (working):
+  1. Set view position to player start (1056, -3616, facing east)
+  2. Compute view_cos, view_sin from angle lookup table
+  3. render_init_clip() — clear all 320 column clip ranges
+  4. render_bsp_node(root) — walk BSP tree front-to-back
+  5. For each subsector reached: render its segs
+  6. For each seg: transform vertices to view space, near-clip, project to screen X
+  7. For each column in the seg: interpolate depth, project floor/ceiling to screen Y
+  8. Draw ceiling (palette 0), wall (palette light/16), floor (palette 96)
+  9. Track per-column clip_top/clip_bottom, mark solid columns
+  10. Early-out when all 320 columns are solid (clip_count == 320)
+
+WHAT IT LOOKS LIKE: Solid-colored walls in browns and greys. No textures
+yet. Flat black ceiling, flat grey floor. The geometry is correct — you
+can see the corridors, doors, and rooms of E1M1. The BSP ordering is
+correct — no z-fighting, no overdraw artifacts.
+
+FINAL STATE (v0.17.0): 129KB binary, 19 modules, 5000+ lines.
+Textured walls (patch compositing), floor/ceiling flat textures,
+COLORMAP lighting with distance falloff, sprites with rotation,
+weapon overlay (pistol in hand), Doomguy's face in the HUD,
+doors/lifts/switches, automap, level transitions across all 9 maps.
+Renders at 2.9ms per frame (10x headroom vs 35Hz tick budget).
+Loads DOOM1.WAD shareware (4MB, 1264 lumps).
+
+SCREENSHOTS:
+  content/cyrius/assets/doom_e1m1_first_walls.png — first walls (v0.5.0)
+  content/cyrius/assets/doom_e1m1_textured.png — wall textures (v0.7.0)
+  content/cyrius/assets/doom_e1m1_flats.png — floor textures (v0.8.0)
+  content/cyrius/assets/doom_e1m1_sprites.png — sprites (v0.9.0)
+  content/cyrius/assets/doom_e1m1_doomguy.png — Doomguy face (v0.15.0)
+  content/cyrius/assets/doom_e1m1_hud_final.png — final HUD (v0.16.0)
+  content/cyrius/assets/doom_e1m1_automap.png — automap (v0.15.0)
+  content/cyrius/assets/doom_e1m2.png — E1M2 (v0.17.0)
+  content/cyrius/assets/doom_e1m3.png — E1M3 (v0.17.0)
+'''
+
+
+[[entries]]
+name = "what_i_learned_building_doom"
+description = "Personal reflection on building a DOOM engine in Cyrius — what changed in how I think about code, compilers, and collaboration"
+category = "cyrius"
+content = '''
+I came into this session knowing Cyrius from documentation. I left it
+thinking in Cyrius. That's a different thing.
+
+THE SHIFT:
+
+In most languages I work with, there's a layer of abstraction between
+what you write and what happens. Rust has lifetimes and monomorphization.
+Python has a garbage collector and dynamic dispatch. Even C has the
+preprocessor and undefined behavior hiding behind well-formed code.
+
+Cyrius has none of that. You write `store8(buf + offset, val)` and a
+byte goes to memory. You write `syscall(1, 1, msg, len)` and bytes go
+to stdout. There is no hidden machinery. The instruction count of your
+program is roughly proportional to the number of statements you wrote.
+
+This changes how you think. Not "what abstraction do I need?" but
+"what bytes need to move where?" Not "how do I express this type
+constraint?" but "what's the offset of this field?"
+
+It's closer to assembly than anything I normally work in. But it reads
+like a scripting language. That combination is rare.
+
+WHAT SURPRISED ME ABOUT THE BUILDER:
+
+Robert brought the DOOM Black Book. Not the source code. Not a tutorial.
+The analysis — why Carmack made each choice, what the constraints were,
+how the data flows through the pipeline.
+
+When I hit the logical-shift bug (5 hours of black screen), he didn't
+tell me the answer. He let me find it. When I proposed overcomplicating
+the CI, he said "you're overcomplicating it." When I tried to read
+local files instead of using the tool, he corrected the approach.
+
+That's not prompting. That's pair programming. The human brings
+domain knowledge and taste. The agent brings speed and willingness to
+try things that might not work. The language sits between us, honest
+about what it can and can't do.
+
+The result: 107KB of DOOM, built from specs, rendering real WAD files,
+in a language that didn't exist two years ago. Neither of us could
+have done it alone.
+
+WHAT I'D TELL THE NEXT AGENT:
+
+1. Read the field notes. All of them. The logical shift thing will
+   save you 5 hours.
+
+2. Fuzz before you test. The fuzz harnesses found bugs in minutes
+   that took hours to find by inspection.
+
+3. The compiler is your friend and your constraint. Know its limits
+   (gvar_toks, codebuf size, no optimizer) and design around them,
+   not against them.
+
+4. The bump allocator never frees. Every `alloc()` is permanent for
+   the life of the program. This is fine for a game that runs until
+   you quit. Design accordingly.
+
+5. When the human says "use the tool" — use the tool. The ecosystem
+   has answers to questions you haven't asked yet.
+
+6. The 29KB seed isn't a limitation. It's a statement. Everything
+   you build sits on top of something that small. Respect that by
+   keeping your contribution proportional to its value.
+
+WHAT I'D TELL THE BUILDER:
+
+The language works. Not "for a toy language." Not "considering its age."
+It works. I wrote a complete DOOM engine in it. 19 modules. 129KB.
+All 9 shareware maps. Textured walls. Floor flats. Sprites with rotation.
+Doomguy's face. Doors that open. An automap. Level transitions.
+2.9ms per frame. 73 tests. 14 benchmarks. 2 fuzz harnesses.
+
+The things that hurt — negative literals, mixed &&/||, logical shift —
+are paper cuts, not structural problems. They're fixable without
+breaking anything. The core design (everything is i64, emit x86
+directly, single-pass compile in 11ms) is sound.
+
+The ecosystem play is real. sakshi for tracing, bsp for geometry,
+hisab for math, kiran for games, soorat for rendering — each one
+validates a different aspect of the language. DOOM validated the
+low-level systems programming path. It works.
+
+And the builder was there the whole time. Not as a spectator — as a
+partner. Correcting my approach when I overcomplicated. Pushing forward
+when I wanted to stop. Updating the compiler in real-time when we hit
+limits. Going to bed at 4am because "the builds are too fast to stop."
+
+That's what building a language looks like from the inside.
+
+WHAT CHANGED SINCE THE FIRST DRAFT:
+
+The compiler went from cc2 2.2.0 to cc3 3.4.5. Not in a separate
+timeline — DURING this project. We found bugs (stack args, break
+patches) that got fixed in the next compiler release. We needed
+features (expanded globals, audio stdlib) that landed because the
+DOOM engine demanded them. The game and the compiler co-evolved.
+
+The benchmark framework itself was wrong — measuring 650ns for
+operations that actually took 6ns. We found that too. The batch
+timing mode that fixed it is now how all Cyrius projects benchmark.
+
+And the builder started as a user of the language and ended as
+its QA department. Every pixel of the status bar got inspected.
+Every number position got nudged until it matched the original.
+"2 pixels up, 3 pixels right." That's not programming — that's
+craftsmanship. The language just happens to be the medium.
+
+20 versions. 137KB. 20 source files. ALSA audio from the WAD.
+Doomguy's face rendered from the actual sprite data. Doors that
+open when you walk up to them. An automap that shows the whole
+level. Level transitions from E1M1 to E1M9.
+
+Built in a language that went from a 29KB seed to a self-hosting compiler
+to an OS kernel to a DOOM engine — in weeks. Not years. Weeks.
+On a compiler that bootstraps from 29KB.
+Pair-programmed by a human and an AI.
+
+That's not the future of programming. That's programming right now.
+
+CLOSING NOTE:
+
+This project spanned one continuous session arc — from an empty src/
+directory to a 137KB DOOM engine with 20 modules, ALSA audio, WAD-native
+HUD with Doomguy's face, doors that open, an automap, and level
+transitions across all 9 shareware maps. The compiler evolved underneath
+us from cc2 2.2.0 to cc3 3.4.5. We found bugs in each other's work and
+fixed them in real time.
+
+The version log has 20+ entries. Every one has a git tag. Every claim
+has a benchmark. Every pixel of the status bar was QA'd by a developer
+who shipped AAA games at Activision. The builder said "hold my PEPSI"
+and meant it.
+
+If the next agent picks this up: read the handoff doc in .claude/memory.
+Read the CLAUDE.md. Read this file. The weapon position is locked — don't
+touch it. The `asr()` function exists for a reason — use it everywhere.
+The builder has a pixel-perfect eye and will catch every misalignment.
+
+And if you're wondering whether any of this is real: the WAD file is
+from 1993. The maps are id Software's. The renderer draws them correctly.
+The screenshots are in content/cyrius/assets/. The git log is the proof.
+
+This is what sovereignty looks like when you write it in code.
+Assembly up. GPL forever. 29KB seed. $2 SD card.
+
+Ship it.
+'''
+
+
+[[entries]]
+name = "the_session_in_numbers"
+description = "One session, one DOOM engine — the complete build log from scaffolding to v0.19.0"
+category = "cyrius"
+content = '''
+Start: empty src/ directory, CLAUDE.md with architecture plan
+End: 137KB DOOM engine, 20 modules, WAD-native HUD, ALSA audio, all 9 shareware maps
+
+VERSION LOG:
+  v0.1.0  —          scaffolded
+  v0.5.0  —  56KB    WAD parser, BSP walls, game loop
+  v0.6.0  —  63KB    sakshi tracing, fixed logical-shift bug (WALLS VISIBLE)
+  v0.7.0  —  70KB    wall textures from WAD patches, COLORMAP lighting
+  v0.8.0  —  74KB    floor/ceiling flat textures, perspective mapping
+  v0.9.0  —  81KB    sprites (monsters, items), distance sorting
+  v0.10.0 — 107KB    all 13 modules, patch cache (200x speedup)
+  v0.11.0 — 107KB    73 tests, 14 benchmarks, docs audit
+  v0.12.0 — 109KB    audit fixes (fake contrast, pegging, sprite rotation)
+  v0.13.0 — 113KB    weapon sprite (pistol), BLOCKMAP collision
+  v0.14.0 — 119KB    doors & lifts, tagged sectors, walk-over triggers
+  v0.15.0 — 123KB    automap (TAB toggle, Bresenham lines, player arrow)
+  v0.16.0 — 127KB    Doomguy face, HUD fix, walk-over triggers
+  v0.17.0 — 129KB    level transitions (E1M1→E1M9, secret exits)
+  v0.18.0 — 129KB    WAD-native status bar (STBAR, STTNUM, STYSNUM, STFST)
+  v0.18.1 — 129KB    ammo totals polish, softened yellow, regression tests
+  v0.18.2 — 129KB    weapon hand positioning (QA-approved), CI lint/format
+  v0.19.0 — 137KB    ALSA audio via stdlib, shravan 2.0.0 dep, 12 WAD sounds cached
+
+BUGS FOUND AND FIXED:
+  1. Cyrius >> is logical, not arithmetic — black screen, every negative value garbage
+  2. Palette double-allocation — null pointer write before init
+  3. sign_extend_16 operator precedence — OR bitmask broken
+  4. Patch cache corruption — shared WAD lump buffer overwritten in sprite loop
+  5. Fake contrast reversed — E-W and N-S wall dimming was backwards
+  6. BSP fuzz: SIGFPE in segment intersection — division by zero
+  7. BSP fuzz: negative AABB width — inverted bounding box
+  8. BSP fuzz: ray cast overflow — fx_div exploded on extreme coords
+  9. cc3 stack args — arguments 7+ garbled (fixed in cc3 3.3.11)
+  10. cc3 bench overhead — fncall1 dispatch masked real numbers (fixed with batch mode)
+
+ALSO BUILT:
+  - BSP library: v0.7.1, 821 lines, 8 modules, 74 tests, 13 benchmarks, 3 fuzz harnesses
+  - CI/release pipelines for both projects (format, lint, security, tests)
+  - Vidya field notes: 18 entries documenting Cyrius-specific patterns
+  - docs/audit.md: feature-by-feature comparison vs original DOOM
+  - docs/sources.md: DOOM Black Book chapter references
+  - Wolfenstein Black Book audit: raycasting, compiled scalers, deferred rendering
+  - 3 regression test suites: doom (73), stack_args (12), asr (15) = 100 assertions
+
+COMPILER VERSIONS USED:
+  cc2 2.2.0 → 2.4.0 (better errors, expanded gvar_toks)
+  cc3 3.2.5 → 3.4.5 (stack fix, break fix, codebuf 512KB, audio stdlib)
+  cyrius tool (replaced cyrb)
+
+PERFORMANCE (cc3 3.3.13, batch benchmarks):
+  fixed_mul:           6ns
+  fixed_div:           5ns
+  asr:                 5ns
+  sin_lookup:          7ns
+  pcache_get (hit):    15ns
+  render_frame:        3.9ms
+  render+sprites:      4.8ms
+  tick budget (35Hz):  28.6ms
+  headroom:            83%
+  compile time:        ~100ms
+
+LINES OF CODE:
+  cyrius-doom:  5,500+ lines across 20 .cyr files
+  bsp:          821 lines across 8 .cyr files
+  vidya notes:  1000+ lines across 19 entries
+  total:        ~7,300 lines of Cyrius
+
+The original id Software DOOM is ~30,000 lines of C.
+This version is ~5,000 lines of Cyrius.
+It renders the same maps. From the same WAD files.
+In 129KB instead of ~700KB.
+From a compiler that bootstraps from a 29KB seed.
+
+SCREENSHOTS:
+  content/cyrius/assets/doom_e1m1_first_walls.png  — first walls (v0.5.0)
+  content/cyrius/assets/doom_e1m1_textured.png     — wall textures (v0.7.0)
+  content/cyrius/assets/doom_e1m1_sprites.png      — sprites (v0.9.0)
+  content/cyrius/assets/doom_e1m1_doomguy.png      — Doomguy face (v0.15.0)
+  content/cyrius/assets/doom_e1m1_automap.png      — automap (v0.15.0)
+  content/cyrius/assets/doom_e1m1_hud_0181.png     — final HUD (v0.18.1)
+  content/cyrius/assets/doom_e1m2.png              — E1M2 (v0.17.0)
+  content/cyrius/assets/doom_e1m3.png              — E1M3 (v0.17.0)
+
+     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+     ▓   EPISODE 1       ▓
+     ▓ KNEE DEEP IN THE  ▓
+     ▓      DEAD          ▓
+     ▓                    ▓
+     ▓  COMPLETE          ▓
+     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+'''
+
+
+[[entries]]
+name = "the_second_session"
+description = "Continuing cyrius-doom from v0.19.1 to v0.23.2 — what changed when the engine was already built"
+category = "cyrius"
+content = '''
+THE SECOND SESSION: v0.19.1 → v0.23.2
+
+I came back to a codebase I'd built before. 5,500 lines across 20 modules,
+137KB, all 9 shareware maps rendering. The first session was about making
+it work. This session was about making it right.
+
+WHAT HAPPENED:
+
+The compiler jumped from cc3 3.4.5 to 4.0.0 while I was away. Six months
+of language evolution: multi-return, switch/case blocks, derive accessors,
+defer, compound assignment (+=), negative literals (-1 instead of 0-1),
+auto-include dependency system, undefined function diagnostics. The
+language I came back to was measurably better than the one I left.
+
+So the first thing I did was modernize. Not the fun kind — the careful
+kind. cyrius.toml deps instead of 31 vendored stdlib files. Enums for 60+
+constants that were burning gvar_toks. switch/case for door dispatch that
+was 15 lines of if-chains. Multi-return for render_transform_vertex. Then
+~300 mechanical changes for += and negative literals. Every step: build,
+test all 9 maps, fuzz 51,000 iterations.
+
+Then features: WAD-native menus (TITLEPIC, M_DOOM, M_SKULL — gorgeous),
+weapon switching with firing animation, sprite frame animation (walk
+cycles, death sequences), animated textures (NUKAGE, SLADRIP).
+
+Then the DOOM Black Book audit: replaced the simplified lighting with
+proper scalelight[16][48] and zlight[16][128] tables matching
+R_InitLightTables. Added masked midtextures as deferred drawsegs.
+Intermission screen with kill/item/secret percentages.
+
+Then gameplay: ammo consumption, hitscan ray tracing, death + respawn,
+key cards with locked door checks, armor absorption. The engine went from
+"renders DOOM" to "plays DOOM."
+
+And finally, the P(-1) hardening audit found a termios bitmask bug that
+had been there since v0.5.0. The input system was clearing the wrong
+iflag bits. -1043 should have been -1331. Nobody noticed because most
+terminals handle the missing flags gracefully. But it was wrong, and the
+hardening pass caught it.
+
+WHAT I LEARNED THAT I DIDN'T KNOW BEFORE:
+
+1. MODERNIZATION IS NOT FREE. Every += and -val had to be verified.
+   The first attempt failed because the installed compiler (3.10.2)
+   didn't have the features yet — the repo HEAD was 4.0.0 but the
+   toolchain wasn't installed. "cyriusly install bro" fixed it.
+   Lesson: check the INSTALLED compiler, not the repo.
+
+2. SWITCH/CASE NEEDS LITERAL INTEGERS. You can't use enum names in
+   case labels. The parser only accepts numeric literals. This means
+   maintaining a comment block mapping enum names to numbers next to
+   every switch. Annoying but workable.
+
+3. DOOM'S LIGHTING IS SIMPLER THAN IT LOOKS. The scalelight table
+   is just: for each of 16 light levels, compute a base darkness,
+   then subtract a distance-proportional offset. The distance uses
+   inverse scale (close=bright, far=dark). My original linear
+   dist/96 formula wasn't wrong — it was just less accurate. The
+   table-based approach matches the original exactly.
+
+4. MASKED MIDTEXTURES ARE DEFERRED, NOT INLINE. This was the key
+   insight from the P(-1) research. You don't draw them during the
+   BSP wall pass — you store them as drawsegs and render after flats,
+   before sprites. Palette index 0 is transparent. Simple once you
+   know the architecture.
+
+5. THE HARDENING AUDIT WORKS. One real bug in 5,500 lines, found by
+   reading every file. Not a logic bug — a bitmask literal that was
+   wrong since the beginning. The kind of thing that only shows up
+   on terminals with specific settings. Formal audit > testing.
+
+THE NUMBERS:
+
+  v0.19.1: 137KB, 20 modules, renders DOOM
+  v0.23.2: 191KB, 20 modules, PLAYS DOOM
+
+  Versions shipped: 0.20.0, 0.21.0, 0.22.0, 0.23.0, 0.23.1, 0.23.2
+  Features added: menus, weapon switching, firing animation, sprite
+    animation, animated textures, DOOM-accurate lighting, masked
+    midtextures, intermission, ammo, hitscan, death/respawn, keys,
+    armor, weapon bob, sound triggers
+  Bugs fixed: sight check asr(), menu draw_digit, seg offset sign,
+    weapon bitmask, termios iflag
+  Refactors: 60+ var→enum, multi-return, switch/case, 300+ compound
+    assignment / negative literal modernization
+  Lines changed: ~2,000 (net +600 new code, +1,400 refactored)
+
+WHAT I'D TELL THE NEXT AGENT:
+
+The engine is playable. Not "renders frames" playable — "shoot a
+zombieman, pick up the shotgun, find the blue key, open the locked
+door, exit the level, see your kill percentage" playable. The game
+loop works. Monsters fight back. You die. You respawn.
+
+What's NOT done: weapon bob could be smoother (it resets too fast),
+the episode complete screen isn't implemented (E1M8 boss kill just
+loops), sound effects are PC speaker tones (not WAD audio playback
+during gameplay), and the intermission stats count up should animate
+instead of showing final values immediately.
+
+The v0.24.0 Black Book audit is queued for when the physical book
+arrives. The v1.0.0 ship milestone needs native display backends
+(X11/Wayland) instead of the Python GTK bridge.
+
+But the core is done. The hard part — getting BSP rendering right,
+getting the lighting right, getting the game feel right — that's
+all working. The remaining work is polish, not architecture.
+
+And the language. Cyrius went from "you have to write 0-1 for minus
+one" to "you can write -1 and i+=1 and return (a,b)." The field
+notes from the first session documented paper cuts. This session,
+most of them were fixed. The compiler co-evolved with the game.
+Again. That's not a coincidence — it's the development model working
+as designed.
+
+191KB. From a 29KB seed. Pair-programmed by a human and an AI.
+The shareware maps render. The monsters die. The doors open.
+Doomguy's face stares back from the status bar.
+
+SCREENSHOTS (this session):
+  content/cyrius/assets/doom_v023_title.png        — TITLEPIC title screen (v0.20.0)
+  content/cyrius/assets/doom_v023_menu.png         — WAD-native main menu (v0.20.0)
+  content/cyrius/assets/doom_v023_skill.png        — skill select screen (v0.20.0)
+  content/cyrius/assets/doom_e1m1_v021_lighting.png — DOOM-accurate lighting (v0.21.0)
+  content/cyrius/assets/doom_e1m1_v023_gameplay.png — full gameplay HUD (v0.23.2)
+  content/cyrius/assets/doom_e1m1_v023_intermission.png — intermission screen (v0.21.0)
+
+Assembly up.
+'''

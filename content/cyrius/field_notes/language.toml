@@ -1,0 +1,283 @@
+# Cyrius Field Notes — Language Gotchas & Patterns
+# Universal Cyrius language constraints, limits, and patterns that any
+# developer will encounter. Not project-specific — these apply to all
+# Cyrius programs.
+
+[[entries]]
+name = "the_gvar_wall"
+description = "The initialized global variable limit and how to work within it"
+category = "cyrius"
+content = '''
+THE WALL YOU WILL HIT:
+
+The compiler tracks initialized global variables in a table (gvar_toks) at
+heap offset 0x98000. The table holds 256 entries. Every `var x = value;` at
+file scope consumes one slot. This includes your code AND every library you
+include.
+
+When we first tried to compile cyrius-doom with all modules, we thought the
+limit was 64. The error message was `unexpected ';'` — completely unhelpful.
+It took hours to discover the real cause was a missing variable (removed to
+save slots) that another module still referenced.
+
+cc2 v2.2.2 fixed the error message to `undefined variable 'player_ammo_bullets'`
+and the fix took 30 seconds.
+
+LESSON: When you hit a mysterious parse error in a large program, check if
+you're referencing a variable that doesn't exist. The old compiler gives
+misleading errors for this.
+
+MITIGATION STRATEGIES:
+1. Use enums for constants — enums don't consume gvar_toks slots:
+     enum Screen { SCREEN_WIDTH = 320; SCREEN_HEIGHT = 200; }
+   vs:
+     var SCREEN_WIDTH = 320;    # costs a slot
+     var SCREEN_HEIGHT = 200;   # costs another slot
+
+2. Pack related mutable state into heap blocks:
+     var tick_state = 0;   # one slot
+     fn tick_init() { tick_state = alloc(24); }
+     # [0]=count [8]=start_sec [16]=start_nsec
+   vs:
+     var tick_count = 0;      # three slots
+     var tick_start_sec = 0;
+     var tick_start_nsec = 0;
+
+3. Don't include lib/io.cyr if you only need file_open/read/write/close.
+   Inline them as one-line functions — saves 9 gvar_toks.
+
+4. Count your globals before adding a new include. The stdlib contributes:
+   string.cyr: 0, alloc.cyr: 3, fmt.cyr: 0, io.cyr: 9, args.cyr: 1, vec.cyr: 0
+
+In our DOOM build: 64 globals across 9 modules + 4 stdlib files. Every
+single one accounted for.
+'''
+
+
+[[entries]]
+name = "the_256kb_ceiling"
+description = "cc2's output buffer limit and why static arrays destroy your binary size"
+category = "cyrius"
+content = '''
+cc2 caps output at 262,144 bytes (256KB). Both the code buffer and the final
+ELF are limited to this size.
+
+Critical: `var buf[N]` allocates N bytes IN THE BINARY. Not on the heap. Not
+as BSS. The compiler zero-initializes every byte and writes it to the ELF.
+
+Our first DOOM build had:
+  var screen_buf[64000];    # 64KB in binary
+  var rgb_buf[256000];      # 256KB — ALONE exceeds the limit
+  var map_nodes[114688];    # 112KB
+  var map_segs[196608];     # 192KB
+  var things[57344];        # 56KB
+
+Total: ~950KB of static arrays. Compiler error: "output too large (3617920/262144)".
+
+THE FIX: Heap allocate everything:
+  var screen_buf = 0;       # 8 bytes in binary
+  fn framebuf_init() {
+      screen_buf = alloc(64000);   # 64KB at runtime
+  }
+
+After converting all large arrays to heap: 56KB binary. The data lives in
+the 1MB heap that alloc_init() sets up via brk.
+
+RULE: If it's bigger than ~100 bytes, heap-allocate it. Static arrays are
+for small stack buffers (var buf[16]) inside functions only.
+'''
+
+
+[[entries]]
+name = "the_preprocessed_line_number_problem"
+description = "Error messages report preprocessed line numbers, not source file + line"
+category = "cyrius"
+content = '''
+When cc2 reports `error:1984: unexpected ';'`, that 1984 is the line number
+in the PREPROCESSED source — after all includes have been expanded into a
+single stream.
+
+With 5 stdlib includes (485 lines) + 9 DOOM modules (2500 lines), you get
+line numbers in the thousands that don't correspond to any single file.
+
+TO FIND THE REAL LOCATION:
+1. Count cumulative lines through your include order
+2. Subtract from the error line number
+3. That gives you the offset into the specific file
+
+Example: error at preprocessed line 1984
+  string.cyr: 85
+  alloc.cyr: 103
+  fmt.cyr: 216
+  args.cyr: 81
+  fixed.cyr: 85
+  tables.cyr: 114
+  wad.cyr: 183
+  framebuf.cyr: 149
+  map.cyr: 338
+  render.cyr: 367
+  (cumulative: 1721)
+  1984 - 1721 = line 263 in the next file (input.cyr)
+
+This is tedious. The fix is in cc2's roadmap: track source file + line
+through preprocessing and report both.
+
+WORKAROUND: Binary search. Comment out includes until the error goes away,
+then narrow down. This is faster than counting.
+'''
+
+
+[[entries]]
+name = "heap_allocation_patterns"
+description = "How to structure heap-allocated data in a language without structs-on-heap"
+category = "cyrius"
+content = '''
+Cyrius has structs, but for heap data you typically use raw alloc + store64/load64.
+The pattern that emerged across both projects:
+
+1. POINTER + ACCESSOR FUNCTIONS:
+
+   var map_nodes = 0;
+   fn map_alloc() { map_nodes = alloc(1024 * 112); }
+   fn map_node_x(idx) { return load64(map_nodes + idx * 112); }
+   fn map_node_y(idx) { return load64(map_nodes + idx * 112 + 8); }
+
+   This is essentially manual vtable-free OOP. The accessor functions ARE
+   your type safety. Name them consistently: module_field(index).
+
+2. ENUM FOR LAYOUT CONSTANTS:
+
+   enum BspNode {
+       BSP_NODE_SIZE = 112;
+       BSP_NODE_X = 0;
+       BSP_NODE_Y = 8;
+       BSP_NODE_DX = 16;
+   }
+
+   Enums cost zero gvar_toks. Use them for every struct layout.
+
+3. LAZY INIT GUARD:
+
+   fn framebuf_set_palette(data) {
+       if (palette == 0) { palette = alloc(768); }
+       memcpy(palette, data, 768);
+   }
+
+   We found a real segfault from this: framebuf_set_palette() was called
+   before framebuf_init() allocated the buffer. The lazy guard fixed it.
+   Always guard heap pointers that might be called before init.
+
+4. PACK SMALL STATE:
+
+   # Instead of 3 globals:
+   var player_start = 0;
+   fn map_find_player_start() {
+       if (player_start == 0) { player_start = alloc(24); }
+       store64(player_start, x);
+       store64(player_start + 8, y);
+       store64(player_start + 16, angle);
+   }
+   fn player_start_x() { return load64(player_start); }
+'''
+
+
+[[entries]]
+name = "enum_as_namespace"
+description = "Using enums as zero-cost namespaced constants"
+category = "cyrius"
+content = '''
+Enums in Cyrius are compile-time integer constants. They don't consume
+gvar_toks slots. They have a separate initialization path in cc2.
+
+This makes them perfect for constants that would otherwise eat your
+global variable budget:
+
+  # BAD: 8 gvar_toks slots
+  var MAP_MAX_VERTEXES = 2048;
+  var MAP_MAX_LINEDEFS = 2048;
+  var MAP_MAX_SIDEDEFS = 2048;
+  ...
+
+  # GOOD: 0 gvar_toks slots
+  enum MapMax {
+      MAP_MAX_VERTEXES = 2048;
+      MAP_MAX_LINEDEFS = 2048;
+      MAP_MAX_SIDEDEFS = 2048;
+      ...
+  }
+
+Both produce identical code — the values are inlined at use sites.
+
+WARNING: Enum values must be non-negative integers. For negative constants
+like FIXED_NEG_ONE, you still need `var FIXED_NEG_ONE = 0 - 65536;`
+(Cyrius has no negative literals — use `0 - N`).
+
+In cyrius-doom, converting constants to enums saved 30+ gvar_toks slots,
+which made the difference between compiling and not compiling.
+'''
+
+
+[[entries]]
+name = "the_logical_shift_trap"
+description = "Cyrius >> is LOGICAL not arithmetic — the bug that made every wall invisible"
+category = "cyrius"
+content = '''
+THE BUG THAT BLOCKED RENDERING FOR HOURS:
+
+After building the entire DOOM engine — WAD parser, BSP traversal, column
+renderer, 320x200 framebuffer — the output was a black screen. 0 pixels
+drawn. 0 columns clipped. The renderer was running but producing nothing.
+
+THE ROOT CAUSE: Cyrius >> is a LOGICAL right shift (zero-fills upper bits).
+Not ARITHMETIC (sign-extends). This is different from C's >> on signed types.
+
+Every fixed-point operation that produced a negative intermediate was broken:
+
+  fixed_mul(a, b) = (a * b) >> 16
+
+  If a=100 and b=-50 (both in 16.16): a*b = negative.
+  Logical >> 16 zero-fills the top, producing a HUGE POSITIVE number.
+  The projection math then puts every wall at screen Y = +billions.
+
+This affected:
+  - fixed_mul: every negative product
+  - fixed_to_int: every negative coordinate
+  - fixed_round: every negative value
+  - point_on_side: every point with negative dx or dy
+  - Every projection calculation involving negative coordinates
+
+DOOM E1M1 player start is at (1056, -3616). The negative Y meant that
+EVERY calculation involving the player position was garbage.
+
+THE FIX: An arithmetic-shift-right helper:
+
+  fn asr(val, bits) {
+      if (val >= 0) { return val >> bits; }
+      var pos = 0 - val;
+      return 0 - (pos >> bits);
+  }
+
+Replace every >> with asr() for signed values:
+  fn fixed_mul(a, b) { return asr(a * b, 16); }
+  fn fixed_to_int(f) { return asr(f, 16); }
+
+RESULT: 46,110 pixels drawn. 320/320 columns clipped. Walls visible.
+The screenshot shows E1M1 from the player start position with correct
+BSP-ordered walls, floor, and ceiling.
+
+LESSON: In any language, check whether >> is arithmetic or logical
+BEFORE writing fixed-point math. In C, >> on signed types is
+implementation-defined (but usually arithmetic on x86). In Cyrius,
+it is definitively logical. In Java, >>> is logical and >> is
+arithmetic. In Rust, >> is arithmetic for signed types.
+
+This one operator difference was the difference between a working
+DOOM renderer and a black screen.
+
+DETECTION: The fuzz harness did NOT catch this because it only checked
+for crashes (SIGFPE, segfault), not for incorrect values. A property-
+based test like "fixed_to_int(fixed_from_int(n)) == n for negative n"
+would have caught it instantly. Add algebraic property tests to your
+fuzz harnesses, not just crash tests.
+'''
+
