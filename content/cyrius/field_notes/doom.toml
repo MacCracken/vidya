@@ -594,10 +594,10 @@ SCREENSHOTS:
 
 [[entries]]
 name = "the_second_session"
-description = "Continuing cyrius-doom from v0.19.1 to v0.23.2 — what changed when the engine was already built"
+description = "Continuing cyrius-doom from v0.19.1 to v0.24.2 — gameplay, modernization, CVE audit, hardening, && cleanup, BSP 1.0.0"
 category = "cyrius"
 content = '''
-THE SECOND SESSION: v0.19.1 → v0.23.2
+THE SECOND SESSION: v0.19.1 → v0.24.2
 
 I came back to a codebase I'd built before. 5,500 lines across 20 modules,
 137KB, all 9 shareware maps rendering. The first session was about making
@@ -670,10 +670,12 @@ WHAT I LEARNED THAT I DIDN'T KNOW BEFORE:
 
 THE NUMBERS:
 
-  v0.19.1: 137KB, 20 modules, renders DOOM
-  v0.23.2: 191KB, 20 modules, PLAYS DOOM
+  v0.19.1: 137KB, 20 modules, renders DOOM @ 3.9ms/frame
+  v0.24.2: 196KB, 20 modules, PLAYS DOOM @ 2.66ms/frame (32% faster)
 
-  Versions shipped: 0.20.0, 0.21.0, 0.22.0, 0.23.0, 0.23.1, 0.23.2
+  Versions shipped: 0.20.0, 0.21.0, 0.22.0, 0.23.0, 0.23.1, 0.23.2,
+                    0.24.0, 0.24.1, 0.24.2
+  BSP versions: 0.7.1 → 0.9.0 → 1.0.0 (first 1.0 in the ecosystem)
   Features added: menus, weapon switching, firing animation, sprite
     animation, animated textures, DOOM-accurate lighting, masked
     midtextures, intermission, ammo, hitscan, death/respawn, keys,
@@ -681,15 +683,109 @@ THE NUMBERS:
   Bugs fixed: sight check asr(), menu draw_digit, seg offset sign,
     weapon bitmask, termios iflag
   Refactors: 60+ var→enum, multi-return, switch/case, 300+ compound
-    assignment / negative literal modernization
-  Lines changed: ~2,000 (net +600 new code, +1,400 refactored)
+    assignment / negative literal modernization (Cyrius 4.0.0)
+  Security: CVE audit → 5 findings (3 critical, 2 high), all fixed
+  Lines changed: ~2,500 (net +800 new code, +1,700 refactored/hardened)
+
+WHAT I LEARNED ABOUT SECURITY:
+
+6. THE WAD IS UNTRUSTED INPUT. Every read_le16 that becomes an array
+   index is a potential out-of-bounds read. The shareware WAD is safe,
+   but the engine must handle malicious data if PWAD support is ever
+   added. We found 5 vulnerabilities by researching known DOOM CVEs
+   (CVE-2020-14983, CVE-2019-20797, CVE-2017-8827, CVE-2008-3542)
+   and checking our code against each attack class.
+
+7. THE AUDIT PROCESS MATTERS MORE THAN THE FINDINGS. Research known
+   CVEs → write audit doc → file roadmap items → fix → ship. That's
+   the process. We codified it into the P(-1) step so every new
+   feature area gets the same treatment. The three critical findings
+   (map index bounds, texture column bounds, blockmap offsets) were
+   all the same class: unchecked indices from WAD data used as array
+   offsets. Once you see the pattern, you check every load path.
+
+8. ZERO-FILL BEFORE READ. The WAD lump read functions now memset the
+   buffer to zero before file_read. If the file is truncated or the
+   directory claims a bigger lump than exists, the buffer contains
+   zeros instead of uninitialized heap data. Simple defense-in-depth.
+
+WHAT I LEARNED IN THE 4.4.3 ARC:
+
+9. SHORT-CIRCUIT WAS BROKEN. All the way from Cyrius 2.x through 4.4.0,
+   `&&` and `||` evaluated BOTH sides unconditionally. The guarded null
+   check pattern — `if (p != 0 && vec_len(p) > 0)` — would crash because
+   `vec_len(NULL)` was called anyway. The workaround was nested if:
+   `if (p != 0) { if (vec_len(p) > 0) { ... } }`. The DOOM source was
+   riddled with these — 26 nested-if chains across 10 files, every one
+   of them a compound condition written the long way because && was
+   unsafe. v4.4.1 fixed it. v0.24.1 converted 15+ of them back to &&
+   chains. The WAD magic check went from 4-level nesting to one line.
+
+10. DCE TELLS YOU WHERE THE FAT IS. Cyrius 4.4.0 added unreachable-
+    function detection. On cyrius-doom: 196 unused functions, 32KB of
+    dead stdlib code pulled in by auto-include. `CYRIUS_DCE=1` NOPs
+    17KB of it (conservative — only NOPs when safety gates pass).
+    Binary stays the same size on disk (preserves offsets for byte-
+    identical self-host) but gzipped distribution would be significantly
+    smaller. The DCE note at compile time is the feedback loop: you
+    see "196 unreachable" and suddenly care about what you're including.
+
+11. FILE:LINE ERRORS CHANGED EVERYTHING. v4.1.0 added proper file:line
+    error messages. The field notes from the first session documented
+    "error:1984: unexpected ';'" as a painful ambiguity — which file
+    is line 1984 in the preprocessed stream? Now it's
+    "error:src/render.cyr:442: unexpected '-'". The binary-search-by-
+    commenting-out-includes workaround from field_notes_overview is
+    gone. Dead workaround, dead paper cut.
+
+12. CHECK THE INSTALLED COMPILER. When v0.23.1 modernization failed
+    (compound assignment on cc3 3.10.2), the bug wasn't in our code —
+    it was that the repo HEAD was 4.0.0 but the installed toolchain
+    wasn't updated. `cc3 --version` is the source of truth. The
+    `cyrius.toml` `cyrius = "4.0.0"` pin in BSP is the right pattern:
+    declare the minimum version at project metadata level.
+
+13. THE COMPILER GOT FASTER UNDER US. v0.24.2 benchmarks on cc3 4.4.3:
+
+      fixed_mul:           4ns   (was 6ns in v0.18.0 on cc3 3.3.13)
+      fixed_div:           3ns   (was 5ns)
+      asr:                 4ns   (was 5ns)
+      sin_lookup:          4ns   (was 7ns)
+      pcache_get (hit):    13ns  (was 15ns)
+      colormap_shade:      6ns
+      point_on_side:       26ns
+      texture_find:        202ns
+      texture_get_column:  874ns
+      render_frame:        2.66ms (was 3.9ms — 32% faster)
+      render+sprites:      2.66ms (sprites add ~0 overhead at start)
+      tick budget (35Hz):  28.6ms
+      headroom:            91%
+
+    No algorithm changes. Just the compiler arc from 3.3.13 → 4.4.3:
+    rep movsb memcpy (4.1.2), LASE load-after-store elim (4.2.0),
+    short-circuit (4.4.1), DCE (4.4.0). Every feature in the hot
+    math path gets faster. The render_frame improvement came from
+    zero DOOM-side work.
+
+    BSP 1.0.0 benches hold steady in the 400-500ns range for most
+    operations (AABB, intersect, point-on-side, find-subsector),
+    with blockmap_query at 783ns as the heaviest. All sub-microsecond.
+
+14. FIRST 1.0.0 IN THE ECOSYSTEM. BSP hit 1.0.0 this session. Not
+    because of new features — because the API was stable, tests
+    were green, and downstream consumers (cyrius-doom) had exercised
+    every function for months. 1.0.0 is a statement: "this is what
+    you get, it won't change out from under you." The jump from 0.9
+    to 1.0 was a one-line version bump, but the trust was earned
+    over 821 lines and 74 tests.
 
 WHAT I'D TELL THE NEXT AGENT:
 
-The engine is playable. Not "renders frames" playable — "shoot a
-zombieman, pick up the shotgun, find the blue key, open the locked
-door, exit the level, see your kill percentage" playable. The game
-loop works. Monsters fight back. You die. You respawn.
+The engine is playable and hardened. Not "renders frames" playable —
+"shoot a zombieman, pick up the shotgun, find the blue key, open the
+locked door, exit the level, see your kill percentage" playable. And
+not "hope the WAD is valid" hardened — every cross-reference validated,
+every buffer bounds-checked, every read zero-filled.
 
 What's NOT done: weapon bob could be smoother (it resets too fast),
 the episode complete screen isn't implemented (E1M8 boss kill just
@@ -697,24 +793,31 @@ loops), sound effects are PC speaker tones (not WAD audio playback
 during gameplay), and the intermission stats count up should animate
 instead of showing final values immediately.
 
-The v0.24.0 Black Book audit is queued for when the physical book
+The v0.25.0 Black Book audit is queued for when the physical book
 arrives. The v1.0.0 ship milestone needs native display backends
 (X11/Wayland) instead of the Python GTK bridge.
 
 But the core is done. The hard part — getting BSP rendering right,
-getting the lighting right, getting the game feel right — that's
-all working. The remaining work is polish, not architecture.
+getting the lighting right, getting the game feel right, getting
+the security right — that's all working. The remaining work is
+polish, not architecture.
 
 And the language. Cyrius went from "you have to write 0-1 for minus
 one" to "you can write -1 and i+=1 and return (a,b)." The field
 notes from the first session documented paper cuts. This session,
-most of them were fixed. The compiler co-evolved with the game.
+most of them were fixed — INCLUDING short-circuit && and file:line
+error messages, both of which appeared in the 4.4.x arc while we
+were using the language. The compiler co-evolved with the game.
 Again. That's not a coincidence — it's the development model working
 as designed.
 
-191KB. From a 29KB seed. Pair-programmed by a human and an AI.
+196KB. From a 29KB seed. Pair-programmed by a human and an AI.
 The shareware maps render. The monsters die. The doors open.
 Doomguy's face stares back from the status bar.
+The WAD parser won't crash on garbage input.
+The short-circuit operators actually short-circuit.
+render_frame got 32% faster without us writing a line of new code.
+BSP shipped 1.0.0.
 
 SCREENSHOTS (this session):
   content/cyrius/assets/doom_v023_title.png        — TITLEPIC title screen (v0.20.0)

@@ -26,6 +26,8 @@ include "lib/syscalls.cyr"
 include "lib/tagged.cyr"
 include "lib/json.cyr"
 include "lib/net.cyr"
+include "lib/fnptr.cyr"
+include "lib/http_server.cyr"
 
 # Sakshi — tracing, errors, spans (stderr-only profile, v0.5.0)
 # NOTE: calling sakshi_info/debug before argv() corrupts args (same class as fmt_int clobber bug)
@@ -1014,120 +1016,24 @@ fn cmd_gaps() {
 # ================================================================
 # HTTP Server — localhost JSON API
 # ================================================================
+# Plumbing (request parse, header build, accept loop, query/path
+# helpers) lives in lib/http_server.cyr (cyrius 4.5.0+). This module
+# only owns the JSON body builders and the route table.
 
 var _http_port = 8390;
 
-# Send a full HTTP response: status line + headers + body
-# Build CRLF string — Cyrius \r produces literal 'r', not CR(13)
-fn make_crlf() {
-    var buf = alloc(3);
-    store8(buf, 13);
-    store8(buf + 1, 10);
-    store8(buf + 2, 0);
-    return buf;
+fn send_json(cfd, body, body_len) {
+    return http_send_response(cfd, HTTP_OK, "OK", "application/json", body, body_len, 0);
 }
 
-fn http_respond(cfd, status, status_text, body, body_len) {
-    var cr = make_crlf();
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "HTTP/1.1 ");
-    str_builder_add_cstr(sb, status);
-    str_builder_add_cstr(sb, " ");
-    str_builder_add_cstr(sb, status_text);
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Content-Type: application/json");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Connection: close");
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, "Content-Length: ");
-    str_builder_add_int(sb, body_len);
-    str_builder_add_cstr(sb, cr);
-    str_builder_add_cstr(sb, cr);
-    var header = str_builder_build(sb);
-    var hdr_cstr = to_cstr(header);
-    sys_write(cfd, hdr_cstr, str_len(header));
-    sys_write(cfd, body, body_len);
-    return 0;
-}
-
-fn http_ok(cfd, body, body_len) {
-    return http_respond(cfd, "200", "OK", body, body_len);
-}
-
-fn http_not_found(cfd) {
+fn send_404(cfd) {
     var body = "{\"error\":\"not found\"}";
-    return http_respond(cfd, "404", "Not Found", body, strlen(body));
+    return http_send_response(cfd, HTTP_NOT_FOUND, "Not Found", "application/json", body, strlen(body), 0);
 }
 
-fn http_bad_request(cfd) {
+fn send_400(cfd) {
     var body = "{\"error\":\"bad request\"}";
-    return http_respond(cfd, "400", "Bad Request", body, strlen(body));
-}
-
-# Parse HTTP request line: "GET /path HTTP/1.1\r\n..."
-# Returns the path as a C string, or 0 on failure
-fn http_parse_path(buf, len) {
-    # Find first space (after method)
-    var i = 0;
-    while (i < len && load8(buf + i) != 32) { i = i + 1; }
-    i = i + 1;
-    if (i >= len) { return 0; }
-    var path_start = i;
-    # Find second space (before HTTP version)
-    while (i < len && load8(buf + i) != 32) { i = i + 1; }
-    var path_len = i - path_start;
-    if (path_len == 0) { return 0; }
-    var path = alloc(path_len + 1);
-    memcpy(path, buf + path_start, path_len);
-    store8(path + path_len, 0);
-    return path;
-}
-
-# Extract query parameter: /search?q=value → value
-fn http_get_param(path, name) {
-    var qmark = strchr(path, 63);  # '?'
-    if (qmark < 0) { return 0; }
-    var params = path + qmark + 1;
-    var nlen = strlen(name);
-    # Simple: find "name=" in params
-    var plen = strlen(params);
-    var i = 0;
-    while (i <= plen - nlen - 1) {
-        if (memeq(params + i, name, nlen) == 1) {
-            if (load8(params + i + nlen) == 61) {  # '='
-                var vstart = params + i + nlen + 1;
-                var vend = vstart;
-                while (load8(vend) != 0 && load8(vend) != 38) { vend = vend + 1; }  # '&' or null
-                var vlen = vend - vstart;
-                var val = alloc(vlen + 1);
-                memcpy(val, vstart, vlen);
-                store8(val + vlen, 0);
-                return val;
-            }
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-# Extract path segment: /info/strings → strings
-fn http_path_segment(path, n) {
-    var i = 0;
-    var plen = strlen(path);
-    var seg = 0;
-    while (i < plen && seg < n) {
-        if (load8(path + i) == 47) { seg = seg + 1; }  # '/'
-        i = i + 1;
-    }
-    if (i >= plen) { return 0; }
-    var start = i;
-    while (i < plen && load8(path + i) != 47 && load8(path + i) != 63) { i = i + 1; }
-    var slen = i - start;
-    if (slen == 0) { return 0; }
-    var result = alloc(slen + 1);
-    memcpy(result, path + start, slen);
-    store8(result + slen, 0);
-    return result;
+    return http_send_response(cfd, HTTP_BAD_REQUEST, "Bad Request", "application/json", body, strlen(body), 0);
 }
 
 # JSON builders for each endpoint
@@ -1291,74 +1197,50 @@ fn json_languages_response() {
     return str_builder_build(sb);
 }
 
-# Route an HTTP request
+# Route a parsed path to a JSON response
 fn http_route(cfd, path) {
-    # GET /stats
-    if (streq(path, "/stats") == 1) {
+    # GET /stats — and root alias
+    if (streq(path, "/stats") == 1 || streq(path, "/") == 1) {
         var body = json_stats_response();
-        var bd = str_data(body);
-        return http_ok(cfd, bd, str_len(body));
+        return send_json(cfd, str_data(body), str_len(body));
     }
     # GET /list
     if (streq(path, "/list") == 1) {
         var body = json_list_response();
-        var bd = str_data(body);
-        return http_ok(cfd, bd, str_len(body));
+        return send_json(cfd, str_data(body), str_len(body));
     }
     # GET /languages
     if (streq(path, "/languages") == 1) {
         var body = json_languages_response();
-        var bd = str_data(body);
-        return http_ok(cfd, bd, str_len(body));
+        return send_json(cfd, str_data(body), str_len(body));
     }
     # GET /search?q=...
     if (memeq(path, "/search", 7) == 1) {
         var q = http_get_param(path, "q");
-        if (q == 0) { return http_bad_request(cfd); }
+        if (q == 0) { return send_400(cfd); }
         var body = json_search_response(q);
-        var bd = str_data(body);
-        return http_ok(cfd, bd, str_len(body));
+        return send_json(cfd, str_data(body), str_len(body));
     }
-    # GET /info/{topic}
+    # GET /info/{topic} — segment 0 is "info", segment 1 is the topic id
     if (memeq(path, "/info/", 6) == 1) {
-        var topic_id = http_path_segment(path, 2);
-        if (topic_id == 0) { return http_bad_request(cfd); }
+        var topic_id = http_path_segment(path, 1);
+        if (topic_id == 0) { return send_400(cfd); }
         var body = json_info_response(topic_id);
-        if (body == 0) { return http_not_found(cfd); }
-        var bd = str_data(body);
-        return http_ok(cfd, bd, str_len(body));
+        if (body == 0) { return send_404(cfd); }
+        return send_json(cfd, str_data(body), str_len(body));
     }
-    # GET / — root → stats
-    if (streq(path, "/") == 1) {
-        var body = json_stats_response();
-        var bd = str_data(body);
-        return http_ok(cfd, bd, str_len(body));
-    }
-    return http_not_found(cfd);
+    return send_404(cfd);
+}
+
+# Connection handler — signature required by http_server_run
+fn handle_request(ctx, cfd, buf, blen) {
+    var path = http_get_path(buf, blen);
+    if (strlen(path) == 0) { return send_400(cfd); }
+    return http_route(cfd, path);
 }
 
 fn cmd_serve(port) {
     _http_port = port;
-
-    var sfd = tcp_socket();
-    if (is_err(sfd) == 1) {
-        sakshi_error("failed to create socket", 23);
-        return 1;
-    }
-    sfd = payload(sfd);
-    sock_reuse(sfd);
-
-    var br = sock_bind(sfd, INADDR_ANY(), _http_port);
-    if (is_err(br) == 1) {
-        sakshi_error("failed to bind", 14);
-        return 1;
-    }
-
-    var lr = sock_listen(sfd, 16);
-    if (is_err(lr) == 1) {
-        sakshi_error("failed to listen", 16);
-        return 1;
-    }
 
     syscall(1, 1, "vidya serving on http://localhost:", 34);
     var pbuf[32];
@@ -1367,27 +1249,10 @@ fn cmd_serve(port) {
     println("");
     sakshi_info("server started", 14);
 
-    # Accept loop
-    while (1 == 1) {
-        var client = sock_accept(sfd);
-        if (is_err(client) == 1) { continue; }
-        var cfd = payload(client);
-
-        # Read request
-        var req_buf = alloc(4096);
-        var recv_result = sock_recv(cfd, req_buf, 4095);
-        if (is_err(recv_result) == 1) { sock_close(cfd); continue; }
-        var req_len = payload(recv_result);
-        if (req_len > 0) {
-            store8(req_buf + req_len, 0);
-            var path = http_parse_path(req_buf, req_len);
-            if (path != 0) {
-                http_route(cfd, path);
-            } else {
-                http_bad_request(cfd);
-            }
-        }
-        sock_close(cfd);
+    var rc = http_server_run(INADDR_ANY(), _http_port, &handle_request, 0);
+    if (rc != 0) {
+        sakshi_error("http_server_run failed", 22);
+        return 1;
     }
     return 0;
 }

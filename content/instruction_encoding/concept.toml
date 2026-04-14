@@ -123,3 +123,41 @@ good_example = "store16 at addr: 66 89 01 — 0x66 prefix selects 16-bit, stores
 title = "SIB byte adds zero latency"
 explanation = "The SIB (Scale-Index-Base) byte enables [base + index*scale + disp] addressing in one instruction. Despite the extra decode byte, SIB-encoded memory operands have the same latency as simple [reg] operands on modern CPUs. The AGU (Address Generation Unit) handles the multiply-add in parallel."
 evidence = "mov rax, [rbx]: 4 cycle latency. mov rax, [rbx + rcx*8 + 16]: also 4 cycle latency. The SIB computation is free."
+
+[[best_practices]]
+title = "Minimal length-only decoder — four tables, ~150 lines"
+explanation = "For CFG construction and binary analysis on code you EMITTED (not arbitrary third-party code), you don't need a full disassembler — you only need 'how long is this instruction?'. Nomade040's ldisasm.cpp (~80 LOC C++) is the canonical minimal x86-64 length decoder: four opcode tables (op1modrm, op1imm8, op1imm32, op2modrm for the 0x0F escape), plus bitwise tests on the opcode's high/low nibbles. Flow: eat legacy prefixes + REX (loop with `R == 4` test), branch on 0x0F escape (handling 0x38/0x3A 3-byte forms), compute immediate size, then call parseModRM if the opcode needs one. No AVX/VEX/EVEX — a self-hosting compiler rarely needs it. Port as-is, fits in ~150 Cyrius lines."
+evidence = "Reference: github.com/gh-nomad/length-disassembler/blob/master/ldisasm.cpp. 80 lines, permissive license, handles every instruction a non-SIMD codegen emits."
+
+[[best_practices]]
+title = "Classify control-flow instructions separately from length decoding"
+explanation = "After you have `length(bytes) -> N`, a 30-line `classify_cf(bytes) -> {fallthrough, branch, cond, call, ret, indirect}` pass is all you need to build a CFG. Don't fold classification into length decode — separate concerns. The CF encoding table is tiny: JMP rel8=EB, rel32=E9, indirect=FF /4. Jcc rel8=70..7F, rel32=0F 80..8F. CALL rel32=E8, indirect=FF /2. RET=C3, RET imm16=C2 iw, LEAVE+RET=C9 C3. JRCXZ=E3, LOOP family=E0..E2. Everything else falls through. For a branch, extract disp8/disp32 (sign-extended); for a call, same. Use those as edge targets in the CFG."
+evidence = "Intel SDM Vol 2 §2.1 (instruction format), §2.2.1 (REX). Encoding table fits in one printed page; classifier is 30 lines of straightforward byte-match."
+
+[[best_practices]]
+title = "Cross-check length decoder against a fuzz corpus of your own .text"
+explanation = "Before trusting a length-only decoder for CFG construction, fuzz it against a known-good decoder (BeaEngine for reference-grade, distorm3, or `objdump -d`'s byte output). The test: walk the compiler's own .text section; compare per-instruction lengths. If your decoder ever desynchronizes from the reference on a byte your compiler emits, you have a bug BEFORE it causes a DCE-NOPing disaster. This is cheap — one script, ~50 lines of Python, run once per backend release."
+bad_example = "Ship a new decoder without a diff test against an oracle — it'll drift on some corner case (group prefix? LOCK? FS/GS segment?) and the first sign will be a wild crash after NOPing a fn body"
+good_example = "objdump -d build/cc3 | awk '{print length_field}' > expected.txt; python decode_and_compare.py build/cc3 expected.txt"
+
+[[gotchas]]
+title = "REX prefix is NOT a prefix for length-decoding control-flow instructions"
+explanation = "REX (0x40-0x4F) modifies operand size and register selection for ModR/M-carrying instructions. But E8/E9/EB/Jcc/C3/Cx don't use REX meaningfully — their encoding doesn't change. When classifying control flow, strip REX if present (it's decorative) and match on the next byte. For FF /2 and FF /4 (indirect call/jmp), the reg field of ModR/M (after optional REX) selects the operation — REX.R extends the reg field but you're looking at the /2 vs /4 discriminator, not R8-R15."
+bad_example = "Classifier emits `call` when it sees 0x48 E8 — confused by REX, treats REX byte as opcode"
+good_example = "Skip prefixes and REX first; then match on the actual opcode byte. E8 is CALL regardless of any prefix byte before it"
+
+[[gotchas]]
+title = "Short-form Jcc (70..7F) are 2 bytes, near-form (0F 80..8F) are 6 bytes"
+explanation = "x86 has two encodings for every conditional jump: rel8 (2 bytes: one-byte opcode + one-byte signed displacement) and rel32 (6 bytes: 0x0F escape + one-byte opcode + four-byte signed displacement). Compilers typically emit rel32 first because they don't know the actual target offset yet (forward jump, needs fixup). A peephole pass can shorten rel32→rel8 when the target is in range — saves 4 bytes per short jump. When decoding, don't assume Jcc is always 6 bytes; check for the short form."
+bad_example = "Length decoder returns 6 for all Jcc, walks off into the wrong instruction boundary on a short-form branch"
+good_example = "Branch in 70..7F: length=2, disp8=b[1]. Branch in 0F 80..8F: length=6, disp32=b[2..5]"
+
+[[performance_notes]]
+title = "Single-function LDE fits in <5KB of generated machine code"
+explanation = "A minimal x86-64 length decoder compiled to machine code (no tables generated on the fly, all four tables baked in as rodata) is under 5KB. This matters for a self-hosting compiler: the LDE adds minimal bloat to the compiler binary itself. ldisasm.cpp at -O2 compiles to ~3.2KB of .text plus ~64 bytes of table data."
+evidence = "Compiled ldisasm.cpp with gcc -Os: 3264 bytes of text. The four prefix/opcode tables total 48 bytes. Full decoder + classifier: well under 5KB."
+
+[[performance_notes]]
+title = "BeaEngine is the reference oracle but too big to port"
+explanation = "BeaEngine (github.com/BeaEngine/beaengine) is full-fidelity — MMX, SSE, AVX, AVX-512, CET, AMX — tens of thousands of lines, LGPL3. It's the right choice when you need to decode arbitrary third-party code. It's the wrong choice for a self-hosting compiler that only needs to decode its own emission output. Use BeaEngine only as a cross-check oracle during fuzz testing. BeaEngine credits sandpile.org and felixcloutier.com/x86 as primary opcode-table sources — cite those if you regenerate your own tables."
+evidence = "BeaEngine source volumes: beaengineSources/ alone is >20,000 lines. ldisasm.cpp: 80 lines. The gap is full-fidelity vs length-only: you trade features for auditability."

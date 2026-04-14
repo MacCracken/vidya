@@ -718,3 +718,94 @@ operating system.
 And it all starts from 29KB.
 '''
 
+
+[[entries]]
+name = "dce_cfg_research_roundup_440"
+description = "v4.4.0 research roundup: chibicc, tcc, QBE, ldisasm, PIC/PIE across ELF/Mach-O/PE — what maps onto a single-pass no-IR compiler and what doesn't"
+category = "cyrius"
+content = '''
+v4.4.0 is "CFG + single-CU DCE". Before writing code, I pulled research on how
+other small compilers solve the three problems that sit in front of us:
+(a) build a control-flow graph without an IR, (b) eliminate dead code
+safely, (c) prepare codegen for position-independent output that will unlock
+macOS/Windows in 4.8/4.9.
+
+What transfers to Cyrius:
+
+**tcc's `nocode_wanted` pattern** — for intra-function unreachability (code
+after `return`), tcc increments a global counter and suppresses byte
+emission while still accounting for label offsets. Zero IR, zero post-pass,
+zero CFG. Cyrius can adopt this directly for post-return dead code. It
+does NOT solve whole-function DCE (orphan functions never called), which
+needs the mark-and-sweep below.
+
+**Muchnick's mark-and-sweep reachability** — classical DCE that predates
+SSA. Takes (node set, edge set, root set) and produces "reachable" bitmap
+via worklist DFS. Cyrius already has all three as side tables: function
+starts at 0xC4000, jump targets at 0x9E000, type-3 (address-of) fixups in
+the fixup table. ~40 lines of Cyrius when layered on top. Roots = entry
+point ∪ functions with address-taken fixups ∪ exported symbols.
+
+**ldisasm.cpp (Nomade040)** — 80-line x86-64 length decoder, four small
+opcode tables, no AVX/EVEX. Cyrius emits a tiny subset of x86-64
+instructions; ldisasm covers everything. Ports to ~150 Cyrius lines.
+Essential for the CFG walk (need to advance past instructions we're not
+interested in to find the next control-flow byte).
+
+**PIC is mostly free on x86-64** — RIP-relative addressing eliminates the
+32-bit-era get_pc_thunk dance. Three reloc types cover 95%: PC32, PLT32,
+GOTPCREL. Codegen diff ≈400 lines in emit.cyr, unlocks ELF ET_DYN
+immediately, prepares Mach-O and PE. Unified model across all three
+formats: "every extern reference is an indirect load through a pointer
+slot". ELF calls the slot GOT+PLT, Mach-O calls it __got+__stubs, PE
+calls it IAT. Codegen is identical; only the table container differs.
+
+What does NOT transfer:
+
+**chibicc ships no DCE at all.** Rui Ueyama's pedagogical compiler emits
+verbatim from AST in codegen.c:gen_stmt and doesn't prune unreachable
+code. The OS never executes those bytes so correctness is preserved, but
+binary sizes suffer. Confirms that a pedagogical single-pass compiler
+isn't expected to do DCE — Cyrius is charting unusual territory by
+attempting it. Useful as a negative example; no code to borrow.
+
+**QBE's CFG algorithm maps; its data structures don't.** QBE's cfg.c
+builds CFG from SSA IR. The algorithm (reverse post-order DFS, ~40
+lines) transfers cleanly. Cyrius skips the IR construction entirely and
+feeds the algorithm directly from emission side-tables.
+
+**gas-style relaxation (true shrinking) is out of scope.** Actually
+SHORTENING the binary (shifting code past deleted spans, recomputing all
+offsets, iterating to fixed point) breaks the cc3==cc3 byte-identity
+invariant unless it's perfectly deterministic — and making it
+deterministic across compiler versions is painful. Start with NOP-fill
+(O(n) one pass, zero fixup rework); defer relaxation indefinitely or
+behind an opt-in `-Osize` flag with its own validation suite.
+
+**BeaEngine is the reference oracle but too big to port.** 20k+ LOC,
+full AVX-512/CET/AMX coverage. Use it once, as a fuzz-test oracle
+against Cyrius's minimal decoder, then throw it away.
+
+**Indirect calls break static reachability.** Any function whose address
+is taken (R_X86_64_64 or Cyrius type-3 fixup) must be a conservative
+root. Otherwise DCE will happily NOP a handler reached through a
+vtable/dispatch table, and the program will crash after jumping into the
+NOPs. The existing 4.4.0-alpha1 report separates "unused" from
+"DCE-eligible" for exactly this reason: surface the gap rather than
+silently under-eliminate.
+
+Sources consolidated into vidya:
+- optimization_passes/concept.toml — DCE without IR, tcc nocode_wanted,
+  mark-and-sweep, NOP-fill vs shrinking
+- instruction_encoding/concept.toml — ldisasm, control-flow classifier,
+  REX-and-Jcc gotchas, fuzz-against-oracle practice
+- elf_and_executable_formats/concept.toml — PIC across ELF/Mach-O/PE,
+  unified model, format-specific gotchas (IAT, LC_DYLD_CHAINED_FIXUPS,
+  PE .reloc-header-required)
+
+Next concrete step: port ldisasm to src/backend/x86/decode.cyr, layer a
+30-line classify_cf on top, then the mark-and-sweep DCE pass in
+fixup.cyr seeded from entry + type-3 roots. All infrastructure exists
+(SFNE fn_end table landed in 4.4.0-alpha1); this is traversal logic
+only.
+'''

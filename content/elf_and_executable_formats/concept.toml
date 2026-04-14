@@ -75,3 +75,51 @@ evidence = "Firefox: 300MB with debug info, 80MB stripped + 250MB debug file. De
 title = "Huge page alignment increases binary size for speed"
 explanation = "Aligning PT_LOAD segments to huge page boundaries (2MB instead of 4KB) allows the kernel to use huge pages for text segments. This reduces TLB misses for large binaries. The cost: up to 2MB of padding between segments. ld -z max-page-size=0x200000 enables this."
 evidence = "Large binary (100MB text): 4KB alignment, 15% TLB miss rate in hot loop. 2MB alignment, huge pages: 2% TLB miss rate. Binary size increase: ~2MB padding. Net: 10-20% throughput improvement for TLB-bound workloads."
+
+[[best_practices]]
+title = "x86-64 PIC is nearly free thanks to RIP-relative addressing"
+explanation = "On x86-64, position-independent code does not require the x86-32 'get_pc_thunk' dance — RIP-relative addressing handles local data directly. For local-symbol data: replace `mov rax, [abs64]` with `lea rax, [rip+disp32]` (ModR/M byte 0x05, 7 bytes). For external data: `mov rax, [rip+sym@GOTPCREL]` loads from the GOT. For external functions: `call sym@PLT`. Three relocations cover 95% of PIC codegen: R_X86_64_PC32 (local branch/data), R_X86_64_PLT32 (extern call), R_X86_64_GOTPCREL (extern data). Total codegen diff from fixed-address ELF: ~400 lines in the x86 emitter."
+evidence = "Eli Bendersky, 'PIC in shared libraries on x64': 'On x64, RIP-relative addressing makes PIC nearly free — most mov reg, [addr] become mov reg, [rip+disp32] with no extra instructions.'"
+
+[[best_practices]]
+title = "PLT and GOT layout — 16-byte stubs + 8-byte slots"
+explanation = "PLT entries are 16 bytes each: `jmp qword [got+n]; push n; jmp plt0` where plt0 is the shared lazy-resolve stub that calls _dl_runtime_resolve. GOT entries are 8 bytes each (one per external symbol). First call to an extern goes via PLT through GOT (initially pointing back to PLT+push); _dl_runtime_resolve patches the GOT entry to point at the real symbol. Subsequent calls jump directly via GOT. The first three GOT slots are reserved (link_map, _dl_runtime_resolve, module_id)."
+evidence = "Eli Bendersky, Ian Lance Taylor 'Linkers' series part 8. Standard System V AMD64 layout — glibc ld.so, musl, and mold all conform."
+
+[[best_practices]]
+title = "Mach-O is PIC by default — no opt-in needed"
+explanation = "Every Mach-O executable is PIE by default. MH_PIE flag is set; the image has a preferred vmaddr (0x100000000 for 64-bit) but the kernel slides it. No GOT/PLT by name — Mach-O uses `__DATA,__got` (non-lazy pointers, equivalent to GOT), `__TEXT,__stubs` (6-byte `jmp qword [rip+disp32]` per external call, equivalent to PLT), and `__TEXT,__stub_helper` (lazy resolver trampolines). Modern macOS (Big Sur+) uses LC_DYLD_CHAINED_FIXUPS — relocations encoded as a compact bytecode stream instead of reloc tables."
+evidence = "Apple Mach-O Runtime Architecture; Mike Ash 'Let's Build dyld'. Mach-O stubs are 6 bytes vs ELF's 16 — smaller because Mach-O doesn't inline the lazy-resolve push+jmp into the stub."
+
+[[best_practices]]
+title = "PE imports via IAT — loader patches at load time, no lazy binding"
+explanation = "PE/COFF does not use RIP-relative for imports the way ELF does. Imports go through the IAT (Import Address Table) — a table of 8-byte function pointer slots in `.idata`. Calls to imported functions compile to `call qword [rip+iat_slot]` (6 bytes, indirect). The loader patches IAT entries at load time — there's no lazy binding. For ASLR: set IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE (0x0040) + HIGH_ENTROPY_VA (0x0020), and emit a `.reloc` section listing every absolute address that needs fixup. RIP-relative code produces an empty `.reloc` section — a free win."
+evidence = "Microsoft PE Format spec, 'A Tour of the Windows Linker'. 'IAT is the moral equivalent of GOT+PLT combined: `call [rip+iat_entry]` is both the PLT stub and the GOT dereference in one indirect call.'"
+
+[[best_practices]]
+title = "Unified mental model: every extern reference is an indirect load"
+explanation = "ELF, Mach-O, and PE are three dialects of the same sentence. In all three: absolute addressing is replaced with RIP-relative; external references go through a fixup table slot (GOT, __got, IAT). Format-specific differences are just the container for the table description — ELF uses reloc records, Mach-O uses opcode streams (LC_DYLD_INFO or chained fixups), PE uses the import directory. For a multi-platform compiler, pay the RIP-relative codegen cost ONCE. Then add per-format table emitters. Total: ~200 lines per format for the container, on top of the one-time ~400-line codegen change."
+evidence = "Ian Lance Taylor, 'Linkers' part 8. 'The compiler's job for PIC is a one-line rule: any address not known at link time goes through a pointer slot.'"
+
+[[gotchas]]
+title = "GOTPCREL vs PLT32 relocations target different symbol classes"
+explanation = "R_X86_64_GOTPCREL is for DATA references to external symbols — the relocation tells the linker to put the GOT entry's address in the instruction. R_X86_64_PLT32 is for CALL/JMP to external functions — the linker resolves to the PLT stub (or direct if statically linked). Confusing them: a data-reference reloc applied to a CALL instruction makes the linker emit an incorrect PLT stub, OR a call-reloc applied to a data reference goes through PLT lazy-resolve code for something that isn't a function. Symptom: segfault or infinite recursion on first access."
+bad_example = "emit `lea rax, [rip+sym]` with R_X86_64_PLT32 because sym is extern — linker tries to resolve a data symbol through PLT"
+good_example = "extern DATA → GOTPCREL; extern CALL/JMP → PLT32; local DATA/CALL → PC32"
+
+[[gotchas]]
+title = "ET_DYN is the ONLY form that also produces shared libraries"
+explanation = "ELF has three image types: ET_EXEC (fixed-address executable), ET_DYN (position-independent; both PIE executable and .so shared library), ET_REL (object file, .o). A PIE executable and a shared library have identical ELF shape — the difference is just whether a PT_INTERP program header + entry point are present. If you build a proper ET_DYN emitter, you can produce both binaries and .so files from the same codegen path. Most of the complexity is the DT_DYNAMIC table and symbol export — the codegen itself is identical."
+bad_example = "Build separate emitters for ET_EXEC and ET_DYN — duplicates most of the work, diverges over time"
+good_example = "One ET_DYN emitter with a flag: PIE adds PT_INTERP + entry_point; shared lib adds DT_SONAME. Everything else shared."
+
+[[gotchas]]
+title = "PE needs explicit .reloc even if code is RIP-relative"
+explanation = "ELF PIE with only RIP-relative code needs zero relocations — the image is self-contained. PE with only RIP-relative code STILL needs a `.reloc` section if DYNAMICBASE is set, because the loader checks the section exists before permitting ASLR. The section can be empty-of-reloc-entries but MUST be present as a section header. Omitting it: the image loads only at its preferred ImageBase, defeating ASLR; or on some Windows versions, fails to load entirely."
+bad_example = "Emit PIE-clean RIP-relative PE, skip .reloc section, ship — Windows 10+ may refuse to load it under ASLR"
+good_example = "Always emit a `.reloc` section header. If no entries, emit a 0-byte directory; the header's presence satisfies the loader."
+
+[[performance_notes]]
+title = "Mach-O stubs save 10 bytes per extern call vs ELF PLT"
+explanation = "Mach-O stubs are 6 bytes each (`jmp qword [rip+disp32]`). ELF PLT entries are 16 bytes (`jmp [got+n]; push n; jmp plt0`). For a binary with 500 extern calls: Mach-O stub section = 3000 bytes; ELF PLT = 8000 bytes. The difference comes from Mach-O keeping the lazy-resolve trampoline in a separate `__stub_helper` section, while ELF inlines the push+jmp into every PLT entry. Neither approach affects call latency on modern CPUs — both are one indirect jump."
+evidence = "Apple Mach-O reference; objdump -d on native macOS/Linux binaries. Stub size ratio has been constant since original Mach-O (1989) and ELF PLT (1995)."

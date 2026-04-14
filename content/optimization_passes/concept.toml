@@ -69,3 +69,30 @@ evidence = "LLVM: inlining alone improves SPEC runtime by ~15-25%. Compare: cons
 title = "Loop unrolling reduces branch overhead by 2-4x"
 explanation = "Each loop iteration has a branch (the back-edge test). On modern CPUs, branches are predicted well, but the prediction table has limited capacity. Unrolling reduces branches per logical iteration and enables SIMD vectorization. Typical unroll factor: 4-8x."
 evidence = "Simple loop summing an array: 1x (no unroll) = 1.2 ns/elem. 4x unroll = 0.7 ns/elem. 8x unroll with autovectorization = 0.2 ns/elem. Diminishing returns past 8x due to code cache pressure."
+
+[[best_practices]]
+title = "DCE without IR: mark-and-sweep over emitted bytes + metadata"
+explanation = "Single-pass compilers that don't build SSA can still do dead-code elimination. Requirement: during emission, record (a) the start offset of every function, (b) every jump target (the rel32 destinations of E9/0F 8x/E8), (c) every function referenced by address-taking (the R_X86_64_64 fixups). That gives you (node set, edge set, root set) — the three inputs Muchnick's mark-and-sweep DCE needs. Worklist-initialize with exported symbols + entry point, pop a node, mark reachable, push successors. Any function whose entry isn't marked gets its byte range overwritten with 0x90 (NOP) or 0xCC (INT3 trap — safer, catches accidental fallthrough). The algorithm is ~40 lines and requires no IR."
+evidence = "QBE (c9x.me/compile) implements reachability in ~40 lines of cfg.c:fillrpo. Same algorithm works on (function, jump_target) side-tables that any direct-to-bytes compiler already maintains during emission."
+
+[[best_practices]]
+title = "tcc's nocode_wanted: suppress emission instead of erasing it"
+explanation = "Tiny C Compiler has a global counter `nocode_wanted`. When the parser enters a statically-unreachable region (after `return`, `break`, `continue`, `goto`, or inside `if(0)`), it increments the counter. The emitter checks the counter before writing any byte and skips actual emission while still maintaining IP accounting for labels. When a label referenced from reachable code gets resolved, the counter decrements. This is DCE *during* emission — no post-pass, no CFG, no IR. It handles intra-function unreachability (post-return dead code) cleanly. Does NOT handle whole-function unreachability (orphan functions) — for that you still need the mark-and-sweep pass."
+evidence = "tcc source tccgen.c — `nocode_wanted` counter + `gsym()` backpatch mechanism. Production-quality TCC has shipped this since ~2002 with no CFG infrastructure."
+
+[[gotchas]]
+title = "Indirect calls break static reachability analysis"
+explanation = "Mark-and-sweep DCE walks the static call graph. Calls via function pointer (FF /2 or table dispatch) don't statically name their target. Any function whose address is taken via a R_X86_64_64 fixup MUST be marked as a root — otherwise DCE will delete functions that are actually reached via vtable/dispatch-table indirection, and the program will jump to NOPed bytes at runtime. The rule: any function index that appears in a type-3 (address-of) fixup entry is a conservative root, same as main."
+bad_example = "DCE considering only type-2 (direct call) fixups — deletes a handler that's reached through a dispatch table, program jumps into NOPs and crashes or loops"
+good_example = "Mark roots = {exported symbols} ∪ {functions with type-3 fixup entries} ∪ {entry point}"
+
+[[gotchas]]
+title = "NOP-fill preserves offsets; shrinking breaks self-hosting"
+explanation = "Overwriting dead-fn bytes with 0x90 NOP keeps every offset stable — all existing jump/call fixups remain valid, the output binary is the same size, and a self-hosting compiler's 'cc compiles cc byte-identical' invariant is preserved. True shrinking (gas-style relaxation) requires shifting all code after each deleted span, recomputing every relocation, and iterating to a fixed point. Each cost-benefit: NOP-fill is O(n) one pass, zero fixup rework, deterministic. Shrinking is O(n·k) with k fixpoint iterations, full fixup rewrite, and extremely hard to make deterministic across compiler versions. For a self-hosting compiler: start with NOP-fill. Defer relaxation indefinitely or until a separate `-Osize` pass that users opt into."
+bad_example = "Implement code shifting in the main DCE pass — introduces nondeterminism that breaks the cc3==cc3 byte-identity test"
+good_example = "NOP-fill by default. Gate true shrinking behind an opt-in flag and a separate validation suite"
+
+[[performance_notes]]
+title = "chibicc ships no DCE at all — single-pass AST compilers often punt"
+explanation = "Rui Ueyama's pedagogical chibicc (≈10k LOC C compiler, x86-64 Linux) has zero dead-code elimination. gen_stmt() in codegen.c emits verbatim from the AST; unreachable code after `return` is emitted into the binary, and nothing prunes it. The OS never executes those bytes so correctness is preserved, but binary sizes suffer. This is a common tradeoff: pedagogical single-pass compilers trade size for simplicity. A self-hosting production compiler that cares about binary size (Cyrius kybernet case: 486KB → ~150-200KB potential) needs at least the mark-and-sweep pass."
+evidence = "chibicc source codegen.c — search for 'gen_stmt' — pure recursive descent over AST, no reachability tracking. 10k LOC for a self-hosting C compiler is impressive, but omitting DCE is a specific cost."

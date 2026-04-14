@@ -2,7 +2,7 @@
 
 > **Status**: Active | **Last Updated**: 2026-04-08
 >
-> **Version**: 2.1.0 | **Topics**: 36 (36 complete — all 11 languages)
+> **Version**: 2.2.0 | **Topics**: 36 (36 complete — all 11 languages)
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 396 | **Binary**: 85KB Cyrius ELF
 >
@@ -52,7 +52,7 @@ Vidya as a localhost HTTP service — queryable by humans, agents, and other AGN
 
 | Item | Description | Priority |
 |------|-------------|----------|
-| **HTTP server** | Localhost JSON API on configurable port. Endpoints: `/search`, `/info/{topic}`, `/compare`, `/list`, `/stats`, `/gaps`, `/languages`. Uses Cyrius `lib/net.cyr` TCP sockets. Static ELF, no runtime deps, resident in memory. | High |
+| **HTTP server** | Localhost JSON API on configurable port. Endpoints: `/search`, `/info/{topic}`, `/compare`, `/list`, `/stats`, `/gaps`, `/languages`. Built on Cyrius stdlib `lib/http_server.cyr` (4.5.0+) — routing + JSON bodies are vidya-owned, request parsing and accept loop come from the stdlib. Static ELF, no runtime deps, resident in memory. | High |
 | **JSON responses** | All endpoints return JSON (via `lib/json.cyr`). Structured output for programmatic consumption by agnoshi, hoosh, and external tools. | High |
 | **Content hot-reload** | Watch content/ for changes, reload registry without restart. For dev workflow — edit a `.cyr` file, query immediately. | Medium |
 | **Marja integration** | When marja (AGNOS HTTP framework) lands, migrate from raw sockets to marja request handling. Same endpoints, cleaner routing. | Future |

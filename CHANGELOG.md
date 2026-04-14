@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-04-14
+
+### Changed
+- **HTTP server now uses `lib/http_server.cyr`** (cyrius 4.5.0 stdlib).
+  Dropped ~270 LOC of hand-rolled plumbing from `src/main.cyr`
+  (`make_crlf`, `http_respond`, `http_ok/not_found/bad_request`,
+  `http_parse_path`, local `http_get_param`/`http_path_segment`, and
+  the bind/listen/accept loop in `cmd_serve`). Routes now go through
+  `http_send_response` + `http_server_run`. Behaviour preserved;
+  `/info/{topic}` now also benefits from stdlib URL-decoding on
+  query strings.
+- CI/release workflows bumped to Cyrius 4.5.0 (from 2.7.1).
+- Vendored stdlib: added `lib/http_server.cyr`, refreshed
+  `lib/fnptr.cyr` to expose `fncall3..fncall6` (needed for the
+  `http_server_run` handler callback).
+
+### Verified
+- Self-build with cc3 4.5.0: 114KB ELF, clean.
+- `vidya serve` end-to-end against `/stats`, `/`, `/list`, `/languages`,
+  `/search?q=...`, `/info/{topic}`, plus 400/404 paths — all return
+  identical JSON shape to 2.1.0.
+
 ## [2.1.0] — 2026-04-09
 
 ### Added
