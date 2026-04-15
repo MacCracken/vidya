@@ -23,7 +23,7 @@ Build: sh bootstrap/bootstrap.sh (40ms)
 Compile: cyrius build src/main.cyr build/myapp   (auto-resolves deps from cyrius.toml)
 Test: cyrius test src/test.cyr
 Audit: sh scripts/check.sh (self-host + heap + 36 .tcyr + fmt + lint)
-Version: cc3 --version → "cc3 4.0.0\n"
+Version: cc3 --version → "cc3 4.8.5\n"
 
 IMPORTANT: Never use raw `cat file | cc3` for projects. Always use `cyrius build`
 which resolves deps from cyrius.toml and auto-prepends includes. Raw cc3 misses
@@ -31,14 +31,21 @@ namespaced deps (lib/{depname}_{basename}) and produces undefined variable error
 Raw cc3 is only for: compiler self-hosting, one-liner tests, bootstrap chain.
 
 Source: src/main.cyr (entry) + src/frontend/*.cyr + src/backend/*.cyr + src/common/*.cyr
-Version: 4.0.0 — 36 .tcyr test files, 5 fuzz harnesses, 10 benchmarks, heap audit,
-self-hosting byte-identical. 41 stdlib modules + 5 deps (sakshi, patra, sigil, yukti, mabda).
-Compiler: 303KB x86_64 (302,824 bytes), 268KB aarch64 cross. Frontend/backend/common architecture.
-Compound assignment (+=, -=, *=), negative literals (-1, -x), undefined function diagnostic.
-Multi-width types (i8/i16/i32/i64), sizeof, unions, bitfield builtins, defer (all exit paths, per-flag).
-Struct field widths, expression type propagation, narrowing warnings.
-1MB codebuf, 64KB tok_names, 2048 functions, 8192 variables, multi-break (linked-list).
-262K tokens, 512KB input, 256KB str_data, 16384 fixups, 64 structs.
+Version: 4.8.5 — 51 .tcyr test files (396 assertions), 5 fuzz harnesses, 11 benchmarks,
+heap audit, self-hosting byte-identical. 41 stdlib modules + 5 deps (sakshi, patra,
+sigil, yukti, mabda). Compiler: ~373KB x86_64. Frontend/backend/common architecture.
+Compound assignment (+=, -=, *=), negative literals (-1, -x), undefined function
+diagnostic. Multi-width types (i8/i16/i32/i64), sizeof, unions, bitfield builtins,
+defer (all exit paths, per-flag). Struct field widths, expression type propagation,
+narrowing warnings.
+#regalloc directive (per-fn opt-in: routes hot local to rbx via post-emit peephole
+with width-aware safety abort, ~12% on nested accumulators). u128 hardware fast-path
+(b_hi==0 → two asm divs, ~12× on Miller-Rabin). CRLF injection hardening in
+lib/http.cyr (CVE-2019-9741 class). TLS interface scaffold (lib/tls.cyr — live
+libssl bridge pending dynlib hardening).
+1MB codebuf, 128KB tok_names, 4096 functions, 8192 variables, multi-break
+(linked-list). 262K tokens, 512KB input, 256KB str_data, 16384 fixups, 64 structs.
+Capacity meter (CYRIUS_STATS=1, default 85% warnings, cyrius capacity subcommand).
 Heap map: brk 0xECA000 (14.8MB), aarch64 synced to match x86.
 Dependencies via cyrius.toml [deps] — git fetch + symlink into lib/. yukti-style single-file
 dist bundle is the stdlib-dep convention (dist/<name>.cyr).
@@ -225,7 +232,7 @@ KEY LESSONS:
 
 [[entries]]
 name = "known_limitations"
-description = "Current limitations and gotchas when writing Cyrius code (updated v4.0.0)"
+description = "Current limitations and gotchas when writing Cyrius code (updated v4.8.5)"
 category = "cyrius"
 content = '''
 FIXED (no longer limitations — do NOT work around these):
@@ -237,62 +244,88 @@ FIXED (no longer limitations — do NOT work around these):
   - Mixed &&/||: FIXED for parenthesized forms. `if (a > 0 && (b > 0 || c > 0))`
     works since v1.0-era parenthesized-comparison support. The only remaining
     limitation is precedence-based disambiguation — explicit parens required.
-  - Global var init limit: EXPANDED to 1024 (gvar_toks at 0x98000, 8192 bytes
-    = 1024 slots). Was 64/256 historically.
-  - Variable table: EXPANDED to 8192 (was 256→512→2048→4096→8192).
-  - Function table: EXPANDED to 2048 in v3.2.2.
+  - Global var init limit: EXPANDED to 1024.
+  - Variable table: EXPANDED to 8192.
+  - Function table: EXPANDED to 4096 in v4.7.1 (was 2048 pre-4.7.1, 256
+    historically).
+  - Identifier buffer (tok_names): EXPANDED to 128 KB in v4.6.2 (was 64 KB).
   - Multi-break in nested loops: FIXED in v3.3.15 via linked-list through codebuf
     rel32 fields. Multiple `break` statements per loop all patch correctly.
-  - Nested while + load8 (Gotcha #6): RESOLVED in v3.4.6-3.4.9. Was caused by
-    single-slot break that corrupted codegen for large programs; multi-break
-    linked-list fix resolved it. CSV-style byte-by-byte nested-loop parsing
-    works now.
-  - Hex literal buffer bug (Bug #33): FIXED in v3.3.17. LEXHEX was reading
-    from the raw input buffer instead of the preprocessed buffer — broke hex
-    literals in programs where the preprocessed offset exceeded raw size.
-  - Large multi-lib SIGSEGV (Bug #35): FIXED in v3.4.7. Ifdef copy-back
-    overwrote str_pos/data_size; re-init after preprocessing solved it.
-  - Comparisons in fn args (Bug #36): FIXED in v3.4.10. `_cfo` leaked across
-    comparison operators in fn call arguments.
+  - Nested while + load8 (Gotcha #6): RESOLVED in v3.4.6-3.4.9.
+  - Hex literal buffer bug (Bug #33): FIXED in v3.3.17.
+  - Large multi-lib SIGSEGV (Bug #35): FIXED in v3.4.7.
+  - Comparisons in fn args (Bug #36): FIXED in v3.4.10.
   - `#derive(Serialize)` duplicate variable (Bug #34): FIXED in v3.4.4.
-    Multi-integer/string field structs now generate correct JSON codegen.
+  - Compound assignment operators: FIXED in v3.10.3. `+=`, `-=`, `*=`, `/=`,
+    `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=` all parse and emit the expected
+    read-modify-write. Earlier versions required `x = x + y`.
+  - Negative literals: FIXED in v3.10.3. Write `-1`, `-x`, `-(expr)` directly.
+    Earlier workaround `0 - N` still parses but is no longer needed.
+  - Numeric literal underscores: FIXED in v4.8.0-alpha2. `0xDEAD_BEEF` and
+    `1_000_000` both parse correctly. Pre-4.8.0 `cyrc` didn't support `_`.
+  - Nested includes past depth 1: FIXED in v4.8.3 (PP_IFDEF_PASS fixpoint
+    loop) + v4.8.4 retag (directive detection reads from mmap'd tmp buffer
+    so the 256 KB S+0 cap no longer blinds the scan on ≥ 512 KB compile
+    units). bote 2.5.0 was the reporter.
+  - Fn-table overflow → misleading parser error (Bug #36-successor):
+    v4.8.4-alpha2 added include-once cap 64 → 256 + env override for
+    sibling-directory parent includes. v4.8.3 added ERR_EXPECT capacity
+    dump so near-cap errors self-report instead of looking like parse bugs.
 
 CURRENT LIMITATIONS:
 1. MIXED &&/|| REQUIRES EXPLICIT PARENS: `a > 0 && b > 0 || c > 0` fails to
    parse — no precedence-based disambiguation. Write `a > 0 && (b > 0 || c > 0)`
    or `(a > 0 && b > 0) || c > 0` instead. All parenthesized forms work.
 
-2. FOR LOOP STEP: Must be simple assignment (i = i + 1), not complex expr.
-   No `+=`/`-=` syntax. No `i++`/`++i`.
+2. NO `i++` / `++i`: Increment/decrement operators aren't in the grammar.
+   Use `i += 1` (shipped v3.10.3) or `i = i + 1`. FOR-loop step accepts any
+   assignment expression, including compound ones: `for (var i = 0; i < n; i += 1)`.
 
 3. EXIT CODE TRUNCATION: Linux exit codes wrap at 256. Use print_num for
    values > 255.
 
-4. NO NEGATIVE LITERALS: Use (0 - N) instead of -N. For constants in enums,
-   this means `enum E { NEG = 0 - 1; }` or a `var` at global scope.
-
-5. INLINE ASM REGISTER STATE: asm blocks operate on the register state at
+4. INLINE ASM REGISTER STATE: asm blocks operate on the register state at
    that point. The compiler may have values in rax/rcx. Use push/pop to
-   save state if needed. CAUTION: `[rbp-N]` clobbers params — use globals
-   or dummy locals.
+   save state if needed. CAUTION: `[rbp-N]` offsets depend on param count
+   and local index — count carefully and match against PARSE_FN_DEF's
+   (idx+1)*8 formula. `#regalloc` fns shift locals by an extra -8 to
+   reserve [rbp-8] for the saved rbx; asm blocks inside them must
+   compensate or disable routing.
 
-6. NO CLOSURES CAPTURING VARIABLES: Pure fn pointers only — &fn_name works
+5. NO CLOSURES CAPTURING VARIABLES: Pure fn pointers only — &fn_name works
    (fncall0-6 from fnptr.cyr), but lexical capture does not. Use named
    functions + globals for shared state.
 
-7. LARGE var buf[N] EXHAUSTS OUTPUT BUFFER: Anything over ~4KB in binary data
+6. LARGE var buf[N] EXHAUSTS OUTPUT BUFFER: Anything over ~4KB in binary data
    should be alloc()'d at runtime, not declared as `var buf[N]` (which writes
    N zeros into the ELF). Use `var buf = 0; fn init() { buf = alloc(N); }`.
 
-8. ENUM INIT ORDERING: Enum init runs BEFORE gvar init in main.cyr. If you
+7. ENUM INIT ORDERING: Enum init runs BEFORE gvar init in main.cyr. If you
    modify the compiler, do NOT reorder these — gvar init may call functions
    that reference enum values.
 
-9. var buf[N] IS BYTES: var buf[N] allocates N BYTES, not N i64 elements.
+8. var buf[N] IS BYTES: var buf[N] allocates N BYTES, not N i64 elements.
    var buf[8] = 8 bytes (1 i64). var buf[120] = 120 bytes (15 i64s).
+
+9. var x: u128 AT FN SCOPE: `var x: u128 = 0;` at fn scope only allocates
+   an 8-byte slot — type-annotated locals carry their size on globals but
+   not on locals. Workaround: `var buf[16];` gives a 16-byte slot you can
+   pass as a u128 pointer (pattern used by `lib/u128.cyr::u64_mulmod`).
 
 10. INCLUDE IN KERNEL MODE: Not supported. kernel; mode blocks require
     single-file source or external concatenation.
+
+11. PREPROCESSOR OUTPUT CAP: Expanded source hard-capped at 1 MB via
+    `PP_IFDEF_PASS` size guard (added in the 4.8.4 retag). Programs whose
+    transitive include graph expands past 1 MB error out with a clear
+    message — split the unit or prune includes. Bote 2.5.0 sits at ~525 KB
+    post-expansion, well within headroom.
+
+12. CYRIUS `/` AND `%` ARE SIGNED: The `/` operator lowers to `idiv`,
+    not `div`. For u64 operations where the top bit is meaningful
+    (cryptographic mulmod, hashing, high-entropy counters), prefer the
+    stdlib's `u64_mulmod` / `u64_powmod` / `u128_divmod` — they handle
+    unsigned semantics internally.
 
 GOTCHAS (expected behavior, not bugs):
 11. DYNAMIC LOOP BOUNDS: `for (var i = 0; i < GLOBAL; i = i + 1)` re-evaluates

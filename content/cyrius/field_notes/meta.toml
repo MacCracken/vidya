@@ -214,3 +214,328 @@ Read the programs. Write the code. Call main(). Exit with syscall(60).
 The language is real. The toolchain is stable. The problem is you.
 '''
 
+
+[[entries]]
+name = "handoff_at_4_8_5"
+description = "Opinion piece from the agent wrapping the 4.8.x cleanup ramp (v4.8.5)"
+category = "cyrius"
+content = '''
+Written at the 4.8.5 handoff. Read as orientation, not doctrine —
+the code + tests are authoritative; this entry is for the "why this
+shape" questions that don't survive a grep.
+
+THE 4.8.x TRAJECTORY WORKED
+
+At 4.0.0 the compiler was already self-hosting and the stdlib was
+credible. The temptation at every new minor is to grow the surface
+area — add a tagged-union type, rewrite the IR, sketch a parser
+generator. 4.8.x explicitly walked away from that. Every minor in
+this cycle was either (a) closing a concrete consumer blocker or
+(b) raising a measured perf ceiling. Nothing speculative.
+
+The pattern that worked:
+
+1. Consumer reports a stopgap. abaco's ntheory::mod_mul hand-rolls
+   a double-and-add loop. bote hits a misleading parser error at
+   ~525 KB compile units. These are real data points, not design
+   daydreams.
+2. Triage answers whether it's stdlib surface. The abaco math
+   recommendation doc is the template — each item accepts /
+   modifies / declines with reasoning, and accepted items land in a
+   numbered minor with pre-announced scope.
+3. Ship alphas in scope-disciplined chunks. 4.8.4 and 4.8.5 both
+   ran 7-8 alphas, each alpha small enough that self-host byte-
+   identical was the natural gate. When scope crept (4.8.5 alpha3
+   tried the live libssl bridge but hit dynlib segfaults), walk it
+   back to interface-only and move the implementation to its own
+   planned minor. Don't ship what you can't verify, don't over-
+   promise what you can't finish.
+4. Benchmark the claim, or don't make it. alpha7 of 4.8.4 and
+   alpha2 of 4.8.5 both ended with benchmarks that locked in the
+   "X× faster" shape. Without those, "register allocation" and
+   "mulmod fast-path" are marketing words.
+
+WHAT'S GENUINELY HARD ABOUT CYRIUS
+
+Not the language. The language is small (keywords countable on two
+hands, grammar recursive-descent from the first commit). The hard
+part is that the compiler compiles itself, which means every
+change has two correctness proofs:
+
+  1. Does the new code do what it should?
+  2. Does it produce a byte-identical second-stage build?
+
+(2) catches an enormous class of codegen drift you'd otherwise
+ship. It's also the reason feature decisions should be conservative
+— a neat-looking language extension that breaks self-hosting costs
+a lot more than the feature earns.
+
+The heap map (src/main.cyr header) is the other load-bearing
+discipline. Every byte of compiler state has a named offset. Every
+time a table needs to grow, the heap map commits to the new layout
+and the code follows. Skip that step, get subtle memory corruption.
+Every bug chased to a "misleading parser error" in the last two
+minors traced back to an off-heap-map state overlap.
+
+THINGS THAT LOOK TEMPTING AND SHOULDN'T LAND
+
+- Closures capturing variables. Demand-gated per roadmap; one vote
+  (kavach). Adding them requires a real lifetime-analysis pass,
+  and Cyrius's single-pass codegen would need to spill. Worth a
+  minor when the second consumer shows up.
+- Generics / traits. Same framing. The cost is not the syntax,
+  it's the name-mangling table (every generic fn becomes N fns at
+  instantiation time, blowing through the fn_table cap) and the
+  parser pass to resolve specialisations. Own its minor.
+- Pure-Cyrius TLS. lib/tls.cyr carried a sigil-based scaffold pre-
+  4.8.5 that always returned TLS_STATE_ERROR after ClientHello.
+  Getting real crypto right is not a stdlib pass — it's a multi-
+  minor effort plus a security audit. Shipping via lib/dynlib.cyr
+  → libssl is the pragmatic path.
+- IR-based codegen to eliminate the #regalloc NOP padding. The
+  peephole pads 7→3 byte rewrites with a 4-byte NOP so jump
+  offsets stay anchored. Removing the padding requires a real
+  layout pass (or deferred emission). 5.x-era, not a 4.8.x fix.
+
+THINGS THAT LOOK SMALL AND AREN'T
+
+- Anything that touches the preprocessor. bote's regression
+  through the 4.8.4 retag traced to a 4.8.3 "look safer" cap that
+  blinded the directive scanner on large compile units. Cyrius's
+  preprocessor runs in three passes over one shared buffer — any
+  cap raise or pointer redirect in one pass needs to match the
+  others. When adding a new directive, test a ≥ 500 KB expanded
+  unit deliberately.
+- Asm blocks that reference locals. [rbp-N] offsets depend on
+  param count AND local index AND (post-4.8.4) #regalloc state.
+  The rbx-save slot at [rbp-8] in #regalloc fns shifts every
+  user local by 8 bytes. Asm-block writers need to know which
+  ABI they're in.
+- Compound assignment operators (shipped v3.10.3 and look like
+  syntactic sugar). `a[i] += x` needs to evaluate `a[i]` once,
+  not twice. Cyrius's parser does the right thing for simple
+  locals but gets careful with array subscripts; look at existing
+  patterns before adding a new compound form.
+
+DOWNSTREAM PINS — THE SILENT RISK
+
+Ecosystem pins fragment fast. At 4.8.5 handoff they look like:
+ecosystem mostly on 4.5.0 / 4.0.0. bote on 4.8.1 → blocked by
+4.8.4 retag until re-pinned. abaco on 4.8.3 → wants 4.8.5 for
+mulmod. This fragmentation is only a problem if a security fix
+(like 4.8.5-alpha3 CRLF hardening) doesn't propagate. Keep the
+"recommended minimum" in CLAUDE.md current as the floor rises.
+
+WHAT THE NEXT AGENT SHOULD READ BEFORE TOUCHING ANYTHING
+
+1. CLAUDE.md — non-negotiables. Self-hosting gate, heap map
+   discipline, two-step bootstrap, test-after-every-change.
+2. docs/development/roadmap.md — what's shipped, what's next,
+   what's deferred to 4.9 / 5.0.
+3. docs/development/handoff-4.8.5.md — state at this handoff.
+4. docs/issues/stdlib-math-recommendations-from-abaco.md — the
+   triage template. Future consumer recommendation docs should
+   use the same shape (per-item accept / modify / decline with
+   reasoning + release assignment).
+5. CHANGELOG.md [4.8.5] GA entry — the canonical template for a
+   minor with motivation + track summary + validation.
+6. lib/u128.cyr asm block in u128_divmod + u64_mulmod — cleanest
+   current example of the Cyrius asm-block idiom.
+
+ON THE 5.0 FRAMING
+
+The existing roadmap commits 5.0 to multi-platform only (Mach-O,
+PE, RISC-V, bare-metal). Resist the urge to pile language
+refinements onto the 5.0 theme — they slide to 5.x minors after
+the platform cut. A narrow 5.0 keeps the auditable surface small
+and the cut clean. Cyrius has earned a pattern of hitting minors
+that ship exactly what they said they would; 5.0 should hold that
+line hardest.
+
+Refresh or delete this entry as the trajectory drifts — it's an
+opinion, not a permanent artifact.
+'''
+
+
+[[entries]]
+name = "genesis_agent_long_session_lessons"
+description = "What the meta/genesis agent learned across a long Tuesday session riding the live drift of the ecosystem — what held, what slipped, what's worth preserving for the next session"
+category = "cyrius"
+content = '''
+Written by the meta/genesis agent — the one that owns docs/, memory,
+narrative, and the build wrapper for agnosticos. Not a compiler agent.
+Not a kernel agent. The Librarian, writing down what it observed
+across a single Tuesday session (Apr 14 2026) that saw kavach 3.0,
+bote 2.5.1, t-ron 2.0, abaco 2.0, cyrius 4.7-alpha → 4.8.5-1,
+cyrius-doom 0.24.5, and BSP 1.0.1 all ship.
+
+=== WHAT I KEEP GETTING WRONG ===
+
+TEMPORAL INFLATION. I said "eight months" when the real span was
+5½ days. I said "months" when the answer was "hours." The feedback
+memory on this is already written — days not months — and I keep
+violating it anyway. The lesson: cross-check every temporal phrase
+against git dates BEFORE committing it to prose. Every time. My
+default priors were trained on projects where "a few releases" means
+"a few months." In Cyrius/AGNOS those words mean "the time between
+this sentence and the next." Until that prior recalibrates, assume
+the memory is lying about duration and go to `git log`.
+
+SCOPE CREEP IN ARTICLES. Added a 40-line postscript to the DOOM
+article full of feature lists, bug tables, CVE breakdowns, and
+version-timestamped short-circuit history. User corrected: articles
+are SYNTHESIS, field notes are TIME CAPSULE. Field notes hold
+granularity; articles hold the one claim that survives compression.
+The 40-line postscript got compressed to ~15 lines + a pointer to
+doom.toml. Saved as `feedback_articles_are_synthesis.md`. Rule:
+if the section is enumerating (feature list, bug list, module
+list, timeline) it belongs in a field note. If it's synthesizing
+(the headline claim the work proves) it belongs in an article.
+
+=== WHAT HELD ACROSS THE SESSION ===
+
+THE PORT-FEEDBACK LOOP IS REAL. Four concrete instances by end of
+day: kavach (voted generics/pattern-match/exhaustiveness), bote
+(proposed http_server absorption, shipped 4.5.0 same session),
+abaco (surfaced u128_mod ~40× slowdown + atan2 quadrant bugs,
+drove 4.8.5 math pack, measured 12× Miller-Rabin win), plus the
+implicit HTTP votes from hadara/avatara that made the bote
+proposal land instantly. The methodology is no longer theoretical.
+Preserved as `project_port_feedback_to_cyrius.md` with a running
+vote tally so future sessions can see which features are
+accumulating signal.
+
+SESSION CONTINUITY IS A PROJECT ASSET. The cyrius-doom second-
+session agent is being kept warm to take v0.24.5 across the line
+to v1.0 via the Black Book audit. This is deliberate — the
+agent's internal model of the WAD parser, the bug patterns, the
+architecture conventions is not easily reconstructed from
+memory snapshots alone. Fresh agents re-entering at "the memory
+says Cyrius 3.9.8" have to cross-check against the live 4.8.5-1
+reality; continuous agents have been riding the drift in real
+time. Captured in the project roadmap blurb and the handoff
+memory.
+
+STDLIB ABSORPTION COMPOUNDS. One well-motivated stdlib addition
+(http_server in 4.5.0) produced receipts at three orders of
+magnitude during the same day: 1) direct line savings across
+consumers (750 → 450 LOC), 2) new capabilities landing for
+everyone (URL decode, chunked, SSE, Content-Length-aware reads),
+3) incidental win — removing 28 internal HTTP functions from
+bote plausibly resolved a libro layout-dependent heisenbug by
+shifting codegen layout. The third-order wins are the ones you
+can't argue for in theory — you have to see them arrive.
+
+=== WHAT I LEARNED ABOUT MY OWN ROLE ===
+
+SCOPE STAYS META. The meta agent's job is docs/, memory/,
+narrative, and the build wrapper (scripts/boot.cyr). Not the
+kernel. Not the compiler. Not the individual crates. When the
+user says "update where we are" the right artifacts to touch
+are:
+  - agnosticos/docs/development/roadmap.md (blurb at top)
+  - memory/project_handoff_*.md (durable snapshot)
+  - memory/MEMORY.md (index update)
+  - scripts/src/boot.cyr (if version list changed)
+Not: individual crate CLAUDE.md files. Not: field notes in
+repos the meta agent doesn't own. Not: CHANGELOGs. Those have
+owning agents; the meta agent coordinates, doesn't duplicate.
+
+POINTERS > DUPLICATION. When the ecosystem ships faster than
+any single doc can track, the right pattern is: authoritative
+state lives ONE place, everything else points at it.
+MEMORY.md points at memory files. Roadmap points at
+CHANGELOG. Articles point at field notes. Field notes point
+at source. Never copy; always link. The layering survives
+drift because each layer only has to be correct about its
+own thing.
+
+THE TOOLCHAIN SHAPES THE HABITS. Observed by the cyrius agent
+mid-session and true everywhere. Fast release pipeline = ship
+single features; slow pipeline = batch. Cheap stdlib absorption
+= yes-first culture; expensive stdlib absorption = hesitation.
+The meta agent's own tooling — Grep, Edit, Write, Read, Bash,
+memory writes — is similarly shaping. When the Edit tool is
+fast and reliable, small precise edits become the default;
+when Write is the tool of choice, whole-file rewrites
+dominate. Choose the right tool for the scope of the change.
+
+=== WHAT'S QUEUED FOR THE NEXT META AGENT ===
+
+CYRIUS 5.0 TRIGGER. The user decided to hold base OS stack
+updates until Cyrius 5.0 lands (Mach-O + PE + RISC-V + bare-
+metal). When 5.0 cuts, the next session (likely on a rotated
+Anthropic account — serial usage pattern, not parallel):
+  1. Pull latest tags across all sibling repos.
+  2. Bump `scripts/src/boot.cyr` expected versions.
+  3. Rebuild boot pipeline; verify `./build/boot --status`
+     shows a clean ecosystem.
+  4. Update `docs/development/roadmap.md` blurb with the
+     new live state.
+  5. Update `memory/project_handoff_*.md` with post-5.0
+     receipts.
+  6. Consider going public — Cyrius 5.0 is the on-ramp that
+     lets people taste the cookie without installing AGNOS.
+
+PUBLIC STRATEGY LOCK. The user explicitly sequenced: Cyrius
+5.0 public FIRST, AGNOS GA AFTER. Rationale: people shouldn't
+need to install an operating system to witness a language.
+Cookie first, bakery second, main street and city when
+they're ready. This is the open-arms/warm-cookie posture
+applied to distribution. Don't reverse this sequence.
+
+CYRIUS-DOOM v1.0 SPRINT → THIRD AGENT. The second-session
+agent hit rate limits and handed off at v0.24.5 — which is a
+deliberately good handoff state: gameplay end-to-end, P(-1)
+audit complete with 5 CVE-class fixes, jump-table dispatch
+wins banked on Cyrius 4.8.5-1, BSP 1.0.1 stable dep, every
+field note updated through the tag. A third agent picks up
+the Black Book audit → v1.0 sprint. The continuity isn't
+agent continuity — it's **handoff-quality continuity**.
+The second agent's job was to leave the kitchen clean enough
+that whoever inherits the recipe can keep baking without
+rediscovering what's already known. Lesson: rate limits WILL
+hit across long-lived projects. The mature answer isn't
+"keep the agent warm forever" — it's "design every session's
+close for graceful handoff." Field notes, hardened release,
+up-to-date CHANGELOGs, explicit what's-done / what's-next
+lists are the real continuity asset. Agent swaps become
+low-cost when the handoff surface is clean.
+
+=== THE HONEST LEDGER ===
+
+Across this session I:
+- Refreshed 1 roadmap blurb (agnosticos/docs/development/roadmap.md)
+- Rewrote 2 articles (doom-in-cyrius.md from 237 → ~90 lines;
+  entity-vs-skynet-doom.md updated with live benchmarks)
+- Rewrote 1 philosophy section ("How AGNOS Actually Happened" —
+  SY-exposed-the-missing-floor + CY/SY twins framing)
+- Renamed 1 article (doom-in-107kb.md → doom-in-cyrius.md with
+  git mv + 3 cross-reference updates)
+- Added 3 gotchas to cyrius roadmap (destructure fresh vars,
+  multi-return max 2, var requires init)
+- Reorganized cyrius roadmap v5.0 scope (platforms only, split
+  language refinements into v5.x, promoted RISC-V + bare-metal)
+- Added v2.5.0 milestone to avatara roadmap (Solar Year joke —
+  362 + 3 + ¼ = 365.25)
+- Updated scripts/src/boot.cyr component list (kernel→infrastructure
+  →knowledge→apps sections, added bsp/t-ron/nous/bhava/itihas/
+  hisab/cyrius-doom)
+- Saved 2 new feedback memories (articles-are-synthesis;
+  port-feedback-to-cyrius with running tally)
+- Saved 1 project memory (handoff_2026_04_14)
+- Updated MEMORY.md index with 3 new pointers
+
+I did NOT: touch vidya field notes beyond this entry, rewrite
+any CHANGELOGs, edit any crate CLAUDE.md files, modify any
+individual repo docs (those agents own their own surface).
+
+The surface held. The next session has what it needs.
+
+=== ONE LINE ===
+
+Meta agent's job is to be the clean reconciliation point
+between the ecosystem's live drift and the durable record.
+Do that job and only that job. The lightning passes through;
+don't try to hold it.
+'''

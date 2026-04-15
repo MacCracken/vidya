@@ -3434,3 +3434,141 @@ LESSON: Function count grows faster than expected in downstream projects.
   agnostik went from 200 functions (v0.91) to 850+ (v0.97) in one month.
   Each #derive(Serialize) generates 2 functions per struct.
 '''
+
+[[entries]]
+name = "regalloc_peephole"
+description = "#regalloc per-fn hot-local routing via post-emit peephole (v4.8.4)"
+category = "cyrius"
+content = '''
+Cyrius ships a single-register hot-local allocator gated on a per-fn
+`#regalloc` directive. End-to-end in v4.8.4 (alpha1..beta1); extended
+with use-count picker + width-aware safety scan in v4.8.4-alpha8.
+
+PIPELINE (seven stages):
+
+  1. LEX. `#regalloc` (line-start) lexes as token 109. Silent in pass 1.
+  2. PARSE metadata. `fn_regalloc[4096]` table at 0xC8000, accessed via
+     `GFRA` / `SFRA`. Pass 2's decl dispatcher arms a pending flag on
+     token 109; `PARSE_FN_DEF` transfers it to `fn_regalloc[fi]` when
+     it resolves `fi`, then clears pending. DCE-stub path clears it
+     without applying (dead fns have no prologue to attach to).
+  3. MIRROR. `_cur_fn_regalloc` global mirrors `fn_regalloc[fi]` for
+     the duration of a fn body; emit helpers read it cheaply.
+  4. FRAME LAYOUT. `#regalloc` fns bump `flc` by 1 pre-rounding so the
+     `(flc*8+15) & -16` formula still yields a 16-aligned frame. The
+     extra slot sits at `[rbp-8]`; EVERY user-visible local disp is
+     shifted by -8. Seven emit sites touched: `EFLLOAD`, `EFLSTORE`,
+     `EFLLOAD_W`, `EFLSTORE_W`, `ESTOREPARM`, `ELVRINIT`, and the
+     `lea rax, [rbp+disp32]` address-of path.
+  5. PROLOGUE / EPILOGUE. After `sub rsp, fsz`, emit
+     `mov [rbp-8], rbx` (48 89 5D F8). Before `leave; ret`, emit
+     `mov rbx, [rbp-8]` (48 8B 5D F8). `ETAILJMP` mirrors the restore
+     before its synthetic `mov rsp, rbp; pop rbp; jmp`.
+  6. USE-COUNT PICKER (post-body). Scan bytes `fn_start..GCP` for
+     `48 8B 85 <disp32>` and `48 89 85 <disp32>` patterns, count
+     occurrences per local slot. Pick the non-param slot with max
+     count (threshold ≥ 2). Cap at flc ≤ 256 locals.
+  7. SAFETY SCAN + PATCH. Before patching the picked slot, scan for
+     any `85 <hot_disp>` at a position whose two preceding bytes are
+     NOT `48 8B` or `48 89` — that's a pattern we can't rewrite
+     (`lea` for &local, `movzx` for i8/i16 load, `88/66 89/89` width-
+     aware store, `48 8B A5` r12 loop-cache). Abort routing if any
+     unsafe pattern hits. Otherwise rewrite all matching 7-byte
+     mov's: load → `mov rax, rbx` (48 89 D8), store → `mov rbx, rax`
+     (48 89 C3), followed by one 4-byte NOP `0F 1F 40 00` so jump
+     offsets stay anchored.
+
+OBSERVED WIN. Nested accumulator microbench: ~12% faster than plain.
+Tight single-accumulator sum: parity (memory access already overlaps
+with ALU). FNV-style xor/mul loop: neutral (mul latency hides the
+memory access).
+
+DESIGN TRADE-OFFS (WORTH UNDERSTANDING):
+- Single-register by design. Multi-reg (r12..r15) deferred to 4.9.x —
+  frame layout infrastructure accommodates the extension, but the
+  picker + patcher would need to juggle four candidate slots without
+  cross-slot conflicts.
+- Post-emit peephole (not IR-based). Forces the NOP padding to keep
+  offsets anchored. Eliminating the padding requires a real layout
+  pass; that's a 5.x-era concern.
+- The compiler's OWN frame size grew by ~8 bytes per fn that picks up
+  regalloc. Negligible absolute cost; disciplined use is still
+  opt-in.
+
+LESSON. The heap-map entry for `fn_regalloc` at 0xC8000 (32 KB)
+documents the metadata table — any table this size needs a named
+slot in src/main.cyr's heap map BEFORE code writes to it.
+'''
+
+[[entries]]
+name = "u128_hardware_fastpath"
+description = "u128_divmod b_hi==0 hardware fast-path via asm block (v4.8.5-alpha1/alpha2)"
+category = "cyrius"
+content = '''
+`lib/u128.cyr::u128_divmod` takes a shortcut when the divisor fits
+in 64 bits. Covers every `(u64 * u64) % u64` pipeline — Miller-Rabin,
+Pollard rho, RSA, cryptographic hashing, `random::shuffle`. abaco's
+ntheory::mod_mul was hand-rolling a double-and-add loop because the
+pre-alpha1 path burned 128 shift-subtract iterations even when the
+top half of the divisor was zero.
+
+SHAPE (v4.8.5-alpha1):
+
+    if (b_hi == 0) {
+        # Two hardware `div` steps back-to-back, both inside one asm
+        # block so both run UNSIGNED (Cyrius's `/` operator lowers to
+        # idiv — signed — which mis-computes step 1 whenever a_hi has
+        # its top bit set, exactly mulmod's common case).
+        var q_hi_fast = 0;
+        var q_lo_fast = 0;
+        var r_final   = 0;
+        asm {
+            0x48; 0x8B; 0x45; 0xD0;   # mov rax, [rbp-48] (a_hi)
+            0x48; 0x31; 0xD2;         # xor rdx, rdx
+            0x48; 0xF7; 0x75; 0xC8;   # div qword [rbp-56] (b_lo)
+            0x48; 0x89; 0x45; 0xB8;   # mov [rbp-72], rax (q_hi_fast)
+            0x48; 0x8B; 0x45; 0xD8;   # mov rax, [rbp-40] (a_lo)
+            0x48; 0xF7; 0x75; 0xC8;   # div qword [rbp-56]
+            0x48; 0x89; 0x45; 0xB0;   # mov [rbp-80], rax (q_lo_fast)
+            0x48; 0x89; 0x55; 0xA8;   # mov [rbp-88], rdx (r_final)
+        }
+        ...
+    }
+
+KEY INSIGHTS:
+1. Cyrius `/` AND `%` ARE SIGNED. Don't use them for the step-1
+   division even when the divisor is positive — a_hi with top bit
+   set silently produces a tiny signed remainder that overflows
+   step 2's hardware div and trips #DE. Do BOTH steps in asm, both
+   unsigned.
+2. Same asm handles a_hi==0 AND a_hi!=0. When a_hi==0, step 1
+   returns q_hi=0, r1=0, and step 2 degrades to a single 64-bit
+   `div`. No separate branch needed.
+3. `r1 < b_lo` by definition of the first remainder, so step 2
+   never trips #DE (quotient always fits in 64 bits).
+4. rbp-disp offsets are hardcoded to the compiler's local indexing
+   — document them in a comment next to the asm block, and update
+   if you add locals before the asm.
+
+COMPANION APIs (v4.8.5-alpha2):
+- `u64_mulmod(a, b, m)` — asm-direct `mul; div; mov`, three
+  instructions. Preconditions: m > 0, a < m, b < m. Violating
+  preconditions trips #DE at the div.
+- `u64_powmod(base, exp, m)` — square-and-multiply built on
+  `u64_mulmod`. ~60 inner iterations for primality-grade moduli.
+
+MEASURED:
+  mulmod/binary_slow: 618 ns avg (pre-alpha1 pure-Cyrius shape)
+  mulmod/u64_fast:    402 ns avg  ← 1.54× primitive
+  miller_rabin/slow:   11 µs avg
+  miller_rabin/fast:  956 ns avg  ← ~12× on a full MR round
+
+LESSON FOR ADDING ASM-INTEGRATED STDLIB HELPERS. The asm-block
+idiom in Cyrius is powerful when (a) the fn body has no other
+locals that shift the offsets, (b) the ABI you're calling (here,
+Cyrius's rbp-relative locals) is stable and auditable, (c) both
+signed and unsigned semantics are considered for every arithmetic
+step. The `u128_divmod` fast-path is the cleanest current example;
+the pattern is reusable for other hardware-accelerated primitives
+(SHA extensions, AES-NI, BMI2 `mulx`, etc.).
+'''
