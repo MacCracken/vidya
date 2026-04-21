@@ -16,49 +16,82 @@ var z: i32 = 0; — width-correct loads (movzx) and stores. sizeof(Type) operato
 Type annotations enable width-correct codegen; untyped variables remain i64.
 f64 supported as bit patterns via 20+ f64_* builtins (SSE2/SSE4.1/x87).
 
-The compiler (cc3) is ~303KB, ~280 functions, 8 modules. It compiles itself
-byte-identical. The AGNOS kernel is written entirely in Cyrius.
+The compiler binary is `cc5` (renamed from cc3 at v5.0.0). 488,864 B x86_64, 10 modules
+(frontend/lex + frontend/parse + backend/x86/* + backend/aarch64/* + backend/cx +
+backend/macho + backend/pe + common/ir + cc compatibility layer). Self-hosts
+byte-identical (two-step + three-step verify). Cross-compiles to aarch64 via
+`src/main_aarch64.cyr` (488KB → ~347KB aarch64 native cross). Apple Silicon
+Mach-O self-hosts byte-identically (v5.3.13); compiler-driven libSystem imports
+landed v5.5.12 (`__DATA_CONST` + `__got` + LC_DYLD_INFO_ONLY). Windows PE32+
+self-hosts natively byte-identical (v5.5.10 — `cc5_win.exe` on Windows 11
+produces output matching Linux cross-build byte-for-byte).
 
 Build: sh bootstrap/bootstrap.sh (40ms)
-Compile: cyrius build src/main.cyr build/myapp   (auto-resolves deps from cyrius.toml)
+Compile: cyrius build src/main.cyr build/myapp   (auto-resolves deps from cyrius.cyml)
 Test: cyrius test src/test.cyr
-Audit: sh scripts/check.sh (self-host + heap + 36 .tcyr + fmt + lint)
-Version: cc3 --version → "cc3 4.8.5\n"
+Audit: sh scripts/check.sh (self-host + heap + 73 .tcyr + fmt + lint; 14 gates, v5.5.27)
+Version: cc5 --version → "cc5 5.5.27\n" (x86_64 Linux default).
+        cc5_aarch64 (Linux aarch64 cross). cc5_win 5.5.27 (Windows x86_64 PE;
+        native self-host v5.5.10+).
+Strict: cc5 --strict (v5.4.19; undefined-fn warnings become hard errors)
 
-IMPORTANT: Never use raw `cat file | cc3` for projects. Always use `cyrius build`
-which resolves deps from cyrius.toml and auto-prepends includes. Raw cc3 misses
+IMPORTANT: Never use raw `cat file | cc5` for projects. Always use `cyrius build`
+which resolves deps from cyrius.cyml and auto-prepends includes. Raw cc5 misses
 namespaced deps (lib/{depname}_{basename}) and produces undefined variable errors.
-Raw cc3 is only for: compiler self-hosting, one-liner tests, bootstrap chain.
+Raw cc5 is only for: compiler self-hosting, one-liner tests, bootstrap chain.
 
 Source: src/main.cyr (entry) + src/frontend/*.cyr + src/backend/*.cyr + src/common/*.cyr
-Version: 4.8.5 — 51 .tcyr test files (396 assertions), 5 fuzz harnesses, 11 benchmarks,
-heap audit, self-hosting byte-identical. 41 stdlib modules + 5 deps (sakshi, patra,
-sigil, yukti, mabda). Compiler: ~373KB x86_64. Frontend/backend/common architecture.
-Compound assignment (+=, -=, *=), negative literals (-1, -x), undefined function
-diagnostic. Multi-width types (i8/i16/i32/i64), sizeof, unions, bitfield builtins,
-defer (all exit paths, per-flag). Struct field widths, expression type propagation,
-narrowing warnings.
+Version: 5.5.27 — 73 .tcyr test files, 5 fuzz harnesses, 16 benchmarks, heap audit,
+self-hosting byte-identical. 59+ stdlib modules including the v5.5.26/v5.5.27 NSS
+identity quartet (lib/pwd.cyr + lib/grp.cyr + lib/shadow.cyr + lib/pam.cyr — pure-
+cyrius musl-pattern readers that bypass glibc NSS for getpwuid/getgrouplist/pam
+semantics; unix_chkpwd fork for non-root auth) + 6 deps (sakshi, patra at 1.5.5 via
+cyrius distlib, sigil 2.9.x with HKDF/SHAKE/SHA-512, yukti, mabda, sankoch). Compiler:
+488,864 B x86_64 (cc5 5.5.27), ~347KB aarch64 cross, ~554KB cc5_win (Windows PE
+cross; native self-host on Win11 v5.5.10+).
+Frontend/backend/common architecture.
+Compound assignment (+=, -=, *=, %=), negative literals, undefined function
+diagnostic (escalatable via --strict). Multi-width types (i8/i16/i32/i64),
+sizeof, unions, bitfield builtins, defer (all exit paths, per-flag). Struct
+field widths, expression type propagation, narrowing warnings. Struct
+initializer syntax, native multi-return, short-circuit && / ||, expression-
+position comparisons.
 #regalloc directive (per-fn opt-in: routes hot local to rbx via post-emit peephole
-with width-aware safety abort, ~12% on nested accumulators). u128 hardware fast-path
-(b_hi==0 → two asm divs, ~12× on Miller-Rabin). CRLF injection hardening in
-lib/http.cyr (CVE-2019-9741 class). TLS interface scaffold (lib/tls.cyr — live
-libssl bridge pending dynlib hardening).
-1MB codebuf, 128KB tok_names, 4096 functions, 8192 variables, multi-break
-(linked-list). 262K tokens, 512KB input, 256KB str_data, 16384 fixups, 64 structs.
-Capacity meter (CYRIUS_STATS=1, default 85% warnings, cyrius capacity subcommand).
-Heap map: brk 0xECA000 (14.8MB), aarch64 synced to match x86.
-Dependencies via cyrius.toml [deps] — git fetch + symlink into lib/. yukti-style single-file
-dist bundle is the stdlib-dep convention (dist/<name>.cyr).
-Constant folding (all arith, 32/64-bit results), tail call opt, DCE (bitmap O(T+N)),
-jump tables (dense switches), dead-store elimination (post-emit pass).
-Return-by-value small structs (ret2/rethi). 7 SIMD packed f64 ops.
+with width-aware safety abort, ~12% on nested accumulators).
+#ifplat PLAT / #endplat (v5.4.19; sugar for #ifdef CYRIUS_ARCH_<UPPER> — supports
+x86 and aarch64 today, falls closed on unknown plat). Coexists with existing #ifdef.
+#pe_import("kernel32.dll", "Symbol") (v5.4.6; PE IAT symbol registration).
+#derive(accessors/Serialize) with single-pass JSON deserializer.
+secret var (v5.3.5; constant-time comparison helper for sigil PQC).
+u128 hardware fast-path (b_hi==0 → two asm divs, ~12× on Miller-Rabin).
+Keccak-f[1600] + SHAKE-128/256 in lib/keccak.cyr (v5.4.15; NIST-verified; 262µs 4KB).
+fncall0..fncall8 in lib/fnptr.cyr (v5.4.13 lifted ceiling 6→8). C FFI via shims
+for struct-by-value / float / variadic / aarch64 7-8 arg — see docs/ffi/.
+
+1MB codebuf, 128KB tok_names, 4096 functions, 8192 variables, 262K tokens,
+512KB input, 256KB str_data, 16384 fixups, 64 structs. Capacity meter
+(CYRIUS_STATS=1, default 85% warnings, cyrius capacity subcommand).
+Heap map: brk 0x150B000 (21MB), aarch64 synced. Integrity: tests/heapmap.sh
+(43 regions, 0 overlaps, 0 warnings).
+Dependencies via cyrius.cyml [deps] — git fetch + symlink into lib/. yukti-style
+single-file dist bundle is the stdlib-dep convention (dist/<name>.cyr).
+[release] table in cyrius.cyml (v5.4.18) — single source of truth for toolchain
+bins/scripts consumed by release.yml + install.sh + pulsar.cyr.
+Constant folding, tail call opt, DCE (bitmap O(T+N)), jump tables (dense
+switches), dead-store elimination. Return-by-value small structs (ret2/rethi).
+IR layer (v5.0.0): 40 opcodes, CFG, LASE, DBE. Per-arch asm dispatch via
+#ifdef CYRIUS_ARCH_{X86,AARCH64} (v5.3.16); new consumers should prefer
+#ifplat syntax (v5.4.19).
 Inline small fns (2 params, 16 tokens via token replay).
-PIC codegen for object; mode (LEA + R_X86_64_PC32, no DT_TEXTREL — glibc 2.38+ dlopen-safe).
-_cyrius_init export wraps top-level code as a callable function in object; mode.
-Overflow guards on 6 arrays. argonaut (6257 lines, 424 tests) + libro (240 tests) compile.
-#derive(Serialize) with _from_json_str single-pass deserializer (O(json_length)).
-include-once semantics, identifier dedup, #ref directive. Fixup table: 8192 entries.
-Dynamic library loading: lib/dynlib.cyr (pure Cyrius ELF .so loader via mmap, no libc).
+PIC codegen for object; mode (LEA + R_X86_64_PC32, no DT_TEXTREL — glibc 2.38+
+dlopen-safe). _cyrius_init export wraps top-level code as a callable function
+in object; mode; STB_GLOBAL binding (v5.4.9 fix).
+Overflow guards on 6 arrays. argonaut (6257 lines, 424 tests) + libro (240
+tests) + kybernet (140 tests) + hadara (329 tests) + ai-hwaccel (491 tests) compile.
+Dynamic library loading: lib/dynlib.cyr (pure Cyrius ELF .so loader via mmap).
+Threading: lib/thread.cyr (v5.4.10 x86 + v5.4.11 aarch64 post-clone trampoline).
+Hashmap: lib/hashmap.cyr with map_new() (cstr keys, legacy) + map_new_str()
+(Str keys, v5.4.14; content-hashed via hash_str_v, fixes ~3% entry-loss bug).
 '''
 
 [[entries]]
@@ -391,61 +424,86 @@ TESTING:
 
 [[entries]]
 name = "stdlib"
-description = "Cyrius standard library: 41 modules + 5 deps, 200+ functions (v4.0.0)"
+description = "Cyrius standard library: 59 modules + 6 deps, 300+ functions (v5.5.27)"
 category = "cyrius"
 content = '''
-CORE LIBRARIES (lib/):
+CORE LIBRARIES (lib/) — 59 stdlib modules + per-arch/OS variants + 6 deps:
 
 string.cyr      — strlen, streq, memeq, memcpy, memset, memchr, strchr, strstr, print_num, println
-alloc.cyr       — alloc_init, alloc, alloc_reset, alloc_used (bump allocator from brk)
+alloc.cyr       — alloc_init, alloc, alloc_reset, alloc_used (bump from brk; routes to alloc_macos.cyr mmap on macOS, alloc_windows.cyr VirtualAlloc on Windows)
 str.cyr         — Str struct (data+len): str_from, str_len, str_eq, str_cat, str_sub, str_contains, str_split, str_trim
 vec.cyr         — Dynamic array: vec_new, vec_push, vec_pop, vec_get, vec_set, vec_len, vec_find, vec_remove
 io.cyr          — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists
 fmt.cyr         — Formatting: fmt_int, fmt_hex, fmt_hex0x, fmt_bool, fmt_byte, fmt_pad, fmt_int_buf, sprintf
-args.cyr        — CLI args: args_init, argc, argv (reads /proc/self/cmdline)
-fnptr.cyr       — Function pointers: fncall0–fncall6 (indirect call via inline asm, 0-6 args)
+args.cyr        — CLI args: args_init, argc, argv (Linux: /proc/self/cmdline). args_macos.cyr reads x28 entry-prologue frame (v5.5.17)
+fnptr.cyr       — Function pointers: fncall0–fncall8 (v5.4.13 lifted ceiling 6→8; v5.5.6 Win64 asm blocks; v5.5.7 strict shadow-space compliance)
 tagged.cyr      — Tagged unions: packed Result (Ok/Err via bit 63), heap Option (Some/None)
-hashmap.cyr     — String→i64 map: map_new, map_set, map_get, map_has, map_delete, map_keys
+hashmap.cyr     — map_new (cstr keys) + map_new_str (Str keys, v5.4.14 content-hashed) + map_u64_new (u64 keys, v5.5.20 SplitMix64, zero-alloc hot path)
 hashmap_fast.cyr— SIMD-attempted hashmap (API parity with hashmap.cyr; scalar is faster for small maps)
 fs.cyr          — Filesystem: is_dir, dir_list, sys_mkdir, sys_unlink, sys_chmod
 process.cyr     — Subprocess: run, run_capture, spawn, exec_vec, exec_env, exec_capture
-syscalls.cyr    — 50+ syscall numbers, wrappers (fork, waitpid, pipe, dup2, epoll, timerfd)
+syscalls.cyr    — Per-arch dispatch to syscalls_{x86_64_linux,aarch64_linux,macos,windows}.cyr (v5.4.11 split; v5.5.18 aarch64 fix for lib/io.cyr)
 net.cyr         — TCP socket wrappers
-http.cyr        — Minimal HTTP/1.0 client (GET, URL parser, response extraction)
+http.cyr        — HTTP/1.0 client (GET, URL parser, response extraction; CRLF-injection hardened)
+http_server.cyr — Minimal HTTP/1.0 server (interim — eventually extracts to a services repo)
 ws.cyr          — WebSocket client (RFC 6455 — handshake, framing, masking, ping/pong)
-tls.cyr         — TLS 1.3 client scaffold (RFC 8446 — record layer + ClientHello; X25519 pending)
+ws_server.cyr   — WebSocket server (interim — extracts with http_server.cyr)
+tls.cyr         — TLS 1.3 client (RFC 8446; libssl.so.3 via dynlib bridge)
 json.cyr        — Minimal JSON: json_parse, json_get, json_get_int, json_build
-toml.cyr        — TOML parser
+toml.cyr        — TOML parser (v5.4.17 fixed multi-line arrays for `[`-starting values)
+cyml.cyr        — CYML parser (TOML header + markdown body)
 csv.cyr         — RFC 4180 CSV parse/write (quoted fields, escaped quotes, commas-in-quotes)
 base64.cyr      — Base64 encode/decode
 bigint.cyr      — 256-bit unsigned integers (4-limb, for cryptography — add/sub/mul/mod/cmp/shr1/addmod/mulmod)
+u128.cyr        — 128-bit integers with hardware fast-path (b_hi==0 → two asm divs, ~12× on Miller-Rabin)
 math.cyr        — Extended math (f64_atan and friends, transcendentals)
 matrix.cyr      — Matrix operations
+linalg.cyr      — Linear algebra primitives
 regex.cyr       — Pattern matching
 trait.cyr       — Manual vtable dispatch: display_vtable, trait_obj_new
 assert.cyr      — Test assertions: assert_eq, assert_ne, assert_true
 bench.cyr       — Benchmarking: bench_start/end/report AND bench_batch_start/stop (for sub-µs ops)
 bounds.cyr      — Array bounds checking
 callback.cyr    — Callback patterns: fork_with_pre_exec
-thread.cyr      — Threads (clone+mmap), mutex (futex), MPSC channels
+thread.cyr      — Threads (clone+mmap), mutex (futex), MPSC channels (v5.4.10 x86 post-clone trampoline + v5.4.11 aarch64 variant)
 async.cyr       — Async primitives
 freelist.cyr    — Freelist allocator (O(1) alloc/free)
 chrono.cyr      — Time: ISO-8601 format/parse, epoch↔date, leap year, is_leap_year
 log.cyr         — Structured logging wrapper over sakshi (ISO-8601 timestamps, level filtering)
 audio.cyr       — ALSA PCM audio via direct ioctls (no libasound, no C FFI)
 mmap.cyr        — Memory-mapped I/O: cyr_mmap, cyr_munmap, cyr_mprotect, mmap_file_ro/rw/anon
-dynlib.cyr      — Pure Cyrius ELF .so loader via mmap (GNU hash table, no libc, no dlopen)
+dynlib.cyr      — Pure-cyrius ELF .so loader via mmap (GNU hash table, no libc, no dlopen).
+                   v5.5.23 dynlib_bootstrap_locale; v5.5.24 dynlib_bootstrap_environ; v5.5.25 dynlib_read_auxv / dynlib_auxv_get
+keccak.cyr      — Keccak-f[1600] + SHAKE-128/256 (v5.4.15; NIST-verified; 262µs/4KB after v5.4.16 inlining)
+ct.cyr          — Constant-time primitives backing `secret var` (sigil PQC helper, v5.3.5)
+cffi.cyr        — C FFI shim surface (struct-by-value / variadic / >6-arg helpers; see docs/ffi/)
 vidya.cyr       — Vidya knowledge-base access
 
-DEPS (fetched via cyrius deps — git + symlink, single-file dist bundles):
-sakshi (0.9.0)  — Tracing/logging (slim + full profiles)
-patra  (0.14.0) — SQL database (B-tree, WAL, transactions)
-sigil  (2.0.1)  — Trust verification (Ed25519, SHA-256/512, HMAC, integrity)
-yukti  (1.2.0)  — Device abstraction (USB, optical, block, GPU via /sys/class/drm, network, udev)
-mabda  (2.1.2, activated in Cyrius 3.6.3) — GPU foundation via wgpu-native
-                  C shim (transitional — backend swap to pure Cyrius planned)
+IDENTITY (NSS-free quartet, v5.5.26 / v5.5.27 — musl-pattern /etc/* readers, bypass glibc NSS):
+pwd.cyr         — pwd_getpwuid / pwd_getpwnam (parses /etc/passwd)
+grp.cyr         — grp_getgrgid / grp_getgrnam / grp_getgrouplist (parses /etc/group)
+shadow.cyr      — shadow_getspnam (parses /etc/shadow; root-only — rc=-1 on EACCES)
+pam.cyr         — pam_unix_authenticate forks /usr/sbin/unix_chkpwd for non-root auth (same path pam_unix.so uses)
 
-Total: 41 stdlib modules + 5 deps, 200+ functions.
+PER-ARCH / PER-OS VARIANTS (auto-selected via _TARGET_* predefines):
+syscalls_x86_64_linux.cyr / syscalls_aarch64_linux.cyr / syscalls_macos.cyr / syscalls_windows.cyr
+alloc_macos.cyr (mmap) / alloc_windows.cyr (VirtualAlloc, v5.5.8)
+args_macos.cyr (x28 entry-prologue argc/argv reader, v5.5.17)
+
+DEP BUNDLES (fetched via `cyrius deps` from cyrius.cyml — git + namespaced symlink):
+sakshi  (2.0.0) — Tracing/logging (slim + full profiles)
+patra   (1.5.5) — SQL database (B-tree, WAL, transactions; bundle via `cyrius distlib` from v5.5.26)
+sigil   (2.9.0) — Ed25519, SHA-256/512, HMAC, HKDF, SHAKE-128/256, AES-NI (v2.9.1 consumers unblocked by v5.5.21 SSE m128 alignment fix)
+yukti   (2.1.1) — Device abstraction (USB, optical, block, GPU via /sys/class/drm, network, udev)
+mabda   (2.5.0) — GPU foundation via wgpu-native C shim (depends on map_u64_* from v5.5.20)
+sankoch (2.0.1) — Lossless compression (LZ4, DEFLATE, zlib, gzip)
+
+Total: 59 stdlib modules (+ per-arch/OS variants) + 6 deps, 300+ functions.
+
+IMPORTANT — use `cyrius build` not raw `cat file | cc5` for projects:
+    `cyrius build` auto-resolves deps from cyrius.cyml and prepends includes.
+    Raw cc5 misses namespaced deps (lib/{depname}_{basename}) → undefined-var errors.
+    Raw cc5 is only for: compiler self-hosting, one-liner tests, bootstrap chain.
 
 USAGE PATTERN:
     include "lib/alloc.cyr"
@@ -2660,4 +2718,457 @@ and internal refactoring.
     kybernet 1.0.1 (140 tests), argonaut 1.2.0 (27 test suites)
     hadara 1.0.0 (329 tests), ai-hwaccel 2.0.0 (491 tests)
     hoosh 2.0.0, avatara 2.3.0 (362 profiles, 24 traditions)
+'''
+
+
+[[entries]]
+name = "cyml_format"
+description = "CYML — Cyrius Markup Language: TOML header + markdown body in one file"
+category = "cyrius"
+content = '''
+CYML (.cyml) — a file format that is TOML above the delimiter, markdown
+below it. Shipped in Cyrius 4.9.2 as lib/cyml.cyr.
+
+=== THE PROBLEM ===
+
+Three formats coexist in the AGNOS ecosystem, each solving half:
+  - TOML: typed fields, but prose in triple-quoted strings is ugly
+  - Markdown: agents read it natively, but no type system
+  - YAML frontmatter: workable hybrid, but YAML has known problems
+    (indentation-sensitive, Norway problem, implicit typing)
+
+No format cleanly combines typed headers with rich prose bodies.
+
+=== THE FORMAT ===
+
+Single-entry:
+    [meta]
+    name = "example"
+    tags = ["tutorial"]
+
+    ---
+
+    Everything below the delimiter is markdown.
+    Full prose. Code blocks. Lists. No escaping.
+
+Multi-entry (vidya pattern):
+    [topic]
+    id = "compression"
+
+    [[entries]]
+    name = "lz4_for_speed"
+    type = "best_practice"
+
+    ---
+
+    LZ4 decompresses at 3-5 GB/s. Pick the algorithm for the use
+    case, not the one you know.
+
+    [[entries]]
+    name = "deflate_bit_order"
+    type = "gotcha"
+
+    ---
+
+    DEFLATE reads bits LSB-first. Most other formats are MSB-first.
+
+=== PARSE RULES ===
+
+1. File starts in TOML mode
+2. [[entries]] on its own line starts a new entry TOML header
+3. --- on its own line switches to markdown body
+4. Next [[entries]] or EOF ends the current body
+5. TOML above first [[entries]] is file-level metadata
+6. Leading/trailing whitespace on body is trimmed
+7. Body is stored as raw string — no markdown parsing
+
+=== API (lib/cyml.cyr) ===
+
+    # Parse full doc (single or multi-entry)
+    var doc = cyml_parse(data, len);
+    var n = cyml_doc_entry_count(doc);
+    var e = cyml_doc_entry(doc, 0);
+    var hdr = cyml_entry_header(e);    # TOML pointer
+    var body = cyml_entry_body(e);     # markdown pointer
+
+    # Convenience for single-entry files
+    cyml_split(data, len, &hdr, &hdr_len, &body, &body_len);
+
+Zero-copy parser: returns pointers into the input buffer. No
+allocation needed for parsing — result is pointers and lengths.
+80-120 lines of Cyrius. 22-assertion test suite.
+
+=== WHY NOT ALTERNATIVES ===
+
+- Keep TOML with triple-quotes: backtick conflicts, noisy diffs
+- Markdown + YAML frontmatter: YAML implicit typing is fragile
+- MDX: wrong ecosystem (React dependency)
+- Custom binary: overkill for text content
+- TOML with #ref includes: one entry = two files, filesystem explodes
+
+=== MIGRATION PATH ===
+
+CYML is additive — TOML files keep working. Migration order:
+1. vidya concept.toml → .cyml (primary consumer)
+2. field_notes/*.toml → .cyml
+3. Memory system evaluates (optional, YAML frontmatter works fine)
+4. CLAUDE.md stays pure markdown (read by Claude Code directly)
+
+=== TOOLING ===
+
+cyrius init --agent        creates a generic CLAUDE.md
+cyrius init --agent=agnos  creates an AGNOS-ecosystem CLAUDE.md
+cyrius init --agent=claude creates a minimal CLAUDE.md
+cyrius init (no flag)      no agent file (clean for end users)
+
+Unknown presets fall back to generic — the flag means "I want an
+agent file", the value is just flavor.
+'''
+
+[[entries]]
+name = "ifplat_directive"
+description = "#ifplat PLAT / #endplat preprocessor directive — v5.4.19 sugar for #ifdef CYRIUS_ARCH_<UPPER>"
+category = "cyrius"
+content = '''
+Cyrius v5.4.19 added `#ifplat PLAT` / `#endplat` as a cleaner
+spelling for arch-gated blocks. It's strictly additive — the
+old `#ifdef CYRIUS_ARCH_X86` / `#ifdef CYRIUS_ARCH_AARCH64`
+forms keep working, and most stdlib call sites still use them
+(migration deferred to v5.5.x after a thread-test regression
+during the in-release migration attempt).
+
+USAGE:
+
+    #ifplat x86
+    asm { ... x86 bytes ... }
+    #endplat
+    #ifplat aarch64
+    asm { ... aarch64 bytes ... }
+    #endplat
+
+SUPPORTED PLATFORMS:
+- x86      → resolves to CYRIUS_ARCH_X86
+- aarch64  → resolves to CYRIUS_ARCH_AARCH64
+- Unknown tokens (e.g. riscv64) fail closed — the body is
+  skipped unconditionally.
+
+SEMANTICS:
+Identical to `#ifdef CYRIUS_ARCH_<UPPER>`. The evaluator
+`PP_IFPLAT_MATCH` in src/frontend/lex.cyr hashes the token to
+the canonical compiler-builtin symbol and looks it up in the
+same flag table as #ifdef. No separate state; no new scopes.
+
+NESTED BLOCKS work (skip_depth tracking mirrors #ifdef). `#ifplat`
+can be nested inside `#ifdef` and vice versa.
+
+WHEN TO USE:
+- New code that gates on architecture: prefer `#ifplat`.
+- Existing code using `#ifdef CYRIUS_ARCH_*`: no migration
+  required. Both forms are first-class.
+
+FUTURE (v5.5.x+): the `(arch, format)` tuple form — e.g.
+`#ifplat aarch64-macho`, `#ifplat x86-pe` — is reserved. The
+directive will grow a match table to cover these as the PE and
+Mach-O backends mature.
+
+TEST: tests/tcyr/ifplat.tcyr — 5 assertions verify equivalence
+with #ifdef on both live arches plus fail-closed on unknown plat.
+'''
+
+[[entries]]
+name = "strict_mode"
+description = "cc5 --strict flag (v5.4.19) — escalates undefined-function warnings to hard errors"
+category = "cyrius"
+content = '''
+Cyrius v5.4.19 added the `--strict` CLI flag to `cc5`. Without it
+(default), calling an undefined function emits a warning plus a
+"will crash at runtime" note and produces a broken binary that
+segfaults when the call is reached. With `--strict`, cc5 refuses
+to emit the binary and exits 1 with:
+
+    error: --strict: refusing to emit binary with N undefined function(s)
+
+Closes the regression class that cost a day of debug time at
+v5.4.15 when a typo `bench_print_all` (should have been
+`bench_report_all`) slipped through as a warning and produced a
+hung-at-runtime bench binary.
+
+USAGE:
+
+    cat foo.cyr | cc5 --strict > foo    # hard-fails on undef-fn
+    cat foo.cyr | cc5 > foo             # warns but produces binary
+
+CLI PARSING: cc5 reads /proc/self/cmdline and walks every arg,
+setting `_strict_mode = 1` when it sees "--st" prefix. Same
+walker handles `--version`. New flags in v5.5.x plug into the
+same loop.
+
+RECOMMENDED: enable `--strict` in CI. Add it to `cyrius build`
+once the flag-forwarding story is designed (v5.5.x+).
+
+FILES: src/main.cyr (cmdline walker), src/backend/x86/fixup.cyr
+(hard-fail check after the undef-count loop).
+'''
+
+[[entries]]
+name = "hashmap_str_keys"
+description = "map_new_str() constructor for Str-struct keys (v5.4.14) — fixes the ~3% entry-loss bug"
+category = "cyrius"
+content = '''
+v5.4.14 added `map_new_str()` to `lib/hashmap.cyr`, a sibling to
+the legacy `map_new()`. The two constructors differ only in
+their `key_type` tag (0 = cstr, 1 = Str); the rest of the API
+(`map_set` / `map_get` / `map_has` / `map_delete` / `map_size`
+/ `map_keys` / `map_values` / `map_clear` / `map_iter` /
+`map_print`) works unchanged for both.
+
+WHY IT EXISTS: before v5.4.14, `hash_str` byte-walked its input
+until NUL — correct for cstr keys but silently broken for Str-
+struct keys (fat `{data_ptr, len}` pairs with no NUL at offset
+0). The byte-walk read the struct's address bytes and adjacent
+freelist memory, producing address-derived hashes that collided
+constantly. `_map_find`'s tombstone/probe path then silently
+overwrote earlier entries — marja's soak tests measured ~3%
+entry loss at counts from 50 to 5000.
+
+USAGE:
+
+    var m_cstr = map_new();           # cstr keys (legacy)
+    map_set(m_cstr, "alpha", 42);
+    map_get(m_cstr, "alpha");         # → 42
+
+    var m_str = map_new_str();        # Str keys (v5.4.14+)
+    map_set(m_str, str_from_int(42), 99);
+    map_get(m_str, str_from_int(42)); # → 99
+
+INTERNAL: the map header grew from 24 to 32 bytes at v5.4.14.
+The new field at `m+24` carries `key_type`. `_map_find` and
+`map_print` branch on it; `_map_hash` and `_map_key_eq`
+dispatch to `hash_str`+`streq` or `hash_str_v`+`str_eq`.
+
+MIGRATION: zero work for existing cstr-keyed callers. Anyone
+using `map_set(m, str_from_int(i), v)` should switch
+`map_new()` → `map_new_str()` at the call site.
+
+v6.0.0 will collapse to Str-only and drop the branch — part of
+the cyc-rename-era cleanup. Until then: both paths are first-
+class.
+
+TEST: tests/tcyr/hashmap_str_keys.tcyr — 17 assertions covering
+500 str_from_int entries + 2000-entry grow + cstr regression.
+'''
+
+[[entries]]
+name = "fncall_ceiling"
+description = "lib/fnptr.cyr fncall0..fncall8 + when to shim C FFI (v5.4.13)"
+category = "cyrius"
+content = '''
+`lib/fnptr.cyr` exposes `fncall0(fp)` through `fncall8(fp,
+a..h)` for calling a function pointer with 0–8 args. Ceiling
+was lifted from 6 to 8 at v5.4.13 for mabda's wgpu render-pass
+FFI unblock.
+
+CALLING CONVENTION (cyrius's own, NOT AAPCS64 on aarch64):
+- Args 1-6 in registers: rdi/rsi/rdx/rcx/r8/r9 (x86_64 SysV)
+  or x0..x5 (aarch64 — cyrius uses 6 regs to stay symmetric
+  with x86_64).
+- Args 7+ on the stack. x86_64: 8 bytes each at [rsp+N*8].
+  aarch64: 16 bytes each via `str xN, [sp, #-16]!` (preserves
+  SP alignment).
+- fp loaded into rax (x86) / x9 (aarch64) for the indirect call.
+- Result comes back in rax / x0.
+
+WHEN DIRECT fncallN IS SAFE:
+- N ≤ 8 args.
+- Every arg is a scalar (integer, pointer, enum widened to i64).
+- No float / double args (they go in xmm0..xmm7 on SysV, v0..v7
+  on AAPCS64 — fncallN doesn't touch SSE/FP regs).
+- Not variadic (SysV needs AL = #SSE regs; fncallN doesn't set
+  AL).
+- On aarch64: ≤ 6 args if calling a C function — past arg 6,
+  cyrius's convention diverges from AAPCS64's 8-reg form.
+
+WHEN TO USE A C SHIM:
+- Struct-by-value arg (SysV §3.2.3 / AAPCS64 §B.4 aggregate
+  rules split these across regs or stack-home; fncallN loads
+  integer regs only).
+- Float / double arg or return.
+- Variadic callee.
+- >6 args into a C function on aarch64.
+
+CANONICAL SHIM SHAPE: accept a `SomethingArgs*` by pointer,
+unpack in C, call the real fn with ABI-correct layout. Cyrius
+calls the shim via `fncall2(shim_fp, subject, &args)`.
+
+MABDA'S wgpu_main.c has 5+ canonical examples
+(wgpu_shim_buffer_map, wgpu_shim_copy_buffer_to_buffer, etc.).
+
+DOCS: docs/ffi/fncall-abi.md (direct-vs-shim decision table) +
+docs/ffi/struct-packing.md (worked examples).
+
+TEST: tests/tcyr/fncall_ceiling.tcyr — 14 assertions covering
+fncall0..fncall8 correctness on both arches.
+'''
+
+[[entries]]
+name = "secret_var_compound_ops"
+description = "Cyrius v5.4.x syntax surface — struct init, multi-return, &local arch dispatch, #regalloc, secret var"
+category = "cyrius"
+content = '''
+A grab-bag of v5.3.x–v5.4.x syntactic additions that haven't
+had their own top-level entry yet. Consolidated here so agents
+can find them without digging through release notes.
+
+STRUCT INITIALIZER SYNTAX (v5.3.x):
+    var p = Point { x: 10, y: 20 };
+Emits struct-shaped stores in declaration order. Pairs with
+#derive(accessors) for accessor-fn generation.
+
+NATIVE MULTI-RETURN (v5.2.x):
+    fn divmod(a, b) { return a / b, a % b; }
+    var q, r = divmod(10, 3);
+Two values come back via rax (ret1) + rdx (ret2). No tuple
+wrapper; two `return` expressions, comma-separated.
+
+&LOCAL ARCH DISPATCH (v5.4.8):
+`&local_var` — takes the address of a local variable.
+parse.cyr now dispatches per-arch in the emit: x86 uses
+`lea rax, [rbp - N]`, aarch64 uses `sub x0, x29, #N`.
+Before v5.4.8, shared parse.cyr emitted raw x86 bytes
+(lea encoding) even under aarch64 — SIGILL on Pi. Fixed
+by arch-guard in emit.cyr; tests/tcyr/local_addr.tcyr
+regression.
+
+#regalloc DIRECTIVE (v4.7.0+):
+    #regalloc 1
+    fn hot_loop() { ... }
+Opt-in per-fn flag. Routes the innermost loop's accumulator
+local to rbx via a post-emit peephole with width-aware safety
+abort (reverts to stack if it spots a width violation).
+~12% speedup on nested accumulators. See feedback_regalloc.md
+for scope rules.
+
+SECRET VAR (v5.3.5):
+    secret var key = load_key();
+    if (ct_eq(key, candidate)) { ... }
+Marks a variable whose comparison must be constant-time. Used
+by sigil's PQC code (ML-DSA signature verification).
+Pairs with `ct_select(c, a, b)` (v5.3.2) and `mulh64(a, b)`
+(v5.3.3) builtins. All three shipped as "Sigil 3.0 enablers".
+
+EXPRESSION-POSITION COMPARISONS (v5.x):
+    var flag = (x == y);
+Comparisons return 0/1 and can live anywhere an integer
+expression does. PARSER LIMITATION: comparisons inside function
+CALL ARGUMENTS are rejected (parser ambiguity with generic/
+templated forms). Work around by assigning first:
+    var eq = (x == y); foo(eq);
+'''
+
+[[entries]]
+name = "identity_lookups_musl_pattern"
+description = "Pure-cyrius /etc/passwd + /etc/group + /etc/shadow readers and non-root password auth — bypass glibc NSS entirely"
+category = "cyrius"
+content = '''
+Cyrius's v5.5.26/v5.5.27 identity surface is a deliberate
+architectural stance: don't try to bootstrap glibc NSS dispatch
+from a static binary (v5.5.23-25 ate three patches proving that's
+not tractable — see static_dlopen_and_nss_bootstrap_limits entry
+in the linking_and_loading concept). Instead, do what musl libc
+does for its entire identity surface: parse `/etc/passwd`,
+`/etc/group`, `/etc/shadow` directly and skip NSS.
+
+=== MODULES ===
+
+  lib/pwd.cyr    (v5.5.26)  — /etc/passwd reader
+  lib/grp.cyr    (v5.5.26)  — /etc/group reader
+  lib/shadow.cyr (v5.5.27)  — /etc/shadow reader
+  lib/pam.cyr    (v5.5.27)  — password verification (non-root path)
+
+Each reader uses the same shape:
+  * Internal cache keeps the whole file in a heap buffer after
+    first read; `{pwd|grp|shadow}_invalidate_cache()` resets.
+  * Caller passes (record_buf, strbuf, strbufsz). Parsed strings
+    land in strbuf; record_buf holds ints + pointers into strbuf.
+  * Return codes: 1=found, 0=not found, -1=file unreadable,
+    -2=strbuf overflow.
+
+=== API ===
+
+  pwd_getpwuid(uid, pwrec, strbuf, strbufsz)
+  pwd_getpwnam(name, pwrec, strbuf, strbufsz)
+    — 56 B pwrec: uid, gid, name, passwd, gecos, dir, shell
+    — accessors: pwd_uid / pwd_gid / pwd_name / pwd_passwd /
+                 pwd_gecos / pwd_dir / pwd_shell
+
+  grp_getgrgid(gid, grrec, strbuf, strbufsz)
+  grp_getgrnam(name, grrec, strbuf, strbufsz)
+  grp_getgrouplist(user, primary_gid, gid_buf, max)
+    — 24 B grrec: gid, name, passwd
+    — grp_getgrouplist always prepends primary_gid, then walks
+      /etc/group adding any group that lists user as a member
+
+  shadow_getspnam(name, sprec, strbuf, strbufsz)
+    — 24 B sprec: name, hash, last_change
+    — /etc/shadow is 0600 root:root — non-root callers get rc=-1;
+      use lib/pam.cyr for non-root auth
+
+  pam_unix_authenticate(user, password)
+    — forks /usr/sbin/unix_chkpwd (Linux-PAM's setuid-root helper),
+      pipes password to its stdin, waits for exit
+    — same path pam_unix.so uses from unprivileged processes
+    — works against any NSS backend configured (files/LDAP/SSSD)
+    — returns PAM_AUTH_OK (0), PAM_AUTH_FAIL (1), or negative
+      infrastructure errors (HELPER_MISSING / PIPE_FAILED /
+      FORK_FAILED / EXEC_FAILED)
+    — pam_unix_available() probes whether the helper is installed
+
+=== USAGE ===
+
+```
+include "lib/pwd.cyr"
+include "lib/pam.cyr"
+
+var pwrec[56];
+var strbuf[1024];
+var rc = pwd_getpwuid(uid, &pwrec, &strbuf, 1024);
+if (rc == 1) {
+    # pwd_name(&pwrec) is a null-term cstring in strbuf
+}
+
+# Verify a password without being root:
+var r = pam_unix_authenticate("alice", pw);
+if (r == PAM_AUTH_OK) { ... }
+```
+
+=== DESIGN NOTES ===
+
+* Bypasses glibc NSS entirely. Same stance as musl. Handles 95%
+  of Linux deployments (passwd: files is default). For LDAP/SSSD/
+  winbind systems that configure non-files backends, pam.cyr's
+  fork to unix_chkpwd covers the auth path; read paths would need
+  a separate route (not yet implemented — no consumer has asked).
+
+* shadow.cyr requires root to read /etc/shadow directly. The
+  non-root auth story routes through pam.cyr's unix_chkpwd helper.
+  An inline SHA-512-crypt implementation (Drepper's algorithm, ~120
+  LoC) was considered for v5.5.27 but deferred: error-prone to
+  hand-implement, and unix_chkpwd already covers every crypt type
+  the system supports (MD5/SHA-256/SHA-512/yescrypt) via a ~1 ms
+  fork. Could land in a future patch if a zero-fork consumer
+  specifically needs it.
+
+* All four readers cache the parsed file. Re-calling into the
+  same module in a loop is cheap. Call invalidate_cache() after
+  an external change (e.g. `usermod`, `passwd`).
+
+=== TESTING ===
+
+  tests/tcyr/pwd_grp.tcyr     — 26 assertions (v5.5.26 gate 4h)
+  tests/tcyr/shadow_pam.tcyr  — 6 assertions (v5.5.27 gate 4i)
+
+Both run clean via direct `build/cc5` compile. The `cyrius test`
+harness currently has a dep-auto-prepend ordering bug that breaks
+any test whose deps reference stdlib (tracked as pre-existing in
+CHANGELOG); check.sh gates use direct compile and are unaffected.
 '''

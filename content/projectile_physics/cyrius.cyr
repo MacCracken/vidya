@@ -1,0 +1,210 @@
+# Projectile Physics — Cyrius reference (runnable)
+# Semi-implicit Euler integration for parabolic arcs in 16.16 fixed-point.
+# Patterns: gravity, bounce with restitution, trajectory, clamping.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# --- Constants (16.16 fixed-point) ---
+
+var FX_SHIFT = 16;
+var FX_ONE = 65536;
+var GRAVITY = 6554;              # 0.1 per frame
+var FLOOR_Y = 14745600;          # 225.0 (bottom of court)
+var RESTITUTION = 45875;         # 0.7 in 16.16
+
+# --- Ball state ---
+
+struct Ball { x; y; vx; vy; }
+
+fn ball_new(x, y, vx, vy) {
+    var b = Ball { x, y, vx, vy };
+    return &b;
+}
+
+fn asr(v, n) {
+    if (v < 0) { return 0 - ((0 - v) >> n); }
+    return v >> n;
+}
+
+# --- Physics ---
+
+fn physics_step(b) {
+    # Semi-implicit Euler: update velocity FIRST, then position
+    # This is energy-stable (explicit Euler accumulates energy)
+    var p: *i64 = b;
+
+    # vy += gravity
+    var vy = *(p + 3);
+    vy = vy + GRAVITY;
+    *(p + 3) = vy;
+
+    # y += vy (using NEW velocity — this is the "semi-implicit" part)
+    var y = *(p + 1);
+    *(p + 1) = y + vy;
+
+    # x += vx (horizontal — unaffected by gravity)
+    var vx = *(p + 2);
+    var x = *p;
+    *p = x + vx;
+}
+
+fn bounce_check(b) {
+    var p: *i64 = b;
+    var y = *(p + 1);
+
+    if (y > FLOOR_Y) {
+        # Reset position to floor surface
+        *(p + 1) = FLOOR_Y;
+
+        # Reverse velocity and apply restitution damping
+        # vy = -(vy * restitution) >> 16
+        var vy = *(p + 3);
+        var bounced = 0 - asr(vy * RESTITUTION, FX_SHIFT);
+        *(p + 3) = bounced;
+    }
+}
+
+# --- Tests ---
+
+fn test_gravity() {
+    # Ball at rest, one frame of gravity
+    var b = Ball { 0, 0, 0, 0 };
+    physics_step(&b);
+
+    var p: *i64 = &b;
+    assert_eq(*(p + 3), GRAVITY, "vy == gravity after 1 step");
+    assert_eq(*(p + 1), GRAVITY, "y == gravity after 1 step (semi-implicit)");
+    return 0;
+}
+
+fn test_parabolic_arc() {
+    # Launch ball upward, verify it rises then falls
+    var b = Ball { 0, 6553600, 0, 0 };   # y=100.0
+    var p: *i64 = &b;
+    *(p + 3) = 0 - 1310720;              # vy = -20.0 (upward)
+
+    var initial_y = *(p + 1);
+
+    # Step 5 frames — ball should rise (y decreases)
+    var i = 0;
+    while (i < 5) {
+        physics_step(&b);
+        i = i + 1;
+    }
+
+    var mid_y = *(p + 1);
+    assert(mid_y < initial_y, "ball rises in first 5 frames");
+
+    # Step 40 more frames — ball should fall past initial position
+    i = 0;
+    while (i < 40) {
+        physics_step(&b);
+        i = i + 1;
+    }
+
+    var final_y = *(p + 1);
+    assert(final_y > initial_y, "ball falls below start after 45 frames");
+    return 0;
+}
+
+fn test_bounce() {
+    # Ball falling toward floor
+    var b = Ball { 0, FLOOR_Y, 0, 655360 };  # at floor, vy=10.0 down
+    var p: *i64 = &b;
+
+    # Push just past floor to trigger bounce
+    *(p + 1) = FLOOR_Y + 1;
+    bounce_check(&b);
+
+    # Velocity should now be negative (upward)
+    var vy = *(p + 3);
+    assert(vy < 0, "vy is negative after bounce");
+
+    # Magnitude should be less than original (restitution < 1.0)
+    var abs_vy = 0 - vy;
+    assert(abs_vy < 655360, "bounce reduces velocity magnitude");
+
+    # Position should be at floor
+    assert_eq(*(p + 1), FLOOR_Y, "position reset to floor on bounce");
+    return 0;
+}
+
+fn test_horizontal_unchanged() {
+    # Horizontal velocity is not affected by gravity
+    var vx_initial = 131072;   # 2.0
+    var b = Ball { 0, 0, vx_initial, 0 };
+    var p: *i64 = &b;
+
+    physics_step(&b);
+    physics_step(&b);
+    physics_step(&b);
+
+    assert_eq(*(p + 2), vx_initial, "vx unchanged after 3 frames of gravity");
+    # x should have moved: 3 * 2.0 = 6.0 in fixed-point = 393216
+    assert_eq(*p, 3 * vx_initial, "x = 3 * vx after 3 frames");
+    return 0;
+}
+
+fn test_energy_decay() {
+    # Ball bouncing should lose energy and eventually stop
+    var b = Ball { 0, 0, 0, 655360 };   # vy=10.0 down
+    var p: *i64 = &b;
+
+    # Simulate 300 frames with bounce checking
+    var i = 0;
+    while (i < 300) {
+        physics_step(&b);
+        bounce_check(&b);
+        i = i + 1;
+    }
+
+    # Velocity magnitude should be very small
+    var vy = *(p + 3);
+    if (vy < 0) { vy = 0 - vy; }
+    assert(vy < GRAVITY * 2, "vy near zero after 300 bouncing frames");
+    return 0;
+}
+
+fn test_semi_implicit_stability() {
+    # Semi-implicit Euler should not gain energy over time.
+    # A bouncing ball should never go higher than its start.
+    var start_y = FLOOR_Y - 655360;   # 10.0 above floor
+    var b = Ball { 0, start_y, 0, 0 };
+    var p: *i64 = &b;
+    *(p + 3) = 0 - 655360;           # vy = -10.0 upward
+
+    var min_y = start_y;              # track highest point (lowest y)
+
+    var i = 0;
+    while (i < 500) {
+        physics_step(&b);
+        bounce_check(&b);
+        var y = *(p + 1);
+        if (y < min_y) { min_y = y; }
+        i = i + 1;
+    }
+
+    # Ball should never have gone higher than a reasonable margin
+    # above the start. Some overshoot is acceptable from discrete steps.
+    var margin = 655360;   # 10.0 tolerance
+    assert(min_y > (start_y - 2 * 655360 - margin),
+           "semi-implicit euler does not explode");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_gravity();
+    test_parabolic_arc();
+    test_bounce();
+    test_horizontal_unchanged();
+    test_energy_decay();
+    test_semi_implicit_stability();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,272 @@
+# State Machines — Cyrius reference (runnable)
+# Finite state machines with enum dispatch, committed states, timers,
+# transition validation, and hierarchical game/player state.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# --- Player state enum ---
+enum PlayerState {
+    PS_IDLE = 0;
+    PS_RUN = 1;
+    PS_SHOOT = 2;
+    PS_DUNK = 3;
+    PS_PASS = 4;
+    PS_STEAL = 5;
+    PS_BLOCK = 6;
+    PS_FALL = 7;
+    PS_REBOUND = 8;
+}
+
+# --- Game state enum ---
+enum GameState {
+    GS_MENU = 0;
+    GS_SELECT = 1;
+    GS_TIPOFF = 2;
+    GS_PLAYING = 3;
+    GS_HALFTIME = 4;
+    GS_OVERTIME = 5;
+    GS_GAMEOVER = 6;
+    GS_ATTRACT = 7;
+}
+
+# --- Input enum ---
+enum Input {
+    INPUT_NONE = 0;
+    INPUT_MOVE = 1;
+    INPUT_SHOOT = 2;
+    INPUT_PASS = 3;
+    INPUT_STEAL = 4;
+}
+
+# --- Committed state durations (frames at 60fps) ---
+var SHOOT_FRAMES = 30;    # 0.5s
+var DUNK_FRAMES = 45;     # 0.75s
+var FALL_FRAMES = 20;     # 0.33s
+
+# --- Player state machine ---
+
+struct Player {
+    state;
+    prev_state;
+    timer;
+}
+
+fn player_new() {
+    return Player { PS_IDLE, PS_IDLE, 0 };
+}
+
+fn is_committed(state) {
+    if (state == PS_SHOOT) { return 1; }
+    if (state == PS_DUNK) { return 1; }
+    if (state == PS_FALL) { return 1; }
+    return 0;
+}
+
+fn player_transition(p, input) {
+    var ptr: *i64 = p;
+    var state = *ptr;
+    var timer = *(ptr + 2);
+
+    # Reject input during committed states with active timer
+    if (is_committed(state) == 1) {
+        if (timer > 0) {
+            return state;
+        }
+    }
+
+    # Save previous state for transition detection
+    *(ptr + 1) = state;
+
+    # Dispatch on input
+    if (input == INPUT_MOVE) {
+        *ptr = PS_RUN;
+        return PS_RUN;
+    }
+    if (input == INPUT_SHOOT) {
+        *ptr = PS_SHOOT;
+        *(ptr + 2) = SHOOT_FRAMES;
+        return PS_SHOOT;
+    }
+    if (input == INPUT_PASS) {
+        *ptr = PS_PASS;
+        return PS_PASS;
+    }
+    if (input == INPUT_STEAL) {
+        *ptr = PS_STEAL;
+        return PS_STEAL;
+    }
+
+    # No valid input → idle
+    *ptr = PS_IDLE;
+    return PS_IDLE;
+}
+
+fn player_tick(p) {
+    var ptr: *i64 = p;
+    var timer = *(ptr + 2);
+
+    if (timer > 0) {
+        timer = timer - 1;
+        *(ptr + 2) = timer;
+
+        if (timer == 0) {
+            # Committed state expired → return to idle
+            *(ptr + 1) = *ptr;   # save prev_state
+            *ptr = PS_IDLE;
+        }
+    }
+}
+
+fn player_did_transition(p) {
+    var ptr: *i64 = p;
+    if (*ptr != *(ptr + 1)) { return 1; }
+    return 0;
+}
+
+# --- Tests ---
+
+fn test_idle_to_run() {
+    var p = player_new();
+    player_transition(&p, INPUT_MOVE);
+
+    var ptr: *i64 = &p;
+    assert_eq(*ptr, PS_RUN, "idle -> run on move input");
+    return 0;
+}
+
+fn test_shoot_committed() {
+    var p = player_new();
+    player_transition(&p, INPUT_SHOOT);
+
+    var ptr: *i64 = &p;
+    assert_eq(*ptr, PS_SHOOT, "entered shoot state");
+
+    # Try to move during shoot — should be rejected
+    player_transition(&p, INPUT_MOVE);
+    assert_eq(*ptr, PS_SHOOT, "shoot rejects move input (committed)");
+
+    # Try to pass during shoot — also rejected
+    player_transition(&p, INPUT_PASS);
+    assert_eq(*ptr, PS_SHOOT, "shoot rejects pass input (committed)");
+    return 0;
+}
+
+fn test_timer_expiry() {
+    var p = player_new();
+    player_transition(&p, INPUT_SHOOT);
+
+    # Tick through all frames
+    var i = 0;
+    while (i < SHOOT_FRAMES) {
+        player_tick(&p);
+        i = i + 1;
+    }
+
+    var ptr: *i64 = &p;
+    assert_eq(*ptr, PS_IDLE, "shoot -> idle after timer expires");
+    assert_eq(*(ptr + 2), 0, "timer is zero after expiry");
+    return 0;
+}
+
+fn test_dunk_committed() {
+    var p = player_new();
+    var ptr: *i64 = &p;
+
+    # Manually set dunk state (normally set by game logic, not input)
+    *ptr = PS_DUNK;
+    *(ptr + 2) = DUNK_FRAMES;
+
+    # Input during dunk — rejected
+    player_transition(&p, INPUT_MOVE);
+    assert_eq(*ptr, PS_DUNK, "dunk rejects input for 45 frames");
+
+    # Tick to completion
+    var i = 0;
+    while (i < DUNK_FRAMES) {
+        player_tick(&p);
+        i = i + 1;
+    }
+    assert_eq(*ptr, PS_IDLE, "dunk -> idle after 45 frames");
+    return 0;
+}
+
+fn test_transition_detection() {
+    var p = player_new();
+    var ptr: *i64 = &p;
+
+    # Initial state: no transition
+    assert_eq(player_did_transition(&p), 0, "no transition initially");
+
+    # Transition to run
+    player_transition(&p, INPUT_MOVE);
+    assert_eq(player_did_transition(&p), 1, "idle->run is a transition");
+    assert_eq(*(ptr + 1), PS_IDLE, "prev_state is idle");
+
+    # Same input again: prev_state updates to RUN
+    player_transition(&p, INPUT_MOVE);
+    assert_eq(player_did_transition(&p), 0, "run->run is not a transition");
+    return 0;
+}
+
+fn test_game_state_progression() {
+    var game = GS_MENU;
+
+    # Menu -> Select -> Tipoff -> Playing
+    assert_eq(game, GS_MENU, "starts at menu");
+
+    game = GS_SELECT;
+    assert_eq(game, GS_SELECT, "menu -> select");
+
+    game = GS_TIPOFF;
+    assert_eq(game, GS_TIPOFF, "select -> tipoff");
+
+    game = GS_PLAYING;
+    assert_eq(game, GS_PLAYING, "tipoff -> playing");
+
+    game = GS_HALFTIME;
+    assert_eq(game, GS_HALFTIME, "playing -> halftime");
+
+    game = GS_PLAYING;
+    assert_eq(game, GS_PLAYING, "halftime -> playing (2nd half)");
+
+    game = GS_GAMEOVER;
+    assert_eq(game, GS_GAMEOVER, "playing -> gameover");
+    return 0;
+}
+
+fn test_committed_then_free() {
+    # After a committed state expires, the player should accept input again
+    var p = player_new();
+    player_transition(&p, INPUT_SHOOT);
+
+    # Tick through shoot
+    var i = 0;
+    while (i < SHOOT_FRAMES) {
+        player_tick(&p);
+        i = i + 1;
+    }
+
+    # Now should accept move
+    player_transition(&p, INPUT_MOVE);
+    var ptr: *i64 = &p;
+    assert_eq(*ptr, PS_RUN, "accepts input after committed state expires");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_idle_to_run();
+    test_shoot_committed();
+    test_timer_expiry();
+    test_dunk_committed();
+    test_transition_detection();
+    test_game_state_progression();
+    test_committed_then_free();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

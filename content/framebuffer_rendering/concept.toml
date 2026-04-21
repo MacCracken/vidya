@@ -1,0 +1,73 @@
+id = "framebuffer_rendering"
+title = "Framebuffer Rendering"
+topic = "FramebufferRendering"
+description = "Software pixel rendering to a CPU-owned framebuffer — pixel formats, double buffering, clearing, and presenting without a GPU."
+tags = ["framebuffer", "software-rendering", "pixel", "BGRA", "double-buffer", "blit", "memset", "no-gpu", "games", "retro"]
+related_topics = ["line_rasterization", "sprite_rendering", "performance", "memory_management", "bloom_and_glow"]
+
+[[best_practices]]
+title = "Use a consistent pixel format throughout"
+explanation = "Pick BGRA8888 or RGBA8888 and stick with it. Mixing formats causes color channel swaps that are hard to debug visually. BGRA is native to X11/Wayland shared memory on Linux; RGBA is native to most image libraries."
+
+[[best_practices]]
+title = "Clear the framebuffer with memset, not per-pixel loops"
+explanation = "Clearing to black (0x00000000) is a memset(fb, 0, width * height * 4). This is orders of magnitude faster than a per-pixel store8 loop because memset uses optimized rep stosb or SIMD internally."
+
+[[best_practices]]
+title = "Double-buffer to prevent tearing"
+explanation = "Draw to an off-screen buffer, then copy (blit) the complete frame to the display surface atomically. Single-buffering shows partial frames as mid-draw, creating visible tearing. The back buffer can be a simple malloc'd array."
+
+[[best_practices]]
+title = "Bounds-check every pixel write"
+explanation = "Out-of-bounds framebuffer writes corrupt adjacent memory silently. Check x >= 0 && x < width && y >= 0 && y < height before every pixel write, or pre-clip geometry to screen bounds before the drawing loop."
+
+[[gotchas]]
+title = "Stride is not always width * bytes_per_pixel"
+explanation = "Some display surfaces pad rows to alignment boundaries (e.g., 4-byte or 16-byte alignment). The stride (bytes per row) may exceed width * bpp. Always use stride for row advancement, not width * bpp."
+bad_example = "var offset = (y * width + x) * 4;  // wrong if stride != width * 4"
+good_example = "var offset = y * stride + x * 4;  // correct with any stride"
+
+[[gotchas]]
+title = "Byte order matters for color channels"
+explanation = "BGRA means byte 0 is blue, byte 1 is green, byte 2 is red, byte 3 is alpha. Writing RGB values to a BGRA buffer swaps red and blue, producing wrong colors. Debug by drawing pure red (0xFF0000) and checking if it appears red or blue on screen."
+bad_example = "store8(fb + offset, (color >> 16) & 0xFF);  // R first — wrong for BGRA"
+good_example = "store8(fb + offset, color & 0xFF); store8(fb + offset + 1, (color >> 8) & 0xFF); store8(fb + offset + 2, (color >> 16) & 0xFF);"
+
+[[gotchas]]
+title = "Alpha channel must be set for compositing surfaces"
+explanation = "Some display servers treat alpha = 0 as fully transparent. If your framebuffer pixels have alpha = 0, the window appears invisible. Always set alpha to 255 for opaque pixels."
+bad_example = "// Only write RGB, leave alpha as 0 from memset clear"
+good_example = "store8(fb + offset + 3, 255);  // set alpha to fully opaque"
+
+[[performance_notes]]
+title = "Memory bandwidth is the bottleneck for software rendering"
+explanation = "A 320x240x4 framebuffer is 307KB. Clearing + drawing + presenting moves 600KB-1MB per frame. At 60fps that's 36-60MB/s — trivial for modern CPUs but a real constraint on embedded or retro hardware. Minimize overdraw."
+evidence = "encom-hits targets <4ms frame time at 320x240. At this resolution, the clear alone is ~50us with memset."
+
+[[performance_notes]]
+title = "Row-major access is cache-friendly"
+explanation = "Framebuffers are stored row-by-row. Drawing left-to-right, top-to-bottom accesses sequential memory (cache hits). Drawing columns or random-access pixels causes cache misses. Horizontal line fills are fastest; vertical lines are slowest per pixel."
+evidence = "draw_hline (sequential writes) benchmarks 3-5x faster than equivalent-length draw_vline (stride-spaced writes)"
+
+[[languages.rust]]
+source = "kiran"
+note = "kiran abstracts framebuffer rendering behind a HeadlessRenderer trait. Software backends write to a Vec<u8> buffer with configurable pixel format. Present copies to display surface via platform layer."
+pattern = "Buffer allocated as Vec<u8> with capacity width * height * 4. Pixel writes via slice indexing with bounds checks compiled out in release mode."
+
+[[languages.cyrius]]
+source = "encom-hits"
+note = "encom-hits uses raw store8 calls for pixel writes into a flat byte array. BGRA format with explicit alpha=255. The entire visual identity is computed lines on a black framebuffer."
+pattern = """
+fn draw_pixel(fb, x, y, color) {
+    if (x < 0) { return 0; }
+    if (x >= SCREEN_W) { return 0; }
+    if (y < 0) { return 0; }
+    if (y >= SCREEN_H) { return 0; }
+    var offset = (y * SCREEN_W + x) * 4;
+    store8(fb + offset, color & 255);           // B
+    store8(fb + offset + 1, (color >> 8) & 255); // G
+    store8(fb + offset + 2, (color >> 16) & 255);// R
+    store8(fb + offset + 3, 255);                // A
+    return 0;
+}
+"""

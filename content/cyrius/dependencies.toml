@@ -1,0 +1,202 @@
+# Cyrius Dependency Management — Vidya Reference
+# How cyrius.toml deps work, stdlib vs project deps, and the dep resolution flow.
+# 2026-04-15
+
+[[entries]]
+name = "cyrius_toml_overview"
+description = "cyrius.cyml is the project manifest — declares build config, stdlib deps, and external deps (legacy cyrius.toml is a fallback)"
+category = "cyrius"
+content = '''
+Every Cyrius project has a cyrius.cyml at the root (CYML = TOML header +
+markdown body, v5.0.0+). Legacy cyrius.toml is still read as a fallback.
+Three sections matter for deps:
+
+    [package]
+    name = "myproject"
+    version = "0.1.0"
+
+    [deps]
+    stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert"]
+
+    [deps.sakshi]
+    git = "https://github.com/MacCracken/sakshi.git"
+    tag = "2.0.0"
+    modules = ["dist/sakshi.cyr"]
+
+The [deps] section has two forms:
+1. stdlib = [...] — copies modules from the installed Cyrius stdlib into lib/
+2. [deps.NAME] — clones a git repo at a tag and copies specific module files
+
+Running `cyrius deps` resolves both. All resolved files land in lib/ as
+absolute symlinks (falls back to copy). The compiler auto-includes them
+via the dep include list. Namespaced deps map to lib/{depname}_{basename};
+if the basename matches depname, lib/{depname}.cyr alias is also created.
+'''
+
+[[entries]]
+name = "stdlib_deps"
+description = "stdlib deps copy .cyr files from the installed Cyrius distribution into the project lib/"
+category = "cyrius"
+content = '''
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert"]
+
+Each name maps to lib/{name}.cyr in the Cyrius installation. `cyrius deps` copies
+these files into the project's lib/ directory. The compiler then auto-includes them.
+
+Common stdlib modules and what they provide:
+
+  string   — strlen, streq, memeq, memcpy, memset, memchr, strchr, atoi, strstr
+  fmt      — fmt_int, fmt_hex, fmt_sprintf (with bufsz), fmt_printf, fmt_float
+  alloc    — bump allocator (alloc_init, alloc, alloc_reset), arena allocator
+  io       — file_read_all, file_write_all, file_exists, dir_list
+  vec      — dynamic array (vec_new, vec_push, vec_get, vec_pop, vec_find)
+  str      — heap-allocated strings (str_from, str_cat, str_split, str_builder)
+  syscalls — Linux syscall wrappers (open, close, read, write, fork, exec, etc.)
+  assert   — test assertions (assert_eq, assert, test_group, assert_summary)
+  net      — TCP sockets (tcp_socket, sockaddr_in)
+  thread   — threads, mutex, channels (thread_create, mutex_lock, chan_send)
+  hashmap  — string-keyed hash table (map_new, map_set, map_get, map_has)
+  json     — JSON parser
+  toml     — TOML parser
+  cyml     — CYML parser (TOML header + markdown body)
+  tls      — TLS client via libssl.so.3 (dynlib bridge)
+
+IMPORTANT: alloc_init() must be called before any alloc() calls. Most stdlib
+modules that allocate (vec, str, hashmap, json, toml) require it.
+'''
+
+[[entries]]
+name = "project_deps"
+description = "Project deps clone a git repo at a pinned tag and copy specific module files into lib/"
+category = "cyrius"
+content = '''
+External dependencies are declared as [deps.NAME] sections in cyrius.toml:
+
+    [deps.sigil]
+    git = "https://github.com/MacCracken/sigil.git"
+    tag = "2.1.2"
+    modules = ["dist/sigil.cyr"]
+
+Fields:
+  git     — repository URL (validated: shell metacharacters rejected)
+  tag     — git tag to clone (pinned version — no floating branches)
+  modules — list of .cyr files relative to repo root to import
+  path    — (optional) local path instead of git clone
+
+Resolution flow:
+1. `cyrius deps` reads the [deps.NAME] section
+2. Clones to $CYRIUS_HOME/deps/{name}/{tag}/ (shallow, cached)
+3. For each module in modules[]:
+   - Source: {clone_dir}/{module_path}
+   - Dest:   lib/{depname}_{basename}  (always namespaced)
+   - Creates absolute symlink (falls back to copy if symlink fails)
+4. If basename matches depname (e.g. sigil.cyr for [deps.sigil]),
+   also creates lib/{depname}.cyr alias for canonical include path
+5. Adds to auto-include list
+
+Consumers include via: include "lib/sigil.cyr"
+The namespaced form (lib/sigil_sigil.cyr) also works but the alias is preferred.
+'''
+
+[[entries]]
+name = "dep_bundle_pattern"
+description = "Multi-file deps must bundle into a single dist/*.cyr file for distribution"
+category = "cyrius"
+content = '''
+Cyrius has no multi-file module system — the compiler processes a single compilation
+unit (one file, with includes expanded). External deps with multiple source files
+must bundle them into a single .cyr file.
+
+The standard pattern (used by sigil, patra, yukti, mabda, sankoch):
+
+1. Create scripts/bundle.sh that concatenates sources in dependency order
+2. Strip include lines (grep -v "^include ")
+3. Add a header with version, source URL, license, usage
+4. Output to dist/{name}.cyr
+
+Example bundle.sh:
+    for f in src/types.cyr src/core.cyr src/api.cyr; do
+        echo "# --- $(basename "$f") ---"
+        grep -v "^include " "$ROOT/$f"
+    done > "$ROOT/dist/mylib.cyr"
+
+Then cyrius.toml references: modules = ["dist/mylib.cyr"]
+
+Common gotchas when bundling:
+- Duplicate variable names across files: Cyrius has no block scoping for
+  if/elif, so `var x` in one elif and `var x` in another elif within the
+  same function collide. Hoist to function top and reassign.
+- Reserved words as variable names: `match`, `type`, `break` etc. Rename.
+- Large static arrays (var buf[262144]): will overflow the 1MB output buffer.
+  Heap-allocate with alloc() instead.
+- File ordering: types/constants first, then low-level, then high-level, then
+  public API last.
+'''
+
+[[entries]]
+name = "cyrius_update_flow"
+description = "cyrius update refreshes lib/ and .cyrius-toolchain from the installed Cyrius version"
+category = "cyrius"
+content = '''
+`cyrius update` does two things:
+
+1. Copies all .cyr files from the installed Cyrius stdlib into lib/
+   (reads $CYRIUS_HOME/current to find the installed version)
+2. Updates .cyrius-toolchain to match the installed version
+
+This is the primary upgrade mechanism. When a new Cyrius version is installed:
+  $ cyrius update
+
+After updating, re-run `cyrius deps` to refresh external deps if needed.
+
+The .cyrius-toolchain file pins the minimum Cyrius version for CI reproducibility.
+`cyrius init` creates it from VERSION; `cyrius update` keeps it current.
+
+As of v5.0.0, the canonical manifest is cyrius.cyml (CYML = TOML header +
+markdown body); legacy cyrius.toml is still read as a fallback.
+'''
+
+[[entries]]
+name = "existing_deps_registry"
+description = "Current Cyrius ecosystem deps: 6 external libraries available via cyrius.cyml"
+category = "cyrius"
+content = '''
+As of v5.5.27, six external libraries are available as deps (pinned in cyrius.cyml):
+
+  sakshi (2.0.0)  — Tracing and error handling. Two profiles:
+                     sakshi.cyr (stderr-only, minimal) and
+                     sakshi_full.cyr (ring buffer, UDP, span stack).
+                     Zero heap allocation. Zero external deps.
+
+  patra (1.5.5)   — Structured storage and SQL queries.
+                     Bundled: dist/patra.cyr. Bundle generation
+                     moved from scripts/bundle.sh to `cyrius distlib`
+                     in v1.5.5 (reads [lib] modules from cyrius.cyml).
+
+  sigil (2.9.0)   — System-wide trust verification (SHA-256/512/SHAKE,
+                     Ed25519, HMAC, HKDF, TPM, AES-NI). Bundled:
+                     dist/sigil.cyr. v2.9.0 added HKDF + SHAKE-128/256;
+                     v2.9.1 consumers use AES-NI cleanly after v5.5.21
+                     fixed SSE m128 16-byte alignment.
+
+  yukti (2.1.1)   — Device abstraction layer for AGNOS.
+                     Bundled: dist/yukti.cyr and dist/yukti-core.cyr
+                     (kernel-safe core profile).
+
+  mabda (2.5.0)   — GPU foundation (wgpu-native shim, compute dispatch).
+                     Bundled: dist/mabda.cyr. Note: 141KB+ bundle
+                     requires input_buf >= 256KB (raised in v3.4.19).
+                     v2.5.0 depends on the u64-keyed hashmap added
+                     in cyrius v5.5.20 (map_u64_* family).
+
+  sankoch (2.0.1) — Lossless compression (LZ4, DEFLATE, zlib, gzip).
+                     Bundled: dist/sankoch.cyr.
+
+To add any of these to your project:
+    [deps.sigil]
+    git = "https://github.com/MacCracken/sigil.git"
+    tag = "2.9.0"
+    modules = ["dist/sigil.cyr"]
+
+Then: cyrius deps
+'''

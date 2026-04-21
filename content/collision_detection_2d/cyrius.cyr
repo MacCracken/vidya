@@ -1,0 +1,232 @@
+# 2D Collision Detection — Cyrius reference (runnable)
+# Circle-circle, AABB overlap, point-in-rect, and collision response.
+# All coordinates in 16.16 fixed-point.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# --- Constants ---
+var FX_SHIFT = 16;
+var FX_ONE = 65536;
+
+fn fx(n) { return n << FX_SHIFT; }
+
+fn asr(v, n) {
+    if (v < 0) { return 0 - ((0 - v) >> n); }
+    return v >> n;
+}
+
+# --- Collision primitives ---
+
+fn dist_sq(x1, y1, x2, y2) {
+    # Squared distance between two points (avoids sqrt).
+    # Pre-shift by 4 to prevent overflow on large coordinates.
+    var dx = asr(x2 - x1, 4);
+    var dy = asr(y2 - y1, 4);
+    return dx * dx + dy * dy;
+}
+
+fn circle_circle(x1, y1, r1, x2, y2, r2) {
+    # Test if two circles overlap.
+    # Uses squared distances to avoid sqrt.
+    var d2 = dist_sq(x1, y1, x2, y2);
+    var sum_r = asr(r1 + r2, 4);    # same shift as dist_sq
+    var r2_sq = sum_r * sum_r;
+    if (d2 <= r2_sq) { return 1; }
+    return 0;
+}
+
+fn aabb_overlap(l1, t1, r1, b1, l2, t2, r2, b2) {
+    # Test if two axis-aligned bounding boxes overlap.
+    # Four comparisons, no multiplication.
+    if (l1 >= r2) { return 0; }
+    if (r1 <= l2) { return 0; }
+    if (t1 >= b2) { return 0; }
+    if (b1 <= t2) { return 0; }
+    return 1;
+}
+
+fn point_in_rect(px, py, left, top, right, bottom) {
+    # Test if a point is inside a rectangle.
+    if (px < left) { return 0; }
+    if (px >= right) { return 0; }
+    if (py < top) { return 0; }
+    if (py >= bottom) { return 0; }
+    return 1;
+}
+
+fn circle_aabb(cx, cy, cr, left, top, right, bottom) {
+    # Test if a circle overlaps an AABB.
+    # Find the closest point on the AABB to the circle center,
+    # then check distance.
+
+    # Clamp circle center to AABB bounds
+    var closest_x = cx;
+    if (closest_x < left) { closest_x = left; }
+    if (closest_x > right) { closest_x = right; }
+
+    var closest_y = cy;
+    if (closest_y < top) { closest_y = top; }
+    if (closest_y > bottom) { closest_y = bottom; }
+
+    var d2 = dist_sq(cx, cy, closest_x, closest_y);
+    var r_shifted = asr(cr, 4);
+    if (d2 <= r_shifted * r_shifted) { return 1; }
+    return 0;
+}
+
+# --- Collision response ---
+
+fn push_apart(x1, y1, x2, y2, overlap) {
+    # Push two entities apart along the line between their centers.
+    # Returns the push vector (dx, dy) for entity 1 (entity 2 gets -dx, -dy).
+    # Simplified: push along the dominant axis.
+    var dx = x2 - x1;
+    var dy = y2 - y1;
+
+    # Push along the axis with larger separation
+    var abs_dx = dx;
+    if (abs_dx < 0) { abs_dx = 0 - abs_dx; }
+    var abs_dy = dy;
+    if (abs_dy < 0) { abs_dy = 0 - abs_dy; }
+
+    if (abs_dx > abs_dy) {
+        # Push along X
+        if (dx > 0) { return 0 - asr(overlap, 1); }
+        return asr(overlap, 1);
+    }
+    # Push along Y
+    if (dy > 0) { return 0 - asr(overlap, 1); }
+    return asr(overlap, 1);
+}
+
+# --- Tests ---
+
+fn test_circle_overlap() {
+    # Two circles close together — should collide
+    var x1 = fx(10);
+    var y1 = fx(10);
+    var r1 = fx(5);
+    var x2 = fx(13);
+    var y2 = fx(10);
+    var r2 = fx(5);
+
+    assert_eq(circle_circle(x1, y1, r1, x2, y2, r2), 1,
+              "overlapping circles collide");
+    return 0;
+}
+
+fn test_circle_no_overlap() {
+    # Two circles far apart — should not collide
+    var x1 = fx(0);
+    var y1 = fx(0);
+    var r1 = fx(1);
+    var x2 = fx(100);
+    var y2 = fx(100);
+    var r2 = fx(1);
+
+    assert_eq(circle_circle(x1, y1, r1, x2, y2, r2), 0,
+              "distant circles don't collide");
+    return 0;
+}
+
+fn test_circle_touching() {
+    # Two circles exactly touching — should collide (<=)
+    var x1 = fx(0);
+    var y1 = fx(0);
+    var r1 = fx(5);
+    var x2 = fx(10);
+    var y2 = fx(0);
+    var r2 = fx(5);
+
+    assert_eq(circle_circle(x1, y1, r1, x2, y2, r2), 1,
+              "touching circles collide (edge case)");
+    return 0;
+}
+
+fn test_aabb_overlap() {
+    # Box A: (0,0)-(10,10), Box B: (5,5)-(15,15) — overlap
+    assert_eq(aabb_overlap(fx(0), fx(0), fx(10), fx(10),
+                           fx(5), fx(5), fx(15), fx(15)), 1,
+              "overlapping AABBs");
+    return 0;
+}
+
+fn test_aabb_no_overlap() {
+    # Box A: (0,0)-(5,5), Box B: (10,10)-(20,20) — no overlap
+    assert_eq(aabb_overlap(fx(0), fx(0), fx(5), fx(5),
+                           fx(10), fx(10), fx(20), fx(20)), 0,
+              "separated AABBs");
+    return 0;
+}
+
+fn test_aabb_adjacent() {
+    # Box A: (0,0)-(10,10), Box B: (10,0)-(20,10) — adjacent, not overlapping
+    assert_eq(aabb_overlap(fx(0), fx(0), fx(10), fx(10),
+                           fx(10), fx(0), fx(20), fx(10)), 0,
+              "adjacent AABBs don't overlap");
+    return 0;
+}
+
+fn test_point_inside() {
+    assert_eq(point_in_rect(fx(5), fx(5), fx(0), fx(0), fx(10), fx(10)), 1,
+              "point (5,5) inside rect (0,0)-(10,10)");
+    return 0;
+}
+
+fn test_point_outside() {
+    assert_eq(point_in_rect(fx(15), fx(5), fx(0), fx(0), fx(10), fx(10)), 0,
+              "point (15,5) outside rect (0,0)-(10,10)");
+    return 0;
+}
+
+fn test_point_on_edge() {
+    # Point on left edge: inside (>=). Point on right edge: outside (<).
+    assert_eq(point_in_rect(fx(0), fx(5), fx(0), fx(0), fx(10), fx(10)), 1,
+              "point on left edge is inside");
+    assert_eq(point_in_rect(fx(10), fx(5), fx(0), fx(0), fx(10), fx(10)), 0,
+              "point on right edge is outside");
+    return 0;
+}
+
+fn test_circle_aabb() {
+    # Circle at (5,5) r=3 vs AABB (0,0)-(10,10) — inside, should overlap
+    assert_eq(circle_aabb(fx(5), fx(5), fx(3), fx(0), fx(0), fx(10), fx(10)), 1,
+              "circle inside AABB");
+
+    # Circle at (20,20) r=3 vs AABB (0,0)-(10,10) — far away
+    assert_eq(circle_aabb(fx(20), fx(20), fx(3), fx(0), fx(0), fx(10), fx(10)), 0,
+              "circle far from AABB");
+    return 0;
+}
+
+fn test_dist_sq() {
+    # 3-4-5 triangle: dist from (0,0) to (3,4) should give dist^2 = 25
+    var d2 = dist_sq(fx(0), fx(0), fx(3), fx(4));
+    # Pre-shifted by 4, so actual value = (3*65536/16)^2 + (4*65536/16)^2
+    # = (12288)^2 + (16384)^2 = 150994944 + 268435456 = 419430400
+    # Just verify it's positive
+    assert(d2 > 0, "distance squared is positive for 3-4-5 triangle");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_circle_overlap();
+    test_circle_no_overlap();
+    test_circle_touching();
+    test_aabb_overlap();
+    test_aabb_no_overlap();
+    test_aabb_adjacent();
+    test_point_inside();
+    test_point_outside();
+    test_point_on_edge();
+    test_circle_aabb();
+    test_dist_sq();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

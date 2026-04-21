@@ -295,6 +295,108 @@ fn test_size_comparison() {
     return 0;
 }
 
+# ================================================================
+# Apple Silicon Mach-O ARM64 — v5.3.x learnings
+# ================================================================
+# Cyrius on Apple Silicon targets Mach-O arm64 executables via
+# CYRIUS_MACHO_ARM=1. The kernel has strict requirements and the
+# BSD raw-SVC interface has subtle conventions that differ from
+# Linux. These facts are baked into EMITMACHO_ARM64 + ESYSCALL +
+# ESYSXLAT as of v5.3.1 / v5.3.6 / v5.3.13.
+
+fn test_mach_o_header_constants() {
+    # FEEDFACF — 64-bit Mach-O magic (little-endian stored, bytes
+    # at file offset 0..3 read CF FA ED FE).
+    var magic = 0xFEEDFACF;
+    assert_eq(magic, 4277009103, "Mach-O 64-bit magic");
+
+    # CPU_TYPE_ARM64 in mach_header_64.cputype.
+    var cputype_arm64 = 0x0100000C;
+    assert_eq(cputype_arm64, 16777228, "CPU_TYPE_ARM64");
+
+    # Required flags for Apple Silicon: MH_NOUNDEFS(1) | MH_DYLDLINK(4) |
+    # MH_TWOLEVEL(0x80) | MH_PIE(0x00200000) = 0x00200085.
+    var flags_required = 0x00200085;
+    assert_eq(flags_required, 2097285, "required mach_header flags");
+
+    # Apple Silicon enforces 16 KB pages, not 4 KB.
+    var page_size = 16384;
+    assert_eq(page_size, 0x4000, "Apple Silicon page size");
+    return 0;
+}
+
+fn test_pie_relative_addressing() {
+    # PIE mandatory on Apple Silicon → absolute addressing via
+    # MOVZ/MOVK breaks under ASLR slide. EMITMACHO_ARM64 emits
+    # adrp+add pairs: adrp xN, <page>; add xN, xN, #<lo12>.
+    # Page-diff is in units of 4 KB (ARM's choice, independent of
+    # kernel page size).
+    var adrp_base = 0x90000000;
+    var adrp_mask = 0x9F00001F;
+    assert_eq(adrp_base, 2415919104, "ADRP base encoding");
+    assert_eq(adrp_mask, 2667577375, "ADRP imm patch mask");
+
+    var add_base = 0x91000000;
+    var add_mask = 0xFFC003FF;
+    assert_eq(add_base, 2432696320, "ADD imm base");
+    assert_eq(add_mask, 4290774015, "ADD imm12 patch mask");
+    return 0;
+}
+
+fn test_bsd_syscall_error_convention() {
+    # BSD raw SVC on macOS signals errors via the CPU carry flag —
+    # on error: carry=1, x0 = errno (small positive). On success:
+    # carry=0, x0 = return value. Linux uses -errno in x0.
+    #
+    # Cyrius's ESYSCALL appends `csneg x0, x0, x0, cc` after
+    # `svc #0x80` under _TARGET_MACHO==2. Negates x0 on carry-set
+    # (error) so x0 = -errno, matching Linux. Higher-level
+    # `if (fd < 0)` checks then work identically on both platforms.
+    var csneg_encoding = 0xDA803400;
+    assert_eq(csneg_encoding, 3665835008, "csneg x0,x0,x0,cc");
+    return 0;
+}
+
+fn test_bsd_svc_whitelist() {
+    # Raw `svc #0x80` works on Apple Silicon for a whitelist of BSD
+    # syscalls when the binary has LC_LOAD_DYLIB libSystem.B.dylib
+    # in its load graph. No __stubs, no __got, no chained fixups
+    # needed for this whitelist.
+    #
+    # Linux x86 → BSD translation (baked into ESYSXLAT):
+    #   read  0→3   write 1→4   open 2→5   close 3→6
+    #   mmap  9→197 mprotect 10→74 munmap 11→73 exit 60→1
+    # x16 (not x8) holds the syscall number for BSD.
+
+    # mmap flags DIFFER between platforms:
+    #   Linux: MAP_PRIVATE(2) | MAP_ANONYMOUS(0x20) = 0x22 = 34
+    #   macOS: MAP_PRIVATE(2) | MAP_ANON(0x1000)    = 0x1002 = 4098
+    # Cross-platform code tries 0x22, falls back to 0x1002 on
+    # negative return (v5.3.13 PP_IFDEF_PASS fix).
+    var linux_anon_flags = 0x22;
+    var macos_anon_flags = 0x1002;
+    assert_eq(linux_anon_flags, 34, "Linux MAP_PRIVATE|MAP_ANONYMOUS");
+    assert_eq(macos_anon_flags, 4098, "macOS MAP_PRIVATE|MAP_ANON");
+    return 0;
+}
+
+fn test_mach_o_segment_layout() {
+    # Multi-page __TEXT (v5.3.6+): __TEXT spans (1 + ceil((cp+spos)/16384))
+    # pages. __DATA appears only when totvar > 0, placed right after __TEXT.
+    # __LINKEDIT follows.
+    var pagezero_size = 72;
+    var linkedit_size = 72;
+    var data_seg_size = 152;
+    assert_eq(pagezero_size, 72, "__PAGEZERO LC");
+    assert_eq(linkedit_size, 72, "__LINKEDIT LC");
+    assert_eq(data_seg_size, 152, "__DATA LC (72 + 1 section)");
+
+    # TEXT_VMADDR fixed at 0x100000000 — first 4 GB is __PAGEZERO.
+    var text_vmaddr = 0x100000000;
+    assert_eq(text_vmaddr, 4294967296, "__TEXT vmaddr after __PAGEZERO");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_binary_layout();
@@ -305,6 +407,11 @@ fn main() {
     test_absolute_addressing();
     test_template_optimization();
     test_size_comparison();
+    test_mach_o_header_constants();
+    test_pie_relative_addressing();
+    test_bsd_syscall_error_convention();
+    test_bsd_svc_whitelist();
+    test_mach_o_segment_layout();
     return assert_summary();
 }
 var exit_code = main();

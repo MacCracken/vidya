@@ -1,0 +1,79 @@
+id = "game_loop_architecture"
+title = "Game Loop Architecture"
+topic = "GameLoopArchitecture"
+description = "The core loop that drives a game — timestep models, frame timing, input handling, and update/render separation."
+tags = ["game-loop", "timestep", "fixed-step", "frame-timing", "fps", "input", "update", "render", "nanosleep", "accumulator", "games"]
+related_topics = ["state_machines", "performance", "concurrency"]
+
+[[best_practices]]
+title = "Use fixed timestep for deterministic physics"
+explanation = "Fixed dt (e.g., 1/60s) makes physics reproducible regardless of hardware speed. Variable dt causes non-deterministic behavior — collisions that happen on fast machines but not slow ones. For simple arcade games, fixed step with no interpolation is sufficient."
+
+[[best_practices]]
+title = "Separate update and render phases"
+explanation = "Physics and game logic run at a fixed rate. Rendering runs at whatever the display supports. Without separation, gameplay speed ties to framerate — the classic DOS game problem where the game runs too fast on modern hardware."
+
+[[best_practices]]
+title = "Poll input once at the top of each tick"
+explanation = "Reading input state once per update tick is simple and predictable. It adds at most one tick of latency (16ms at 60fps) which is imperceptible for arcade games. Event-driven input is lower latency but more complex."
+
+[[best_practices]]
+title = "Track frame time with monotonic clocks"
+explanation = "Use clock_gettime(CLOCK_MONOTONIC) or equivalent. Wall clock time can jump (NTP adjustments, suspend/resume). Monotonic clocks only move forward. Compute elapsed time as difference between consecutive reads."
+
+[[gotchas]]
+title = "Spiral of death from slow updates"
+explanation = "If an update takes longer than dt, the accumulator grows, demanding more updates per frame, making it worse. Cap the accumulator to a maximum (e.g., 5*dt) to prevent runaway. Accept slowdown over desynchronization."
+bad_example = "while (accumulator >= dt) { update(dt); accumulator -= dt; }  // unbounded"
+good_example = "if (accumulator > 5 * dt) { accumulator = 5 * dt; } while (accumulator >= dt) { update(dt); accumulator -= dt; }"
+
+[[gotchas]]
+title = "Timer overflow on 32-bit counters"
+explanation = "A 32-bit microsecond counter wraps at ~71 minutes. A 32-bit millisecond counter wraps at ~49 days. Use 64-bit nanosecond monotonic clocks to avoid wrap-around bugs in long-running games."
+bad_example = "var elapsed_us: u32 = now_us - prev_us;  // wraps at 71 minutes"
+good_example = "var elapsed_ns: i64 = now_ns - prev_ns;  // wraps at 292 years"
+
+[[gotchas]]
+title = "Sleep overshoot from OS scheduler"
+explanation = "nanosleep/usleep may overshoot by 1-15ms depending on OS scheduler granularity. For 60fps (16.67ms budget), sleeping 16ms may wake at 17-31ms. Sleep for less than the full budget, then busy-wait the remainder."
+bad_example = "nanosleep(16667000);  // may wake at 17-31ms"
+good_example = "nanosleep(14000000); while (now() < next_frame) { }  // sleep most, spin the rest"
+
+[[performance_notes]]
+title = "Frame budget calculation"
+explanation = "60fps = 16.67ms per frame. 120fps = 8.33ms. 240fps = 4.17ms. Subtract OS overhead (~0.5ms) and present time (~0.5ms) from the budget. For simple wireframe games at 320x240, the actual rendering takes <2ms, leaving ample margin."
+evidence = "encom-hits targets <4ms for 240fps. Simple line-drawing games at 320x240 are well within budget even on modest hardware."
+
+[[performance_notes]]
+title = "Fixed step with no interpolation is simplest"
+explanation = "When update rate equals render rate (both 60fps), no interpolation is needed. The accumulator pattern and lerp between states are only necessary when update and render rates differ. For retro-style games, the simple loop is correct and complete."
+evidence = "Original TRON arcade ran at a fixed rate with no interpolation. encom-hits follows the same pattern: poll, update, render, sleep."
+
+[[languages.rust]]
+source = "kiran"
+note = "kiran's Scheduler provides a fixed-timestep game loop with configurable dt (default 1/60s). Systems are registered into stages (Input, GameLogic, Render) and executed in order. Frame profiling tracks per-system timing."
+pattern = """
+// kiran example: game_loop.rs
+let mut scheduler = Scheduler::new(1.0 / 60.0);
+scheduler.add_system(Stage::Input, input_system);
+scheduler.add_system(Stage::GameLogic, game_system);
+loop {
+    scheduler.tick(&mut world)?;
+    if world.resource::<GameClock>().frame_count() >= max_frames { break; }
+}
+"""
+
+[[languages.cyrius]]
+source = "encom-hits"
+note = "encom-hits uses a minimal fixed-step loop: poll input, update game state, render to framebuffer, sleep until next frame. No accumulator, no interpolation — update rate equals render rate."
+pattern = """
+// Planned pattern for encom-hits main loop:
+while (running) {
+    input_poll();
+    game_update();
+    game_render(fb);
+    fb_present(fb);
+    sleep_until(next_frame);
+    next_frame = next_frame + FRAME_TIME_US;
+}
+"""

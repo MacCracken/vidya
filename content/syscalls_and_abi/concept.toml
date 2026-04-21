@@ -81,3 +81,20 @@ evidence = "clock_gettime via syscall: ~300 cycles. Via vDSO: ~20 cycles. 15x fa
 title = "Register-based calling convention is faster than stack-based"
 explanation = "System V AMD64 passes the first 6 integer args in registers, avoiding memory accesses. The old i386 cdecl convention pushed all arguments on the stack. For functions with ≤6 args (the vast majority), the 64-bit convention eliminates all argument memory traffic."
 evidence = "Function with 3 integer args: AMD64 = 0 memory accesses for args, i386 cdecl = 3 pushes + 3 reads = 6 memory accesses. At ~4 cycles per memory access, that's ~24 cycles saved per call."
+
+[[gotchas]]
+title = "Apple Silicon allows raw SVC only with libSystem in load graph"
+explanation = "arm64 macOS does not outright forbid raw `svc #0x80` BSD syscalls from user code. The undocumented rule: the binary must have `LC_LOAD_DYLIB /usr/lib/libSystem.B.dylib` in its load command set. The binary does not have to actually call any libSystem function — dyld must simply observe libSystem as a dependency during load. With libSystem loaded, `svc #0x80` with the BSD syscall number in x16 and args in x0-x5 works for the classic BSD whitelist (read=3, write=4, open=5, close=6, exit=1, mmap=197, mprotect=74, munmap=73). Without libSystem in the load graph, even a signed PIE binary hits SIGSYS on the first SVC."
+bad_example = "Signed arm64 Mach-O binary with __PAGEZERO + __TEXT + LC_MAIN only — svc #0x80 → SIGSYS (exit 140)"
+good_example = "Same binary + LC_LOAD_DYLIB libSystem.B.dylib in load commands — svc #0x80 works identically to a libSystem-forwarded call"
+
+[[gotchas]]
+title = "Linux and BSD syscall numbers differ on arm64"
+explanation = "Linux aarch64 uses one syscall number space (read=63, write=64, open=56 via openat, exit=93, etc.), defined by the Linux kernel's unistd.h. Darwin/macOS aarch64 uses the classic BSD numbers (read=3, write=4, open=5, exit=1, mmap=197), unchanged from 4.4BSD. A compiler that emits raw syscalls for both targets must translate at codegen time. Additionally, the syscall number register differs: Linux uses x8, Darwin uses x16. Both use svc, but Linux `svc #0` and Darwin `svc #0x80`."
+bad_example = "Port a Linux aarch64 program to macOS by just changing SVC immediate — x8 holds the wrong syscall number"
+good_example = "Translate syscall num (Linux→BSD), move to x16 (not x8), emit svc #0x80 (not #0)"
+
+[[best_practices]]
+title = "x86 Linux syscall numbers are a useful intermediate form"
+explanation = "A multi-target compiler benefits from picking one 'canonical' syscall number space and translating on emit. x86 Linux numbers (read=0, write=1, open=2, exit=60, mmap=9) are a good canonical form: they are compact (small ints), well-known, and the Cyrius compiler parser already validates arities against them. The aarch64 backend translates at emit time: x86 Linux → aarch64 Linux for CYRIUS_MACHO_ARM unset, x86 Linux → BSD for CYRIUS_MACHO_ARM=1. Same ESYSXLAT chain structure, different output values."
+evidence = "Cyrius v5.3.0: one syscall emission path handles three targets (x86_64 Linux raw, aarch64 Linux translated, aarch64 Mach-O BSD). Same cmp/b.ne/movz chain, different target numbers and registers."

@@ -1,0 +1,71 @@
+id = "line_rasterization"
+title = "Line Rasterization"
+topic = "LineRasterization"
+description = "Integer-only algorithms for drawing lines, circles, and arcs on a pixel grid — Bresenham's algorithm and its variants."
+tags = ["bresenham", "line-drawing", "rasterization", "midpoint-circle", "wireframe", "pixels", "framebuffer", "integer-only", "games", "rendering"]
+related_topics = ["framebuffer_rendering", "fixed_point_arithmetic", "performance", "algorithms"]
+
+[[best_practices]]
+title = "Handle all octants in Bresenham's line algorithm"
+explanation = "The basic derivation only covers shallow positive-slope left-to-right lines. A production implementation must swap x/y roles when |dy| > |dx| (steep lines), negate step directions for negative slopes, and ensure consistent endpoint drawing regardless of start/end order."
+
+[[best_practices]]
+title = "Special-case horizontal and vertical lines"
+explanation = "Horizontal lines are a memset-like fill across one row. Vertical lines step by screen stride. Both are 3-5x faster than the general Bresenham loop. Most wireframe games have many axis-aligned lines (grids, rectangles, UI), so this optimization matters."
+
+[[best_practices]]
+title = "Use the midpoint circle algorithm for circles"
+explanation = "Same error-term principle as Bresenham's line, applied to circles. Compute one octant, mirror to all eight via symmetry. Integer-only, no trigonometry needed. Extends to ellipses with two error terms."
+
+[[best_practices]]
+title = "Clip lines to screen bounds before rasterization"
+explanation = "Drawing off-screen pixels wastes cycles and risks out-of-bounds writes. Cohen-Sutherland or Liang-Barsky clipping rejects or trims lines before the pixel loop begins. For axis-aligned rectangles (screen bounds), clipping is trivial."
+
+[[gotchas]]
+title = "Double-bright pixels at shared vertices"
+explanation = "Inclusive-inclusive endpoint convention draws both endpoints. When two connected lines share a vertex, that pixel is drawn twice, appearing brighter with additive blending. Use exclusive-end convention for connected geometry, or accept the artifact for wireframe aesthetics."
+bad_example = "draw_line(0,0, 10,10); draw_line(10,10, 20,0);  // pixel (10,10) drawn twice"
+good_example = "draw_line(0,0, 10,10); draw_line(11,9, 20,0);  // or accept double-bright as aesthetic choice for neon wireframe"
+
+[[gotchas]]
+title = "Negative coordinate handling"
+explanation = "Bresenham's abs(dx)/abs(dy) computation on unsigned types wraps on negative values. Use signed integers throughout and compute absolute values carefully. In Cyrius: dx = 0 - dx when dx < 0 (no negative literal syntax)."
+bad_example = "var dx = x1 - x0; // may be negative, abs() not built-in"
+good_example = "var dx = x1 - x0; if (dx < 0) { dx = 0 - dx; }"
+
+[[gotchas]]
+title = "Steep lines produce gaps when stepping only in x"
+explanation = "When |dy| > |dx|, the line is steep — stepping one pixel in x skips y values, leaving gaps. The fix: swap x/y roles so the major axis always increments by 1."
+bad_example = "// Always step x: produces gaps on steep lines"
+good_example = "if (abs(dy) > abs(dx)) { swap x and y roles in the loop }"
+
+[[performance_notes]]
+title = "Bresenham's inner loop is ~5 instructions"
+explanation = "One compare, one conditional add, one unconditional add, one pixel write, one loop increment. On modern CPUs this is dominated by memory access (the pixel write). On CPUs without FPU (embedded, retro), this is 5-10x faster than y=mx+b with float rounding."
+evidence = "Software wireframe renderers (DOOM, TRON arcade) used Bresenham variants for all line drawing. encom-hits draws 100-300 lines per frame at <4ms."
+
+[[performance_notes]]
+title = "Memory access pattern matters for cache"
+explanation = "Horizontal lines write consecutive bytes (cache-friendly). Vertical lines write pixels stride-apart (one cache miss per pixel on large framebuffers). Shallow lines are between these extremes. Special-casing horizontal fills (memset-style) provides the biggest speedup."
+evidence = "draw_hline with sequential store8 is 3-5x faster than general draw_line for axis-aligned segments"
+
+[[languages.rust]]
+source = "kiran"
+note = "kiran's software renderer uses Bresenham for debug draw overlays. raasta's debug_draw module outputs line segments for visualization."
+pattern = "Line segments represented as (Vec2, Vec2, Color) tuples, rasterized by the presentation layer."
+
+[[languages.cyrius]]
+source = "encom-hits"
+note = "encom-hits draw.cyr implements Bresenham with special-cased hline/vline. Every visual is computed lines — no sprites, no textures."
+pattern = """
+fn draw_line(fb, x0, y0, x1, y1, color) {
+    var dx = x1 - x0;
+    var dy = y1 - y0;
+    if (dx < 0) { dx = 0 - dx; }
+    if (dy < 0) { dy = 0 - dy; }
+    var sx = 1; if (x0 > x1) { sx = 0 - 1; }
+    var sy = 1; if (y0 > y1) { sy = 0 - 1; }
+    var err = dx - dy;
+    // ... Bresenham loop with bounds-checked store8 pixel writes
+}
+"""

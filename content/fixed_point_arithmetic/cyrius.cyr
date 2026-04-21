@@ -1,0 +1,226 @@
+# Fixed-Point Arithmetic — Cyrius reference (runnable)
+# 16.16 fixed-point: integer bits in upper 48, fraction in lower 16.
+# Patterns: multiply, divide, overflow-safe mul, sine table, arithmetic shift.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# --- Constants ---
+
+var FX_SHIFT = 16;
+var FX_ONE = 65536;          # 1.0 in 16.16
+var FX_HALF = 32768;         # 0.5 in 16.16
+
+# --- Core operations ---
+
+fn fx_from_int(n) {
+    return n << FX_SHIFT;
+}
+
+fn fx_to_int(v) {
+    # Truncate toward zero
+    if (v < 0) {
+        return 0 - ((0 - v) >> FX_SHIFT);
+    }
+    return v >> FX_SHIFT;
+}
+
+fn fx_to_int_round(v) {
+    # Round to nearest integer
+    if (v < 0) {
+        return 0 - ((0 - v + FX_HALF) >> FX_SHIFT);
+    }
+    return (v + FX_HALF) >> FX_SHIFT;
+}
+
+fn fx_mul(a, b) {
+    # Standard multiply: (a * b) >> 16
+    # WARNING: overflows if |a| * |b| > 2^63
+    return (a * b) >> FX_SHIFT;
+}
+
+fn fx_mul_safe(a, b) {
+    # Overflow-safe multiply: pre-shift both inputs
+    # Trades 8 bits of precision for overflow resistance
+    return asr(a, 8) * asr(b, 8);
+}
+
+fn fx_div(a, b) {
+    # Fixed-point divide: (a << 16) / b
+    # Caller must ensure b != 0
+    if (b == 0) { return 0; }
+    return (a << FX_SHIFT) / b;
+}
+
+fn asr(v, n) {
+    # Arithmetic shift right (sign-preserving)
+    # Cyrius >> is logical (zero-fills), this preserves the sign
+    if (v < 0) {
+        return 0 - ((0 - v) >> n);
+    }
+    return v >> n;
+}
+
+# --- Sine table (quarter-wave, 256 entries) ---
+
+var _sin_table[256];
+var _sin_init_done = 0;
+
+fn sin_table_init() {
+    # Bhaskara I approximation: sin(x) ≈ 16x(π-x) / (5π²-4x(π-x))
+    # Compute for first quadrant (0-255 → 0 to π/2), mirror for rest.
+    # Using integer approximation of the formula.
+    var i = 0;
+    while (i < 256) {
+        # Map i (0-255) to angle (0 to 16384, representing 0 to π/2)
+        # sin(i/256 * π/2) * 65536
+        # Simple approximation: scale linearly for now, replace with
+        # precomputed values for production
+        var angle = i * 64;    # 0-16320
+        var quarter = 16384;
+        # Parabolic approximation: 4*x*(quarter-x) / quarter^2 * 65536
+        var x = angle;
+        var num = 4 * (x >> 4) * ((quarter - x) >> 4);
+        var denom = (quarter >> 4) * (quarter >> 4);
+        if (denom > 0) {
+            store64(&_sin_table + i * 8, (num * FX_ONE) / denom);
+        } else {
+            store64(&_sin_table + i * 8, 0);
+        }
+        i = i + 1;
+    }
+    # Fixup: sin(90°) = 1.0
+    store64(&_sin_table + 255 * 8, FX_ONE);
+    _sin_init_done = 1;
+}
+
+fn sin_lookup(angle) {
+    if (_sin_init_done == 0) { sin_table_init(); }
+    # angle: 0-1023 where 1024 = full circle
+    angle = angle & 1023;
+
+    if (angle < 256) {
+        # First quadrant: direct lookup
+        return load64(&_sin_table + angle * 8);
+    }
+    if (angle < 512) {
+        # Second quadrant: mirror
+        return load64(&_sin_table + (511 - angle) * 8);
+    }
+    if (angle < 768) {
+        # Third quadrant: negate first quadrant
+        return 0 - load64(&_sin_table + (angle - 512) * 8);
+    }
+    # Fourth quadrant: negate mirror
+    return 0 - load64(&_sin_table + (1023 - angle) * 8);
+}
+
+fn cos_lookup(angle) {
+    return sin_lookup(angle + 256);
+}
+
+# --- Tests ---
+
+fn test_fx_from_int() {
+    assert_eq(fx_from_int(1), 65536, "1.0 == 65536");
+    assert_eq(fx_from_int(10), 655360, "10.0 == 655360");
+    assert_eq(fx_from_int(0), 0, "0.0 == 0");
+    return 0;
+}
+
+fn test_fx_mul() {
+    # 3.0 * 2.5 = 7.5
+    var a = fx_from_int(3);             # 196608
+    var b = 163840;                      # 2.5 in 16.16
+    var result = fx_mul(a, b);
+    assert_eq(result, 491520, "3.0 * 2.5 == 7.5 (491520)");
+
+    # 1.0 * 1.0 = 1.0
+    assert_eq(fx_mul(FX_ONE, FX_ONE), FX_ONE, "1.0 * 1.0 == 1.0");
+
+    # 0.5 * 0.5 = 0.25
+    var quarter = fx_mul(FX_HALF, FX_HALF);
+    assert_eq(quarter, 16384, "0.5 * 0.5 == 0.25 (16384)");
+    return 0;
+}
+
+fn test_fx_mul_safe() {
+    # 1000.0 * 1000.0 — would overflow normal fx_mul on 32-bit
+    var a = fx_from_int(1000);
+    var b = fx_from_int(1000);
+    var result = fx_mul_safe(a, b);
+    # Result should be positive (not wrapped negative from overflow)
+    assert(result > 0, "safe mul of 1000*1000 is positive");
+    return 0;
+}
+
+fn test_fx_div() {
+    # 10.0 / 4.0 = 2.5
+    var a = fx_from_int(10);
+    var b = fx_from_int(4);
+    var result = fx_div(a, b);
+    assert_eq(result, 163840, "10.0 / 4.0 == 2.5 (163840)");
+
+    # Division by zero returns 0
+    assert_eq(fx_div(FX_ONE, 0), 0, "div by zero returns 0");
+    return 0;
+}
+
+fn test_asr() {
+    # Arithmetic shift right preserves sign
+    assert_eq(asr(-256, 1), -128, "asr(-256, 1) == -128");
+    assert_eq(asr(256, 1), 128, "asr(256, 1) == 128");
+    assert_eq(asr(-1, 1), 0, "asr(-1, 1) == 0");
+    assert_eq(asr(0, 4), 0, "asr(0, 4) == 0");
+    return 0;
+}
+
+fn test_sin_lookup() {
+    sin_table_init();
+    # sin(0) = 0
+    assert_eq(sin_lookup(0), 0, "sin(0) == 0");
+
+    # sin(256) ≈ 1.0 (peak of sine wave)
+    var peak = sin_lookup(256);
+    assert(peak > 60000, "sin(256) near 1.0");
+
+    # sin(512) = 0 (half circle)
+    assert_eq(sin_lookup(512), 0, "sin(512) == 0");
+
+    # sin(768) ≈ -1.0
+    var trough = sin_lookup(768);
+    assert(trough < -60000, "sin(768) near -1.0");
+
+    # cos(0) = sin(256) ≈ 1.0
+    assert(cos_lookup(0) > 60000, "cos(0) near 1.0");
+    return 0;
+}
+
+fn test_roundtrip() {
+    # Convert int → fixed → int should be identity
+    var i = 0;
+    while (i < 100) {
+        var fx = fx_from_int(i);
+        var back = fx_to_int(fx);
+        assert_eq(back, i, "roundtrip");
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_fx_from_int();
+    test_fx_mul();
+    test_fx_mul_safe();
+    test_fx_div();
+    test_asr();
+    test_sin_lookup();
+    test_roundtrip();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

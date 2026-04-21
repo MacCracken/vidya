@@ -1,0 +1,65 @@
+id = "sprite_rendering"
+title = "Sprite Rendering"
+topic = "SpriteRendering"
+description = "Drawing 2D images to a framebuffer — atlas management, scaled blitting, transparency, and draw order for real-time graphics."
+tags = ["sprites", "rendering", "2d", "framebuffer", "atlas", "blit", "transparency", "z-order", "scaling", "animation", "games"]
+related_topics = ["fixed_point_arithmetic", "memory_management", "performance", "allocators"]
+
+[[best_practices]]
+title = "Pack sprites into atlases to minimize texture switches"
+explanation = "Loading individual sprite files is slow. Pack all sprites into a single atlas image and index by region (x, y, width, height). One load, one buffer, O(1) lookup per sprite."
+
+[[best_practices]]
+title = "Use a color key or alpha bit for transparency"
+explanation = "Pick one palette index (commonly 0 or 255) as the transparent color. During blit, skip pixels matching the key. This is simpler and faster than full alpha blending for retro-style rendering."
+
+[[best_practices]]
+title = "Sort sprites by depth before drawing"
+explanation = "Draw back-to-front (painter's algorithm): background first, then far sprites, then near sprites. This ensures correct occlusion without a depth buffer. For 2D games with a ground plane, Y coordinate is often sufficient as the depth key."
+
+[[best_practices]]
+title = "Pre-compute scaled sprite dimensions"
+explanation = "If sprites scale based on distance or perspective, compute the scaled width and height once per frame, not per pixel. Store as integer dimensions and use them for the blit loop bounds."
+
+[[best_practices]]
+title = "Clip sprites against screen bounds before blitting"
+explanation = "A sprite partially off-screen must be clipped to avoid writing outside the framebuffer. Compute the visible rectangle (clamped to 0..screen_width, 0..screen_height) before entering the pixel loop."
+
+[[gotchas]]
+title = "Off-by-one in sprite blit loops"
+explanation = "A sprite at x=319 with width=2 writes to pixels 319 and 320. Pixel 320 is outside a 320-wide framebuffer. Always clamp: end_x = min(x + width, screen_width)."
+bad_example = "for col in 0..sprite_width { framebuf[y * 320 + x + col] = pixel; }"
+good_example = "var end_x = min(x + sprite_width, SCREEN_W); for col in x..end_x { framebuf[y * 320 + col] = pixel; }"
+
+[[gotchas]]
+title = "Scaling with integer division causes gaps"
+explanation = "When scaling a sprite down, stepping through source pixels by src_w/dst_w can skip source pixels unevenly, creating visible gaps or doubled columns. Use fixed-point stepping instead."
+bad_example = "var src_x = col * src_width / dst_width;  // integer division causes jitter"
+good_example = "var src_step = (src_width << 16) / dst_width; var src_x = 0; for col { pixel = src[src_x >> 16]; src_x += src_step; }"
+
+[[gotchas]]
+title = "Draw order bugs cause flickering sprites"
+explanation = "If two sprites at the same depth are drawn in inconsistent order between frames, they visually flicker. Use a stable sort or a secondary sort key (entity ID) to break ties deterministically."
+bad_example = "sort_by_y(sprites);  // unstable sort: tied Y values swap randomly"
+good_example = "sort_by_y_then_id(sprites);  // stable or secondary key: deterministic order"
+
+[[gotchas]]
+title = "Forgetting to clear the framebuffer between frames"
+explanation = "If you only draw sprites without clearing, old frame data persists. Moving sprites leave trails. Clear the buffer (or redraw the background) every frame before compositing sprites."
+bad_example = "draw_sprites(fb); present(fb);  // trails from previous frame"
+good_example = "clear(fb, bg_color); draw_background(fb); draw_sprites(fb); present(fb);"
+
+[[performance_notes]]
+title = "Software blit is memory-bandwidth bound"
+explanation = "A 320x240 framebuffer is 76,800 pixels. At 60fps, that's 4.6M pixels/second minimum (just clearing). Each sprite blit adds width*height reads and writes. Minimize overdraw by culling off-screen sprites early."
+evidence = "DOOM cyrius-doom renders full frame at 2.6-3.9ms in software, well within 16ms budget"
+
+[[performance_notes]]
+title = "Palette indirection is cheaper than RGB"
+explanation = "An 8-bit palette framebuffer uses 1 byte per pixel instead of 3-4. Final RGB conversion happens once at present time. All sprite operations (blit, transparency check, lighting) work on single bytes."
+evidence = "DOOM uses 256-color palette: 64KB framebuffer vs 192KB+ for RGB, 3x less memory bandwidth"
+
+[[performance_notes]]
+title = "Sprite caching prevents redundant atlas lookups"
+explanation = "If the same sprite is drawn multiple times per frame (multiple enemies of the same type), cache the atlas offset and dimensions after the first lookup. HashMap or direct array index by sprite ID."
+evidence = "DOOM patch cache: 200x speedup for texture lookups by caching column pointers"

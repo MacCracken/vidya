@@ -1,0 +1,61 @@
+id = "fixed_point_arithmetic"
+title = "Fixed-Point Arithmetic"
+topic = "FixedPointArithmetic"
+description = "Integer-based fractional math using scaled representations — how to get sub-pixel precision without floating point hardware."
+tags = ["fixed-point", "16.16", "math", "overflow", "integer", "scaling", "sine-table", "precision", "games", "dsp", "embedded"]
+related_topics = ["algorithms", "performance", "memory_management"]
+
+[[best_practices]]
+title = "Use a consistent fixed-point format throughout"
+explanation = "Pick one format (e.g., 16.16) and use it everywhere. Mixing 8.8 and 16.16 in the same codebase leads to silent precision loss. Document the format in a central location."
+
+[[best_practices]]
+title = "Pre-shift inputs before multiplication to avoid overflow"
+explanation = "fx_mul(a, b) = (a * b) >> 16. If both a and b are large, the intermediate product overflows. Shift one or both inputs down first: (a >> 8) * (b >> 8) preserves the result within 64-bit range at the cost of some low-bit precision."
+
+[[best_practices]]
+title = "Use lookup tables for trigonometry"
+explanation = "Sine/cosine via fixed-point Taylor series is slow and hard to get right. Pre-compute a 256 or 1024-entry quarter-wave table, then mirror for full 360 degrees. One table lookup replaces dozens of multiplications."
+
+[[best_practices]]
+title = "Guard every division against zero"
+explanation = "Fixed-point division (a << 16) / b will SIGFPE on b == 0. Unlike floating point, there is no infinity representation. Check before every divide, and check after any scaling that might reduce the divisor to zero."
+
+[[gotchas]]
+title = "Multiplication overflow is silent"
+explanation = "Two 16.16 values multiplied produce a 32.32 result that needs 64 bits of intermediate storage. On 32-bit systems this wraps silently. Even on 64-bit, values above ~32767.0 will overflow."
+bad_example = "var result = (a * b) >> 16;  // overflows if a=1000<<16, b=1000<<16"
+good_example = "var result = (a >> 8) * (b >> 8);  // trades 8 bits of precision for overflow safety"
+
+[[gotchas]]
+title = "Right shift on negative values is implementation-defined"
+explanation = "Arithmetic right shift (sign-extending) vs logical right shift (zero-filling) differ on negative numbers. -1 >> 1 is -1 (arithmetic) or a huge positive number (logical). Know which your language provides."
+bad_example = "var half = negative_velocity >> 1;  // logical shift: becomes huge positive"
+good_example = "fn asr(v, n) { if (v < 0) { return 0 - ((0 - v) >> n); } return v >> n; }"
+
+[[gotchas]]
+title = "Converting back to integer truncates, not rounds"
+explanation = "value >> 16 always truncates toward zero. For display or collision checks, this can cause off-by-one pixel errors. Add half (1 << 15) before shifting to get rounding."
+bad_example = "var pixels = position >> 16;  // 0.9 in fixed-point becomes 0"
+good_example = "var pixels = (position + 32768) >> 16;  // 0.9 rounds to 1"
+
+[[gotchas]]
+title = "Accumulating small values loses precision over time"
+explanation = "Adding 0.01 per frame (655 in 16.16) for 1000 frames should give 10.0 (655360). But if intermediate operations involve right shifts, low bits are lost each frame. Accumulate in full precision, convert only for output."
+bad_example = "position = (position >> 16 + delta >> 16) << 16;  // precision lost every frame"
+good_example = "position = position + delta;  // accumulate in fixed-point, convert only for display"
+
+[[performance_notes]]
+title = "Fixed-point multiply is 1-2 instructions on modern hardware"
+explanation = "A 64-bit multiply followed by a right shift. No FPU pipeline stalls, no denormal penalties, no mode switching. On embedded and retro hardware, this is 10-100x faster than software float."
+evidence = "Cyrius benchmark: fx_mul at 4-6ns, comparable to raw integer multiply"
+
+[[performance_notes]]
+title = "Lookup tables trade memory for speed"
+explanation = "A 1024-entry sine table costs 8KB (64-bit entries) but replaces ~20 multiplications per lookup. For game loops calling sin/cos every frame for every entity, this is a clear win."
+evidence = "sin_lookup benchmark: 4-7ns per call vs ~50ns for polynomial approximation"
+
+[[performance_notes]]
+title = "Pre-shifting reduces precision but prevents pipeline stalls"
+explanation = "Overflow checking with branches (if a > threshold) introduces pipeline stalls. Pre-shifting unconditionally is faster even though it loses low bits, because the CPU never mispredicts."
+evidence = "Division-free sign checks before any division eliminated all SIGFPE in BSP fuzz testing (50,000 iterations)"

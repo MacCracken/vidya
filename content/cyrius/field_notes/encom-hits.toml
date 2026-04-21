@@ -1,0 +1,319 @@
+# Cyrius Field Notes — ENCOM's Hits
+# Experiences from building a six-game arcade collection in Cyrius (v0.5.0).
+# Zero-asset neon wireframe rendering, shared engine, 3,872 lines, 14 modules.
+# The art is math. Every pixel is a computed line.
+
+[[entries]]
+name = "encom_hits_overview"
+description = "Building a six-game arcade collection with zero assets — pure math rendering in Cyrius"
+category = "cyrius"
+content = '''
+ENCOM's Hits is a collection of six arcade games sharing a common engine,
+rendered entirely in neon wireframe on black. No textures, no sprites, no
+asset files. Every pixel on screen is a computed line, rect, or filled
+polygon. The entire visual output comes from Bresenham's algorithm and
+four drawing primitives.
+
+Six games, 3,872 lines, 14 source files:
+  Light Cycles  — 188 lines. Trail combat on an 80x60 grid.
+  Grid Bugs     — 258 lines. Pathfinding chase on a node graph.
+  Battle Tanks  — 274 lines. Maze combat with ricochet projectiles.
+  MCP Cone      — 248 lines. Timing puzzle through rotating barriers.
+  Interceptors  — 287 lines. Vertical shooter with wave enemies.
+  Disc Arena    — 275 lines. 1v1 disc combat with wall ricochets.
+
+The engine layer (engine, draw, input, glow, ai, grid, types) is 1,258
+lines. The main module (menu, text rendering, title cards, splash screen,
+scoring, screenshot mode) is 1,084 lines. The game modules total 1,530.
+
+Build: `cyrius build src/main.cyr build/encom-hits`
+Screenshot: `./build/encom-hits --ppm`
+
+The project proves that a shared game engine pattern works in Cyrius.
+One framebuffer, one input system, one glow pass, six games.
+'''
+
+
+[[entries]]
+name = "zero_asset_rendering"
+description = "Every visual is a line — what zero-asset rendering actually means in practice"
+category = "cyrius"
+content = '''
+The constraint: no asset files. No sprites, no textures, no fonts, no
+images loaded from disk. The binary IS the game — code and nothing else.
+
+What this means in practice:
+
+DRAWING: Four primitives build everything.
+  draw_line(fb, x0, y0, x1, y1, color)  — Bresenham's algorithm
+  draw_hline / draw_vline               — fast axis-aligned paths
+  draw_filled_rect(fb, x, y, w, h, color)
+
+TEXT: A 3x5 bitmap font defined as bit patterns in code. Each character
+is five rows of three bits. 'A' is {7,5,7,5,5}. draw_char renders each
+set bit as a filled rect at the given scale. 36 characters: A-Z, 0-9,
+plus punctuation. The font definition is 50 lines of if-statements.
+
+GLOW: Single-pass additive bloom. For each bright pixel (max channel
+> 128), add 1/4 of its color to the four adjacent pixels, clamped to
+255. One pass, no blur kernel, no framebuffer copy. It transforms flat
+neon lines into glowing tubes.
+
+SPLASH SCREEN: The perspective grid is computed — lines from a vanishing
+point to the screen bottom, horizontal lines with quadratic spacing for
+depth illusion. The "ENCOM" title is 20 draw_line calls forming five
+36-pixel-tall vector letters.
+
+The aesthetic constraint (1982 TRON cabinet) IS the engineering
+constraint. Colored lines on black requires no asset pipeline, no format
+parsing, no texture management. The look and the architecture are the
+same decision.
+'''
+
+
+[[entries]]
+name = "shared_engine_pattern"
+description = "One framebuffer, one input system, six games — the shared engine that emerged"
+category = "cyrius"
+content = '''
+The engine layer was built for Light Cycles, then every subsequent game
+plugged into it without modification. The pattern:
+
+FRAMEBUFFER (engine.cyr, 160 lines):
+  alloc(320 * 240 * 4) gives a BGRA framebuffer. engine_present() either
+  writes to /dev/fb0 (direct) or converts to PPM (/tmp fallback).
+  clock_gettime + nanosleep gives fixed 60fps. Each game calls
+  draw_clear(fb) at the start of its render, draws its scene, and the
+  main loop applies glow_apply() and engine_present() after.
+
+INPUT (input.cyr, 169 lines):
+  termios raw mode, non-blocking stdin reads, escape sequence parsing
+  for arrow keys. 18 key slots (WASD, arrows, space, enter, esc, Q,
+  1-6). input_poll() resets all keys each frame and reads available
+  bytes. Each game reads input_key(KEY_*) without knowing about
+  terminal IO.
+
+GAME TICK RATES:
+  Each game runs at a different logical update rate via a tick counter:
+    Light Cycles: every 6 frames (10/sec) — deliberate, strategic
+    Grid Bugs: every 10 frames (6/sec) — slow grid movement
+    Battle Tanks: every 4 frames (15/sec) — responsive combat
+    MCP Cone: every 3 frames (20/sec) — fast rotation matching
+    Interceptors: every 3 frames (20/sec) — arcade action
+    Disc Arena: every 2 frames (30/sec) — precise disc timing
+
+  The rendering always runs at 60fps. The game logic is decoupled.
+
+INCLUDE ORDER MATTERS:
+  Cyrius is single-pass. Functions must be defined before use.
+  The include chain: types → engine → input → draw → lightcycles →
+  grid → gridbugs → ai → tanks → mcpcone → interceptors → discs → glow.
+  ai.cyr calls lc_cell() (defined in lightcycles.cyr, included before)
+  and maze_has_wall() (defined in grid.cyr, also before). Getting this
+  wrong gives silent undefined-function runtime crashes.
+'''
+
+
+[[entries]]
+name = "ai_pathfinding"
+description = "A* on a 16x12 maze, lookahead on an 80x60 grid — practical pathfinding in Cyrius"
+category = "cyrius"
+content = '''
+Three AI strategies, all in ai.cyr (412 lines):
+
+A* OPEN GRID (ai_find_direction):
+  Standard A* with Manhattan heuristic. Linear scan for lowest f-cost
+  in the open set — O(n²) but n is at most 4800 (Light Cycles grid) or
+  192 (tank maze). Fine for 60fps.
+
+  Arrays: five static i64[4800] arrays (g_cost, f_cost, parent, closed,
+  open). 192KB of static data. The compiler warns about it. It works.
+
+A* WITH MAZE WALLS (ai_find_direction_maze):
+  Same algorithm but checks maze_has_wall() before expanding neighbors.
+  Direction mapping: d0→N(0), d1→S(1), d2→W(3), d3→E(2). The swap
+  between d2/d3 and wall directions 3/2 is where the original tank AI
+  bug hid — it used greedy chase (ai_chase_direction) which ignored
+  walls entirely and walked into dead ends.
+
+LIGHT CYCLES LOOKAHEAD (ai_lightcycles):
+  Not A* — too expensive per tick on an 80x60 grid. Instead: check which
+  directions are safe (no immediate collision), count consecutive empty
+  cells in each safe direction, pick the one with the most open space.
+  Jitter suppression: if the current direction has >= half the best
+  space, keep going straight. This prevents the AI from oscillating
+  between two equally good paths.
+
+  The AI is surprisingly competent. It survives longer than most human
+  players on the first few rounds.
+'''
+
+
+[[entries]]
+name = "the_security_audit"
+description = "Seven bugs found in a pre-release security audit — memory, input, file I/O"
+category = "cyrius"
+content = '''
+A systematic audit before v1.0 found seven issues:
+
+CRITICAL:
+  Bug spawn Y out-of-bounds — gridbugs.cyr spawned bugs at Y=12 and
+  Y=14 on a grid with Y range 0-11. Array index (12 * 16 + x) * 8
+  writes past the connection array. Fix: modulo clamp on spawn coords.
+
+  draw_number buffer overflow — 8-slot digit array for a function that
+  could receive 19-digit i64 values. Fix: cap extraction loop at 8.
+
+  PPM fallback leaked 230KB per frame — alloc() called every frame in
+  the fallback path, never freed. Fix: pre-allocate once in engine_init.
+
+HIGH:
+  Ctrl+C silently eaten — ISIG disabled for raw mode means the terminal
+  signal is gone. Fix: map ETX (byte 3) to KEY_Q for graceful quit.
+
+  Score file read blindly trusted — crafted scores.dat could inject
+  negative or overflowing values. Fix: clamp loaded values to [0, 99999999].
+
+MEDIUM:
+  File permissions 0666 → 0644. Xorshift PRNG zero-trap guard.
+
+The audit took one pass. All fixes were under 5 lines each. The most
+dangerous bug (PPM leak) would have caused OOM in minutes of PPM-fallback
+play. The others required malicious input or edge-case grid states.
+'''
+
+
+[[entries]]
+name = "building_six_games"
+description = "What each game taught about the engine — from Light Cycles to Disc Arena"
+category = "cyrius"
+content = '''
+Each game tested a different engine capability:
+
+LIGHT CYCLES proved the framebuffer, input, and basic drawing. 80x60
+grid, two players, trails, collision. The packed coordinate trick
+(x * 1000 + y) for single-return movement works because Y < 60.
+
+GRID BUGS proved pathfinding and grid connectivity. 16x12 node graph
+with adjacency arrays. Bugs chase via simple greedy movement that
+checks connections. The I/O Tower goal gives level progression.
+
+BATTLE TANKS proved maze generation and projectile physics. DFS
+iterative backtracker generates a perfect maze. Shots ricochet by
+reflecting velocity on wall collision. The A* maze pathfinder was
+the hardest piece — getting the wall-direction mapping right took
+two iterations.
+
+MCP CONE proved rotation and timing. Pre-computed 16-entry sin/cos
+tables (scaled by 100, integer math only). Rings rotate at different
+speeds with alternating directions. Speed ramps when rings are broken.
+
+INTERCEPTORS proved wave spawning and multi-entity collision. 8 enemies,
+4 player bullets, 6 enemy bullets — 18 active entities with pairwise
+collision checks. The recognizer shape (rect body + two legs) is 3
+draw calls per enemy.
+
+DISC ARENA proved ricochet physics and AI prediction. Discs bounce off
+top/bottom walls, pass through the center, and return to the thrower.
+The AI tracks incoming discs to dodge, predicts player position to aim,
+and has a cooldown timer to prevent instant-throw spam.
+'''
+
+
+[[entries]]
+name = "the_screenshot_pipeline"
+description = "How --ppm mode renders every game screen to PPM files for documentation"
+category = "cyrius"
+content = '''
+Following the cyrius-doom pattern: a --ppm CLI flag that renders
+static screenshots and exits without entering the game loop.
+
+The pipeline:
+  1. Read /proc/self/cmdline, scan for "--ppm" byte pattern (45 45 112 112 109)
+  2. Initialize engine (framebuffer + PPM buffer) but NOT input (no terminal)
+  3. Render each screen → glow_apply → engine_write_ppm_to(path)
+  4. Exit via syscall(60, 0)
+
+The arg parsing was harder than expected. Cyrius's args.cyr stdlib module
+stores /proc/self/cmdline in a LOCAL buffer — the pointer dangles after
+args_init() returns. We bypassed it: read cmdline into a global buffer,
+byte-scan for the "--ppm" pattern directly. Five nested if-statements
+comparing ASCII values. Ugly but bulletproof.
+
+PPM output goes to /tmp/ (relative paths with subdirectories fail with
+the raw open() syscall — it's SYS_OPEN not openat, and O_CREAT doesn't
+create parent directories). A shell script converts to PNG:
+
+  for f in /tmp/encom_*.ppm; do
+    magick "$f" -scale 200% "screenshots/$(basename $f .ppm).png"
+  done
+
+14 screenshots: splash, menu, 6 title cards, 6 gameplay screens.
+
+SCREENSHOTS:
+  content/cyrius/assets/encom_splash.png         — splash screen with perspective grid
+  content/cyrius/assets/encom_menu.png            — 6-game selection menu
+  content/cyrius/assets/encom_lightcycles.png     — Light Cycles gameplay
+  content/cyrius/assets/encom_gridbugs.png        — Grid Bugs gameplay
+  content/cyrius/assets/encom_tanks.png           — Battle Tanks gameplay
+  content/cyrius/assets/encom_mcpcone.png         — MCP Cone gameplay
+  content/cyrius/assets/encom_interceptors.png    — Interceptors gameplay
+  content/cyrius/assets/encom_discs.png           — Disc Arena gameplay
+  content/cyrius/assets/encom_title_lightcycles.png — Light Cycles title card
+  content/cyrius/assets/encom_title_gridbugs.png    — Grid Bugs title card
+  content/cyrius/assets/encom_title_tanks.png       — Battle Tanks title card
+  content/cyrius/assets/encom_title_mcpcone.png     — MCP Cone title card
+  content/cyrius/assets/encom_title_interceptors.png — Interceptors title card
+  content/cyrius/assets/encom_title_discs.png        — Disc Arena title card
+'''
+
+
+[[entries]]
+name = "what_i_learned_building_encom_hits"
+description = "Reflections on building a six-game collection — shared engines, visual constraints, and the 1982 aesthetic"
+category = "cyrius"
+content = '''
+THE AESTHETIC IS THE ARCHITECTURE:
+
+The "no assets" constraint wasn't a limitation — it was the design.
+Every visual being a computed line means no asset loading, no format
+parsing, no texture management, no sprite sheets. The build output is
+one binary. The deployment is `cp`. The attack surface is stdin and
+one 48-byte score file.
+
+The 1982 TRON cabinet rendered vector graphics on a raster display.
+Colored lines on black. We're doing exactly that — 40 years later,
+in a language that didn't exist until recently, on a 320x240
+framebuffer written directly to /dev/fb0.
+
+WHAT EACH GAME COST:
+
+The first game (Light Cycles) took the most work because it included
+the engine. Games 2-4 each reused the engine and added their unique
+mechanic. Games 5-6 were the fastest — the patterns were established,
+the engine was proven, the menu/scoring/title-card infrastructure
+handled everything.
+
+This is the kiran pattern before kiran exists: shared renderer, shared
+input, shared game loop, per-game logic modules. ENCOM's Hits is a
+proof of concept for that architecture.
+
+THE GLOW MAKES IT:
+
+Without glow_apply(), the games look like debug wireframes. With it,
+they look like neon tubes on glass. One function, 97 lines, single-pass
+additive blend. It's the cheapest visual effect in the collection and
+it does more for the aesthetic than all the game logic combined.
+
+THE NUMBERS:
+
+  Source:     3,872 lines across 14 .cyr files
+  Games:      6 (200-287 lines each)
+  Engine:     1,258 lines (shared)
+  Main:       1,084 lines (menu, text, scoring, screenshots)
+  Resolution: 320x240 BGRA framebuffer
+  Colors:     8 (cyan, orange, blue, white, red, green, dim blue, black)
+  Assets:     0
+  Frame time: <4ms target (trivially met — these are simple games)
+  Score file: 48 bytes (6 x i64)
+'''

@@ -1,0 +1,87 @@
+id = "projectile_physics"
+title = "Projectile Physics"
+topic = "ProjectilePhysics"
+description = "Simulating objects in flight — Euler integration, gravity, parabolic arcs, bounce, and restitution for balls, bullets, and thrown objects."
+tags = ["physics", "projectile", "euler", "gravity", "parabolic", "arc", "bounce", "restitution", "trajectory", "simulation", "games", "fixed-point"]
+related_topics = ["fixed_point_arithmetic", "collision_detection_2d", "performance", "maze_generation", "game_ai_decisions"]
+
+[[best_practices]]
+title = "Use semi-implicit Euler for stability"
+explanation = "Update velocity first, then use the NEW velocity to update position. This is more stable than explicit Euler (update position with old velocity) for the same computational cost. Order matters: v += a*dt; p += v*dt."
+
+[[best_practices]]
+title = "Separate the physics timestep from the render framerate"
+explanation = "Physics should tick at a fixed rate (e.g., 60Hz) regardless of render framerate. Accumulate time, step physics in fixed increments, interpolate for rendering. This prevents physics breaking at high or low framerates."
+
+[[best_practices]]
+title = "Model bounce with a restitution coefficient"
+explanation = "When a projectile hits a surface, reverse the velocity component perpendicular to the surface and multiply by a restitution factor (0.0 = dead stop, 1.0 = perfect bounce, 0.6-0.8 = realistic). Keep the parallel component unchanged."
+
+[[best_practices]]
+title = "Clamp velocity to prevent physics explosions"
+explanation = "In fixed-point, very high velocities can cause position to jump past collision boundaries (tunneling) or overflow. Cap velocity to a maximum that ensures the projectile moves at most half the thinnest object's width per frame."
+
+[[best_practices]]
+title = "Use gravity as a constant acceleration, not a velocity"
+explanation = "Gravity is acceleration (units/frame^2), not velocity. Add it to velocity each frame: vy += gravity. A common mistake is adding gravity to position directly, which produces incorrect arcs."
+
+[[gotchas]]
+title = "Explicit Euler accumulates energy over time"
+explanation = "A bouncing ball using explicit Euler (position += velocity, then velocity += gravity) will bounce higher each time because the integration order adds a tiny energy surplus each step. Semi-implicit Euler fixes this."
+bad_example = "pos += vel; vel += gravity;  // energy increases each frame"
+good_example = "vel += gravity; pos += vel;  // semi-implicit: energy-stable"
+
+[[gotchas]]
+title = "Fixed-point gravity too small to register"
+explanation = "If gravity is 0.05 per frame and your fixed-point format is 16.16, that's 3276.8 — rounds to 3277. But if gravity is 0.001, it's 65.5 — accumulated rounding over hundreds of frames creates visible drift. Use sufficient precision or larger timesteps."
+bad_example = "var gravity = 1;  // 0.00001 in 16.16 — too small, ball floats"
+good_example = "var gravity = 6554;  // 0.1 in 16.16 — visible arc, smooth motion"
+
+[[gotchas]]
+title = "Bounce that adds velocity instead of reflecting"
+explanation = "On collision, reflecting vy means vy = -vy * restitution. A common mistake is vy = vy + bounce_force, which adds to the current velocity instead of reversing it, causing the ball to accelerate through surfaces."
+bad_example = "if (hit_ground) { vy = vy + 500; }  // adds upward force, doesn't reverse"
+good_example = "if (hit_ground) { vy = 0 - ((vy * restitution) >> 16); pos_y = ground_y; }"
+
+[[gotchas]]
+title = "Not resetting position to the collision surface"
+explanation = "When a ball passes below the floor between frames, just reversing velocity leaves it embedded in the floor. Reset position to the surface AND reverse velocity, or the ball oscillates inside the geometry."
+bad_example = "if (y > floor) { vy = -vy; }  // ball is below floor, stays there"
+good_example = "if (y > floor) { y = floor; vy = 0 - ((vy * restitution) >> 16); }"
+
+[[performance_notes]]
+title = "Euler integration is 2 additions per axis per frame"
+explanation = "Semi-implicit Euler: vy += gravity; y += vy. That's 2 operations per axis, 4-6 total for 2D/3D. No transcendental functions, no matrix math. This is why it's the standard for real-time games."
+evidence = "Per-entity physics cost: 5-20ns per frame. Negligible even for hundreds of entities."
+
+[[performance_notes]]
+title = "Fixed-point physics avoids FPU entirely"
+explanation = "All physics operations (add, multiply, shift) are integer ALU instructions. No FPU context switching, no denormal traps, no precision mode issues. On embedded or retro hardware, this is the only viable approach."
+evidence = "NBA Jam original: all physics in TMS34010 integer arithmetic. cyrius-doom: all physics in i64 fixed-point."
+
+[[performance_notes]]
+title = "Batching entity updates improves cache locality"
+explanation = "Update all positions in one pass, then all velocities, then check all collisions. This iterates each array once instead of touching position/velocity/collision arrays randomly per entity."
+evidence = "Cache line is 64 bytes = 8 i64 values. Sequential access prefetches naturally; random access causes cache misses at ~100ns each."
+
+[[languages.rust]]
+source = "impetus"
+note = "impetus handles projectiles via rigid bodies with high velocity. Collision events report contact normal for reflection. Raycast queries predict paths. Material restitution controls bounce energy. Spring constraints can model tethered projectiles."
+pattern = """
+// impetus: projectile launch
+world.apply_force(projectile, Force::impulse([vx, vy, 0.0]));
+// Reflection: new_vel = vel - 2 * dot(vel, normal) * normal
+// Restitution scales reflected velocity by material bounciness
+"""
+
+[[languages.cyrius]]
+source = "encom-hits"
+note = "encom-hits tanks.cyr will implement grid-based ricochet. Projectile moves one cell per tick. On wall hit, reflect the perpendicular velocity axis. Max 2 bounces (TK_MAX_BOUNCES). Discrete grid movement avoids tunneling."
+pattern = """
+// Planned: wall reflection
+// Vertical wall hit: vx = 0 - vx;
+// Horizontal wall hit: vy = 0 - vy;
+// Corner hit: both reflect
+// bounces = bounces + 1;
+// if (bounces > TK_MAX_BOUNCES) { projectile_alive = 0; }
+"""

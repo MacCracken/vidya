@@ -1,0 +1,89 @@
+id = "collision_detection_2d"
+title = "2D Collision Detection"
+topic = "CollisionDetection2D"
+description = "Detecting and responding to overlaps between 2D shapes — circles, rectangles, and points against game geometry like rims, walls, and other entities."
+tags = ["collision", "2d", "aabb", "circle", "intersection", "overlap", "response", "physics", "games", "geometry", "broadphase", "narrowphase"]
+related_topics = ["fixed_point_arithmetic", "projectile_physics", "algorithms", "performance", "grid_pathfinding", "line_rasterization"]
+
+[[best_practices]]
+title = "Use broadphase culling before narrowphase tests"
+explanation = "Don't test every entity against every other entity. Use spatial partitioning (grid, quadtree) or bounding box overlap to cheaply eliminate non-colliding pairs. Only run expensive shape tests on pairs that pass broadphase."
+
+[[best_practices]]
+title = "Separate detection from response"
+explanation = "Detection answers 'do these shapes overlap?' Response answers 'what happens now?' Keep them as separate functions. Detection is pure geometry. Response is game logic (bounce, damage, push-back)."
+
+[[best_practices]]
+title = "Use squared distances to avoid square roots"
+explanation = "Circle-circle collision: (dx*dx + dy*dy) < (r1+r2)*(r1+r2). The squared comparison gives the same boolean result as comparing distances but avoids an expensive sqrt call."
+
+[[best_practices]]
+title = "Test with axis-aligned bounding boxes first"
+explanation = "AABB overlap is 4 comparisons. Circle intersection is a multiply and add. Always do the AABB test first — if the bounding boxes don't overlap, the shapes can't collide regardless of their actual geometry."
+
+[[gotchas]]
+title = "Tunneling through thin objects at high speed"
+explanation = "A fast-moving ball can pass through a thin wall between frames. If velocity per frame exceeds wall thickness, the ball is on one side in frame N and the other side in frame N+1, never overlapping."
+bad_example = "ball.x += ball.vx;  // ball moves 20px/frame, wall is 5px thick"
+good_example = "// Sweep test: check if the line from old_pos to new_pos intersects the wall\nif (line_intersects_rect(old_x, old_y, new_x, new_y, wall)) { respond(); }"
+
+[[gotchas]]
+title = "Negative AABB dimensions from unordered coordinates"
+explanation = "If you construct an AABB from two arbitrary points, left might be greater than right. Width = right - left gives a negative value, and all overlap tests break silently."
+bad_example = "var w = box.right - box.left;  // negative if points were swapped"
+good_example = "var w = max(0, box.right - box.left);  // or: normalize at construction time"
+
+[[gotchas]]
+title = "Collision response that creates new collisions"
+explanation = "Pushing two overlapping circles apart by the overlap distance can push one into a third circle. Solve iteratively (2-3 passes) or use constraint-based resolution."
+bad_example = "a.x += overlap_x; a.y += overlap_y;  // a now overlaps entity c"
+good_example = "// Iterative: resolve all pairs, repeat 2-3 times until stable\nfor pass in 0..3 { resolve_all_pairs(entities); }"
+
+[[gotchas]]
+title = "Fixed-point precision in distance calculations"
+explanation = "dx*dx in 16.16 fixed-point can overflow if dx > 181 (181^2 * 65536 > 2^31). Pre-shift coordinates down before squaring, or use 64-bit intermediates."
+bad_example = "var dist_sq = dx * dx + dy * dy;  // overflows on large court coordinates"
+good_example = "var dist_sq = (dx >> 4) * (dx >> 4) + (dy >> 4) * (dy >> 4);  // safe with reduced precision"
+
+[[performance_notes]]
+title = "AABB test is 4 comparisons with no multiplication"
+explanation = "Two rectangles overlap iff: a.left < b.right AND a.right > b.left AND a.top < b.bottom AND a.bottom > b.top. This is the cheapest possible spatial test."
+evidence = "Sub-nanosecond on modern hardware. BSP benchmark: AABB operations at 400-500ns including full setup"
+
+[[performance_notes]]
+title = "Grid-based broadphase scales linearly with entity count"
+explanation = "Divide the world into cells. Each entity is assigned to its cell(s). Only test entities in the same or adjacent cells. For N entities in a W*H grid, average cost is O(N * entities_per_cell) instead of O(N^2)."
+evidence = "DOOM BLOCKMAP: grid-based collision reduces per-frame collision checks from thousands to dozens"
+
+[[performance_notes]]
+title = "Circle-circle is cheaper than polygon-polygon"
+explanation = "Circle overlap is one distance check (3 multiplies, 2 adds, 1 compare). Polygon overlap requires separating axis theorem (SAT) with O(edges) projections. Use circles for entity collision and reserve polygons for static geometry."
+evidence = "Entity collision in arcade games typically uses circle radii exclusively — sufficient accuracy at minimal cost"
+
+[[languages.rust]]
+source = "impetus"
+note = "impetus provides full 2D collision detection: AABB, circle, capsule, convex hull shapes. Broadphase via spatial hash grid or AABB tree. Collision events (Started, Stopped, Ongoing) with contact normal, depth, and impulse. Collision layers via 32-bit bitmask."
+pattern = """
+// impetus: collision layers and events
+ColliderDesc {
+    shape: ColliderShape::Ball { radius: 0.5 },
+    collision_layer: 0x01,
+    collision_mask: 0xFF,
+    ..Default::default()
+}
+// After step: world.collision_events() returns contact data
+"""
+
+[[languages.cyrius]]
+source = "encom-hits"
+note = "encom-hits uses grid cell occupancy for Light Cycles (4800-cell array, states: empty/p1/p2/wall) and Grid Bugs (connectivity array). Collision is array lookup + value check. No geometric tests needed for grid-based games."
+pattern = """
+fn lc_cell(x, y) {
+    if (x < 0) { return 3; }         // wall
+    if (x >= LC_GRID_W) { return 3; }
+    if (y < 0) { return 3; }
+    if (y >= LC_GRID_H) { return 3; }
+    return lc_grid[y * LC_GRID_W + x];
+}
+// Collision: if (lc_cell(nx, ny) != 0) { player_alive = 0; }
+"""

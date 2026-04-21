@@ -116,3 +116,43 @@ evidence = "syscall instruction: 2 bytes (0x0F 0x05). libc write() wrapper: func
 title = "Two-pass assembly enables single-allocation output"
 explanation = "A two-pass assembler knows exact sizes after pass 1, so pass 2 can pre-allocate the output buffer in one shot. No reallocation, no backpatching. This is O(n) in input size with minimal allocation overhead."
 evidence = "Cyrius seed assembles 10,000 instructions in 5.7ms (13 MB/s throughput). Tokenizer dominates at ~5ms; encoding is ~0.3ms."
+
+[[gotchas]]
+title = "Apple Silicon Mach-O arm64 rejects LC_UNIXTHREAD"
+explanation = "On x86_64 and on the 2018 Intel MacBook, LC_UNIXTHREAD binaries (direct entry point, no dyld) run fine. On arm64 macOS (Apple Silicon, macOS 11+), the kernel SIGKILLs any LC_UNIXTHREAD executable at exec, regardless of ad-hoc signing, MH_PIE flag, or LC_BUILD_VERSION declaration. The kernel's undocumented requirement: arm64 Mach-O executables must go through dyld via LC_MAIN + LC_LOAD_DYLINKER + LC_LOAD_DYLIB libSystem.B.dylib. This is not in Apple's public docs; it is learned by observation."
+bad_example = "LC_UNIXTHREAD with thread state flavor=6, pc=entry_addr on arm64 macOS → zsh: killed"
+good_example = "LC_MAIN + LC_LOAD_DYLINKER(/usr/lib/dyld) + LC_LOAD_DYLIB(/usr/lib/libSystem.B.dylib) — exec works"
+
+[[gotchas]]
+title = "codesign strict validation requires __LINKEDIT segment"
+explanation = "On arm64 macOS, `codesign` refuses to sign a Mach-O that lacks an `LC_SEGMENT_64 __LINKEDIT` load command with 'main executable failed strict validation.' Even an empty __LINKEDIT (vmsize=0, filesize=0 at the end of the file) satisfies the check — codesign extends it in place when writing the signature. This is a format prerequisite, not a behavior flag: the signature must have a place to live. x86_64 macOS is more forgiving about this; arm64 enforces."
+bad_example = "Mach-O arm64 with just __PAGEZERO + __TEXT + LC_UNIXTHREAD → codesign: object file format unrecognized, invalid, or unsuitable"
+good_example = "Add a minimal __LINKEDIT segment after __TEXT, filesize=0 initially; codesign grows it as needed"
+
+[[gotchas]]
+title = "Apple Silicon requires MH_PIE flag"
+explanation = "arm64 macOS rejects non-PIE Mach-O executables. The mach_header_64.flags field must include MH_PIE (0x200000). This forces the binary to be position-independent; the kernel applies an ASLR slide at exec. Any absolute addressing in the code (MOVZ/MOVK to a fixed vaddr) breaks because the vaddr is no longer where you stored it. Use PC-relative addressing (adrp + add for static, adrp + ldr for indirect) exclusively."
+bad_example = "mach_header_64.flags = MH_NOUNDEFS (0x1) — kernel refuses to load on arm64"
+good_example = "flags = MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE (0x00200085)"
+
+[[gotchas]]
+title = "__TEXT must be R|X on arm64 (W^X enforcement)"
+explanation = "x86_64 Cyrius Mach-O emitters used initprot = 7 (RWX) for __TEXT because macOS x86_64 tolerated it. arm64 macOS enforces W^X at segment map time — any segment marked with both W (0x2) and X (0x4) bits is rejected. Split code from mutable data: __TEXT (R|X = 5) for executable code + read-only strings (__cstring subsection); __DATA or __DATA_CONST (R|W = 3, becomes R after dyld fixups) for mutable state."
+bad_example = "LC_SEGMENT_64 __TEXT with initprot = 7 (RWX) — works on Intel, rejected on Apple Silicon"
+good_example = "__TEXT initprot = 5 (R|X); separate __DATA initprot = 3 (R|W) for variables"
+
+[[gotchas]]
+title = "dyld_chained_fixups cannot be skipped on arm64 macOS"
+explanation = "LC_DYLD_CHAINED_FIXUPS (cmd = 0x80000034) is the modern binding format on macOS 12+. Even binaries with zero imported symbols need a valid chain fixups blob — if just a 56-byte header with imports_count=0. The blob layout: dyld_chained_fixups_header (28 bytes + 4 pad = 32), then dyld_chained_starts_in_image (seg_count + seg_info_offset[n]). When seg_info_offset[i] = 0, the segment has no fixups. Trailing alignment padding brings total to a multiple of 8."
+bad_example = "Skip LC_DYLD_CHAINED_FIXUPS entirely or set datasize=0 → codesign/dyld complains"
+good_example = "Emit 56-byte empty blob: version=0, starts_offset=32, imports_offset=48, symbols_offset=48, imports_count=0, imports_format=1; then starts_in_image with seg_count=3 and all offsets=0"
+
+[[best_practices]]
+title = "Probe-first when building for a hostile platform"
+explanation = "When targeting a platform whose kernel gives no diagnostic output on failure (Apple Silicon SIGKILLs binaries that violate undocumented requirements), do not iterate on the compiler. Write a small standalone program that emits the target binary format byte-by-byte, runs on the host, produces a candidate binary, and submits it for signing/execution on the target. Each iteration cycle drops from minutes-to-hours (rebuild compiler, run tests, re-ship) to seconds (edit probe, pipe, scp, run). Get the byte layout correct in the probe first, then fold into the compiler's emitter."
+evidence = "Cyrius v5.3.0 Apple Silicon emitter: 3 probe files (programs/macho_probe_arm*.cyr) carried the entire format discovery. The compiler-side emitter fold was a day of work; the probes were a day. Without probes, blind iteration against the compiler would have taken weeks."
+
+[[best_practices]]
+title = "Get ground truth from the platform's own toolchain"
+explanation = "Apple's public Mach-O documentation is incomplete and sometimes incorrect about what the arm64 kernel accepts. The correct reference is clang's output on a modern Mac for a trivial program. `otool -l` dumps the load command set; `xxd -s <offset> -l <size>` extracts raw bytes of any region. Replicate what clang emits byte-for-byte first; simplify later once you understand which bits matter."
+evidence = "Every structural correctness question for Cyrius v5.3.0 was answered by dumping a 16840-byte clang-generated exit-42 binary. Undocumented details like the dyld_chained_fixups 'empty blob' layout for zero-import binaries, the __LINKEDIT section ordering (chain_fixups → exports_trie → function_starts → symtab → strtab → code_signature), and the exact 15-load-command set were all extracted from real output, not docs."

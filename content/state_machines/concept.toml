@@ -1,0 +1,87 @@
+id = "state_machines"
+title = "State Machines"
+topic = "StateMachines"
+description = "Modeling systems as discrete states with explicit transitions — from simple enums to hierarchical game state architectures."
+tags = ["state-machine", "fsm", "transitions", "game-state", "enum", "switch", "hierarchy", "committed", "animation", "input"]
+related_topics = ["design_patterns", "pattern_matching", "type_systems", "game_loop_architecture", "game_ai_decisions"]
+
+[[best_practices]]
+title = "Enumerate all states explicitly"
+explanation = "Every valid state should be a named constant or enum variant. Boolean flags like is_jumping + is_attacking create combinatorial state explosion (2^N implicit states). An enum with JUMP_ATTACK as a single state is clearer and prevents impossible combinations."
+
+[[best_practices]]
+title = "Validate transitions at the transition point"
+explanation = "Not every state can transition to every other state. A player in DUNK state cannot transition to IDLE — they must finish the dunk first. Encode valid transitions as a table or guard conditions at the transition call site."
+
+[[best_practices]]
+title = "Use hierarchical state machines for complex systems"
+explanation = "A game has a top-level state machine (MENU → PLAYING → GAMEOVER) and nested state machines (player: IDLE → RUN → SHOOT). Each level handles its own transitions independently. The parent state constrains which child machines are active."
+
+[[best_practices]]
+title = "Separate state from state logic"
+explanation = "Store the current state as data (an enum value). Execute state-specific logic by dispatching on the value (switch/case or function table). This makes the state inspectable, serializable, and testable without running the logic."
+
+[[best_practices]]
+title = "Define committed states that cannot be interrupted"
+explanation = "Some states represent animations or actions that must play to completion (a dunk, a reload, a death animation). Mark these as committed: the transition function rejects inputs until the state's duration expires. This creates game feel — commitment to actions has weight."
+
+[[gotchas]]
+title = "Boolean flag soup creates impossible states"
+explanation = "is_running && is_shooting && is_jumping && is_dead — can a dead player be running? With booleans, the code must check. With an enum, DEAD is a single state and RUN is a different one."
+bad_example = "if (is_jumping && !is_dead && is_shooting) { ... }  // 16 possible combinations"
+good_example = "switch (state) { case JUMP_SHOOT: ... }  // each state is one value"
+
+[[gotchas]]
+title = "Missing the 'stay in current state' transition"
+explanation = "If your transition function doesn't handle 'no valid transition', it may default to a zero/null state. Explicitly handle the case where no transition applies by returning the current state unchanged."
+bad_example = "fn transition(state, input) { if input == JUMP { return JUMPING; } /* falls off: returns 0 */ }"
+good_example = "fn transition(state, input) { if input == JUMP { return JUMPING; } return state; }"
+
+[[gotchas]]
+title = "Transition side effects happening twice"
+explanation = "If you play a sound on enter_state(DUNK) but the transition is called every frame, the sound plays every frame. Guard side effects with a 'previous state' check: only fire on actual transitions."
+bad_example = "if (state == DUNK) { play_sound(SLAM); }  // plays 60 times per second"
+good_example = "if (state == DUNK && prev_state != DUNK) { play_sound(SLAM); } prev_state = state;"
+
+[[gotchas]]
+title = "Forgetting to reset timers on state entry"
+explanation = "A SHOOT state with a 500ms animation timer must reset when entered. If the timer persists from a previous SHOOT, the animation may skip frames or end immediately."
+bad_example = "state = SHOOT;  // timer still has leftover value from last shot"
+good_example = "state = SHOOT; state_timer = 0;  // fresh timer on every entry"
+
+[[performance_notes]]
+title = "Switch/case compiles to jump tables for dense enums"
+explanation = "If enum values are contiguous (0, 1, 2, ..., N), the compiler can emit a jump table: O(1) dispatch regardless of state count. Sparse enums fall back to if-chains: O(N) worst case."
+evidence = "Cyrius 4.8.2: jump tables for density >= 33% and range <= 1024. Measurable speedup in DOOM dispatch."
+
+[[performance_notes]]
+title = "State machines have zero overhead vs if-chains"
+explanation = "A well-structured state machine compiles to the same code as equivalent if/else chains. The organizational benefit is free at runtime."
+evidence = "DOOM door dispatch: 15-line if-chain replaced with switch/case, identical binary output"
+
+[[performance_notes]]
+title = "Committed states eliminate redundant input processing"
+explanation = "During a committed state, the input handler can early-return without checking any other conditions. A 500ms dunk animation means 30 frames where the input system does almost no work."
+evidence = "Game loops process input in <1us when in committed states vs 5-10us for full input evaluation"
+
+[[languages.rust]]
+source = "kiran"
+note = "kiran's animation module uses state machines with blend trees and transitions. Scheduler stages (Input → GameLogic → Render) form an implicit pipeline FSM. ECS world resources track game phase state."
+pattern = """
+// kiran: scheduler stages as implicit FSM
+scheduler.add_system(Stage::Input, input_system);
+scheduler.add_system(Stage::GameLogic, game_system);
+// Game clock controls fixed timestep, systems execute in stage order
+"""
+
+[[languages.cyrius]]
+source = "encom-hits"
+note = "encom-hits uses enum Game for game selection and switch dispatch in the main loop. Each game has init/update/render functions. The outer FSM (which game) wraps per-game flow (playing/paused/game_over)."
+pattern = """
+enum Game { GAME_MENU = 0, GAME_LIGHTCYCLES = 1, GAME_GRIDBUGS = 2, GAME_TANKS = 3, GAME_MCPCONE = 4 }
+switch (current_game) {
+    case GAME_MENU: menu_update(); menu_render(fb);
+    case GAME_LIGHTCYCLES: lc_update(); lc_render(fb);
+    // ...
+}
+"""

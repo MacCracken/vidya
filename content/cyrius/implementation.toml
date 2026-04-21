@@ -3572,3 +3572,621 @@ step. The `u128_divmod` fast-path is the cleanest current example;
 the pattern is reusable for other hardware-accelerated primitives
 (SHA extensions, AES-NI, BMI2 `mulx`, etc.).
 '''
+
+
+[[entries]]
+name = "plan_win64_abi_v553"
+description = "v5.5.3 ✅ SHIPPED — Win64 arg-register flip for ≤4-arg cyrius-to-cyrius fn calls (EPOPARG + ESTOREREGPARM under _TARGET_PE)"
+category = "cyrius"
+content = '''
+SHIPPED 2026-04-20 as v5.5.3. Scope was NARROWED from the
+original full-ABI-lift plan to just the arg-register flip (≤4
+args). Shadow space + >4-arg stack shuttle + fnptr.cyr Win64
+variants split into v5.5.4 (see plan_win64_abi_completion_v554).
+
+WHAT ACTUALLY SHIPPED (~20 lines in src/backend/x86/emit.cyr):
+
+- EPOPARG _TARGET_PE branch (lines 745-767): n=0 → pop rcx
+  (0x59), n=1 → pop rdx (0x5A), n=2 → pop r8 (0x5841), n=3 →
+  pop r9 (0x5941). n≥4 falls through to SysV encoding.
+- ESTOREREGPARM _TARGET_PE branch (lines 852-880): symmetric
+  flip on the callee side. pidx=0 → mov [rbp+disp], rcx
+  (0x8D8948), pidx=1 → mov [rbp+disp], rdx (0x958948), pidx=2 →
+  mov [rbp+disp], r8 (0x85894C), pidx=3 → mov [rbp+disp], r9
+  (0x8D894C). pidx≥4 falls through.
+
+VERIFIED on real Windows 11 (nejad@hp, build 26200): 5/5 fncall
+matrix PASS — 1-arg (RCX), 2-arg (RCX+RDX), 3-arg (+R8), 4-arg
+(+R9), nested (fn-calling-fn). hello.exe still runs (v5.4.x
+reroutes unaffected). Linux check.sh 10/10 green, 70 .tcyr
+suites PASS, self-host byte-identical (479440 B, +832 B over
+v5.5.2).
+
+CI GATE: `.github/workflows/ci.yml` `windows-cross` job's new
+"v5.5.3 Win64 ABI fncall gate" step asserts byte-level presence
+of the Win64 spill quartet (48898d / 4889?? / 4c8985 / 4c898d)
+in w_arg4.exe. `windows-native` runs each program on
+`windows-latest`, asserts ERRORLEVEL=42 for all five. Catches
+any future regression that drifts back to SysV regs.
+
+KEY LESSON: Cyrius's codegen doesn't use RDI/RSI inside fn
+bodies (only at the arg-pass/arg-receive boundary). So flipping
+EPOPARG + ESTOREREGPARM symmetrically was the ENTIRE coherent
+change needed for ≤4-arg calls to work — no prologue/epilogue
+changes, no callee-save flip, no shadow space required (both
+sides are cyrius code; cyrius doesn't use shadow space
+internally either). This made the first slice 20 lines instead
+of the 200 originally estimated.
+
+ORIGINAL FULL-ABI PLAN (now v5.5.4 scope) kept for reference.
+
+SYSV → WIN64 DIFFERENCES (the canonical reference): Today under CYRIUS_TARGET_WIN=1 every Win32
+reroute (EEXIT / EWRITE_PE / v5.5.1 bundle / v5.5.2 enum-const fold)
+already sets up Win64 ABI correctly at the kernel32 boundary, but
+cyrius-to-cyrius function calls still use SysV x86_64 inside the
+compiled binary. That "half-Win64" state doesn't crash as long as
+user code never invokes Win32 callbacks, but breaks the moment we
+do (WNDPROC, thread-start routines, CRT hooks). v5.5.3 lifts the
+internal convention to match the boundary convention.
+
+SYSV → WIN64 DIFFERENCES (the canonical reference):
+
+  SysV x86_64 (Linux/Mach-O)         Win64 (Microsoft x64)
+  ─────────────────────────          ─────────────────────
+  int args: RDI,RSI,RDX,RCX,R8,R9    int args: RCX,RDX,R8,R9
+  (first 6)                          (first 4 only)
+  fp args: XMM0..XMM7 (first 8)      fp args: XMM0..XMM3 (first 4)
+  args 7+: stack                     args 5+: stack (at [rsp+32+])
+  no shadow space                    32 B mandatory shadow space
+  128 B red zone below RSP           NO red zone (RSP-volatile)
+  caller-saved: RAX,RCX,RDX,RSI,     caller-saved: RAX,RCX,RDX,R8,R9,
+    RDI,R8..R11,XMM0..XMM15            R10,R11,XMM0..XMM5
+  callee-saved: RBX,RBP,R12..R15     callee-saved: RBX,RBP,RDI,RSI,
+    (no XMM callee-saves)              RSP,R12..R15,XMM6..XMM15
+  return: RAX (int), XMM0 (fp)       return: RAX (int), XMM0 (fp)
+  struct >16 B: mem retptr arg 0    struct >8 B: hidden retptr in RCX,
+    (RDI), args shift                   other args shift right one slot
+  variadic fp: XMM only              variadic fp: duplicate to both
+                                        XMM and corresponding GP reg
+
+CYRIUS-SPECIFIC DETOUR — the flip is cheaper than it looks:
+
+1. Cyrius's codegen does NOT use RDI/RSI inside compiled function
+   bodies. They only appear at the arg-pass/arg-receive boundary
+   (EPOPARG, ESTOREPARM) and are dead by the time the body runs.
+   Callee-save-set flip (SysV→Win64 adds RDI/RSI) is therefore a
+   NO-OP inside EFNPRO/EFNEPI — we don't save/restore them because
+   we don't use them.
+2. XMM6..XMM15 callee-saved flip is also a no-op today — Cyrius
+   emits no SSE inside compiled user code (the optimizer phases in
+   v5.5.x haven't landed yet). When SSE codegen ships, revisit.
+3. RDI/RSI as incoming arg registers: under Win64 they ARE NOT args
+   any more — args 5 and 6 come from [rsp+32+offset] instead. The
+   ONLY change needed at EPOPARG is to route n=0,1,2,3 → RCX,RDX,R8,
+   R9 and n=4,5,6,7 → stack reads.
+4. Cyrius's aarch64 backend stays untouched — different file, Linux
+   stays on SysV, Mach-O stays on SysV. v5.5.3 is a pure _TARGET_PE
+   gate.
+
+CALL-SITE CHANGES (src/backend/x86/emit.cyr):
+
+  EPOPARG(S, n)                   lines 745-753
+    Today: n=[0..5] → [0x5F, 0x5E, 0x5A, 0x59, 0x5841, 0x5941]
+           (pop rdi/rsi/rdx/rcx/r8/r9).
+    Win64: n=[0..3] → pop into RCX/RDX/R8/R9; n=[4..7] → leave
+           args on stack at [rsp+32+(n-4)*8] (caller already wrote
+           them there per parse.cyr's push loop).
+    Guard: `if (_TARGET_PE == 1)` branch at top.
+
+  ECALLPOPS(S, n)                 lines 761-787
+    Today: pops ≤6 args into SysV registers; >6 uses r11-r14 as
+           temps and re-pushes in correct order.
+    Win64: pops ≤4 args into RCX/RDX/R8/R9; args 5+ already live
+           on stack — caller leaves them there, emits
+           `sub rsp, 32` to open shadow space, `call`, then
+           `add rsp, 32+(N-4)*8` on the ECALLCLEAN side. No
+           re-push needed because stack args stay at [rsp+32+].
+
+  ECALLCLEAN(S, n)                lines 790-801
+    Today: `add rsp, (n-6)*8` for n>6.
+    Win64: `add rsp, 32 + max(0, (n-4))*8` unconditionally —
+           every call pays the 32 B shadow tax. n≤4: `add rsp, 32`.
+           n=5: `add rsp, 40`. n=6: `add rsp, 48`.
+
+  ESTOREPARM(S, pidx, lidx, pc)   lines 862-873
+  ESTOREREGPARM / ESTORESTACKPARM lines 840-859
+    Today: pidx<6 → register spill into [rbp+disp]; pidx≥6 →
+           stack read from [rbp+16+i*8].
+    Win64: pidx<4 → RCX/RDX/R8/R9 spill into [rbp+disp];
+           pidx≥4 → stack read from [rbp+16+32+(pidx-4)*8]
+           (the 32 accounts for the shadow space the caller
+           allocated below the return address).
+
+RSP ALIGNMENT INVARIANT (non-negotiable):
+  RSP must be 16-aligned at every `call` instruction. Entry to
+  a function (immediately after `call` pushes return addr) has
+  RSP ≡ 8 (mod 16). EFNPRO's `push rbp` returns RSP ≡ 0 (mod 16).
+  Any `sub rsp, N` must keep N a multiple of 16. EEXIT today uses
+  `sub rsp, 0x28` (40 = 32 shadow + 8 pad); EWRITE_PE uses
+  `sub rsp, 0x40` (64 = 32 shadow + 32 locals). Generalize: if
+  the fn has K qword spill slots, frame = `max(32, 32 + K*8)`
+  rounded up to next 16.
+
+fnptr.cyr CHANGES (lib/fnptr.cyr):
+  fncallN (N=0..8) currently use `#ifdef CYRIUS_ARCH_X86` inline
+  asm that hardcodes RDI/RSI/... Under Win64 self-host they need
+  a parallel `#ifdef CYRIUS_TARGET_WIN` path with Win64 registers
+  + shadow-space `sub rsp, 0x20` before the indirect call. Affects
+  lines 43-322 — 9 asm blocks total. Can be gated by the same
+  #ifdef the backend checks (_TARGET_PE == 1 at cc5_win compile).
+
+SELF-HOST FIXPOINT (the authoritative gate):
+  cc5_v2 == cc5_v1 (Linux, today) — unchanged.
+  Add cc5_win_v2 from cc5_win_v1 under CYRIUS_TARGET_WIN=1, assert
+  cc5_win_v1 == cc5_win_v2 byte-identical. This runs in the
+  ubuntu-cross path since cc5_win runs BY cc5; actual Windows-
+  native fixpoint (cc5_win compiling itself ON Windows) lands in
+  v5.5.4 (plan_windows_self_host_v554).
+
+3-FAILED-ATTEMPTS FALLBACK (per CLAUDE.md):
+  If self-host fixpoint fails three distinct Win64 migration
+  attempts, split the work:
+    v5.5.3a — arg-register mapping only (EPOPARG + ECALLPOPS
+              + ESTOREPARM).
+    v5.5.3b — shadow space + ECALLCLEAN.
+    v5.5.3c — callee-save set flip (likely a no-op for Cyrius).
+  Each sub-patch self-hosts independently.
+
+SCOPE NOT INCLUDED (now v5.5.4, see plan_win64_abi_completion_v554):
+  - Shadow-space allocation at cyrius-to-cyrius call sites.
+  - >4-arg stack shuttle (ECALLPOPS/ECALLCLEAN/ESTORESTACKPARM).
+  - fnptr.cyr Win64 fncallN variants.
+  - Callee-save set flip (expected no-op for Cyrius — RDI/RSI
+    unused in codegen — but formally required by the ABI).
+
+SCOPE NOT INCLUDED (v5.5.5+):
+  - Win64 self-host ON Windows (v5.5.5, see plan_windows_self_host_v554).
+  - Struct-return-by-value via hidden RCX retptr (defer until
+    aggregate returns appear in Win-compiled code).
+  - __chkstk for frames ≥ 4 KB (no Cyrius fn currently trips this;
+    the 21 MB compiler state lives on the HEAP, not the stack).
+  - Variadic float duplication (defer until vararg support on
+    the PE arm — Cyrius has no varargs today).
+'''
+
+
+[[entries]]
+name = "plan_win64_abi_completion_v554"
+description = "Implementation plan for v5.5.4: shadow space at cyrius-to-cyrius call sites + >4-arg stack shuttle + fnptr.cyr Win64 fncallN variants"
+category = "cyrius"
+content = '''
+Forward-looking plan for v5.5.4 — completes the internal Win64 ABI
+lift that v5.5.3 started. Once this ships, cc5's own source compiles
+correctly under CYRIUS_TARGET_WIN=1 regardless of fn arity, and
+the native Windows self-host in v5.5.5 is unblocked.
+
+WHY THIS IS SPLIT FROM v5.5.3:
+- v5.5.3 needed only EPOPARG + ESTOREREGPARM (caller-callee reg
+  flip). ~20 lines, verified on real Windows in one session.
+- v5.5.4 touches ECALLPOPS / ECALLCLEAN / ESTORESTACKPARM / every
+  call site that today computes RSP alignment assuming no shadow
+  + fnptr.cyr's 9 hand-rolled asm blocks. ~200 lines, higher risk
+  per the original plan's estimate.
+- CLAUDE.md principle: "ONE change at a time — never bundle
+  unrelated changes." Arg-reg flip and shadow space have different
+  failure modes; shipping them as one release would conflate
+  bisect signal.
+
+SCOPE — all _TARGET_PE-guarded; Linux/Mach-O paths untouched:
+
+1. SHADOW SPACE AT EVERY CYRIUS-TO-CYRIUS CALL SITE.
+   Generalize the `sub rsp, N` pattern the kernel32 reroutes
+   already use (EEXIT: sub rsp, 0x28; EWRITE_PE: sub rsp, 0x40).
+   At each call site:
+     - Before the call: `sub rsp, 0x28` (40 = 32 shadow + 8 align).
+       RSP at the call must be 16-aligned; callee sees RSP ≡ 8
+       (mod 16) after its `call` pushes the return addr.
+     - After the call: `add rsp, 0x28` to unwind.
+   Placement: ECALLPOPS appends sub rsp, 0x28 after all arg pops;
+   ECALLCLEAN prepends add rsp, 0x28 before any stack-arg cleanup.
+
+2. ECALLPOPS STACK-ARG SHUTTLE FOR N > 4.
+   Mirror of the existing SysV N>6 shuttle (same file, same shape):
+     - Pop the top (N-4) extras off the push-stack into scratch
+       r10, r11, r14, r15 (or stash in memory if >4 extras).
+     - Pop the 4 register-bound args into RCX/RDX/R8/R9 via EPOPARG.
+     - Allocate shadow: sub rsp, 0x20.
+     - Re-push extras so they land at [rsp+0x20..]: 5th arg goes
+       to [rsp+0x20], 6th to [rsp+0x28], etc.
+     - Call.
+     - add rsp, 0x20 + (N-4)*8.
+
+3. ESTORESTACKPARM DISP32 SHIFT.
+   Under _TARGET_PE and pidx≥4:
+     Today: stack-arg read from [rbp+16+8i] (SysV layout, no shadow).
+     Win64: [rbp+16+32+(pidx-4)*8] — +32 accounts for caller's
+     shadow space below the return address.
+   Also ESTOREPARM's dispatch boundary shifts: pidx<4 → register
+   path; pidx≥4 → stack path (vs SysV's pidx<6 / pidx≥6).
+
+4. FNPTR.CYR WIN64 FNCALLN VARIANTS.
+   lib/fnptr.cyr lines 43-322 have 9 hand-rolled x86 asm blocks
+   (fncall0..fncall8) that load args from [rbp-disp] into
+   RDI/RSI/.../R9. Add #ifdef CYRIUS_TARGET_WIN parallel blocks:
+     - Args 0..3 → RCX/RDX/R8/R9.
+     - For fncall5..fncall8, add sub rsp, 0x20 + extras × 8 before
+       call, mov [rsp+0x20], arg4; [rsp+0x28], arg5; etc.
+     - add rsp, N after call to unwind.
+   Keep SysV blocks active under #ifdef CYRIUS_ARCH_X86 but NOT
+   CYRIUS_TARGET_WIN so Linux/Mach-O are unaffected.
+
+5. CALLEE-SAVE SET FLIP (expected no-op for Cyrius).
+   Win64 adds RDI, RSI to callee-saved; SysV has them caller-saved.
+   Verify via disasm of a cc5_win-compiled cc5 binary that no fn
+   body touches RDI/RSI outside of EPOPARG/ESTOREREGPARM (which
+   are at the arg boundary and immediately spill). If clean,
+   EFNPRO/EFNEPI need no change. Add a guard comment.
+   XMM6-XMM15 flip is similarly no-op until SSE codegen lands.
+
+SELF-HOST FIXPOINT:
+  - Linux cross: cc5 under CYRIUS_TARGET_WIN=1 produces cc5_win_v1.
+  - cc5_win_v1 on Linux (as ELF, since we don't run on Windows in
+    this release) compiles main_win.cyr → cc5_win_v2. Assert
+    cc5_win_v1 == cc5_win_v2 byte-identical.
+  - Actual Windows-native fixpoint is v5.5.5 scope.
+
+3-FAILED-ATTEMPTS FALLBACK: if the full bundle fails, split
+further — e.g. v5.5.4 = shadow space only, v5.5.5 = stack shuttle,
+v5.5.6 = fnptr.cyr. Don't force.
+
+WHAT BREAKS WITHOUT v5.5.4:
+- Any Cyrius program under CYRIUS_TARGET_WIN=1 that calls a fn
+  with 5+ args silently mis-compiles (args 5+ end up in wrong
+  Win64 registers or at wrong stack offsets).
+- Indirect fn-pointer calls via fncallN on Windows use wrong
+  arg registers.
+- Strict Win64 compliance (callees that DO use shadow space to
+  spill inbound regs) breaks — though no kernel32 callee we've
+  hit yet does this, so it's latent risk.
+'''
+
+
+[[entries]]
+name = "plan_windows_self_host_v554"
+description = "v5.5.5 implementation plan (filename retained from v5.5.4-era draft): native Windows self-host of cc5_win on windows-latest + full .tcyr suite"
+category = "cyrius"
+content = '''
+Forward-looking plan for v5.5.5 (was v5.5.4 before the v5.5.3
+Win64-ABI split; entry name retained to avoid cross-refs churn).
+After v5.5.4 completes the internal Win64 ABI lift, cc5_win is a
+complete PE32+ compiler that produces PE32+. The next gate is:
+cc5_win compiling ITSELF on a real Windows host, byte-identical
+to the ubuntu-cross build.
+
+CURRENT STATE (v5.5.2 baseline):
+  - .github/workflows/ci.yml has windows-cross + windows-native
+    jobs. Cross-compile on ubuntu-latest with CYRIUS_TARGET_WIN=1,
+    upload artifacts, run on windows-latest.
+  - hello.exe round-trips end-to-end: "hi\\n" + exit 0.
+  - exit0/exit1/exit42/exit255 gate passes on windows-latest.
+  - cc5_win binary exists (v5.5.0 src/main_win.cyr cross-entry).
+
+WHAT v5.5.4 MUST ADD:
+
+1. cc5_win read-src-from-stdin on Windows
+   - Native cc5 reads src/main.cyr from stdin (read(0, buf, ...)).
+   - Win64 equivalent: GetStdHandle(STD_INPUT_HANDLE = -10 as DWORD
+     = 0xFFFFFFF6) → ReadFile into heap buffer.
+   - Parse-time reroute already shipped (v5.5.1 syscall(0, ...) →
+     ReadFile via IAT). But it operates on fd=0; the GetStdHandle
+     call is inserted by the PE backend when it detects fd=0 or fd=1.
+   - No new compiler work — the existing v5.5.1 reroute handles it.
+     Just verify ReadFile+pipe semantics match the Linux read() loop.
+
+2. cc5_win write-bin-to-stdout on Windows
+   - Cyrius's output model: PE bytes to stdout, redirect to a file.
+   - PowerShell `>` REDIRECTION CORRUPTS BINARY OUTPUT. PowerShell
+     reads stdout as text and re-encodes (UTF-16 BOM on 5.1, UTF-8
+     BOM/no-BOM on 7+ depending on preference vars). NEVER use `>`
+     on PE bytes. See field note windows_arc_anticipated_gotchas.
+   - Correct forms (both work):
+       cmd /c "type src\\main.cyr | cc5_win.exe > cc5_win_b.exe"
+       Start-Process -FilePath cc5_win.exe -RedirectStandardInput src `
+                     -RedirectStandardOutput cc5_win_b.exe `
+                     -Wait -NoNewWindow
+   - In GitHub Actions, prefer `shell: cmd` for the self-host step
+     so redirection is byte-clean. The existing windows-native job
+     uses `shell: pwsh` for Start-Process — keep that idiom; don't
+     mix in `>` redirects.
+
+3. File-include resolution on Windows
+   - Cyrius's frontend preprocessor resolves `include "lib/foo.cyr"`
+     by opening files directly (not via cyrius driver preprocessing).
+   - Uses syscall(SYS_OPEN, path, flags, mode) → already rerouted
+     to CreateFileW at v5.5.1. CreateFileW takes LPCWSTR (UTF-16)
+     so the reroute needs to widen the ASCII path at emit time.
+     Check: does the v5.5.1 sys_open reroute currently MultiByteToWideChar
+     or assume ASCII-safe paths? If the latter, file a v5.5.4 sub-
+     item for UTF-16 conversion.
+   - Path separators: Win32 accepts both `/` and `\\` in paths, so
+     Cyrius's `lib/foo.cyr` literals work without translation.
+   - MAX_PATH (260 chars) applies unless paths start with `\\?\\` or
+     the process opts in via registry. Our src tree fits under 260;
+     non-issue today but document the ceiling.
+
+4. Two-step bootstrap ON Windows
+   - Round 1 (ubuntu-cross): cc5 + CYRIUS_TARGET_WIN=1 → cc5_win_v1.
+   - Round 2 (ubuntu-cross repeat, still): cc5_win_v1 under wine or
+     a container? No — run cc5_win_v1 on windows-latest via CI job.
+     Input: src/main_win.cyr from the checkout. Output: cc5_win_v2.
+   - Assert: cc5_win_v1 == cc5_win_v2 (cmp on Windows or artifact
+     download + cmp on ubuntu).
+   - Round 3 (windows-native): cc5_win_v2 compiles src/main_win.cyr
+     a second time → cc5_win_v3. Assert cc5_win_v2 == cc5_win_v3.
+
+5. .tcyr test suite on windows-latest
+   - Each .tcyr compiled on Windows via cc5_win_v2, resulting binary
+     executed on Windows, exit code checked.
+   - Most .tcyr use syscall() with Linux numbers — the PE reroutes
+     cover SYS_WRITE, SYS_READ, SYS_OPEN, SYS_CLOSE, SYS_LSEEK,
+     SYS_MMAP, SYS_MUNMAP, SYS_EXIT. Tests using uncovered syscalls
+     (fork, clone, futex, epoll, etc.) must be tagged
+     `# platform: linux` or similar and skipped on Windows.
+   - Shell harness in CI is pwsh; for-each loop over tests/tcyr/*.tcyr.
+     Capture stdout + exit code, match against `# expect: ...` header
+     or exit-code extract same as Linux flow.
+
+GITHUB ACTIONS SHAPE (append to ci.yml after windows-native):
+
+  windows-self-host:
+    needs: [windows-native]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: windows-pe-binaries, path: ./win }
+      - name: Self-host round 2 (cc5_win_v1 → cc5_win_v2)
+        shell: cmd
+        run: |
+          type src\\main_win.cyr | win\\cc5_win.exe > win\\cc5_win_b.exe
+      - name: Byte-identical fixpoint
+        shell: cmd
+        run: fc /b win\\cc5_win.exe win\\cc5_win_b.exe
+      - name: .tcyr suite
+        shell: pwsh
+        run: |
+          # iterate tests/tcyr/*.tcyr, pipe to cc5_win_b.exe,
+          # exec result, compare exit code to expectations.
+
+WHAT WOULD BE WRONG IF THE FIXPOINT FAILS:
+  - Byte diff in .text: ABI drift — some code path still emits SysV
+    registers on the Windows side. Diff the two binaries' .text,
+    disasm around the first diff.
+  - Byte diff in .rdata: string or gvar ordering drift — check heap
+    map + string interning determinism under the new code path.
+  - Byte diff in .idata: IAT registration order changed — the hash
+    used by _pe_ensure_* is deterministic; if order drifts, a cache
+    or map iteration is non-deterministic.
+
+SCOPE NOT INCLUDED (carries to v5.5.5+):
+  - Windows as primary dev platform (still developing on Linux).
+  - MSI / installer packaging (v5.6+ at earliest).
+  - Windows long-path support (`\\?\\` prefix) — defer until needed.
+  - UTF-16 path widening (if v5.5.1 reroute assumes ASCII, split
+    into v5.5.4b sub-item).
+'''
+
+
+[[entries]]
+name = "plan_compiler_optimization_v56x"
+description = "Pinned release sequence for compiler optimization phases O1–O6. Each gets a concrete v5.6.x patch number — no more 'parallel track' drift across minors"
+category = "cyrius"
+content = '''
+Compiler optimization (O1–O6) is its own minor at v5.6.x, landing
+BEFORE RISC-V (v5.7.0, slid from v5.6.0) so the new port inherits
+an optimized compiler rather than one still queueing baseline work.
+
+PINNED RELEASE SEQUENCE (2026-04-20):
+  v5.6.0 = Phase O1: instrumentation + FNV-1a symbol table (~240 LOC)
+  v5.6.1 = Phase O2: peephole quick wins, x86_64 + aarch64 (~510 LOC)
+  v5.6.2 = Phase O3: IR-driven passes (~590 LOC)
+  v5.6.3 = Phase O4: linear-scan register allocation (~600–900 LOC)
+  v5.6.4 = Phase O5: maximal-munch instruction selection (~300–500 LOC)
+  v5.6.5 = Phase O6: slab allocator (~150 LOC, MEASUREMENT-GATED)
+  v5.6.6 = v5.6.x closeout (or v5.6.5 if O6 skipped)
+
+WHY THIS IS PINNED AND NOT "QUEUED":
+  O1–O6 originally queued under v5.4.x as a "parallel track" (none
+  shipped), carried forward to v5.5.x as the same "parallel track"
+  (none shipped — v5.5.x focus stayed on platform completion).
+  Without concrete patch numbers, the pattern would repeat: slip
+  to v5.6.x "queue", slip to v5.7.x "queue", etc. Pinning to
+  v5.6.0–v5.6.5 with explicit per-phase content makes the sequence
+  auditable — a roadmap PR that skips a phase must account for it
+  in CHANGELOG.
+
+ORDERING CONSTRAINTS (non-negotiable):
+  - O1 before everything: baseline numbers required to validate
+    later phases quantitatively.
+  - O3 before O4: linear-scan regalloc needs complete IR coverage
+    (O3's precondition is finishing IR instrumentation across the
+    remaining ~50 direct emit sites in parse.cyr).
+  - O6 gated on O4 profile: slab only worth it if bump-alloc is
+    hot during live-range construction. If not, SKIP and ship
+    v5.6.5 as the closeout.
+
+PREREQUISITE: v5.5.15 (v5.5.x closeout). No optimization phase
+opens until v5.5.x platform + runtime work is honest-closed.
+
+DOWNSTREAM DEPENDENCY: v5.7.0 (RISC-V rv64). The rv64 backend
+lands its tile table against v5.6.4's maximal-munch walker on
+day one, instead of retrofitting later. That's why RISC-V slid
+from v5.6.0 to v5.7.0 on the same day this pinning happened.
+
+NON-NEGOTIABLE CROSS-PHASE INVARIANTS:
+  - Byte-identical self-host after every phase.
+  - Every pass deterministic (no iterated coalescing, no
+    load-order-dependent state).
+  - No graph-coloring regalloc, no SCCP/GVN/polyhedral, no
+    static instruction scheduling on x86_64, no PEXT/PDEP/BMI2
+    opportunistic codegen. See roadmap §"v5.6.0 — Compiler
+    optimization arc" guardrails.
+
+RESEARCH SOURCES (converged):
+  - QBE (simple backend, linear-scan regalloc shape)
+  - TCC (one-pass codegen, shape of peephole in a small compiler)
+  - QBE arm64 peephole — Brian Callahan
+  - Poletto & Sarkar — linear-scan register allocation
+  - Agner Fog — x86_64 microarchitecture (LEA latency, flag
+    reuse, port pressure)
+  - vidya content/optimization_passes, content/code_generation,
+    content/allocators
+
+KEY LESSON FROM v5.5.x PLATFORM ARC (carries to v5.6.x):
+  Narrow, single-concern patches ship. Bundled patches stall.
+  Each O-phase is independently verifiable (byte-identical
+  self-host + benchmark numbers before/after) — ship them as
+  distinct releases rather than as a "v5.6.0 optimizer drop".
+'''
+
+
+[[entries]]
+name = "plan_pe_correctness_tail_v555plus"
+description = "Deferred PE correctness items beyond v5.5.4: .reloc/ASLR, __chkstk, struct-return, variadic, SEH scope"
+category = "cyrius"
+content = '''
+Items the Win64 ABI + native self-host arcs (v5.5.3 + v5.5.4) do
+NOT deliver. Each is a distinct patch or minor; recorded here so
+the triage doesn't rot between now and "someone trips it".
+
+1. __chkstk / STACK PROBING
+   Win64 reserves stack lazily — only the first page (4 KB) is
+   committed at thread start, with a GUARD PAGE below. Accessing
+   the guard page commits another 4 KB and moves the guard down.
+   Touching memory BELOW the guard page (e.g. via `sub rsp, 8192`
+   without intermediate loads) skips the guard and the kernel
+   delivers STATUS_STACK_OVERFLOW.
+
+   The fix: for any fn frame ≥ 4 KB, inject a `call __chkstk`
+   after computing frame size in RAX. __chkstk walks the frame in
+   4 KB steps, loading a byte from each page, forcing the guard
+   sequence in order. MSVC injects this automatically; no-CRT
+   compilers must supply their own.
+
+   Minimal __chkstk implementation (36 bytes, public-domain, from
+   Chris Wellons' libchkstk):
+     push rax
+     push rcx
+     neg  rax
+     add  rsp, rax          ; hypothetical new RSP
+     mov  rcx, gs:[0x10]    ; StackLimit (TIB + 0x10)
+     jmp  .check
+   .probe:
+     sub  rcx, 0x1000
+     test eax, [rcx]        ; touch this page
+   .check:
+     cmp  rcx, rsp
+     ja   .probe
+     pop  rcx
+     pop  rax
+     ret
+
+   CYRIUS STATUS: no function in cc5, no function in the stdlib,
+   and no function in any downstream program currently has a stack
+   frame ≥ 4 KB. The 21 MB compiler state lives on the HEAP (heap
+   map in main.cyr). Stack frames are typically < 512 bytes. DEFER
+   until a compiled program trips STATUS_STACK_OVERFLOW (if ever).
+
+   WHEN IT MATTERS: if Cyrius grows a `var buf[4096];`-style large
+   automatic array. Today's alternative (and the idiomatic one) is
+   `var buf = alloc(4096)`, which is heap and untouched by the
+   guard page mechanism.
+
+2. .reloc SECTION + ASLR
+   v5.4.2 sets IMAGE_FILE_RELOCS_STRIPPED (0x0001), so the loader
+   must place the binary at ImageBase = 0x140000000. This works
+   for a single CLI exe — the kernel always has that VA range free.
+
+   For DLL output OR to opt into ASLR
+   (IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE = 0x0040), emit a .reloc
+   section listing every absolute 64-bit address in code/data.
+
+   .reloc block format (per PE32+ spec):
+     Block header (8 bytes):
+       DWORD PageRVA       ; 4 KB-aligned RVA the block covers
+       DWORD BlockSize     ; header + entries, DWORD-aligned
+     Entries (2 bytes each):
+       USHORT: top 4 bits = type, bottom 12 bits = offset within page
+     Types for PE32+:
+       IMAGE_REL_BASED_ABSOLUTE = 0  (padding only)
+       IMAGE_REL_BASED_DIR64    = 10 (primary, 64-bit reloc)
+
+   Example: 3 DIR64 relocs at RVA 0x1008, 0x1010, 0x1018:
+     PageRVA   = 0x00001000
+     BlockSize = 16       ; 8 header + 6 entries + 2 pad
+     entries   = 0xA008, 0xA010, 0xA018, 0x0000
+
+   When the loader picks a different ImageBase, it adds
+   (actual - preferred) to every 64-bit slot listed in .reloc.
+
+   CYRIUS STATUS: DIR64 sites in a Cyrius-compiled PE are:
+   (a) every `movabs rax, imm64` targeting a gvar or string literal
+       (v5.4.8 instrumented these already — use the fixup table);
+   (b) every IAT-target `movabs` (but `call [rip+disp32]` via IAT
+       is already PIC, no reloc needed);
+   (c) the entry point address in the PE header.
+   Estimated entry count: ~3-5 per fn, ~one per string literal.
+   A typical self-hosted cc5 PE with ~475 KB and ~1200 fns would
+   emit ~2000-3000 DIR64 entries ≈ 6-9 KB of .reloc.
+
+   DEFER until first DLL output or compliance requirement for ASLR.
+
+3. STRUCT-RETURN-BY-VALUE (>8 bytes)
+   Win64 convention: return types > 8 B are returned via HIDDEN
+   POINTER. Caller allocates space, passes the address as arg 0
+   in RCX. All other args shift right one slot: arg 1 → RDX,
+   arg 2 → R8, arg 3 → R9, arg 4+ on stack. Callee returns the
+   same pointer in RAX.
+
+   Cyrius's struct-return story today:
+     - Structs ≤ 8 B: returned in RAX (works on both ABIs — the
+       SysV and Win64 cases match).
+     - Structs > 8 B: Cyrius today returns via the `#derive(accessors)`
+       pattern + heap alloc; true pass-by-value struct return is
+       unimplemented. No compiled code exercises the Win64 hidden-
+       retptr convention yet.
+
+   DEFER until an aggregate-return fn appears in Windows-compiled
+   code. When that happens, the fix is a new EFNRET_PE branch that
+   copies the local struct into [RCX] + sets RAX = RCX, plus a
+   caller-side allocation stage in ECALLPOPS.
+
+4. VARIADIC FLOAT DUPLICATION
+   Win64 rule: float args passed to a VARIADIC or UNPROTOTYPED
+   function must be loaded into BOTH the positional XMM register
+   AND the corresponding integer register. So `printf("%f", 3.14)`
+   needs `movsd xmm1, [rip+pi]; movq rdx, xmm1; call printf`.
+
+   CYRIUS STATUS: Cyrius has NO variadic functions. fncallN is
+   fixed-arity via the N suffix. DEFER until varargs ship (if ever).
+
+5. SEH / .pdata / .xdata — INDEFINITELY DEFERRED
+   Structured Exception Handling metadata. Not needed for CLI .exe
+   execution. Only matters for:
+   (a) C++ exceptions (Cyrius has none)
+   (b) SEH __try/__except (Cyrius has none)
+   (c) Debugger stack walk past a non-leaf fn (still useful but
+       not required for correctness)
+   (d) ETW profilers
+   (e) Windows error reporting dialogs that show a stack trace
+
+   If a compiled cyrius fn faults, Windows will show the fault
+   at the EIP with no unwind — acceptable for now. Leaves only
+   PARTIALLY-AVAILABLE debugger support; core flow works.
+
+SUMMARY — v5.5.5+ PRIORITY (subject to downstream pressure):
+  1. struct-return-by-value (highest, first to break)
+  2. .reloc + ASLR (medium, needed for DLLs)
+  3. __chkstk (low, purely defensive)
+  4. variadic float duplication (blocked on vararg lang feature)
+  5. SEH (indefinite)
+'''

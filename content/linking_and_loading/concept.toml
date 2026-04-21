@@ -75,3 +75,318 @@ evidence = "Firefox with LTO: ~5% faster runtime, 10-15% smaller binary. Link ti
 title = "Lazy binding amortizes startup cost but hurts first-call latency"
 explanation = "Lazy binding defers symbol resolution until first use. A program with 1000 dynamic symbols but only using 100 at startup resolves 100 instead of 1000. But each first call to an unresolved symbol incurs ~1000 cycles. For interactive applications, LD_BIND_NOW is often better (resolve all at startup, no surprises later)."
 evidence = "Large application: lazy binding startup 50ms, first-call stalls scattered through execution. LD_BIND_NOW startup 120ms, but zero first-call latency after. Total wall time often similar."
+
+[[entries]]
+name = "runtime_dynload_from_static_binary"
+description = "How a no-libc statically-linked binary loads and calls shared library functions at runtime — the minimal dynamic linker"
+category = "linking_and_loading"
+content = '''
+CONTEXT: Cyrius 4.9.3 needs to call libssl.so.3 functions from a
+statically-linked binary with no libc. The existing dynlib.cyr can
+mmap a .so and resolve symbol names, but calling them crashes because
+relocations aren't processed. This entry documents the minimal
+dynamic linker implementation.
+
+=== THE PROBLEM ===
+
+A shared library (.so) contains code that references external symbols
+via the GOT (Global Offset Table). When the OS dynamic linker
+(ld-linux-x86-64.so.2) loads a .so normally, it:
+
+  1. Maps each PT_LOAD segment at the right virtual address
+  2. Processes RELA relocations — writes resolved addresses into GOT
+  3. Loads transitive dependencies (DT_NEEDED)
+  4. Runs init functions (DT_INIT, DT_INIT_ARRAY)
+  5. Marks RELRO pages read-only
+
+Without step 2, every function that references an external symbol
+(malloc, strlen, errno, etc.) crashes — the GOT entry is zero.
+
+=== MINIMAL VIABLE DYNAMIC LINKER ===
+
+For libssl.so.3 on x86_64 Linux, the minimum is:
+
+STEP 1 — Multi-segment mmap:
+  Walk PT_LOAD headers. Reserve the total address span with one
+  anonymous mmap (PROT_NONE), then mmap each segment over it with
+  correct permissions:
+    Segment 0: PROT_READ             (headers, .dynsym, .dynstr)
+    Segment 1: PROT_READ|PROT_EXEC   (.text)
+    Segment 2: PROT_READ             (.rodata)
+    Segment 3: PROT_READ|PROT_WRITE  (.data, .bss, GOT)
+
+  The base address of the reservation becomes the load bias.
+  This replaces the single flat mmap in current dynlib.cyr.
+
+STEP 2 — DT_NEEDED recursion:
+  Parse the dynamic section for DT_NEEDED entries. Each value is an
+  offset into DT_STRTAB naming a dependency ("libcrypto.so.3",
+  "libc.so.6"). Load each dependency first (depth-first), building
+  a loaded-library list to avoid duplicates.
+
+  Library search: try /usr/lib/<name>, /lib/<name>,
+  /lib/x86_64-linux-gnu/<name>. Match ldconfig behavior for the
+  common case.
+
+STEP 3 — RELA relocation processing:
+  Parse DT_RELA + DT_RELASZ from the dynamic section. Each Elf64_Rela
+  is 24 bytes: r_offset (u64), r_info (u64), r_addend (i64).
+
+  Relocation type = r_info & 0xFFFFFFFF (lower 32 bits on x86_64).
+  Symbol index = r_info >> 32.
+
+  For libssl, only 2 types matter:
+
+  R_X86_64_GLOB_DAT (type 6) — 596 of 624 relocations:
+    *( base + r_offset ) = sym_address
+    Resolve the symbol (by index → name → lookup across all loaded
+    libs), write the absolute address into the GOT slot. This is
+    how imported functions get their addresses.
+
+  R_X86_64_64 (type 1) — 28 of 624:
+    *( base + r_offset ) = sym_address + r_addend
+    Same as GLOB_DAT but adds a constant offset. Used for data
+    references (vtables, type descriptors).
+
+  R_X86_64_RELATIVE (type 8) — from RELR section:
+    *( base + r_offset ) += load_bias
+    No symbol lookup needed. Adjusts internal pointers that were
+    compiled with a 0 base address. Common in libcrypto/libc.
+
+  R_X86_64_IRELATIVE (type 37) — libc only (46 occurrences):
+    address = call( base + r_addend )
+    *( base + r_offset ) = address
+    The resolver function picks the best implementation at runtime
+    (e.g., AVX2 memcpy vs SSE2 memcpy). Call the function at
+    base+r_addend, write its return value into the slot.
+
+  R_X86_64_TPOFF64 (type 18) — libc only (15 occurrences):
+    Thread-local storage offset. Skip for single-threaded use.
+    If needed: allocate a TLS block, compute offset, write it.
+
+STEP 4 — Init functions (optional but recommended):
+  If DT_INIT exists, call it after relocations. If DT_INIT_ARRAY
+  exists, call each function pointer in the array. libcrypto uses
+  init to seed its RNG. libc uses init for locale/threading setup.
+
+=== DEPENDENCY CHAIN FOR LIBSSL ===
+
+  libssl.so.3
+    → libcrypto.so.3 (160 GLOB_DAT relocations)
+      → libc.so.6 (78 GLOB_DAT + 46 IRELATIVE + 15 TPOFF64)
+        → ld-linux-x86-64.so.2 (already mapped by kernel, skip)
+
+  Load order: libc first, then libcrypto, then libssl.
+  Total relocations to process: ~900.
+
+=== LIBC SYMBOLS LIBSSL ACTUALLY IMPORTS (41) ===
+
+  Memory: memcpy, memmove, memset, memchr, memcmp
+  String: strlen, strcmp, strncmp, strchr
+  I/O: read, write, sendfile, poll
+  System: getpid, gettimeofday, time, stat, secure_getenv
+  Threading: pthread_mutex_init/lock/unlock/destroy,
+             pthread_cond_init/signal/broadcast/wait/timedwait/destroy,
+             pthread_create/join, pthread_attr_init/destroy/setdetachstate
+  Allocation: (via libcrypto, which calls malloc/free/realloc)
+  Other: qsort, __errno_location, __ctype_b_loc,
+         __stack_chk_fail, __cxa_finalize, __isoc23_strtol
+
+  The pthread and __errno_location functions are the hardest —
+  they require TLS for the errno thread-local variable.
+
+=== KEY INSIGHT: LOAD LIBC PROPERLY ===
+
+Don't stub libc functions. Load libc.so.6 the same way as libssl,
+resolve its symbols, and let libssl call into the real
+implementation. libc is self-contained (its only dependency is
+ld-linux, which the kernel already maps). The 46 IRELATIVE
+relocations in libc are the only complexity — they require calling
+resolver functions to pick IFUNC implementations.
+
+For a single-threaded Cyrius process, TPOFF64 relocations can write
+static offsets — no real TLS block needed. __errno_location can
+return a pointer to a static global. This covers libssl's use case.
+
+=== ESTIMATED CODE SIZE ===
+
+  Multi-segment mmap:      ~40 lines
+  DT_NEEDED recursion:     ~30 lines
+  RELA processing:         ~50 lines (GLOB_DAT + 64 + RELATIVE)
+  IRELATIVE support:       ~15 lines
+  Library search paths:    ~20 lines
+  Loaded-library tracking: ~15 lines
+  Total:                   ~170 lines on top of existing dynlib.cyr
+
+=== TESTING STRATEGY ===
+
+  1. Load libc.so.6 alone, resolve "strlen", call it via fnptr
+  2. Load libcrypto.so.3, resolve "OPENSSL_version_major", call it
+  3. Load libssl.so.3, resolve "TLS_client_method" + "SSL_CTX_new"
+  4. Full TLS handshake to a known HTTPS endpoint
+'''
+
+[[entries]]
+name = "static_dlopen_and_nss_bootstrap_limits"
+description = "Why hand-populating _rtld_global_ro from auxv is a dead-end for static-binary dlopen, and what to do instead"
+category = "linking_and_loading"
+content = '''
+CONTEXT: Cyrius v5.5.23-25 attempted to unblock glibc NSS dispatch
+(getpwuid, getgrouplist, pam_authenticate, getaddrinfo) from a
+static binary that dlopen's libc.so.6 via a pure-cyrius loader.
+Three patches were spent narrowing the problem. Lessons documented
+here so future investigators can skip the dead-end.
+
+=== THE DEAD-END: hand-populating _rtld_global_ro ===
+
+Natural hypothesis: if we parse /proc/self/auxv and write fields
+into ld.so's `_rtld_global_ro` struct at the right offsets, glibc's
+internal init functions will work.
+
+Status: DOES NOT WORK. Not "hard to do" — structurally wrong.
+
+Evidence from cyrius v5.5.25:
+  * GLOB_DAT resolution DOES work — libc's GOT slot for
+    _rtld_global_ro correctly points at ld.so's export after
+    dynlib_open.
+  * Struct is mapped-but-zero-filled because ld.so's _dl_start
+    never ran on our static binary (we bypassed PT_INTERP).
+  * __libc_early_init does `div %r8` where r8 = *(rtld_ro+0x2a8);
+    with zero there, SIGFPE.
+  * Populating +0x2a0 / +0x2a8 with plausible values from auxv
+    moves past SIGFPE → SIGSEGV elsewhere in the same function.
+  * Populating THAT field moves to yet another SIGSEGV — each
+    field reveals the next uninitialised one.
+  * Even with __libc_early_init skipped, getpwuid directly still
+    SIGSEGVs in NSS dispatch (private-static module table not
+    reachable via exported symbols).
+
+=== WHY IT CAN'T WORK (the maintainers' view) ===
+
+From Florian Weimer, libc-alpha 2017:
+  "Change the static dlopen implementation to load ld.so first
+   and let it handle all further dynamic linking."
+
+Translation: `_rtld_global_ro` has ~100 fields across many
+substructs (including an embedded `struct cpu_features` with
+CPUID arrays). ld.so populates them across dozens of code paths
+in elf/rtld.c. Hand-populating what ld.so itself populates is
+literally reimplementing ld.so — without access to its internal
+state machine — against a moving target (offsets drift between
+glibc releases).
+
+Every patch of glibc can add fields. Every CPU microarchitecture
+change can shift `struct cpu_features`. There is no stable ABI.
+
+=== WHAT TO DO INSTEAD ===
+
+Three legitimate paths (pick based on consumer needs):
+
+PATH 1 — BYPASS GLIBC NSS ENTIRELY (what musl does)
+
+For identity lookups (getpwuid, getpwnam, getgrgid, getgrouplist):
+don't use glibc. Parse /etc/passwd and /etc/group directly.
+
+musl libc does this for its entire NSS surface:
+  getpwent.c:    25 LoC entry points
+  getpwent_a.c:  ~55 LoC parser (colon-split)
+  getpw_a.c:     ~40 LoC
+  getpw_r.c:     45 LoC reentrant wrapper
+
+Total ~165 LoC; actual logic is ~50 LoC. Handles passwd:files
+and group:files — the default NSS config on essentially every
+Linux desktop, server, and container.
+
+Shadow auth (pam_authenticate): read /etc/shadow directly + verify
+unix crypt(3) format ($6$salt$hash / $5$salt$hash) via an existing
+SHA-family implementation. For non-root scenarios where /etc/shadow
+is 600 root:root: fork /usr/sbin/unix_chkpwd (setuid-root, designed
+for pipe-based invocation by non-root PAM modules — this is what
+Linux-PAM's pam_unix itself does).
+
+Limitation: works only for "files" NSS backends. LDAP / SSSD / NIS
+/ winbind need Path 3.
+
+PATH 2 — SUBPROCESS HELPER
+
+Fork/exec /usr/bin/getent or /usr/sbin/unix_chkpwd. Both are on
+every mainstream Linux distro. fork+exec cost per lookup is ~1 ms;
+fine for auth paths, bad for hot loops. Advantage: handles any
+NSS backend the system is configured for, with no cyrius-side
+complexity.
+
+PATH 3 — FOREIGN-DLOPEN PATTERN
+
+For cases that genuinely need glibc's full state (getaddrinfo with
+DNS + /etc/hosts + /etc/resolv.conf; strerror with locale messages;
+setenv realloc path; setlocale global rwlock):
+
+Two production implementations exist — copy them:
+  * pfalcon/foreign-dlopen on GitHub
+  * Cosmopolitan libc's cosmo_dlopen
+
+Core idea:
+  1. Compile a ~40-line C helper at install time against the
+     system libc. Cache somewhere stable.
+  2. mmap the helper ELF + ld-linux.so.2.
+  3. Build a fake argv/envp/auxv on a fresh 64 KB stack. Populate
+     AT_PHDR, AT_BASE, AT_ENTRY, AT_PAGESZ, AT_RANDOM,
+     AT_SYSINFO_EHDR from /proc/self/auxv.
+  4. setjmp in your static code.
+  5. Jump to ld.so's ELF entry point (e_entry) with the constructed
+     stack. ld.so now runs its NORMAL _dl_start flow, populates
+     _rtld_global_ro legitimately, calls __libc_start_main, which
+     runs the helper's main().
+  6. Helper's main resolves symbols via real dlsym, invokes a
+     caller-provided callback with the captured fn pointers.
+  7. Callback longjmps back into the static binary with a struct
+     of {dlopen, dlsym, getaddrinfo, ...} real fn pointers.
+
+The key insight: you don't populate anything — ld.so does,
+exactly as it does for every other process on the system.
+
+Cost: ~200 LoC host-language + ~40 LoC C helper + setjmp/longjmp
+primitives. Risks: locale double-init, TLS base collision with
+any prior TLS setup. Cosmopolitan handles both cleanly; copy their
+approach.
+
+=== RULE OF THUMB ===
+
+  * If the glibc fn is a simple file parser (passwd, group,
+    hosts, nsswitch.conf): rewrite it in your language. Deterministic,
+    no glibc dependency.
+  * If it's network (getaddrinfo, gethostbyname): Path 2 via
+    `getent hosts` if cheap enough, else Path 3.
+  * If it needs glibc's full state (locale, errno, malloc, pthread):
+    Path 3 (foreign-dlopen).
+  * NEVER try to hand-populate _rtld_global_ro. Not worth the time.
+
+=== REFERENCES ===
+
+  * glibc ldsodefs.h (struct rtld_global_ro):
+    https://elixir.bootlin.com/glibc/latest/source/sysdeps/generic/ldsodefs.h
+  * glibc dl-parse_auxv.h (auxv → GLRO mapping):
+    https://elixir.bootlin.com/glibc/latest/source/sysdeps/unix/sysv/linux/dl-parse_auxv.h
+  * Weimer on why static dlopen is broken:
+    https://sourceware.org/legacy-ml/libc-alpha/2017-12/msg00521.html
+  * Cosmopolitan cosmo_dlopen:
+    https://github.com/jart/cosmopolitan/blob/master/libc/dlopen/dlopen.c
+  * pfalcon/foreign-dlopen:
+    https://github.com/pfalcon/foreign-dlopen
+  * musl getpwent.c:
+    https://git.musl-libc.org/cgit/musl/plain/src/passwd/getpwent.c
+  * Linux-PAM unix_chkpwd (setuid helper for shadow auth):
+    https://reviews.freebsd.org/D34322
+
+=== CYRIUS-SPECIFIC ARTIFACTS ===
+
+  * lib/dynlib.cyr — the custom ELF loader, has
+    dynlib_bootstrap_* primitives (locale, environ, read_auxv)
+    that are useful for simple libc calls (strlen, getpid, getenv)
+    but do NOT solve NSS dispatch.
+  * programs/nss_probe.cyr — reference probe. Runs the full
+    bootstrap sequence and dumps _rtld_global_ro + libc GOT state.
+    Useful for anyone who wants to revisit the dead-end path.
+  * docs/development/issues/dynlib-nss-bootstrap.md — full
+    investigation log with empirical findings.
+'''

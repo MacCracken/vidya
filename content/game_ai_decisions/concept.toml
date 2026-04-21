@@ -1,0 +1,94 @@
+id = "game_ai_decisions"
+title = "Game AI Decision Making"
+topic = "GameAIDecisions"
+description = "How game AI evaluates options and chooses actions — decision trees, weighted probabilities, and stat-driven behavior for believable opponents."
+tags = ["ai", "decision-tree", "probability", "game-ai", "drone", "npc", "behavior", "stats", "difficulty", "opponent", "strategy"]
+related_topics = ["state_machines", "algorithms", "performance", "grid_pathfinding", "collision_detection_2d", "projectile_physics"]
+
+[[best_practices]]
+title = "Use stat-driven probability curves, not hardcoded thresholds"
+explanation = "A player with Shooting=8 should have a different shot probability than Shooting=3. Map stats to probability curves (linear, quadratic, or lookup table). This makes AI behavior tunable without code changes."
+
+[[best_practices]]
+title = "Separate evaluation from execution"
+explanation = "The AI decision function returns WHAT to do (shoot, pass, dunk). A separate function DOES it. This lets you test decision logic with unit tests: given these inputs, does the AI choose the right action?"
+
+[[best_practices]]
+title = "Weight multiple factors, don't use single-condition trees"
+explanation = "Real decisions consider distance to goal, defender proximity, shot clock, teammate position, and stats simultaneously. Score each option (shoot=75, pass=60, drive=40) and pick the highest. This produces more nuanced behavior than a series of if-else checks."
+
+[[best_practices]]
+title = "Scale difficulty by adjusting stat values, not logic"
+explanation = "Easy AI uses Speed=3, Shooting=4. Hard AI uses Speed=8, Shooting=9. The decision logic stays identical — the stat curves naturally produce better play. This is how the original NBA Jam handles difficulty."
+
+[[best_practices]]
+title = "Add randomness to prevent predictability"
+explanation = "Even with perfect decision scoring, the AI should occasionally pick a suboptimal choice. Add noise to scores (score += random(-10, 10)) so the AI sometimes passes when shooting is marginally better. Humans are unpredictable; AI should be too."
+
+[[gotchas]]
+title = "AI that always makes the optimal play feels unfair"
+explanation = "If the AI always shoots when open and the shooting stat gives 90% accuracy, it makes nearly every shot. Players perceive this as cheating even though the logic is correct. Cap accuracy or add a forced-miss probability."
+bad_example = "if (is_open && distance < range) { shoot(); }  // AI never misses an open shot"
+good_example = "var accuracy = base_accuracy - distance_penalty + stat_bonus;\nif (random(100) < accuracy) { make_shot(); } else { miss_shot(); }"
+
+[[gotchas]]
+title = "Decision trees with too many branches cause inconsistent behavior"
+explanation = "A 20-deep if-else tree has paths that are nearly never taken. The AI may behave strangely in rare situations because untested branches have bugs. Flatten to weighted scoring to ensure all combinations are exercised."
+bad_example = "if (close && turbo && open && !fire && clock < 10 && ...) { dunk(); }"
+good_example = "var dunk_score = closeness * 30 + turbo_bonus * 20 + openness * 25;\nreturn highest_score(shoot_score, dunk_score, pass_score);"
+
+[[gotchas]]
+title = "Forgetting the shot clock creates passive AI"
+explanation = "Without time pressure, AI can dribble indefinitely looking for the perfect shot. As the shot clock decreases, shooting urgency should increase: multiply shooting score by (1 + clock_pressure)."
+bad_example = "// AI evaluates options identically at 24 seconds and 2 seconds"
+good_example = "var urgency = max(1, (SHOT_CLOCK_MAX - clock_remaining) / 4);\nshoot_score = shoot_score * urgency;"
+
+[[gotchas]]
+title = "AI teammate ignoring alley-oop windows"
+explanation = "An alley-oop requires the passer to recognize the receiver's position AND trajectory. If AI only checks current position, it misses the timing window where the receiver is airborne near the rim."
+bad_example = "if (teammate_near_rim()) { pass(); }  // teammate might be running away from rim"
+good_example = "if (teammate_near_rim() && teammate_moving_toward_rim() && teammate_can_catch()) { lob_pass(); }"
+
+[[performance_notes]]
+title = "Decision evaluation should be sub-microsecond per entity"
+explanation = "In a 4-player game at 60fps, AI runs for 2-4 entities per frame. Each evaluation must complete in under 1us to avoid impacting frame time. Weighted scoring with 5-8 factors achieves this easily."
+evidence = "Simple weighted scoring: 50-200ns per evaluation. Decision trees: similar for depth < 10."
+
+[[performance_notes]]
+title = "Precompute stat lookup tables at game start"
+explanation = "If shooting accuracy depends on stat * distance * defender_proximity, precompute stat-to-probability tables during load. During gameplay, the AI does a single table lookup instead of repeated multiplication."
+evidence = "Table lookup: 5-10ns. Runtime calculation: 20-50ns. Over 60fps * 4 entities, savings are marginal but the code is simpler."
+
+[[performance_notes]]
+title = "Random number generation must be fast and deterministic"
+explanation = "AI uses randomness every frame. Use a fast PRNG (PCG, xorshift) seeded at game start. This is both faster than syscall-based random and makes replays deterministic: same seed = same AI behavior."
+evidence = "PCG multiply-add: ~2ns per call. /dev/urandom read: ~200ns per call. 100x difference in hot loops."
+
+[[languages.rust]]
+source = "raasta"
+note = "raasta provides steering behaviors (seek, flee, arrive, pursuit, evade, wander, flocking, obstacle avoidance) with weighted and priority-based blending. RVO/ORCA for multi-agent collision avoidance. Flow fields for crowd movement."
+pattern = """
+// raasta: behavior blending
+let seek = SteerBehavior::Seek { target: player_pos };
+let avoid = avoid_obstacles(pos, vel, obstacles, max_speed);
+let blended = blend_weighted(&[
+    WeightedSteer { behavior: seek, weight: 1.0 },
+    WeightedSteer { behavior: avoid, weight: 3.0 },
+], max_speed);
+"""
+
+[[languages.rust]]
+source = "kiran"
+note = "kiran's behavior_demo.rs shows NPC personality traits (Patience, Warmth, Humor) as f32 values that modify AI decisions. Mood stimulus events trigger emotional responses. Higher-level than arcade AI but demonstrates trait-driven behavior architecture."
+pattern = "Personality traits stored as f32 (0.0-1.0), combined with mood stimulus to produce behavioral responses."
+
+[[languages.cyrius]]
+source = "encom-hits"
+note = "encom-hits uses greedy chase for grid bugs (reduce distance to player per tick). Light Cycles AI planned with wall-avoidance lookahead. Tank AI planned with A* pathfinding + shot prediction through ricochet geometry."
+pattern = """
+// Grid Bugs: greedy chase
+var dx = gb_player_x - gb_bug_x[i];
+if (dx > 0) { if (gb_can_move(bx, by, EAST)) { gb_bug_x[i] = gb_bug_x[i] + 1; } }
+// Tank AI (planned): A* to player, fire when line-of-sight clear
+// Light Cycles AI (planned): avoid walls with N-cell lookahead
+"""

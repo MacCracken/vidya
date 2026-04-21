@@ -1,0 +1,111 @@
+id = "compression"
+title = "Compression"
+topic = "Compression"
+description = "Lossless and lossy compression algorithms — entropy coding, dictionary compression, transform coding. Three generations: Huffman (1952), LZ77/LZ78 (1977/1978), ANS (2009). Covers DEFLATE, LZ4, Zstandard, and the primitive map across the AGNOS ecosystem."
+tags = ["compression", "deflate", "lz4", "zstandard", "huffman", "lz77", "entropy-coding", "dictionary-compression", "zlib", "gzip", "bit-stream"]
+related_topics = ["algorithms", "binary_formats", "performance"]
+
+[[best_practices]]
+title = "LZ4 for speed, DEFLATE for compatibility, Zstandard for best ratio"
+explanation = "LZ4 decompresses at 3-5 GB/s with ~2:1 ratio. DEFLATE is what zip/gzip/git use — universal compatibility. Zstandard (tANS + LZ77) beats both on ratio at competitive speed. Pick the algorithm for the use case, not the one you know."
+
+[[best_practices]]
+title = "Separate the entropy coder from the dictionary coder"
+explanation = "Modern compression is a pipeline: LZ77 (dictionary) → entropy coding (Huffman or ANS). These are independent stages. A good LZ77 match-finder can feed any entropy coder. Don't weld them together."
+
+[[best_practices]]
+title = "Test decompression against known-good implementations"
+explanation = "Your DEFLATE decompressor must produce byte-identical output to zlib for the same input. Your compressor's output must be decompressible by zlib. Cross-implementation testing catches spec misreadings that round-trip tests miss."
+
+[[best_practices]]
+title = "Bit-reader correctness before Huffman correctness"
+explanation = "DEFLATE is a bit-stream, not a byte-stream. Huffman codes straddle byte boundaries. If your bit-reader is wrong, every Huffman decode is wrong. Test the bit-reader exhaustively in isolation before building anything on top of it."
+
+[[best_practices]]
+title = "Benchmark throughput (MB/s), not just ratio"
+explanation = "A 10% better ratio that halves throughput is rarely worth it. Compression benchmarks must report both MB/s (compress and decompress separately) and ratio. The ratio/speed Pareto frontier is what matters."
+
+[[best_practices]]
+title = "Check for extraction before writing from scratch"
+explanation = "Compression primitives (bit I/O, Huffman, Rice, range coding, LPC) often already exist in audio/video codecs. In AGNOS: shravan has bit-reader, Huffman decode, Rice coding, range encoding, LPC prediction, FFT/MDCT. Factor and generalize before reimplementing."
+
+[[gotchas]]
+title = "DEFLATE bit order is LSB-first"
+explanation = "DEFLATE reads bits from least significant bit first within each byte. Most other formats (JPEG, PNG metadata) are MSB-first. Getting this wrong produces garbage that looks almost-but-not-quite right — the most confusing class of bug."
+bad_example = "// MSB-first: read high bit first\nbit = (byte >> (7 - bit_pos)) & 1"
+good_example = "// LSB-first (DEFLATE): read low bit first\nbit = (byte >> bit_pos) & 1"
+
+[[gotchas]]
+title = "Fixed vs dynamic Huffman trees are not optional"
+explanation = "A DEFLATE decompressor must handle both fixed (type 01) and dynamic (type 10) Huffman blocks. Many real-world streams use both in the same file. Implementing only fixed trees will decompress some files and silently fail on others."
+bad_example = "// Only handle fixed trees — will fail on most real DEFLATE streams"
+good_example = "// Handle all three block types: uncompressed (00), fixed (01), dynamic (10)"
+
+[[gotchas]]
+title = "LZ77 match copies can overlap source and destination"
+explanation = "A match with offset=1 and length=100 means 'repeat the last byte 100 times.' The source and destination overlap. You must copy byte-by-byte, not memcpy. This is how LZ77 encodes run-length patterns."
+bad_example = "memcpy(dst + pos, dst + pos - offset, length)  // WRONG: memcpy doesn't handle overlap"
+good_example = "for i in 0..length { dst[pos + i] = dst[pos - offset + i] }  // correct: byte-by-byte"
+
+[[gotchas]]
+title = "Decompression bombs: untrusted input can claim enormous output"
+explanation = "A malicious compressed stream can claim to decompress to terabytes. Always enforce an output size limit. Without it, a 50-byte input can exhaust memory."
+bad_example = "// Allocate output based on claimed uncompressed size from header\nvar buf = alloc(header.uncompressed_size)"
+good_example = "// Enforce a hard limit regardless of what the header claims\nif output_size > MAX_OUTPUT { return ERR_OUTPUT_LIMIT }"
+
+[[gotchas]]
+title = "Adler-32 and CRC-32 are not interchangeable"
+explanation = "zlib uses Adler-32 (faster, weaker). gzip uses CRC-32 (slower, stronger). Using the wrong checksum produces a valid-looking stream that fails verification. Check which format you're wrapping."
+
+# AGNOS ecosystem primitive map
+# This section maps compression primitives to where they already exist
+# in the AGNOS codebase, so implementors know what to lift vs write fresh.
+
+[[sections]]
+title = "AGNOS Ecosystem Primitive Map"
+content = '''
+Compression primitives are not concentrated in one crate. They're distributed
+across audio codecs (shravan), GPU abstraction (mabda), and the compression
+library (sankoch). This map shows where each primitive lives.
+
+ENTROPY CODING:
+  Huffman decode (canonical)     → shravan/aac.cyr:843-873 (AAC codebooks)
+                                 → sankoch/huffman.cyr (DEFLATE tables, extracted)
+  Rice/Golomb coding             → shravan/flac.cyr:367-437 (FLAC residuals)
+  Range/arithmetic coding        → shravan/opus.cyr:175-284 (Opus encoder)
+  tANS (Asymmetric Numeral Sys)  → not yet implemented (Zstandard future)
+
+BIT-STREAM I/O:
+  Bit-reader (generic)           → shravan/main.cyr:1244-1283 (LSB/MSB modes)
+  Bit-writer (with buffer grow)  → shravan/flac.cyr:1007-1147 (FLAC encoder)
+  Bit-reader (DEFLATE LSB-first) → sankoch/bitreader.cyr (extracted + adapted)
+  Bit-writer (DEFLATE LSB-first) → sankoch/bitwriter.cyr (extracted + adapted)
+
+DICTIONARY COMPRESSION:
+  LZ4 block format               → sankoch/lz4.cyr (new, no prior impl)
+  LZ77 sliding window            → sankoch/lz77.cyr (new — the missing piece)
+  DEFLATE framing                → sankoch/deflate.cyr (new, RFC 1951)
+
+PREDICTION:
+  LPC (Linear Predictive Coding) → shravan/flac.cyr:517-580 (FLAC decoder)
+  Fixed-order prediction          → shravan/flac.cyr:1235-1260 (FLAC encoder)
+  Adaptive prediction             → shravan/main.cyr:1377-1418 (ALAC unfilter)
+
+TRANSFORMS:
+  FFT (radix 2/3/5)              → shravan/fft.cyr:29-237 (generic, any size)
+  MDCT (forward + inverse)       → shravan/fft.cyr:238-356 (generic)
+
+CHECKSUMS:
+  Adler-32                        → sankoch/checksum.cyr (inline, RFC 1950)
+  CRC-32                          → sankoch/checksum.cyr (inline, RFC 1952)
+  SHA-256, BLAKE3                 → sigil (crypto boundary)
+
+GPU COMPUTE:
+  Compute dispatch (generic)      → mabda/compute.cyr (pipeline, bind groups)
+  Texture compression (BC/ASTC)   → mabda (backlogged, dispatch ready)
+
+The key insight: sankoch is an extraction + factoring operation, not greenfield.
+The bit I/O, Huffman decode, and entropy coding primitives are already written
+and tested in shravan. The genuinely new code is LZ77 match-finding and the
+DEFLATE/zlib/gzip format wrappers.
+'''

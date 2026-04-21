@@ -1,0 +1,287 @@
+# Game AI Decision Making — Cyrius reference (runnable)
+# Stat-driven AI using weighted scoring, probability curves, and PRNG.
+# Modeled on NBA Jam's drone AI (DRONE.ASM/DRONE2.ASM).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# --- Action enum ---
+enum Action {
+    ACT_SHOOT = 0;
+    ACT_DUNK = 1;
+    ACT_PASS = 2;
+    ACT_DRIVE = 3;
+    ACT_STEAL = 4;
+}
+
+# --- Player stats (1-10 scale) ---
+struct Stats {
+    speed;
+    shooting;
+    dunking;
+    passing;
+    stealing;
+    blocking;
+    clutch;
+    rebounding;
+}
+
+fn stats_new(spd, sht, dnk, pas, stl, blk, clt, reb) {
+    return Stats { spd, sht, dnk, pas, stl, blk, clt, reb };
+}
+
+# --- PRNG (PCG multiply-add) ---
+
+var _rng_state = 12345;
+
+fn rng_seed(s) {
+    _rng_state = s;
+}
+
+fn rng_next() {
+    _rng_state = _rng_state * 6364136223846793005 + 1442695040888963407;
+    # Use upper bits for better distribution
+    return (_rng_state >> 33) & 2147483647;
+}
+
+fn rng_range(max) {
+    # Returns value in [0, max)
+    if (max <= 0) { return 0; }
+    var r = rng_next();
+    # Ensure positive
+    if (r < 0) { r = 0 - r; }
+    return r - (r / max) * max;
+}
+
+# --- Probability check ---
+
+fn prob_check(stat) {
+    # Returns 1 with probability stat*10 out of 100.
+    # stat=10 → always succeeds. stat=0 → always fails.
+    var threshold = stat * 10;
+    var roll = rng_range(100);
+    if (roll < threshold) { return 1; }
+    return 0;
+}
+
+# --- AI scoring functions ---
+
+fn evaluate_shoot(shooting_stat, distance) {
+    # Score based on shooting stat and distance to rim.
+    # Higher stat = higher base score. Closer = higher score.
+    var base = shooting_stat * 10;
+    var dist_units = distance >> 16;    # fixed-point to integer
+    var score = base - dist_units;
+    if (score < 0) { score = 0; }
+    return score;
+}
+
+fn evaluate_dunk(dunking_stat, distance) {
+    # Must be within dunk range (3.0 game units) to score.
+    var dist_units = distance >> 16;
+    if (dist_units > 3) { return 0; }
+    # Close enough: high-value action
+    return dunking_stat * 15;
+}
+
+fn evaluate_pass(passing_stat) {
+    # Passing is always an option but scored lower.
+    return passing_stat * 8;
+}
+
+fn evaluate_drive(speed_stat) {
+    # Driving to the basket — based on speed.
+    return speed_stat * 6;
+}
+
+fn apply_urgency(score, shot_clock) {
+    # As shot clock decreases, shooting urgency increases.
+    # urgency = max(1, (24 - remaining) / 4)
+    var urgency = (24 - shot_clock) / 4;
+    if (urgency < 1) { urgency = 1; }
+    return score * urgency;
+}
+
+fn add_noise(score) {
+    # Add randomness to prevent predictable AI.
+    # Noise in [-10, 10] range.
+    var noise = rng_range(21) - 10;
+    var result = score + noise;
+    if (result < 0) { result = 0; }
+    return result;
+}
+
+# --- Main decision function ---
+
+fn ai_decide_offense(stats, distance, shot_clock) {
+    var p: *i64 = stats;
+    var shooting = *(p + 1);
+    var dunking = *(p + 2);
+    var passing = *(p + 3);
+    var speed = *p;
+
+    # Evaluate all options
+    var shoot_score = evaluate_shoot(shooting, distance);
+    shoot_score = apply_urgency(shoot_score, shot_clock);
+    shoot_score = add_noise(shoot_score);
+
+    var dunk_score = evaluate_dunk(dunking, distance);
+    dunk_score = add_noise(dunk_score);
+
+    var pass_score = evaluate_pass(passing);
+    pass_score = add_noise(pass_score);
+
+    var drive_score = evaluate_drive(speed);
+    drive_score = add_noise(drive_score);
+
+    # Pick highest
+    var best_action = ACT_SHOOT;
+    var best_score = shoot_score;
+
+    if (dunk_score > best_score) {
+        best_action = ACT_DUNK;
+        best_score = dunk_score;
+    }
+    if (pass_score > best_score) {
+        best_action = ACT_PASS;
+        best_score = pass_score;
+    }
+    if (drive_score > best_score) {
+        best_action = ACT_DRIVE;
+        best_score = drive_score;
+    }
+
+    return best_action;
+}
+
+# --- Tests ---
+
+fn test_evaluate_shoot() {
+    # Shooting stat 9, distance 3.0
+    var score = evaluate_shoot(9, 3 << 16);
+    assert_eq(score, 87, "shoot score: 9*10 - 3 = 87");
+
+    # Shooting stat 1, distance 20.0 → clamped to 0
+    var low = evaluate_shoot(1, 20 << 16);
+    assert_eq(low, 0, "low stat + far distance = 0");
+
+    # At the rim (distance 0) with max stat
+    var close = evaluate_shoot(10, 0);
+    assert_eq(close, 100, "stat 10 at rim = 100");
+    return 0;
+}
+
+fn test_evaluate_dunk() {
+    # Close range with good stat
+    var score = evaluate_dunk(8, 2 << 16);
+    assert_eq(score, 120, "dunk: stat 8 * 15 = 120 at close range");
+
+    # Too far to dunk
+    var far = evaluate_dunk(10, 10 << 16);
+    assert_eq(far, 0, "dunk: 0 when too far");
+    return 0;
+}
+
+fn test_urgency() {
+    var base = 50;
+
+    # Full clock (24 remaining): urgency = 1
+    var full = apply_urgency(base, 24);
+    assert_eq(full, 50, "full clock: no urgency multiplier");
+
+    # Low clock (2 remaining): urgency = (24-2)/4 = 5
+    var low = apply_urgency(base, 2);
+    assert_eq(low, 250, "low clock: score * 5");
+
+    # Empty clock (0): urgency = 24/4 = 6
+    var empty = apply_urgency(base, 0);
+    assert_eq(empty, 300, "empty clock: score * 6");
+    return 0;
+}
+
+fn test_prob_check() {
+    # Stat 10 should always pass (threshold=100, roll is [0,100))
+    rng_seed(42);
+    var i = 0;
+    var all_pass = 1;
+    while (i < 20) {
+        if (prob_check(10) != 1) { all_pass = 0; }
+        i = i + 1;
+    }
+    assert_eq(all_pass, 1, "stat 10 always passes prob check");
+
+    # Stat 0 should always fail (threshold=0, no roll is < 0)
+    rng_seed(99);
+    var all_fail = 1;
+    i = 0;
+    while (i < 20) {
+        if (prob_check(0) != 0) { all_fail = 0; }
+        i = i + 1;
+    }
+    assert_eq(all_fail, 1, "stat 0 always fails prob check");
+    return 0;
+}
+
+fn test_prng_determinism() {
+    # Same seed produces same sequence
+    rng_seed(77777);
+    var a1 = rng_next();
+    var a2 = rng_next();
+
+    rng_seed(77777);
+    var b1 = rng_next();
+    var b2 = rng_next();
+
+    assert_eq(a1, b1, "same seed: first value matches");
+    assert_eq(a2, b2, "same seed: second value matches");
+    return 0;
+}
+
+fn test_prng_variation() {
+    rng_seed(42);
+    var a = rng_next();
+    var b = rng_next();
+    assert(a != b, "consecutive PRNG values differ");
+    return 0;
+}
+
+fn test_difficulty_scaling() {
+    # Easy AI (low stats) should score lower than Hard AI (high stats)
+    var easy_shoot = evaluate_shoot(3, 5 << 16);
+    var hard_shoot = evaluate_shoot(9, 5 << 16);
+    assert(hard_shoot > easy_shoot, "hard AI shoots better than easy AI");
+
+    var easy_dunk = evaluate_dunk(2, 2 << 16);
+    var hard_dunk = evaluate_dunk(9, 2 << 16);
+    assert(hard_dunk > easy_dunk, "hard AI dunks better than easy AI");
+    return 0;
+}
+
+fn test_ai_decide() {
+    # At dunk range with high dunk stat — should prefer dunk
+    rng_seed(100);  # fixed seed for determinism
+    var s = stats_new(5, 5, 10, 3, 3, 3, 3, 3);
+    var action = ai_decide_offense(&s, 1 << 16, 20);
+    # Dunk score = 10*15 = 150, shoot score ~50, pass ~24
+    # Even with noise, dunk should dominate
+    assert_eq(action, ACT_DUNK, "high dunk stat at close range -> dunk");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_evaluate_shoot();
+    test_evaluate_dunk();
+    test_urgency();
+    test_prob_check();
+    test_prng_determinism();
+    test_prng_variation();
+    test_difficulty_scaling();
+    test_ai_decide();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
