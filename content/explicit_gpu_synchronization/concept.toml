@@ -1,0 +1,73 @@
+id = "explicit_gpu_synchronization"
+title = "Explicit GPU Synchronization"
+topic = "ExplicitGpuSynchronization"
+description = "Application-authored GPU sync (pipeline barriers, timeline semaphores, events) replacing the driver-tracked shadow state machine of GL/D3D11. Moved the correctness burden onto the app so drivers stop guessing — enables multi-threaded recording and aggressive scheduling. In a render-graph-first architecture, ~95% of barriers fall out of declared reads/writes automatically; the remaining 5% (feedback loops, dynamic-cadence CPU/GPU sync) needs one escape-hatch primitive: a timeline wait/signal. For single-queue apps a monotonic frame counter is even simpler."
+tags = ["synchronization", "gpu", "barriers", "timeline-semaphores", "fences", "pipeline-stages", "render-graph", "async-compute"]
+related_topics = ["render_graph_architecture", "bindless_resources", "gpu_memory_pooling", "concurrency", "state_machines"]
+
+[[best_practices]]
+title = "Let the render graph derive barriers — hand-written barriers are a code smell"
+explanation = "Topological sort over declared reads/writes emits the minimum correct barrier set. Any hand-placed barrier signals either incomplete declarations (fix the declarations) or a dependency the graph cannot see (use the timeline escape hatch, not a pipeline barrier). Frostbite, UE5 RDG, and Granite all converged on this; apps rarely write raw barriers in production."
+
+[[best_practices]]
+title = "Batch barriers at pass boundaries, not per resource"
+explanation = "One barrier call per pass boundary, with all resource transitions bundled, is dramatically cheaper than emitting a barrier per resource. On deferred renderers this alone saves 8-12% CPU-side. In Vulkan use `vkCmdPipelineBarrier2` (Synchronization2) with a single `VkDependencyInfo` carrying all transitions."
+
+[[best_practices]]
+title = "Prefer Synchronization2 where available"
+explanation = "Vulkan 1.3 core (or VK_KHR_synchronization2). Collapses memory/buffer/image barrier flavors into one `VkDependencyInfo`. Unified 64-bit stage+access masks. Image layout transition co-located with the barrier. The legacy API is retained only for driver compatibility; new code should never touch it."
+
+[[best_practices]]
+title = "Timeline semaphores for cross-queue; one fence per frame-in-flight"
+explanation = "Timeline semaphores (Vulkan 1.2 core, D3D12 fences, Metal events) are monotonic u64 counters — host and device can both wait or signal any value. They replace fences + binary semaphores + events. For single-queue apps, one fence per frame-in-flight covers every frame-pacing need; never emit a fence per submit."
+
+[[best_practices]]
+title = "Consider a frame counter before reaching for timelines"
+explanation = "For single-queue rendering, a monotonic frame counter plus `wait_frame(n)` covers the common case (CPU reads frame N's readback after the GPU finishes frame N). Timelines are strictly more powerful but also add one primitive's worth of API surface. Expose timelines when async compute enters the picture; before then, a frame counter is all consumers need."
+
+[[gotchas]]
+title = "Image layout transitions are part of the Vulkan barrier but separate in D3D12"
+explanation = "In Vulkan, a pipeline barrier carries `oldLayout` and `newLayout` and does the transition inline. In D3D12, `ResourceBarrier` with `BARRIER_TYPE_TRANSITION` does the equivalent, but the first use of a resource may need an explicit initial state declaration. Cross-API abstractions that forget this pattern bug on first use."
+
+[[gotchas]]
+title = "Cross-queue ownership transfer needs matching release/acquire pair"
+explanation = "Using a resource on two queues requires a release barrier on queue A (`srcQueueFamilyIndex = A, dstQueueFamilyIndex = B`) and a matching acquire barrier on queue B. Forgetting either half causes silent corruption. Render graphs that span queues should own this transfer; applications should never be asked to write it by hand."
+
+[[gotchas]]
+title = "WAW (write-after-write) hazards vanish silently without graph tracking"
+explanation = "Two compute passes writing the same buffer look fine in isolation; without an intervening barrier the GPU can reorder them. The bug is frame-timing-dependent and often escapes validation because validation layers only check declared barriers, not missing ones. Graph-derived barriers catch this because the graph sees both writes; hand-rolled code rarely does."
+
+[[gotchas]]
+title = "ALL_COMMANDS masks are correct but crater performance"
+explanation = "`VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT` as source and destination is always safe but forces a full pipeline flush. During bring-up it's fine; shipped code must narrow to the actual stages involved. A renderer running entirely in ALL_COMMANDS masks will be several times slower than a renderer with tight stage masks, and no validation layer will complain."
+
+[[gotchas]]
+title = "Validation layers catch ~90% of sync bugs — ship CI with them on"
+explanation = "Vulkan Validation Layers implement a shadow model of correct state and flag illegal transitions. They're not perfect but they catch most sync bugs before they reach hardware where the symptom is 'random flicker.' Every CI run should enable validation; release builds disable it. The alternative is debugging GPU state from tea leaves."
+
+[[performance_notes]]
+title = "Synchronization2 wall-time savings"
+explanation = "Consolidating barrier flavors into one `VkDependencyInfo` and unifying stage/access masks reduces CPU-side barrier recording overhead measurably on deferred renderers, where barrier count is highest."
+evidence = "AMD's Sync2 writeup: 8-12% CPU-side reduction in barrier recording on deferred renderers. Khronos blog introduction cites similar numbers across multiple engines."
+
+[[performance_notes]]
+title = "Graph-derived barriers vs hand-placed"
+explanation = "Graph-derived barriers eliminate defensive transitions that hand-written code emits to be safe. The compile phase knows every pass's intent and emits only the barriers actually required."
+evidence = "O'Donnell, Frostbite FrameGraph GDC 2017: ~40% fewer redundant transitions, measurable GPU-idle reduction on async compute workloads. Granite: single-digit microseconds of barrier-emission cost per frame across hundreds of resources."
+
+[[performance_notes]]
+title = "Vulkan's barrier flavors and stage count are historical artifacts"
+explanation = "Sync2 already collapsed memory/buffer/image barriers into one structure. Vulkan's ~30 pipeline stages exist because of raster's fixed-function heritage — compute pipelines need 3 stages (producer, consumer, host); raster needs ~6 (vertex, fragment, color-out, depth-out, transfer, compute). A fresh API can ship an enum, not a bitmask, and collapse barrier kinds to one form where access and layout derive from the resource type."
+evidence = "Vulkan 1.3 Synchronization2 migration guide documents the collapse. D3D12 never had the multi-flavor split. No modern GPU uses the full 30-stage distinction — the mask is partly a legacy-compat mechanism."
+
+references = [
+  "Vulkan synchronization chapter — https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap7.html",
+  "VK_KHR_synchronization2 — https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VK_KHR_synchronization2.html",
+  "Khronos Sync2 intro (Tobias Hector) — https://www.khronos.org/blog/vulkan-synchronization-2-streamlining-synchronization-in-vulkan-1.3",
+  "D3D12 resource barriers — https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-resource-barriers-to-synchronize-resource-states",
+  "Themaister, 'Yet another blog explaining Vulkan synchronization' — https://themaister.net/blog/2019/08/14/yet-another-blog-explaining-vulkan-synchronization/",
+  "Themaister, 'Render graphs and Vulkan — a deep dive' — https://themaister.net/blog/2017/08/15/render-graphs-and-vulkan-a-deep-dive/",
+  "O'Donnell, FrameGraph GDC 2017 — https://www.gdcvault.com/play/1024612/",
+  "NVIDIA Vulkan Dos and Don'ts — https://developer.nvidia.com/blog/vulkan-dos-donts/",
+  "AMD GPUOpen Vulkan barriers explained — https://gpuopen.com/learn/vulkan-barriers-explained/",
+]

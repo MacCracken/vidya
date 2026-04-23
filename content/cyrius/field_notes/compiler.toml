@@ -1992,3 +1992,193 @@ that the related tooling surfaces (cyrdoc, cyrius test harness,
 distlib) still play nice. They usually don't — and catching it
 in the same patch is cheaper than filing a follow-up.
 '''
+
+[[entries]]
+name = "v5_5_28_to_40_gotchas_bundle"
+description = "Non-obvious gotchas from the v5.5.28 → v5.5.40 stretch of the minor (fdlopen completion, PE Win64 ABI closure, fixup cap raise, parser split, cc3 retirement, closeout)"
+category = "cyrius"
+content = '''
+The tail of v5.5.x (28 → 40) hit a cluster of gotchas that
+future-Claude investigations will circle back to. Each one cost
+real debug time; recording them so a vidya search hits them
+before rediscovery.
+
+=== 1. fdlopen_init_full: PF_* bits and mmap PROT_* bits are NOT 1:1 ===
+
+v5.5.34 fix. ELF program-header flags:
+  PF_X = 1
+  PF_W = 2
+  PF_R = 4
+
+Linux mmap prot flags:
+  PROT_READ  = 1
+  PROT_WRITE = 2
+  PROT_EXEC  = 4
+
+R and X are SWAPPED. Any loader that maps ELF segments into its
+own address space (foreign-dlopen, cosmopolitan-pattern, etc.)
+must translate — a naïve `prot = p_flags` leaves PF_R-only
+segments execute-only. Result: reads from those pages SIGSEGV,
+but ld.so's fault handler swallows the SIGSEGV and exits 0
+silently. Exit-0-silent is a KILLER symptom to debug — no
+observable output.
+
+The v5.5.29 "ld.so enters and exits 0 silent" investigation
+spent three attempts on wrong hypotheses (zero-filled auxv,
+missing AT_* fields) before the A1 diagnostic (read `base[0]`
+post-mmap_elf, before handing to ld.so) localized the SIGSEGV
+to mprotect'd segments. 6-line arithmetic swap fixed it.
+
+Kept `programs/fdlopen-phdr-probe.cyr` in-tree as the A1
+methodology template: when ld.so goes silent, probe the mapped
+pages before handing control off.
+
+=== 2. R11 (not RCX) as __chkstk probe scratch under Win64 ===
+
+v5.5.36 Phase 1 initially emitted the `__chkstk`-equivalent
+probe using RCX as the loop iterator. Worked fine for regular
+fns. BROKE as soon as v5.5.36 Phase 2b added struct-by-value
+return — because Win64 passes the hidden retptr in RCX, and
+the probe clobbered it before the callee could stash it.
+
+Fix: use R11 (volatile on both SysV and Win64, NOT an arg
+register on either). Same 32-byte probe size, same encoding
+length, just a different register choice.
+
+Lesson for any future fn-prologue codegen that uses a scratch
+register: PICK FROM THE ABI-VOLATILE, NON-ARG set. R10 and R11
+are the safest picks on x86_64 — volatile on both SysV and
+Win64, never passed an argument in either ABI.
+
+=== 3. Cross-repo symlink: mabda/lib → cyrius/lib ===
+
+v5.5.34 sidebar. From v5.5.30 through v5.5.33 there was a
+recurring mystery: `lib/dynlib.cyr` in the cyrius repo kept
+losing the same 111 lines (the dynlib_bootstrap_environ /
+_read_auxv / _auxv_get block) between sessions. Four separate
+"restore dynlib" commits landed. The pre-commit hook caught
+it eventually but couldn't explain why it kept happening.
+
+Root cause: `/home/macro/Repos/mabda/lib` was a symlink to
+`/home/macro/Repos/cyrius/lib`. An agent working in mabda that
+ran Write or Edit on `lib/<anything>.cyr` wrote through the
+symlink into the cyrius repo. mabda-scope agents had no visibility
+into cross-repo callers (only cyrius's fdlopen.cyr used those
+fns), so dead-code passes removed them on what looked like clean
+reasoning. Same 111 lines every time because it was the same
+well-reasoned-but-cross-repo-blind decision, re-made.
+
+If you're ever investigating apparently-spontaneous file
+corruption in cyrius's lib/, first check for inbound symlinks:
+
+  find /home/macro/Repos -maxdepth 3 -type l -lname "*cyrius/lib*"
+  find ~/.cyrius -type l | xargs readlink -f | grep Repos/cyrius
+
+Fix (v5.5.34): retired the mabda symlink; mabda now uses
+`cyrius deps` to populate a real `lib/` directory. Added a
+Makefile `check-lib-wiring` guard in mabda that fails builds
+if lib/ ever becomes a symlink again. cyrius's CLAUDE.md grew
+a "Downstream repo setup (ecosystem rule)" section explicitly
+forbidding the pattern.
+
+=== 4. Nested-include refactor for byte-identical file splits ===
+
+v5.5.38. Splitting parse.cyr (4971 LOC) and lex.cyr (2355 LOC)
+into smaller component files without touching any main_*.cyr
+consumer file was done via NESTED INCLUDES:
+
+  # original
+  include "src/frontend/parse.cyr"     # 4971 LOC
+
+  # after split
+  include "src/frontend/parse.cyr"     # 891 LOC, which itself:
+    include "src/frontend/parse_types.cyr"
+    include "src/frontend/parse_expr.cyr"
+    include "src/frontend/parse_decl.cyr"
+    include "src/frontend/parse_ctrl.cyr"
+    include "src/frontend/parse_fn.cyr"
+
+Because cyrius's `include` is textual inlining and preserves
+line-order, the flattened fn-definition sequence is IDENTICAL
+to the pre-split file. Self-host byte-identical by construction,
+and verified at each of six extraction stages via
+`cmp /tmp/cc5_new build/cc5-from-before-stage`. Not just
+gen1 == gen2 self-host — provable zero-delta mechanical move.
+
+Future refactor pattern: extract, update parse.cyr's include
+line list, verify cmp-clean, move to next extraction. Don't
+bundle multiple extractions per verify step — bisecting a
+break then requires more work than just linear-stepping.
+
+=== 5. cyrius self had been silently failing since v5.0.0 ===
+
+v5.5.39 retirement of the cc3-era `src/cc/` + entry point files
+uncovered a long-standing bug in `cbt/commands.cyr` `cmd_self`:
+it was piping `src/compiler.cyr` (the old cc3 entry point)
+through cc5 for the self-host check. `src/compiler.cyr` had
+been broken since v5.1.9's partial cleanup — its `include`
+list referenced `src/cc/util.cyr`, `src/cc/jump.cyr`, and
+`src/cc/fixup.cyr` which no longer existed on disk. Build
+output was garbage (undefined-fn warnings for every helper),
+and `cyrius self` reported `FAIL: cc5!=cc5` on every run.
+
+Nobody noticed because:
+  - bootstrap/CI/scripts don't invoke `cyrius self`
+  - the proper self-host check lives in scripts/check.sh
+    (uses src/main.cyr, which works)
+  - the cbt CLI was rarely exercised for self
+
+Fix: one-character-ish change — repointed cmd_self at
+src/main.cyr. `cyrius self` now reports truth.
+
+Lesson: if a tool subcommand has been "passing" forever without
+anyone checking, be suspicious. Especially self-host / correctness
+checks. They should fail LOUDLY when broken, not silently PASS
+on vacuous input.
+
+=== 6. tests/heapmap.sh regex: 2+ spaces required, dropped 7+ hex digits ===
+
+v5.5.40 closeout. The heap-auditor's regex `^#   0x[0-9A-Fa-f]+  +[a-zA-Z_]`
+required 2+ spaces between the hex offset and the region name.
+Column-aligned comments have different spacing depending on
+hex-digit count:
+
+  #   0x00000  input_buf     [...]    # 5-digit offset + 2 spaces
+  #   0x11A000 var_noffs     [...]    # 6-digit offset + 1 space
+  #   0x150B000 fixup_tbl    [...]    # 7-digit offset + 1 space
+
+Regex matched the 5-digit line (2 spaces) and silently skipped
+the 6/7-digit lines (1 space). Net effect: every region past
+0xFC000 was INVISIBLE to the auditor. That includes the IR
+region (0xECA000+), the codebuf/output buffers, token arrays,
+and the v5.5.37 relocated fixup_tbl at 0x150B000.
+
+Audits reported "47 regions, 0 warnings" when the real count
+was 72. The v5.5.37 fixup_tbl relocation went unchecked by
+the tooling for three patches.
+
+Fix (v5.5.40 closeout): relax regex from `  +` to ` +`. Now
+72 regions, 0 overlaps (genuine).
+
+Lesson: CI/audit tooling silently skipping work is WORSE than
+failing loudly. If a regex-based parser could plausibly miss
+a line format, audit the output count against the known region
+count. One trivial assertion would have caught this years ago.
+
+=== Bundle rule of thumb ===
+
+This v5.5.28–v5.5.40 stretch shipped ~12 patches across
+substantive platform work (fdlopen completion, Win64 ABI,
+fixup cap raise, parser split, cc3 retirement, closeout). Most
+of the hard-to-debug issues came from SUBTLE INTERACTIONS:
+R11 vs RCX under two different ABIs; ELF PF bits vs mmap
+PROT bits; regex whitespace vs column alignment; cross-repo
+symlink vs cross-repo dead-code analysis.
+
+For any future minor with similar platform-arc work, the
+highest-ROI investment is the DIAGNOSTIC probe (fdlopen-phdr-probe.cyr
+pattern) — write a tiny program that reads the state the
+real code produces, surface it before the next opaque failure
+mode fires. When the symptom is "exit 0 silent" or "byte-
+identical but wrong," diagnostics > re-reasoning.
+'''

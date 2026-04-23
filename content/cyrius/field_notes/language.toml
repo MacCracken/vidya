@@ -565,3 +565,93 @@ the same pattern:
     lib/foo_linux.cyr    Linux peer
     lib/foo_windows.cyr  Windows peer
 '''
+
+[[entries]]
+name = "stack_var_keyword_for_struct_locals"
+description = "v5.5.36 `stack var p: Point;` forces a named struct onto the frame; `var p: Point;` also now parses"
+category = "cyrius"
+content = '''
+v5.5.36 added the `stack` storage-class keyword for named struct
+locals, plus `var p: Point;` (no RHS) as a parse-level way to
+declare a struct-typed local. Both allocate on the frame:
+
+    fn demo() {
+        stack var p: Point;       // explicit (preferred when
+                                  // you want readers to notice)
+        p.x = 1;
+        p.y = 2;
+    }
+
+    fn demo2() {
+        var q: Point;             // same effect, shorter form
+        q.x = 3;
+    }
+
+`stack` is reserved (TOK=111). Variable and field names can't
+use `stack` any more — rename to `stk`/`sp` if you collide.
+
+Struct locals that previously needed anonymous filler `var`
+slots to land at a known rbp disp can now just declare at the
+struct type directly.
+'''
+
+[[entries]]
+name = "struct_return_by_value_5_5_36"
+description = "`fn make(): Point { ... return p; }` compiles — struct return is native on both SysV and Win64"
+category = "cyrius"
+content = '''
+Pre-v5.5.36 callers had to pass `&Point` out-params; the
+compiler didn't wire struct-by-value return for >8B types.
+v5.5.36 closed it:
+
+    fn make_point(x: int, y: int): Point {
+        stack var p: Point;
+        p.x = x;
+        p.y = y;
+        return p;
+    }
+
+    fn caller() {
+        var got: Point = make_point(3, 4);  // deep copy
+    }
+
+ABI plumbing (automatic):
+ - SysV: hidden retptr in RDI (first arg).
+ - Win64: hidden retptr in RCX (first arg).
+ - Callee memcpys the local into *retptr before RET.
+
+The `var got: Point = make_point(...)` form on the LHS is also
+new in v5.5.36 — parser recognises struct-returning call on the
+RHS and emits the retptr setup.
+
+Use return-by-value for small packed values (Point, Range,
+Result). Long-lived structs should still live on the heap.
+'''
+
+[[entries]]
+name = "variadic_fn_5_5_36"
+description = "`fn printf(fmt: str, ...)` syntax lands in v5.5.36 (Phase 3-min); use lib/varargs.cyr inside the body"
+category = "cyrius"
+content = '''
+v5.5.36 added `...` as the variadic-parameter token:
+
+    fn printf(fmt: str, ...) {
+        // use lib/varargs.cyr va_start / va_arg / va_end
+    }
+
+`...` is TOK=112, only valid as the last parameter. The compiler
+sets a GFVA flag on the callee so call sites know to handle
+variadic ABI quirks:
+ - Win64 MSDN rule: float args to a variadic callee go into
+   BOTH the XMM register file AND the RCX/RDX/R8/R9 GPR slots.
+   The compiler emits the duplication at the call site; you
+   don't write it.
+ - SysV passes float args in XMM0-7 as usual; RAX on the call
+   holds the number of XMM regs used, per SysV §3.5.7.
+
+Phase 3-min (shipped v5.5.36) covers primitives-through-varargs.
+Phase 3-full (future) expands va_arg to structs-by-value and
+nested varargs — for now, if you need those shapes, pass a
+pointer or a single `u64` and unpack.
+'''
+

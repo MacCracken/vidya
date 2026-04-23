@@ -1,0 +1,77 @@
+id = "gpu_memory_pooling"
+title = "GPU Memory Pooling and Sub-allocation"
+topic = "GpuMemoryPooling"
+description = "Allocating GPU memory per-resource is expensive (~10-100 µs per DRM BO ioctl on Linux) and hits driver per-process limits (~64K BOs on AMDGPU). The industry pattern is to allocate a few large blocks upfront and sub-allocate from them in user space — collapsing N ioctls to 1 and giving the app control over placement. Three allocator shapes cover every documented real-world win: bump (transient per-frame, reset on frame boundary), ring (upload staging, head/tail chase with fences), and TLSF block pool (persistent mid-life resources). Defragmentation is largely cargo-cult; shipping AAA sizes pools to avoid it. Render-graph-informed aliasing — disjoint-lifetime transients sharing memory — beats general-purpose pools on the single biggest win available."
+tags = ["gpu", "memory", "allocator", "sub-allocation", "tlsf", "bump-allocator", "ring-buffer", "bar", "rebar", "aliasing", "drm"]
+related_topics = ["render_graph_architecture", "bindless_resources", "explicit_gpu_synchronization", "allocators", "memory_management", "virtual_memory"]
+
+[[best_practices]]
+title = "Sub-allocate from 64-256 MB blocks — never per-resource"
+explanation = "One DRM BO or VkDeviceMemory per 64-256 MB block, with TLSF or similar sub-allocation within. Collapses N ioctl calls to N/block_count. VMA and D3D12MA both default to this pattern. The block size trades off fragmentation (smaller blocks are less wasteful) against allocation overhead (larger blocks make BOs cheaper per sub-allocation)."
+
+[[best_practices]]
+title = "Separate allocators per use-case"
+explanation = "Transient (bump allocator, reset each frame), upload staging (ring buffer, head/tail with fences), and persistent (TLSF block pool) have incompatible lifetime patterns. One allocator can't do all three well — bump allocators can't free mid-frame, ring buffers require ordered access, TLSF overhead is wasted on transients. Three allocators, each optimal for its use case, beats one general-purpose allocator."
+
+[[best_practices]]
+title = "Use BAR / ReBAR memory for upload when available"
+explanation = "Resizable BAR (AMD SAM, NVIDIA ReBAR) exposes the full VRAM aperture to the CPU. CPU writes go directly to GPU memory, eliminating the staging-copy step. Intel's ReBAR analysis measured 5-15% FPS improvement on VRAM-pressured titles. ~60% Steam HW survey penetration as of early 2026 — plan for both paths; fall back to staging-copy when BAR is unavailable."
+
+[[best_practices]]
+title = "Cache BO handles across frames — don't free-and-recreate same-size resources"
+explanation = "Creating a new BO of the same size a destroyed one had is wasteful (the ioctl cost repeats). Maintain a size-keyed free list of recently-destroyed BOs; reuse before going to the driver. Especially important for transient render targets that change size only on window resize."
+
+[[best_practices]]
+title = "Honor bufferImageGranularity between buffers and optimal-tiled images"
+explanation = "Some hardware requires extra alignment padding when a buffer sub-allocation and an optimal-tiled image sub-allocation land in the same memory block. `VkPhysicalDeviceLimits::bufferImageGranularity` declares this. Either force each block to hold only buffers or only images (bucketing), or pad the boundary between them. Missing the padding causes silent corruption on some drivers."
+
+[[gotchas]]
+title = "Non-coherent HOST_VISIBLE on tilers requires explicit flush"
+explanation = "Mobile tile-based GPUs (Mali, Adreno) often expose HOST_VISIBLE memory that is not HOST_COHERENT. CPU writes are buffered and don't reach GPU-visible memory until `vkFlushMappedMemoryRanges`. Forgetting the flush causes silent data corruption — the GPU reads stale data, the CPU sees the new data, and the bug is platform-specific. Always check the memory type's coherency bit before assuming writes are visible."
+
+[[gotchas]]
+title = "Long-lived pool fragmentation can orphan free memory"
+explanation = "After days of uptime, a 256 MB block may have 200 MB free but no 16 MB contiguous slot. Common in long-running compositors (aethersafta-class workloads). Three mitigations: size pools to fit peak working set (avoids the problem), use separate pools per size class (contains the problem), or ship defragmentation (complex and rarely worth it in production, per multiple AAA post-mortems)."
+
+[[gotchas]]
+title = "DRM BO per-process limits bite long-running processes"
+explanation = "AMDGPU defaults to ~64K BOs per process, Intel/i915 has lower limits in some configurations. A compositor running for weeks with sloppy BO lifecycle exhausts the table and the driver refuses new allocations. Pool allocation makes this a non-issue (tens of BOs total); per-resource allocation with poor release discipline hits the ceiling."
+
+[[gotchas]]
+title = "Pre-ReBAR consumer GPUs cap BAR at 256 MB"
+explanation = "Without Resizable BAR, the CPU-visible portion of VRAM is capped at 256 MB on most consumer hardware. Uploading > 256 MB of data requires staging-copy regardless. In 2026 ReBAR penetration is significant but not universal; the fallback path must exist."
+
+[[gotchas]]
+title = "Write-combined vs cached mappings — mixing them is a 10× perf cliff"
+explanation = "Write-combined mappings are optimized for CPU-write/GPU-read (no readback allowed — reads go through uncached memory). Cached mappings allow CPU readback but are slower for writes. Using a WC mapping for readback or a cached mapping for upload costs an order of magnitude. Allocator APIs should force the choice at allocation time and never mix."
+
+[[performance_notes]]
+title = "Sub-allocation vs per-resource allocation"
+explanation = "Replacing per-resource ioctls with sub-allocation from pooled blocks collapses allocator cost. VMA's own benchmarks show the allocator-call reduction and throughput improvement on allocation-heavy frames."
+evidence = "VMA test suite: 10-50× allocator-call reduction, ~3-5× throughput on allocation-heavy frames. Per-BO DRM ioctl cost is 10-100 µs; sub-allocation cost is tens of nanoseconds."
+
+[[performance_notes]]
+title = "BAR uploads eliminate one copy entirely"
+explanation = "Without BAR/ReBAR, uploading data to GPU memory requires: CPU → staging buffer (HOST_VISIBLE) → GPU copy → destination buffer (DEVICE_LOCAL). With ReBAR, the CPU writes directly to the DEVICE_LOCAL destination. One copy, not two."
+evidence = "Intel ReBAR analysis: 5-15% FPS gains in VRAM-pressured titles. NVIDIA ReBAR blog documents similar ranges."
+
+[[performance_notes]]
+title = "Render-graph-informed aliasing beats general-purpose pools"
+explanation = "A general-purpose pool allocator treats every sub-allocation as independent. A render-graph-informed allocator knows which sub-allocations are transients with disjoint lifetimes and can reuse the same backing memory across them. This is the single largest memory optimization available for GPU workloads."
+evidence = "Frostbite FrameGraph GDC 2017: ~50% render-target memory reclaimed on complex frames through transient aliasing. No general-purpose allocator can achieve this without lifetime knowledge the graph provides."
+
+[[performance_notes]]
+title = "VMA is ~20K lines; the essential allocator is ~2K"
+explanation = "VMA is the canonical GPU allocator — but 90% of its code is features beyond the essential TLSF + block pool. Templated statistics, per-type strategy selection, defragmentation state machines, budget tracking APIs, JSON dump, custom mutex abstraction. A fresh-slate GPU library can ship three focused allocators (bump/ring/TLSF-block) in ~2K lines and cover every documented real-world win."
+evidence = "VMA source tree: ~20K lines C++. Themaister/Granite allocator: low single-digit thousands of lines total. Functional parity on shipped workloads."
+
+references = [
+  "AMD Vulkan Memory Allocator (VMA) — https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator (docs: https://gpuopen.com/vulkan-memory-allocator/)",
+  "AMD D3D12 Memory Allocator (D3D12MA) — https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator",
+  "Themaister / Granite allocator writeups — https://themaister.net/blog/",
+  "Khronos Vulkan memory best practices — https://docs.vulkan.org/samples/latest/samples/performance/memory_allocation/README.html",
+  "Linux DRM memory management — https://docs.kernel.org/gpu/drm-mm.html",
+  "AMD Smart Access Memory (SAM) — https://www.amd.com/en/technologies/smart-access-memory",
+  "NVIDIA Resizable BAR — https://developer.nvidia.com/blog/nvidia-geforce-rtx-30-series-resizable-bar-support/",
+  "NVIDIA Vulkan Dos and Don'ts (memory section) — https://developer.nvidia.com/blog/vulkan-dos-donts/",
+]

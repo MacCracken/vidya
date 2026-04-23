@@ -1,0 +1,138 @@
+id = "direct_drm_gpu_compute"
+title = "Direct DRM GPU Compute Submission"
+topic = "DirectDrmGpuCompute"
+description = "Dispatching a compute workload to a Linux GPU via direct `ioctl()` against `/dev/dri/renderD128`, bypassing libdrm, libvulkan, and Mesa. The kernel UAPI is fully documented and stable; the ring-packet format (PM4 on AMDGPU) is not published by vendors but is readable in Mesa + the upstream GPL kernel driver. Viable in ~1,500 LOC for a compute-MVP on one ASIC family. A cleaner alternative for compute-first workloads is KFD + AQL (the ROCm path) — hardware scheduler manages rings, app submits AQL packets rather than hand-assembling PM4."
+tags = ["drm", "amdgpu", "gpu", "compute", "ioctl", "kernel-uapi", "pm4", "aql", "kfd", "radv", "ring-buffer", "syncobj", "gem"]
+related_topics = ["render_graph_architecture", "explicit_gpu_synchronization", "gpu_memory_pooling", "bindless_resources", "syscalls_and_abi", "kernel_topics"]
+
+[[best_practices]]
+title = "Use the render node (renderD128), not the card node"
+explanation = "`/dev/dri/renderD128` skips the DRM master auth dance. Intended for headless/compute workloads and non-privileged rendering. `/dev/dri/card0` requires DRI auth tokens and is meant for display-owning processes (compositors). For a compute library the render node is the right entry point."
+
+[[best_practices]]
+title = "AMDGPU_GEM_CREATE → GEM_MMAP → GEM_VA — all three are mandatory before GPU access"
+explanation = "Creating a GEM BO gives you a kernel-side handle. Mapping returns a fake offset you feed to `mmap()` for CPU access. VA-mapping (`DRM_IOCTL_AMDGPU_GEM_VA` with `AMDGPU_VA_OP_MAP`) gives the BO a virtual address in the process's GPU address space. The GPU cannot touch a BO without a VA mapping. New users forget step 3 and get kernel errors on submission."
+
+[[best_practices]]
+title = "Use render nodes + syncobjs, not legacy fences"
+explanation = "Attach a `SYNCOBJ_OUT` chunk to your CS ioctl and wait via generic `DRM_IOCTL_SYNCOBJ_WAIT`. The per-context `DRM_IOCTL_AMDGPU_WAIT_CS` with (ctx, ip, ring, seq) still works but syncobjs are the modern, vendor-agnostic path and compose with timeline semaphores for cross-queue use."
+
+[[best_practices]]
+title = "Treat Mesa as your PM4 spec; treat the kernel driver as your register spec"
+explanation = "AMD does not publish a current PM4 packet reference manual. Mesa's `src/amd/common/ac_pm4.c`, `sid.h`, `nvd.h`, `gfx11_enum.h` carry the de-facto opcode and header encoding. Register offsets and semantics live in the kernel driver at `drivers/gpu/drm/amd/include/asic_reg/gc_*.h`. Both are GPL and in-tree — it is documentation-via-code, not reverse engineering."
+
+[[best_practices]]
+title = "For compute-first sovereign stacks, evaluate KFD + AQL before committing to CS + PM4"
+explanation = "The KFD interface (`/dev/kfd`) is AMD's compute-dedicated kernel path. Apps submit AQL packets to a user queue; the hardware scheduler (HWS) manages the ring. Eliminates most PM4 hand-assembly for pure compute workloads. ROCm uses it. For mixed graphics+compute you still want CS + PM4 (render node path); for compute-only (ML, scientific, shader-based data processing) KFD + AQL is simpler, smaller, and the architecturally right answer for a sovereign OS."
+
+[[gotchas]]
+title = "CPU-visible VRAM (ReBAR) is a flag, not a separate domain"
+explanation = "`AMDGPU_GEM_DOMAIN_VRAM` + the `AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED` flag requests a BO in CPU-accessible VRAM. Without the flag, writes to VRAM go through an implicit staging path. Without Resizable BAR, CPU-accessible VRAM is capped at 256 MB; the kernel silently falls back to GTT for larger allocations. Check `AMDGPU_INFO_VRAM_USAGE` + `AMDGPU_INFO_VRAM_GTT` to know what you actually got."
+
+[[gotchas]]
+title = "User-mode queues (UMQ) are GFX11+ only and still maturing"
+explanation = "Linux kernel 6.11+ added `DRM_IOCTL_AMDGPU_USERQ` for GFX11 (RDNA3+). Pre-GFX11, or on kernels <6.11, the legacy `DRM_IOCTL_AMDGPU_CS` path is the only supported option. Don't assume UMQ availability — runtime-probe it and fall back. KFD's user queues are older and more stable but live on a different device node entirely."
+
+[[gotchas]]
+title = "Forgetting the BO_LIST causes kernel rejects, not GPU faults"
+explanation = "The CS ioctl requires a pre-registered `drm_amdgpu_bo_list` listing every BO the IB will touch. The kernel uses it for residency tracking (which BOs to keep in VRAM vs evict) and for security validation. Submitting a CS without listing a BO that the shader actually reads causes `-EINVAL` at ioctl time — not a shader page fault, so the error path is misleading if you're expecting the latter."
+
+[[gotchas]]
+title = "PM4 register programming is order-sensitive"
+explanation = "`IT_SET_SH_REG` packets must program `COMPUTE_PGM_LO/HI` (shader address) before `COMPUTE_PGM_RSRC1/2` (register allocation), and both before `COMPUTE_NUM_THREAD_X/Y/Z`, before `IT_DISPATCH_DIRECT`. Out-of-order writes produce silent GPU hangs, not errors. Mesa's PM4 builders encode this ordering; copying the sequence verbatim is strongly advised for first-pass implementations."
+
+[[gotchas]]
+title = "AQL packets require aligned queue allocation"
+explanation = "KFD queue allocation (`AMDKFD_IOC_CREATE_QUEUE`) requires the ring buffer be allocated from a specific heap with strict alignment — typically 4 KB page-aligned, queue size power-of-two in AQL packet slots. Doorbell pages must be mmap'd from a specific offset returned by the queue-create ioctl. Alignment bugs manifest as the HWS silently ignoring submissions."
+
+[[gotchas]]
+title = "AMDGPU SYNCOBJ_OUT chunk uses `drm_amdgpu_cs_chunk_sem` (4 bytes), NOT `drm_amdgpu_cs_chunk_syncobj` (16 bytes)"
+explanation = "A subtle UAPI trap. The 16-byte `drm_amdgpu_cs_chunk_syncobj` struct (handle + flags + point) is ONLY used by `SYNCOBJ_TIMELINE_WAIT` / `SYNCOBJ_TIMELINE_SIGNAL` chunks. The binary chunks — `DEPENDENCIES`, `SYNCOBJ_IN`, `SYNCOBJ_OUT`, `SCHEDULED_DEPENDENCIES` — use `drm_amdgpu_cs_chunk_sem` which is just `{u32 handle}`. Using the 16-byte layout with `length_dw=4` causes the kernel to interpret your bytes as 4 u32 handles (the 3 trailing zeros being invalid) and return `-EINVAL` from `drm_syncobj_find`. The kernel source is `amdgpu_cs_p2_syncobj_out` in `drivers/gpu/drm/amd/amdgpu/amdgpu_cs.c`."
+bad_example = "store32(&chunk + 0, handle); store32(&chunk + 4, 0); store64(&chunk + 8, 0); // length_dw=4 → EINVAL"
+good_example = "store32(&chunk + 0, handle); // length_dw=1 for SYNCOBJ_OUT"
+
+[[gotchas]]
+title = "GFX9 COMPUTE_STATIC_THREAD_MGMT_SE0/SE1 default to 0 — dispatches hang silently"
+explanation = "The per-shader-engine CU-enable masks `COMPUTE_STATIC_THREAD_MGMT_SE0..3` default to zero on a fresh AMDGPU context. Zero means 'no CUs enabled for this context'; the CS ioctl accepts your submission, but the scheduler refuses to issue waves and your dispatch queues forever with no error. The syncobj never signals, you get `-ETIME` from wait, and `dmesg` is silent. Fix: emit `SET_SH_REG COMPUTE_STATIC_THREAD_MGMT_SE0 = 0xFFFFFFFF` (and SE1..3 on hardware that has them) before `DISPATCH_DIRECT`. Also zero out `COMPUTE_RESOURCE_LIMITS` and `COMPUTE_TMPRING_SIZE` explicitly since stale values from previous contexts can similarly throttle waves to zero."
+bad_example = "// PM4 stream sets PGM_LO/HI/RSRC1/RSRC2/NUM_THREAD_X/Y/Z then DISPATCH_DIRECT — waves never issue"
+good_example = "// Also SET_SH_REG COMPUTE_STATIC_THREAD_MGMT_SE0=0xFFFFFFFF, SE1=0xFFFFFFFF, RESOURCE_LIMITS=0, TMPRING_SIZE=0"
+
+[[gotchas]]
+title = "GFX9 COMPUTE_PGM_RSRC1 with FLOAT_MODE = 0 may be rejected by firmware"
+explanation = "Setting `COMPUTE_PGM_RSRC1` with only `DX10_CLAMP` (bit 21) and leaving `FLOAT_MODE` (bits 12-19) at zero can cause some GFX9 firmware revisions to silently refuse the shader. The canonical minimum value that works across all GFX9 silicon is `(0xC0 << 12) | (1 << 21) | (1 << 23) = 0x00AC0000` — FLOAT_MODE = round-to-nearest-even for f32+f64, DX10_CLAMP on, IEEE_MODE on. This is the value radv's `ac_compute_resource_limits` produces for a baseline shader."
+bad_example = "PGM_RSRC1 = 0x00200000 (DX10_CLAMP only, FLOAT_MODE=0)"
+good_example = "PGM_RSRC1 = 0x00AC0000 (FLOAT_MODE=0xC0 | DX10_CLAMP | IEEE_MODE)"
+
+[[gotchas]]
+title = "GFX9 COMPUTE_STATIC_THREAD_MGMT SE2/SE3 are at 0xB864/0xB868 — and DO matter"
+explanation = "Vega / GFX9 has FOUR per-SE CU-enable masks, not two: `COMPUTE_STATIC_THREAD_MGMT_SE0` (0xB85C), `SE1` (0xB860), **`SE2` (0xB864)**, **`SE3` (0xB868)**. All default to zero on a fresh context. On 4-SE discrete Vega parts, leaving SE2/SE3 at zero causes any dispatch that lands on SE2/SE3 waves to never issue — triggering `gfx_v9_0_bad_op_irq` on memory-store instructions (the SQ interprets an unlaunched-wave state as an illegal opcode during memory-op retire). On 1-SE APUs (Cezanne, Raven) the registers still exist; setting them to 0xFFFFFFFF is harmless. radv unconditionally programs all four. Worse — 0xB864 is easy to mistake for `COMPUTE_TMPRING_SIZE` based on apparent contiguity; writing 0 to 0xB864 thinking you're setting TMPRING_SIZE actively disables SE2."
+bad_example = "SET_SH_REG 0xB85C = 0xFFFFFFFF  # SE0\nSET_SH_REG 0xB860 = 0xFFFFFFFF  # SE1\nSET_SH_REG 0xB864 = 0             # thought it was TMPRING_SIZE — actually SE2!"
+good_example = "SET_SH_REG 0xB85C..0xB868 = 0xFFFFFFFF each  # all four SE masks enabled"
+
+[[gotchas]]
+title = "GFX9 COMPUTE_PGM_RSRC1.SGPRS field must account for VCC + flat_scratch overhead"
+explanation = "The `SGPRS` field in COMPUTE_PGM_RSRC1 (bits 6-9) encodes `(num_sgprs/8) - 1` — value V allocates `(V+1) * 8` SGPRs. Value 0 allocates only 8 SGPRs. Per radv (`radv_shader.c::ac.num_sgprs_used + 2 + 3`), the SGPR count must include the shader's declared SGPR use PLUS 2 for VCC PLUS 3 for flat_scratch overhead. A 'minimum' store shader with USER_SGPR=2 (s0/s1 holding the target VA) plus VCC (2) plus flat_scratch (3) needs ~7-8 SGPRs, which exceeds the 8-SGPR budget once compiler-injected state is counted. Set SGPRS=1 (16 allocated) for safety on any shader that touches memory."
+bad_example = "PGM_RSRC1 = 0x00AC0000  # SGPRS=0 → 8 SGPRs total, tight"
+good_example = "PGM_RSRC1 = 0x00AC0040  # SGPRS=1 → 16 SGPRs total"
+
+[[gotchas]]
+title = "Shaders need ≥16 dwords of trailing s_nop padding (AMDGPU ABI)"
+explanation = "The SQ speculatively prefetches past the end of a shader while the current wavefront is retiring. If there's nothing there (or garbage bytes from uninitialized memory) the prefetcher decodes it as instructions and raises `bad_op_irq`. The AMDGPU ABI mandates ≥16 dwords of `s_nop 0` (0xBF800000) padding after `s_endpgm`. A shader that terminates at, say, offset 32 bytes and is immediately followed by all-zero BO fill can silently wedge because 0x00000000 disassembles to a valid-looking but semantically invalid instruction."
+bad_example = "shader: [v_mov, v_mov, v_mov, store, s_endpgm]  # tight 5 instructions, no padding"
+good_example = "shader: [v_mov, v_mov, v_mov, store, s_endpgm, 16x s_nop 0]  # prefetcher-safe"
+
+[[gotchas]]
+title = "GFX9 COMPUTE_PGM_RSRC2.TRAP_PRESENT=1 is mandatory for memory ops"
+explanation = "Bit 6 of `COMPUTE_PGM_RSRC2` is TRAP_PRESENT. Leaving it zero means 'no trap handler installed' — and on GFX9, the SQ speculatively consults the trap handler table for any memory op that might need fault reporting. If TRAP_PRESENT=0 the speculation fails into `bad_op_irq` even when no actual trap would have been raised. ROCT-Thunk kfdtest sets it unconditionally. USER_SGPR=2 with TRAP_PRESENT=1 encodes as RSRC2 = 0x04 | 0x40 = 0x44."
+bad_example = "RSRC2 = 0x04  # USER_SGPR=2 only, TRAP_PRESENT=0"
+good_example = "RSRC2 = 0x44  # USER_SGPR=2 AND TRAP_PRESENT=1"
+
+[[gotchas]]
+title = "GFX9 first-dispatch preamble: ACQUIRE_MEM cache invalidate is required"
+explanation = "Before the first compute dispatch on a context, the PM4 stream must include an `IT_ACQUIRE_MEM` packet invalidating SH_ICACHE, SH_KCACHE, TC (L2), and TCL1 caches. Without it, the SQ's instruction cache can hold stale bytes from a prior context's shader, and the next dispatch decodes garbage. Mesa rusticl on gfx90c uses `coher_cntl = 0xa8c40000` (`coher_size = 0xFFFFFFFF`, `coher_size_hi = 0x00FFFFFF`, `base_lo/hi = 0`, `poll_interval = 0x0A`). radv emits this as part of its queue preamble on first submit."
+
+[[gotchas]]
+title = "GFX9 COMPUTE_PGM_LO/HI are at 0xB830/0xB834, NOT 0xB848/0xB84C"
+explanation = "Multiple public references and initial research put `COMPUTE_PGM_LO` at byte offset 0xB848 — that's WRONG for GFX9. The real offsets (verified on gfx90c via `AMD_DEBUG=ib` dump of a working Mesa rusticl compute dispatch): PGM_LO=0xB830, PGM_HI=0xB834, PGM_RSRC1=0xB848, PGM_RSRC2=0xB84C, RESOURCE_LIMITS=0xB854, STATIC_THREAD_MGMT_SE0=0xB858, SE1=0xB85C, TMPRING_SIZE=0xB860, SE2=0xB864, SE3=0xB868. Getting PGM_LO/HI wrong is devastating and silent: your shader is never pointed at, the hardware uses whatever stale value was in the real PGM_LO register, dispatches may appear to 'complete' (sync-obj signals via the GPU-reset recovery path after a wedge), but your code never runs. Always verify register offsets against `AMD_DEBUG=ib` on working reference code."
+bad_example = "R_COMPUTE_PGM_LO = 0xB848  # matches some outdated docs — actually RSRC1 on GFX9"
+good_example = "R_COMPUTE_PGM_LO = 0xB830  # verified via Mesa AMD_DEBUG=ib dump"
+
+[[gotchas]]
+title = "A 'signaled' sync-obj does NOT mean the shader executed"
+explanation = "`DRM_IOCTL_SYNCOBJ_WAIT` returning successfully only proves that the GPU's scheduler retired the submission — that retirement can happen via the GPU-reset recovery path when the dispatch wedges. The sync-obj wait returns 0, your program thinks 'dispatch completed,' and dmesg quietly logs `GPU reset succeeded`. Checking sync-obj return alone is insufficient to verify the shader ran. Cross-check either by (a) reading back a known written value from the output buffer, (b) running `journalctl -k` after dispatch to confirm no GPU resets, or (c) both."
+bad_example = "rc = native_syncobj_wait(fd, syncobj, timeout);\nif (rc == 0) { printf(\"OK\\n\"); }"
+good_example = "rc = native_syncobj_wait(fd, syncobj, timeout);\n// Also check output buffer for a known written value before claiming success"
+
+[[performance_notes]]
+title = "Mesa AMD_DEBUG=ib dump is the ground-truth oracle for PM4"
+explanation = "When working on direct-ioctl AMDGPU code and trying to diagnose why a dispatch doesn't behave, the single most useful tool is `AMD_DEBUG=ib <your-opencl-program>`. Mesa decodes its PM4 IB in real-time with register names resolved — every SET_SH_REG target, every opcode, every value. Match your PM4 stream byte-for-byte against Mesa's and the delta is exactly what you're missing. This single diagnostic found the register-offset mismatch after three research agents failed to surface it."
+evidence = "A Mesa rusticl compute dispatch on gfx90c with AMD_DEBUG=ib produces ~80 lines of decoded PM4 showing every register, packet, and value. Diff against direct-ioctl output reveals wrong register offsets, missing preamble packets, incorrect ACQUIRE_MEM cache bits, and wrong DISPATCH_INITIATOR flags — each of which would otherwise cost hours of research."
+
+[[performance_notes]]
+title = "ioctl-level LOC estimate for AMDGPU compute MVP"
+explanation = "A minimum-viable compute path (device open + info + create 3 BOs + hand-roll a PM4 IB + CS + syncobj wait + readback) fits in ~1,200-1,800 LOC of direct-syscall code. Production hardening (real allocator, VA manager, BO-list reuse, GFX10/11/12 divergence, residency handling) adds ~2,500-4,000 LOC to get to ~4,000-6,000 total."
+evidence = "Research vs Mesa radv's ~80K LOC: ~15-20% of radv is irreducible compute substrate (winsys + CS builder + meta compute). The other ~80% is Vulkan API surface, descriptor-set lowering, pipeline cache, render-pass machinery, WSI, RT/BVH — none required for headless compute."
+
+[[performance_notes]]
+title = "Skip libdrm — the ioctl layer is small enough to rewrite"
+explanation = "libdrm_amdgpu is ~5K LOC wrapping ioctls 1:1. For a sovereign OS the marginal convenience doesn't offset the dependency. ~1,500 LOC of Cyrius replicates the wrapper surface cleanly, with idiomatic typed handles + result types instead of the libdrm `int` return codes."
+evidence = "libdrm_amdgpu source: ~5K LOC MIT-licensed C. AMDGPU ioctl struct count: ~40 across `amdgpu_drm.h`. A thin Cyrius layer at ~40 LOC per ioctl totals ~1,500 LOC — same order as the compute-MVP engine code itself."
+
+[[performance_notes]]
+title = "KFD + AQL is smaller than CS + PM4 for compute workloads"
+explanation = "AQL packets are a fixed 64-byte format with documented semantics (HSA standard). PM4 is variable-length, vendor-proprietary, and changes across ASIC families. KFD's hardware scheduler means apps don't build their own ring-buffer management. For compute-only sovereign stacks, KFD + AQL is architecturally simpler and the same path ROCm takes — meaning you inherit industry testing for free."
+evidence = "HSA AQL specification: ~30-page PDF, stable across AMD GPU generations. KFD kernel interface: documented at docs.kernel.org/gpu/amdkfd. ROCm's minimal AQL dispatch samples (e.g., hsakmt, libhsa-runtime) demonstrate compute dispatch in hundreds of lines rather than thousands."
+
+references = [
+  "AMDGPU kernel UAPI — https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/uapi/drm/amdgpu_drm.h",
+  "AMDGPU kernel docs — https://docs.kernel.org/gpu/amdgpu/",
+  "Mesa radv (PM4 reference implementation) — https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/amd",
+  "libdrm_amdgpu (thin ioctl wrapper) — https://gitlab.freedesktop.org/mesa/drm/-/tree/main/amdgpu",
+  "AMD RDNA ISA manuals (RDNA1/2/3) — https://gpuopen.com/amd-gpu-architecture-programming-documentation/",
+  "umr (AMD's ioctl-level debugger, RE-free source) — https://gitlab.freedesktop.org/tomstdenis/umr",
+  "AMDKFD kernel interface — https://docs.kernel.org/gpu/amdkfd.html",
+  "HSA AQL packet specification — http://www.hsafoundation.com/standards/",
+  "ROCm / hsakmt (KFD + AQL reference) — https://github.com/RadeonOpenCompute/ROCT-Thunk-Interface",
+  "Dave Airlie's dri-devel posts on usermode queues (2023-2024) — https://lists.freedesktop.org/archives/dri-devel/",
+  "DRM memory management docs — https://docs.kernel.org/gpu/drm-mm.html",
+]

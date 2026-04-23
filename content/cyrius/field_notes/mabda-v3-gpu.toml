@@ -1,0 +1,233 @@
+# Cyrius Field Notes — Mabda v3 Native GPU Backend
+# First pure-Cyrius AMDGPU compute dispatch, 2026-04-21.
+# Phase A + B.0-B.3 landed in one session. B.4 (verifiable memory
+# write from the shader) blocked on the same day, with specific
+# gotchas captured below for the next attempt.
+
+[[entries]]
+name = "mabda_v3_overview"
+description = "What v3 is and why direct-ioctl AMDGPU matters for AGNOS sovereignty"
+category = "cyrius"
+content = '''
+Mabda is AGNOS's GPU foundation library, written in Cyrius. Today (v2.x)
+it ships over wgpu-native through a C launcher — transitional
+scaffolding that gets consumers onto a stable GPU surface while the
+sovereign path is built.
+
+v3's goal: pure-Cyrius GPU backend via direct DRM/KMS ioctls.
+No libdrm, no libvulkan, no Mesa, no C launcher. `open("/dev/dri/renderD128")`,
+then `syscall(SYS_IOCTL, fd, ...)` against the AMDGPU kernel UAPI.
+
+Why this matters: AGNOS treats 2026 as a clean slate. 20+ years of
+GPU API baggage (OpenGL extension churn, Vulkan's verbosity, wgpu's
+web-safety compromises) exists because each era was constrained by
+what came before. AGNOS isn't. The native backend should extract the
+LESSONS from that history (render-graph-first, bindless-only,
+graph-derived sync, pooled memory) without inheriting the ceremony.
+
+v3 ships as a dual backend: the wgpu+C path stays (measurement baseline,
+migration runway), and a native Cyrius backend is added alongside.
+Retirement of the C path is v4.0, consumer-driven.
+'''
+
+
+[[entries]]
+name = "phase_a_aliasing_planner"
+description = "Phase A — transient aliasing planner (CPU only, 442 tests)"
+category = "cyrius"
+content = '''
+Phase A was pure-math validation of graph-first principles. The mabda
+v2.5.0 render graph already had `first_use` scaffolding and an
+`rg_aliasing(g, 1)` flag. Phase A made them real.
+
+The planner:
+  - TransientResource grew from 56 to 72 bytes (added last_use, offset).
+  - rg_build computes first_use + last_use per transient during toposort.
+  - rg_plan_aliasing_stats runs greedy interval coloring per kind
+    (buffers and textures kept in separate sub-ranges) producing
+    byte offsets that let disjoint-lifetime transients share storage.
+
+Benchmark: on a synthetic 6-node chain with 5 transients in a
+staggered pattern, the planner reclaims 60% of the memory vs
+no-aliasing (2 slots instead of 5). The Frostbite FrameGraph GDC
+2017 paper cites ~50% on AAA frames — this bench isn't AAA-scale
+but the algorithm scales the right way.
+
+Fuzz harness: 5 seeds × ~250 random graphs × 4 invariants (no
+co-live same-kind offset overlap, offsets in range, aliased ≤ naive,
+aliased ≥ max single transient). All green.
+
+Scale caveat: mabda has no realistic-scale consumer graph today
+(`render_graph_e2e` is 3 nodes / 0 transients). Phase A benches
+top out at 30 transients. Real validation of the planner's wall-time
+and reclaim ratio happens in Phase D when soorat/rasa run their
+actual per-frame graphs through it.
+'''
+
+
+[[entries]]
+name = "phase_b3_first_dispatch"
+description = "Phase B.3 — first live pure-Cyrius compute dispatch"
+category = "cyrius"
+content = '''
+The milestone: `make test-native-compute-spike` outputs
+"dispatch completed (sync-obj signaled)" on real AMD hardware.
+Pure Cyrius → Linux kernel → AMDGPU driver → hardware → back.
+
+Full link-time dependency graph of the binary:
+  programs/native_compute_spike.cyr
+  → src/lib.cyr (stdlib + mabda modules)
+  → syscall() (direct Linux SYS_IOCTL/SYS_OPEN/etc)
+  → Linux kernel AMDGPU driver
+
+No wgpu-native. No libdrm. No libvulkan. No C launcher. Not even gcc
+in the toolchain for this binary — Cyrius emits the ELF directly.
+
+Subdivision of Phase B.3:
+  B.3.a — ctx + BO list + VA map. Setup ioctls all green.
+  B.3.b — PM4 packet builder (PKT3 header, SET_SH_REG,
+          DISPATCH_DIRECT, IT_NOP, IT_ACQUIRE_MEM). Pure math,
+          fuzzed with 4 seeds × 500 samples.
+  B.3.c — hand-encoded s_endpgm shader (single 4-byte instruction).
+  B.3.d — CS ioctl + sync-obj wait. Full dispatch.
+
+Three non-obvious gotchas that ate the most time:
+
+1. SYNCOBJ_OUT chunk uses `drm_amdgpu_cs_chunk_sem` (4 bytes, handle
+   only), NOT the 16-byte `drm_amdgpu_cs_chunk_syncobj`. The latter
+   is timeline-chunk-only. Wrong layout → -EINVAL from the kernel.
+
+2. COMPUTE_STATIC_THREAD_MGMT_SE0/SE1 default to zero. Zero means
+   "no CUs enabled for this context" — dispatch queues forever,
+   syncobj never signals, dmesg silent. Set to 0xFFFFFFFF.
+
+3. COMPUTE_PGM_RSRC1 with FLOAT_MODE=0 may be rejected by firmware.
+   Minimum safe value: 0x00AC0000 (FLOAT_MODE=0xC0 | DX10_CLAMP | IEEE_MODE).
+
+All three live as gotchas in vidya/content/direct_drm_gpu_compute.
+'''
+
+
+[[entries]]
+name = "phase_b4_store_blocker"
+description = "Phase B.4 — compute shader memory write still wedging"
+category = "cyrius"
+content = '''
+A shader that consists only of register moves + s_endpgm dispatches
+cleanly. The moment you add a memory-store instruction (global_store_dword,
+flat_store_dword, or s_store_dword), the SQ raises gfx_v9_0_bad_op_irq
+and the GPU resets.
+
+What tried so far, in order:
+  - Multiple store-instruction encodings (global / flat / scalar,
+    with and without GLC/SLC cache bits) — all fail identically.
+  - Output buffer VA moved from 256 MiB up through 64 GiB — no help.
+  - AMDHSA vs AMDPAL clang target — byte-identical ISA emitted.
+
+Three more fixes applied from subsequent research, after which the
+symptom changed but not in the way we want:
+  - TRAP_PRESENT bit in PGM_RSRC2 (was missing, now set).
+  - 16 dwords of s_nop 0 padding after s_endpgm (AMDGPU ABI
+    requirement — SQ prefetches past shader end).
+  - ACQUIRE_MEM packet before DISPATCH_DIRECT (I-cache invalidate).
+  - Fixed wrong register offset: 0xB864 is SE2, not TMPRING_SIZE.
+    I was silently disabling SE2 every dispatch.
+  - Added SE2/SE3 writes at 0xB864/0xB868.
+  - Bumped RSRC1.SGPRS from 0 (8 regs) to 1 (16 regs) per radv's
+    num_sgprs + VCC(2) + flat_scratch(3) requirement.
+
+After all of the above: no more GPU resets on dispatch, but the
+output buffer still reads the sentinel (no write lands). The SQ isn't
+faulting anymore — the store just isn't reaching memory. Different
+failure mode, more research needed.
+
+Likely remaining issues:
+  - radv emits a "queue preamble" on first submit that we don't:
+    CP_COHER_START_DELAY, TA_CS_BC_BASE_ADDR, etc. Set-once state
+    that the kernel's amdgpu_cs context-init may not reproduce
+    identically for our raw-ioctl path.
+  - SH_MEM_CONFIG / SH_MEM_BASES are RLC-gated (userspace can't
+    write them). Kernel programs them per-VMID at device init,
+    but the VMID our CS lands on might not be in the compute-VMID
+    pool that gets the full init.
+
+Prudent next step when this thread resumes: install OpenCL on the
+host, strace a simple compute write, diff the CS chunks and register
+writes against ours. That's ground truth.
+'''
+
+
+[[entries]]
+name = "research_pattern_that_worked"
+description = "The specific research loop that unblocked Phase B.3"
+category = "cyrius"
+content = '''
+The mabda v3 GPU work has been almost-entirely research-driven. Every
+major unblock came from a focused research agent, not from local
+debugging. Pattern that worked:
+
+1. Ship broken code that produces a SPECIFIC error message (not just
+   "doesn't work" — a kernel error code or dmesg line).
+
+2. Dispatch a research agent with the exact symptom. Frame the prompt:
+   - What has been tried and ruled out
+   - The specific error message / errno
+   - The candidate hypotheses to investigate
+   - Ask for Mesa radv / kernel source line-level citations
+   - "What 1-3 line diff fixes this?"
+
+3. When the agent comes back with a concrete "program register X to
+   value Y", apply it and rerun.
+
+4. Capture the finding in vidya as a gotcha with bad/good examples.
+   This is what makes the research compound — every solved issue is
+   searchable for the next AGNOS project doing similar work.
+
+The direct-ioctl AMDGPU path is essentially undocumented outside
+Mesa radv source and ROCT-Thunk kfdtest. No "tutorial" exists.
+The only path is: read radv, try, fail, read more radv, try, fail,
+eventually read the right radv function. Research agents accelerate
+this 10-20x by reading radv on your behalf with a targeted question.
+
+Also worth noting — agents are fallible. The second research agent
+claimed moving the output VA above the 32-bit aperture would fix
+the store issue. Empirical test: didn't. The aperture theory was
+plausible but wasn't the bug. Agents should be trusted for line-level
+source citations, not necessarily for causal theories.
+'''
+
+
+[[entries]]
+name = "mabda_v3_design_principles_recap"
+description = "What mabda v3's native API commits to"
+category = "cyrius"
+content = '''
+From docs/proposals/v3-native-api-principles.md, three non-negotiables
+determine the API shape. Everything else flexes around them.
+
+1. Graph-first submission. render_graph_run(g) is the canonical entry
+   point. Leaf ops (gpu_dispatch, gpu_draw, gpu_copy) exist as
+   convenience but internally build a one-node graph. No raw command
+   buffers in the @public API. The backend optimizes aggressively
+   against graph structure — barriers derived from declared reads
+   and writes, transient memory aliased across disjoint lifetimes.
+
+2. Bindless-only. One typed u32 handle per resource. Shaders index
+   into per-frame resources[] and samplers[] tables. No bind groups,
+   no descriptor sets, no layouts, no update templates. The
+   pool/set/layout trinity exists entirely for backwards compatibility
+   with pre-bindless hardware; AGNOS picks a modern floor.
+
+3. Graph-derived sync. No hand-placed barriers in @public. For the
+   ~5% the graph can't cover, exactly one escape hatch: a timeline
+   primitive (monotonic frame counter for single-queue; timeline
+   semaphores when multi-queue enters).
+
+The native backend's @public surface target: ≤35 functions (vs ~100
+on the wgpu path). Dist size target: ≤6000 lines for
+dist/mabda_native.cyr (vs VMA alone at 20K lines).
+
+The v3.x era keeps both backends. v4.0 retires the wgpu path
+consumer-driven — once every consumer has been running native in
+production across a full release cycle.
+'''

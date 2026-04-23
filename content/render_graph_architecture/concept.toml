@@ -1,0 +1,71 @@
+id = "render_graph_architecture"
+title = "Render Graph Architecture"
+topic = "RenderGraphArchitecture"
+description = "DAG-based orchestration of GPU passes where each pass declares the resources it reads and writes; the framework topologically sorts, derives barriers, culls dead passes, and aliases transient memory. Converged on by post-2015 engines (Frostbite FrameGraph 2017, Unreal RDG, Unity SRP, Granite) because scheduling resource state and memory with global knowledge beats per-call local guesses. The abstraction is small and load-bearing — most of the production complexity is C++ accretion, not essential."
+tags = ["render-graph", "gpu", "scheduling", "dag", "transient-resources", "barriers", "aliasing", "framegraph", "rdg", "toposort"]
+related_topics = ["bindless_resources", "explicit_gpu_synchronization", "gpu_memory_pooling", "state_machines", "design_patterns"]
+
+[[best_practices]]
+title = "Declare reads and writes honestly — the graph trusts declarations completely"
+explanation = "Every downstream derivation (barriers, aliasing, culling) assumes the pass's declared read/write set is exhaustive. A pass that mutates a resource without declaring it corrupts aliased memory silently. Treat the declaration as a contract, not a hint."
+
+[[best_practices]]
+title = "Split transient from persistent resources"
+explanation = "Transient resources exist only within the frame and can be aliased against other transients with disjoint lifetimes; persistent (imported) resources carry external state across frames. Force the distinction at the type level — the compile-phase aliasing pass only considers transients. Frostbite reports ~50% render-target memory reclaimed through transient aliasing."
+
+[[best_practices]]
+title = "Coarse passes beat fine passes"
+explanation = "One pass per render target is usually the right granularity. Over-decomposing into many tiny passes explodes the graph, burns compile-phase CPU time, and produces a scheduling plan no better than the coarse version. The graph is an orchestration tool, not a shader-dispatch loop."
+
+[[best_practices]]
+title = "Name every pass and every resource"
+explanation = "Debug labels are what make 'scheduled-vs-declared' diffs readable in tools like RenderDoc and PIX. They cost nothing at runtime (labels are static strings) and save hours when a barrier or aliasing bug surfaces."
+
+[[best_practices]]
+title = "Derive barriers from declarations, never hand-place"
+explanation = "Hand-written barriers are a code smell in a render-graph architecture. The graph's topological sort + per-resource access-diff walk emits the minimum correct barrier set. Hand-placed barriers indicate the declarations are incomplete (fix those) or the graph can't express the dependency (escape hatch: one timeline wait/signal, see explicit_gpu_synchronization)."
+
+[[gotchas]]
+title = "Recording order is not execution order"
+explanation = "After topological sort and dead-pass culling, passes execute in dependency order, which may differ from the order they were added. Code that relies on side effects of a pass that gets culled will silently break — culling removes passes whose outputs no one reads, regardless of any side channel the pass might have wanted."
+
+[[gotchas]]
+title = "Aliasing failures are silent and frame-rate dependent"
+explanation = "If pass A lies about not writing to resource X, and the aliasing pass places pass B's unrelated resource Y on the same memory, pass B reads garbage. The corruption shows up only at specific frame timings and makes debugging terrible. Validation layers catch ~90% of this; ship CI with them on and an assertion-mode build that double-checks declared vs actually-touched resources."
+
+[[gotchas]]
+title = "Imported resources need an explicit initial state"
+explanation = "A resource the graph did not create (swapchain texture, persistent history buffer, external input) has a state the graph cannot see. Forgetting to declare the initial state causes first-use barrier bugs — the graph transitions from its assumed state to the target state, but the actual state was different."
+
+[[gotchas]]
+title = "Async compute needs cross-queue semaphores the scheduler must own"
+explanation = "If the graph spans multiple queues (graphics + compute), inter-queue dependencies need semaphores, not barriers. Applications that hand-allocate these usually get ownership transfer wrong (release on queue A, acquire on queue B, matching family indices). Make the graph own the semaphores."
+
+[[gotchas]]
+title = "Rebuilding the graph every frame thrashes allocators"
+explanation = "A fresh compile phase each frame allocates declaration arrays, adjacency lists, and barrier buffers. Without a stable transient pool these allocations turn into per-frame heap churn. Either pool the graph's working memory across frames, or memoize when topology is stable (Granite hints at this; no published numbers)."
+
+[[performance_notes]]
+title = "Graph-derived barriers vs hand-placed"
+explanation = "Topo-sort + per-resource access-diff walk emits only the barriers actually needed; hand-placed barriers from a rendering-code author typically include many defensive transitions that collapse after graph analysis."
+evidence = "Frostbite GDC 2017 (O'Donnell): ~40% fewer redundant transitions, measurable GPU-idle reduction. UE5 RDG docs: roughly half the barriers of UE4's manual system. Granite (Themaister): 2-3× fewer barriers than hand-rolled Vulkan on comparable scenes."
+
+[[performance_notes]]
+title = "Transient memory aliasing"
+explanation = "Resources with disjoint lifetimes share backing memory. The aliasing pass walks transients in first-write/last-read order, placing each into the earliest free slot. The win scales with pass count and render-target diversity."
+evidence = "Frostbite GDC 2017: ~50% render-target memory reclaimed on complex frames. Subsequent engine talks (UE5, Unity HDRP) cite similar magnitudes."
+
+[[performance_notes]]
+title = "Most production render-graph complexity is C++ accretion"
+explanation = "The load-bearing primitives are three: virtual handles that become real at compile phase, honest read/write declarations per pass, and a compile/execute split at the data level. Type-erased pass data, virtual dispatch, builder/setup/execute phase separation, resource proxies, RAII lifetime tracking, and template-heavy 'strongly typed' resource APIs are C++ artifacts. A language with tagged unions, first-class function pointers, and manual allocation can express the essential pattern in a fraction of the code."
+evidence = "Granite (~10K lines) vs typical AAA render-graph modules (30-50K lines). The difference is almost entirely language tax, not feature delta."
+
+references = [
+  "Yuriy O'Donnell, 'FrameGraph: Extensible Rendering Architecture in Frostbite', GDC 2017 — https://www.gdcvault.com/play/1024612/ (slides via https://www.ea.com/frostbite/news/framegraph-extensible-rendering-architecture-in-frostbite)",
+  "Unreal Engine 5 Render Dependency Graph — https://dev.epicgames.com/documentation/en-us/unreal-engine/render-dependency-graph-in-unreal-engine",
+  "Unity SRP RenderGraph — https://docs.unity3d.com/Packages/com.unity.render-pipelines.core@17.0/manual/render-graph-system.html",
+  "Hans-Kristian Arntzen (Themaister), 'Render graphs and Vulkan — a deep dive' — https://themaister.net/blog/2017/08/15/render-graphs-and-vulkan-a-deep-dive/",
+  "Granite open-source engine — https://github.com/Themaister/Granite",
+  "Riccardo Loggini, 'Render graphs' survey — https://logins.github.io/graphics/2021/05/31/RenderGraphs.html",
+  "bgfx view-ordering (lightweight cousin) — https://bkaradzic.github.io/bgfx/overview.html",
+]

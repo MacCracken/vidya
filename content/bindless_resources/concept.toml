@@ -1,0 +1,74 @@
+id = "bindless_resources"
+title = "Bindless Resources"
+topic = "BindlessResources"
+description = "GPU resource access where shaders index into a large table of descriptors by integer ID, replacing the classic bind-slot-per-draw model. The entire resource set lives as an addressable table in GPU memory; draw commands carry IDs, not bindings. D3D12 descriptor heaps (2015) were the first modern expression; SM 6.6 dynamic resources and Vulkan's VK_EXT_descriptor_buffer (2023) converge on 'descriptors are just bytes in a buffer.' For a GPU library targeting bindless-capable hardware only, the classic pool/set/layout/update-template ceremony collapses to one primitive: a typed handle into a per-frame resource table."
+tags = ["bindless", "descriptors", "gpu", "descriptor-heap", "descriptor-buffer", "dynamic-resources", "gpu-driven-rendering", "draw-call-rate"]
+related_topics = ["render_graph_architecture", "explicit_gpu_synchronization", "gpu_memory_pooling", "memory_management"]
+
+[[best_practices]]
+title = "One global descriptor table per frame, indexed by u32 handle"
+explanation = "Don't ship per-material or per-draw descriptor sets. One resource table for the whole frame, populated once, referenced by integer ID from the draw stream. This is the shape D3D12 descriptor heaps and SM 6.6 dynamic resources landed on independently — the simplest model that covers every use case."
+
+[[best_practices]]
+title = "Pack resource IDs into vertex/index/instance streams for GPU-driven rendering"
+explanation = "When per-draw texture/buffer IDs live in the vertex or instance buffer, the GPU can issue indirect multi-draws without any CPU involvement per draw. The CPU writes one buffer of draw arguments; the GPU reads its own material descriptors. This is how Destiny hit 10-50× D3D11 draw-call rates."
+
+[[best_practices]]
+title = "Separate tables by type only where hardware demands"
+explanation = "Vulkan and D3D12 still split samplers from SRV/UAV/CBV at the hardware level, so two tables is the floor. Don't fragment further — one combined SRV/UAV/CBV table and one sampler table is enough. Collapse per-material, per-frame, per-pass table distinctions into the single global table."
+
+[[best_practices]]
+title = "Encode IDs as tagged opaque handles — never expose raw indices"
+explanation = "Store a resource type tag and a generation counter alongside the index. Shaders see u32 indices but the application sees TextureHandle/BufferHandle/SamplerHandle distinct types. Prevents passing a buffer ID where a texture was expected and makes deferred free safe — an invalid handle detects the generation mismatch rather than reading a freed slot."
+
+[[best_practices]]
+title = "Deferred-free descriptors by N frames"
+explanation = "A descriptor freed mid-frame may still be read by in-flight GPU work. Queue freed handles onto an N-frame ring (N = max frames in flight + 1) and only recycle the slot after the GPU has finished with it. Generation counters on handles turn 'use after free' into a detectable error rather than a GPU hang."
+
+[[gotchas]]
+title = "Tilers hate divergent descriptor indexing"
+explanation = "On tile-based GPUs (mobile Mali/Adreno, Apple Silicon in some paths), neighbouring shader threads reading different descriptor slots tank throughput because the on-chip descriptor cache is small. The bindless pattern of 'every draw could index anything' can be much slower on tilers than on desktop discrete GPUs. Measure on your target hardware class."
+
+[[gotchas]]
+title = "Runtime type mismatches are UB, not validation errors"
+explanation = "With VK_EXT_descriptor_buffer and D3D12 SM 6.6 dynamic resources, the shader declares the access type (texture sample, storage image write, etc.) but the index can point at any descriptor slot. If the slot's actual descriptor type doesn't match the shader's expectation, most drivers don't flag it — they return garbage or hang. Tag handles at the application level; trust nothing at the shader level."
+
+[[gotchas]]
+title = "Validation layers lie at scale"
+explanation = "Vulkan Validation Layers break down around 100k descriptor updates per frame — they either crash, silently skip validation, or miss whole classes of bugs. This is fine for the classic bind-per-draw model but quickly exceeds the descriptor update budget of bindless workloads. Ship with validation in dev, turn it off in bench, double-check critical paths with narrow validation targets."
+
+[[gotchas]]
+title = "Partial hardware support forces shader permutations or a hard floor"
+explanation = "Not every GPU supports every descriptor type in bindless. Older Intel iGPU, some mobile, and pre-SM-6.6 D3D12 hardware may expose bindless for textures but not for UAVs, or cap array sizes at 16-128. Either ship permutations (`#ifdef BINDLESS_UAV`) or pick a hard floor that eliminates the split. AGNOS can pick the floor."
+
+[[gotchas]]
+title = "Dead descriptors linger until GPU retirement"
+explanation = "Reusing a descriptor slot before the GPU has finished reading the prior resource is a data race. The kernel and driver don't track descriptor liveness per-slot, only per-submit. You either deferred-free by max-frames-in-flight, or you explicitly `vkDeviceWaitIdle` (a pipeline-destroying stall). Deferred free is the only practical answer."
+
+[[performance_notes]]
+title = "Draw-call rate with bindless"
+explanation = "Eliminating per-draw descriptor binding collapses the CPU-side draw loop to 'write argument buffer + issue one indirect multi-draw.' Bindless hardware can sustain 10-50× the draw count of bind-per-draw hardware at the same CPU budget."
+evidence = "Destiny (Tatarchuk, GDC 2015): 10-50× draw-call rate improvement vs D3D11 bindful path. Assassin's Creed Unity / Anvil engine: 50,000+ draw batches per frame. Granite (Themaister) descriptor-buffer path: ~2× faster descriptor submission than set-based."
+
+[[performance_notes]]
+title = "GPU-driven rendering eliminates CPU per-draw cost"
+explanation = "With resource IDs embedded in per-draw data (vertex/instance attributes), indirect multi-draw dispatches thousands of draws from a single CPU call. CPU-side per-draw cost effectively drops to zero; bottleneck moves to GPU culling and rasterization load, which are the parts hardware is best at accelerating."
+evidence = "Multiple GDC talks 2020-2024 on 'GPU-driven rendering' (Activision, Frostbite, Digital Foundry analyses). Qualitative: CPU main thread moves from 'issuing draws' to 'preparing scene data and culling work.'"
+
+[[performance_notes]]
+title = "The API ceremony surrounding bindless is mostly backwards-compat overhead"
+explanation = "Bind groups, descriptor sets, descriptor set layouts, and descriptor update templates exist because hardware used to have real binding tables. On modern GPUs the 'descriptor' is a pointer; the pool/set/layout/update-template trinity is bookkeeping the driver invents to validate a legacy API shape. A fresh API targeting bindless-capable hardware only ships one primitive — a typed handle into a per-frame resource table — and nothing else."
+evidence = "Microsoft collapsed the trinity to one concept (the heap) in D3D12, 2015. SM 6.6 dynamic resources (2021) collapsed it to zero root-signature entries. Vulkan's VK_EXT_descriptor_buffer (2023) is Khronos catching up. Ten years of API evolution converging on the same simpler shape."
+
+references = [
+  "Vulkan descriptor indexing chapter — https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap14.html#descriptorsets-updates",
+  "VK_EXT_descriptor_buffer — https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VK_EXT_descriptor_buffer.html",
+  "Khronos 'VK_EXT_descriptor_buffer' blog — https://www.khronos.org/blog/vk-ext-descriptor-buffer",
+  "D3D12 dynamic resources (SM 6.6) — https://microsoft.github.io/DirectX-Specs/d3d/HLSL_SM_6_6_DynamicResources.html",
+  "Metal argument buffers — https://developer.apple.com/documentation/metal/buffers/about_argument_buffers",
+  "Natasha Tatarchuk, 'Destiny's Multithreaded Rendering' GDC 2015 — https://advances.realtimerendering.com/destiny/gdc_2015/",
+  "Themaister, 'Vulkan descriptor management take 2' — https://themaister.net/blog/2021/03/13/vulkan-descriptor-management-take-2/",
+  "Themaister, 'VK_EXT_descriptor_buffer — a clean slate' — https://themaister.net/blog/2023/08/20/vk-ext-descriptor-buffer-a-clean-slate/",
+  "AMD GPUOpen bindless guides — https://gpuopen.com/learn/",
+  "NVIDIA GL_NV_bindless_texture (original) — https://developer.nvidia.com/sites/default/files/akamai/opengl/specs/GL_NV_bindless_texture.txt",
+]

@@ -29,10 +29,12 @@ produces output matching Linux cross-build byte-for-byte).
 Build: sh bootstrap/bootstrap.sh (40ms)
 Compile: cyrius build src/main.cyr build/myapp   (auto-resolves deps from cyrius.cyml)
 Test: cyrius test src/test.cyr
-Audit: sh scripts/check.sh (self-host + heap + 73 .tcyr + fmt + lint; 14 gates, v5.5.27)
-Version: cc5 --version → "cc5 5.5.27\n" (x86_64 Linux default).
-        cc5_aarch64 (Linux aarch64 cross). cc5_win 5.5.27 (Windows x86_64 PE;
-        native self-host v5.5.10+).
+Audit: sh scripts/check.sh (self-host + heap + 78 .tcyr + fmt + lint; 19 gates, v5.5.40)
+Version: cc5 --version → "cc5 5.5.40\n" (x86_64 Linux default).
+        cc5_aarch64 (Linux aarch64 cross). cc5_win 5.5.40 (Windows x86_64 PE;
+        native self-host v5.5.10+; .reloc + DYNAMIC_BASE ASLR v5.5.35;
+        Win64 ABI completion — stack-var + __chkstk + struct-by-value return +
+        varargs syntax — v5.5.36).
 Strict: cc5 --strict (v5.4.19; undefined-fn warnings become hard errors)
 
 IMPORTANT: Never use raw `cat file | cc5` for projects. Always use `cyrius build`
@@ -40,14 +42,19 @@ which resolves deps from cyrius.cyml and auto-prepends includes. Raw cc5 misses
 namespaced deps (lib/{depname}_{basename}) and produces undefined variable errors.
 Raw cc5 is only for: compiler self-hosting, one-liner tests, bootstrap chain.
 
-Source: src/main.cyr (entry) + src/frontend/*.cyr + src/backend/*.cyr + src/common/*.cyr
-Version: 5.5.27 — 73 .tcyr test files, 5 fuzz harnesses, 16 benchmarks, heap audit,
-self-hosting byte-identical. 59+ stdlib modules including the v5.5.26/v5.5.27 NSS
-identity quartet (lib/pwd.cyr + lib/grp.cyr + lib/shadow.cyr + lib/pam.cyr — pure-
-cyrius musl-pattern readers that bypass glibc NSS for getpwuid/getgrouplist/pam
-semantics; unix_chkpwd fork for non-root auth) + 6 deps (sakshi, patra at 1.5.5 via
-cyrius distlib, sigil 2.9.x with HKDF/SHAKE/SHA-512, yukti, mabda, sankoch). Compiler:
-488,864 B x86_64 (cc5 5.5.27), ~347KB aarch64 cross, ~554KB cc5_win (Windows PE
+Source: src/main.cyr (entry) + src/frontend/*.cyr (parser split into 6 files
+v5.5.38: parse/types/expr/decl/ctrl/fn; lexer split v5.5.38: lex + lex_pp)
++ src/backend/*.cyr + src/common/*.cyr. Legacy cc3 source (src/cc/ +
+compiler*.cyr) retired v5.5.39 — 3,333 LOC of dead code removed.
+Version: 5.5.40 — 78 .tcyr test files, 5 fuzz harnesses, 16 benchmarks, heap audit,
+self-hosting byte-identical. Stdlib unchanged — 59+ modules including the
+v5.5.26/v5.5.28 NSS identity quartet (lib/pwd.cyr + lib/grp.cyr + lib/shadow.cyr +
+lib/pam.cyr — pure-cyrius musl-pattern readers that bypass glibc NSS for
+getpwuid/getgrouplist/pam semantics; unix_chkpwd fork for non-root auth) + the
+v5.5.28/v5.5.34 lib/fdlopen.cyr foreign-dlopen for full-libc access + 6 deps
+(sakshi, patra at 1.5.5 via cyrius distlib, sigil 2.9.x with HKDF/SHAKE/SHA-512,
+yukti, mabda, sankoch). Compiler:
+488,864 B x86_64 (cc5 5.5.28), ~347KB aarch64 cross, ~554KB cc5_win (Windows PE
 cross; native self-host on Win11 v5.5.10+).
 Frontend/backend/common architecture.
 Compound assignment (+=, -=, *=, %=), negative literals, undefined function
@@ -424,7 +431,7 @@ TESTING:
 
 [[entries]]
 name = "stdlib"
-description = "Cyrius standard library: 59 modules + 6 deps, 300+ functions (v5.5.27)"
+description = "Cyrius standard library: 59 modules + 6 deps, 300+ functions (v5.5.28)"
 category = "cyrius"
 content = '''
 CORE LIBRARIES (lib/) — 59 stdlib modules + per-arch/OS variants + 6 deps:
@@ -477,6 +484,14 @@ dynlib.cyr      — Pure-cyrius ELF .so loader via mmap (GNU hash table, no libc
 keccak.cyr      — Keccak-f[1600] + SHAKE-128/256 (v5.4.15; NIST-verified; 262µs/4KB after v5.4.16 inlining)
 ct.cyr          — Constant-time primitives backing `secret var` (sigil PQC helper, v5.3.5)
 cffi.cyr        — C FFI shim surface (struct-by-value / variadic / >6-arg helpers; see docs/ffi/)
+fdlopen.cyr     — Foreign-dlopen primitives (v5.5.28; x86_64 Linux only). `dl_setjmp` / `dl_longjmp`
+                   (SysV callee-saved regs to 128-byte jmp_buf; POSIX longjmp(0)→1 via cmove),
+                   `fdlopen_helper_available` (stat-probe for $HOME/.cyrius/dlopen-helper, reads
+                   $HOME from /proc/self/environ), `fdlopen_init` / `fdlopen_slot` + 11 accessors
+                   (dlopen / dlsym / getaddrinfo / strerror / setlocale / …), 256-byte state buffer.
+                   Paired with programs/dlopen-helper.c (~100 LoC C bridge) + scripts/install.sh
+                   compile hook. In-process ld.so-entry orchestration pinned against first driver —
+                   API surface stable, `fdlopen_init` returns FDL_ERR_UNINIT (-8) until then.
 vidya.cyr       — Vidya knowledge-base access
 
 IDENTITY (NSS-free quartet, v5.5.26 / v5.5.27 — musl-pattern /etc/* readers, bypass glibc NSS):
@@ -3070,7 +3085,7 @@ name = "identity_lookups_musl_pattern"
 description = "Pure-cyrius /etc/passwd + /etc/group + /etc/shadow readers and non-root password auth — bypass glibc NSS entirely"
 category = "cyrius"
 content = '''
-Cyrius's v5.5.26/v5.5.27 identity surface is a deliberate
+Cyrius's v5.5.26/v5.5.28 identity surface is a deliberate
 architectural stance: don't try to bootstrap glibc NSS dispatch
 from a static binary (v5.5.23-25 ate three patches proving that's
 not tractable — see static_dlopen_and_nss_bootstrap_limits entry
@@ -3082,8 +3097,8 @@ does for its entire identity surface: parse `/etc/passwd`,
 
   lib/pwd.cyr    (v5.5.26)  — /etc/passwd reader
   lib/grp.cyr    (v5.5.26)  — /etc/group reader
-  lib/shadow.cyr (v5.5.27)  — /etc/shadow reader
-  lib/pam.cyr    (v5.5.27)  — password verification (non-root path)
+  lib/shadow.cyr (v5.5.28)  — /etc/shadow reader
+  lib/pam.cyr    (v5.5.28)  — password verification (non-root path)
 
 Each reader uses the same shape:
   * Internal cache keeps the whole file in a heap buffer after
@@ -3152,7 +3167,7 @@ if (r == PAM_AUTH_OK) { ... }
 * shadow.cyr requires root to read /etc/shadow directly. The
   non-root auth story routes through pam.cyr's unix_chkpwd helper.
   An inline SHA-512-crypt implementation (Drepper's algorithm, ~120
-  LoC) was considered for v5.5.27 but deferred: error-prone to
+  LoC) was considered for v5.5.28 but deferred: error-prone to
   hand-implement, and unix_chkpwd already covers every crypt type
   the system supports (MD5/SHA-256/SHA-512/yescrypt) via a ~1 ms
   fork. Could land in a future patch if a zero-fork consumer
@@ -3165,7 +3180,7 @@ if (r == PAM_AUTH_OK) { ... }
 === TESTING ===
 
   tests/tcyr/pwd_grp.tcyr     — 26 assertions (v5.5.26 gate 4h)
-  tests/tcyr/shadow_pam.tcyr  — 6 assertions (v5.5.27 gate 4i)
+  tests/tcyr/shadow_pam.tcyr  — 6 assertions (v5.5.28 gate 4i)
 
 Both run clean via direct `build/cc5` compile. The `cyrius test`
 harness currently has a dep-auto-prepend ordering bug that breaks
