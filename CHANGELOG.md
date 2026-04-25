@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-04-25
+
+### Changed
+- **HTTP server now runs on `lib/sandhi.cyr`** (cyrius 5.7.0 stdlib).
+  Sandhi is the canonical service-layer stdlib dep; replaces the
+  vendored `lib/http_server.cyr`. Caller renames in `src/main.cyr`:
+  `http_send_response` → `sandhi_server_send_response`,
+  `http_get_param` → `sandhi_server_get_param`,
+  `http_path_segment` → `sandhi_server_path_segment`,
+  `http_get_path` → `sandhi_server_get_path`,
+  `http_server_run` → `sandhi_server_run`.
+  `HTTP_OK` / `HTTP_NOT_FOUND` / `HTTP_BAD_REQUEST` / `INADDR_ANY()`
+  now resolve through sandhi.
+- CI/release workflows bumped to Cyrius 5.7.0 (from 4.5.0).
+- Build manifest migrated `cyrius.toml` → `cyrius.cyml` with
+  `[deps] stdlib = [...]` and `[deps.sakshi]` git stanza, matching
+  the yukti layout. Stdlib now declares `sandhi` as a dep.
+
+### Removed
+- Orphan `lib/http_server.cyr` — superseded by sandhi stdlib.
+
 ## [2.2.0] — 2026-04-14
 
 ### Changed
