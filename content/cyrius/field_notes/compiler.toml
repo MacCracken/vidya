@@ -2182,3 +2182,1121 @@ real code produces, surface it before the next opaque failure
 mode fires. When the symptom is "exit 0 silent" or "byte-
 identical but wrong," diagnostics > re-reasoning.
 '''
+
+[[entries]]
+name = "v5_6_x_optimization_arc_gotchas_bundle"
+description = "v5.6.0 — v5.6.17 gotchas: IR-pass debugging methodology, ESETCC IR-emit-order, parse_ctrl loop_top IR_NOP, IR_RAX_CLOBBER reads RCX, parse-time vs IR-time const-fold, NOP-fill preserves jumps, doc state-split (continued in v5_6_18_to_26_regalloc_arc_gotchas_bundle for Phase O4 + regalloc default-on)"
+category = "cyrius"
+content = '''
+=== IR-PASS BISECTION METHODOLOGY (v5.6.17 — load-bearing) ===
+
+When an IR-walking pass (DCE, copy-prop, future peepholes) silently
+corrupts cc5, do NOT keep guessing missing use/def cases by reading
+code. The IR has too many opcodes and backend semantics to enumerate
+from a desk read.
+
+USE THIS PATTERN INSTEAD:
+
+  1. Add a cap-env knob to the pass: CYRIUS_<PASS>_CAP=N limits
+     the pass to its first N actions. Default = -1 (uncapped).
+     Implementation in src/common/ir.cyr:
+
+       fn ir_pass_capped(S, cap) {
+           var actions = 0;
+           ...
+           if (cap >= 0) { if (actions >= cap) { dead = 0; } }
+           ...
+           actions = actions + 1;
+       }
+       fn ir_pass(S) { return ir_pass_capped(S, 0 - 1); }
+
+  2. Add a per-action context dump in the pass:
+
+       <PASS> action #N ni=X op=OP a1=A1 a2=A2 | ctx:
+         <-prev3 <-prev2 <-prev1 ->next1 ->next2 ->next3
+
+     (Skip IR_NOP / IR_ELIMINATED in prev/next walk so dump shows
+      real-instruction context, not whitespace.)
+
+  3. Binary-search by varying CYRIUS_<PASS>_CAP from 0 upward.
+     Smallest N where cc5_b crashes = the action that's wrong.
+
+  4. Inspect dump for action N. Opcode + 3 prev / 3 next ops will
+     show the local pattern and what use/def case the pass missed.
+
+WHY IT WORKS: the IR is small enough that 6 ops of context (3 each
+side, NOP-filtered) shows the local pattern. The cap knob isolates
+a single failing action so the dump output is manageable.
+
+WHY GUESSING FAILED IN v5.6.16: two attempts at fixing DCE wasted
+hours guessing missing-use cases (738 → 1,674 wrongly-killed
+between attempts). v5.6.17 used the cap-knob methodology and found
+the actual bug in ~10 minutes (kill #3 = MOV_CA before CLBRA).
+
+KEEP THE KNOB: don't remove the cap env after the bug is fixed.
+It's load-bearing for future audits when later passes (copy-prop,
+dead-store, future peepholes) hit the same class of hidden semantic.
+
+GENERALIZE: wire each new IR pass with its own cap on first
+implementation, BEFORE turning the pass on. Const-fold could have
+had CYRIUS_FOLD_CAP, copy-prop should have CYRIUS_COPYPROP_CAP, etc.
+
+=== IR_RAX_CLOBBER READS RCX (v5.6.17 fix) ===
+
+IR_RAX_CLOBBER is recorded by emit fns that mutate RAX (and possibly
+RDX) without going through MOVR — specifically EMULH (mulh64),
+EIDIV (idiv signed), ELODC (mov rax, [rcx]). The opcode name is
+misleading — it doesn't ONLY clobber RAX. All three READ RCX:
+
+  • EMULH:  reads rax, reads rcx, writes rax (hi half).
+  • EIDIV:  reads rax (dividend low), reads rcx (divisor),
+            writes rax (quotient), writes rdx (remainder).
+  • ELODC:  reads rcx (the address), writes rax (the loaded value).
+
+RCX is NEVER written by these — it's preserved across the op.
+
+DCE liveness rules for IR_RAX_CLOBBER:
+  • _ir_clobbers_rax(IR_RAX_CLOBBER) = 1   (writes rax)
+  • _ir_uses_rax(IR_RAX_CLOBBER)     = 1   (reads rax — mulh/idiv)
+  • _ir_def_rcx_any(IR_RAX_CLOBBER)  = 0   (does NOT write rcx)
+  • _ir_uses_rcx(IR_RAX_CLOBBER)     = 1   (reads rcx — operand/divisor/address)
+
+Same correction applies to:
+  • IR_ADD_IMM_X1: rcx += imm — reads rcx, writes rcx. Both uses
+    and def_rcx_any. Use case in PE arg-shuttle path.
+  • IR_RAW_EMIT (v5.6.12 marker): opaque conservative — could read
+    OR write any register. Treat as both reader and writer for
+    RAX and RCX so DCE can't kill anything around it.
+
+If you forget any of these correspondences, DCE will kill an
+upstream MOV_CA whose RCX value the CLBRA needed.
+
+=== ESETCC IR-EMIT-ORDER RULE (v5.6.15) ===
+
+When an emit helper (Efoo) calls another emit helper (Ebar), and
+both record their own IR opcodes via _IR_REC*, the order in which
+they record matters. The IR stream must mirror the BYTE order in
+codebuf — not the source-line order in the helper.
+
+WRONG (IR says SETCC→CMP, bytes are cmp→setcc):
+
+  fn ESETCC(S, op) {
+      if (_IR_REC1(S, IR_SETCC, op) == 1) { return 0; }
+      ECMPR(S);   # this records IR_CMP after we already recorded SETCC
+      EB(S, 0x0F); ...
+  }
+
+RIGHT (IR matches byte order):
+
+  fn ESETCC(S, op) {
+      ECMPR(S);
+      if (_IR_REC1(S, IR_SETCC, op) == 1) { return 0; }
+      EB(S, 0x0F); ...
+  }
+
+WHY IT MATTERS: at IR_ENABLED=0 the bug is silent (IR not consumed).
+At IR_ENABLED ≥ 1, any pass walking adjacent IR ops (peephole match,
+liveness, dead-code) sees inverted order and either misses real
+fusions or misclassifies live-ranges. v5.6.15 found 3,665 SETCC→CMP
+IR adjacencies that were really cmp→setcc in bytes.
+
+AUDIT RULE: every emit fn that calls another emit fn must record IR
+AFTER the sub-call, not before. The IR sequence should read top-to-
+bottom in the same order codebuf bytes appear.
+
+=== PARSE_CTRL LOOP_TOP IR_NOP REQUIREMENT (v5.6.14) ===
+
+When parse captures `loop_top = GCP(S)` for a back-edge target
+(while/for/for-in/classic-for), it MUST also record an IR_NOP at
+that position with arg1=loop_top:
+
+  loop_top = GCP(S);
+  if (_ire >= 1) { ir_emit(S, IR_NOP, 0, loop_top, 0); }
+
+Without the IR_NOP marker, ir_build_bbs doesn't see a BB boundary
+at the loop entry. JMP_BACK edges then land mid-BB, and any pass
+that reasons about per-BB state (LASE, future copy-prop) will
+incorrectly conclude that values from the BB's first-entry path
+are still live during loop iterations.
+
+v5.6.14 found this when re-enabling LASE: 811 LOAD_LOCAL eliminations
+that all looked correct turned into 5,692 B of corruption because
+the LOAD was redundant on first iteration but not on second.
+
+PATTERN GENERALIZES: any back-edge target needs an IR_NOP landing
+pad. Forward-jump targets (EPATCH) already get NOP markers via the
+existing patch convention.
+
+=== PARSE-TIME VS IR-TIME CONST-FOLD (v5.6.16) ===
+
+Cyrius has TWO const-fold mechanisms now:
+
+  1. PARSE-TIME via _cfo / _cfv flags in parse_expr.cyr
+     Tracks single-side-literal fold: `5 * x`, `a + 7`, etc.
+     Fires when LHS is a literal (`_cfo == 1`) and RHS is also
+     a NUM token. Bytes-perfect in-place rewrite — uses SCP() to
+     rewind CP and re-emit EMOVI(folded_val).
+
+  2. IR-TIME via ir_const_fold() in ir.cyr (v5.6.16)
+     Forward state-machine sweep over IR for the patterns parse-
+     time missed: LOAD_IMM(a), PUSH, LOAD_IMM(b), [POP_RCX |
+     MOV_CA + POP_RAX], OP. Two shapes covered (commutative
+     after v5.6.10 shuttle elim, non-commutative). For each
+     match: in-place rewrite codebuf — write EMOVI(fold_val) at
+     LHS LOAD_IMM CP, NOP-fill remainder of span. Mark consumed
+     IR nodes IR_NOP to keep IR consistent.
+
+When to use which:
+
+  • Parse-time is the right place when LHS is known literal at
+    parse time (typical case). It rewinds CP — bytes shrink.
+  • IR-time catches the long tail (e.g., when LHS comes from a
+    fold that itself wasn't possible at parse-time, or when
+    PARSE_TERM took a non-fold branch due to precedence). It
+    rewrites in-place — bytes preserved (NOP-filled), real
+    shrinkage waits for v5.6.22 codebuf compaction.
+
+DON'T duplicate work: the IR pass should not re-detect what
+parse-time already handled. v5.6.16 measurement: 130 IR folds vs
+hundreds of parse-time folds — the IR pass is genuinely the long
+tail.
+
+=== NOP-FILL PRESERVES JUMP TARGETS + FIXUPS (v5.6.16 design choice) ===
+
+All v5.6.x IR-level optimizations (LASE, const-fold, DCE, future
+copy-prop) NOP-fill bytes in the codebuf rather than rewinding CP.
+This is intentional:
+
+  • Forward jumps (EPATCH) reference target offsets relative to
+    end-of-jump-instruction. If we shifted bytes, we'd have to
+    rewalk and patch every jump.
+  • Backward jumps (JMP_BACK) similarly reference prior CPs.
+  • The fixup table (FIXUP() at end of compile) references node
+    CPs. Shifting would invalidate the table.
+  • IR_NODE_CP records would need rebuilding.
+
+NOP-fill sidesteps all of this — bytes don't move, jumps stay valid,
+fixups still resolve. The cost: cc5 binary stays the same total size,
+just with more 0x90 bytes. NOPs are decoded at near-zero µop cost on
+modern CPUs, so runtime is unaffected.
+
+REAL BINARY SHRINKAGE waits for v5.6.22 codebuf compaction — a single
+pass at end of pipeline that:
+  1. Walks codebuf for runs of ≥4 NOPs
+  2. CP-rewinds past the run
+  3. Shifts subsequent code down
+  4. Fixes up forward jumps + fixup table CPs + IR_NODE_CP records
+
+Doing compaction at end consolidates the work — one pass instead of
+per-optimization. Plus jump+fixup repair is non-trivial; better to
+get it right once than per-pass.
+
+=== STATE-DOC SPLIT (v5.6.16 — process meta-lesson) ===
+
+CLAUDE.md's "Current State" paragraph grew to 32 KB on a single line
+because every release appended another sentence. Made it
+unmaintainable for ingestion (token cost, parsability) and prone to
+silent rot (version refs duplicated in 4 places).
+
+THE FIX: split CLAUDE.md into preferences/process/procedures (durable,
+~150 lines) + docs/development/state.md (volatile, refreshed every
+release, ~50 lines). Historical narrative goes in
+docs/development/completed-phases.md.
+
+PATTERN GENERALIZES: any project's "instructions" doc that includes
+"current state" is at risk. Watch for the rot:
+
+  • A "Current State" or "Recent Changes" section that grows by
+    one sentence per release.
+  • Version numbers duplicated across multiple sections of the
+    same doc.
+  • Aspirational/historical content interleaved with durable rules.
+
+When you see this pattern, propose a split. Durable rules in the
+top-level instruction file; volatile state in a sibling refreshed-
+per-release doc. The instruction file becomes preferences/process/
+procedures only.
+
+=== ROADMAP QUALITY-BEFORE-OPS RULE (v5.6.16/17 enforced) ===
+
+When an optimization pass corrupts cc5 even after audit attempts,
+SHIP what works correctly and BAIL on the broken piece. Don't
+force in something that doesn't work just to hit a pre-planned slot.
+
+v5.6.16 example: planned to ship const-fold + bitmap liveness + DCE
+together (~260 LOC). Const-fold worked clean (130 folds / 774 B);
+DCE corrupted cc5. Shipped const-fold alone, bailed on DCE,
+re-pinned to v5.6.17 with proper investigation budget. v5.6.17 used
+the bisection methodology (which itself became a saved pattern),
+fixed in ~10 min, shipped clean (678 kills / 2,010 B).
+
+THE BAD ALTERNATIVE: would have been to either ship broken DCE
+(NOPE — cc5 wouldn't self-host), OR keep desk-reading missing-use
+cases for hours/days (already failed twice in v5.6.16). The bisection
+methodology was the third option that surfaced because of "STOP and
+ask" — when stuck, propose both the small ship and the bigger fix.
+
+DON'T SLIP UNILATERALLY: pinning the deferred half to a specific next
+slot (v5.6.17, v5.6.18) is the user's call, not yours. Report
+findings, propose options, wait for direction. The cascade is
+acceptable IF the bug fix justifies its own slot — which it does for
+correctness work.
+'''
+
+[[entries]]
+name = "v5_6_18_to_26_regalloc_arc_gotchas_bundle"
+description = "v5.6.18 — v5.6.26 gotchas: regalloc default-on, Phase O4 split, SysV ECALLPOPS r12-r14 clobber, asm/regalloc layout collision, picker bisection methodology, EPOPARG cancel-mirror gap, Phase O5 maximal-munch dead end"
+category = "cyrius"
+content = '''
+v5.6.18 → v5.6.26 covered the optimization arc's Phase O4 (regalloc)
+landing — including default-on flip — plus the v5.6.25 aarch64
+push/pop-cancel completion that closed v5.6.11's mirror gap. Phase
+O5 maximal-munch was tried at v5.6.26 scope but dropped (recon
+found 0 fused-op candidates; push-imm rewrite has rax-side-effect +
+forward-jump-target issues; needs an IR-level push-elision pass
+first).
+
+=== CODEGEN SCRATCH REGS MUST BE CALLER-SAVED (v5.6.24) ===
+
+The biggest landmine in the regalloc default-on landing.
+`src/backend/x86/emit.cyr::ECALLPOPS` SysV n>6 stack-arg shuttle
+used **r12, r13, r14 as scratch** to pop extras across the 6
+reg-arg pops. r11 was correctly caller-saved; r12-r14 are
+CALLEE-SAVED in SysV. Pre-regalloc, that was safe-by-accident
+because cyrius didn't emit r12-r15 anywhere. Once v5.6.20+
+regalloc started pinning caller's locals to those exact
+callee-saved regs, every 8+ arg call silently corrupted the
+locals — caller's pinned `fs` was overwritten with a popped arg
+value before the call, callee preserved (the wrong) value, and
+the caller continued with garbage.
+
+Surfaced as TWO bisection-disjoint reports:
+1. flags.tcyr at AUTO_CAP=118 — the 118th auto-enabled fn
+   (`test_str_short`) had an `_argv(3, "prog", "-o", "/tmp/out.s",
+   0, 0, 0, 0, 0)` 9-arg call; the shuttle clobbered r12 holding
+   `fs` in the next-fn `test_defaults`'s frame; flags_get_int
+   returned 0 instead of the registered default 7.
+2. sandhi M2 (filed 2026-04-24, same date-case file) —
+   sandhi_http_response_parse's `var headers` silently zeroed by
+   an unrelated downstream call. Workaround was
+   `var hdr_backup = headers;` (shifted local layout away from
+   picker's choice).
+
+Same root. Fix: rewrote SysV ECALLPOPS to use **only r10
+(caller-saved)** via direct `[rsp+offset]` MOV addressing — no
+pops, single shift loop, end with `add rsp, 48`. Length-equal to
+the un-rewritten path.
+
+**Audit rule for new codegen** (load-bearing): any register used
+as scratch in cyrius codegen MUST be caller-saved in the target
+ABI, OR be explicitly saved/restored. SysV caller-saved scratch:
+rax/rcx/rdx/rsi/rdi/r8/r9/r10/r11. Win64 caller-saved scratch:
+rax/rcx/rdx/r8/r9/r10/r11. Avoid rbx/r12-r15 unless wrapping with
+push+pop pairs (and accounting for the rsp shift in nearby
+[rsp+N] references).
+
+=== "ALIGNMENT REGRESSION" CAN BE A RED HERRING (v5.6.23) ===
+
+v5.6.22's default-on flip surfaced what looked like a v5.5.21
+array-alignment regression — `regression-inline-asm-discard.sh`
+SIGSEGV'd on PXOR xmm,m128 over `var rk[240]`. The shape said
+"alignment". v5.6.23 investigation had to PROBE the array VA
+(`mod 16 = 0` — fine) before discarding the alignment framing.
+
+Real cause: `regalloc's prologue saves rbx/r12-r15 to [rbp-8]..
+[rbp-40]`, and `parse_fn.cyr` computes local-var disps as
+`-(idx + 1 + _cur_fn_regalloc) * 8`, shifting every spilled
+local/param 40 B further from rbp. Inline asm hardcodes
+`mov rdi, [rbp-0x08]` to read param 1 under the standard cyrius
+prologue. Under auto-enable that read the saved RBX value (a
+pointer-shaped garbage) which PXOR then dereferenced.
+
+Fix: `parse_fn.cyr` body-scan lookahead for token 48 (`asm`).
+Auto-enable silently skips fns with asm; opt-in `#regalloc`
+on an asm fn warns and skips. Stdlib callers protected:
+`lib/fnptr.cyr`, `lib/thread.cyr`, `lib/atomic.cyr`,
+`lib/hashmap_fast.cyr`, `lib/u128.cyr`, `lib/thread_local.cyr`,
+`lib/fdlopen.cyr`, `lib/args_macos.cyr`.
+
+**Generalized rule**: when symptom is a memop SIGSEGV under new
+codegen and the obvious culprit looks like an existing fix's
+edge case, probe the operand's actual address FIRST. If the
+alignment/size/value is correct, the bug is elsewhere in the
+pipeline — usually layout or register choice.
+
+=== PICKER TIME-SHARE BREAKS LOOPS (v5.6.22) ===
+
+v5.6.20's Poletto-Sarkar picker added time-sliced register reuse:
+when an interval expires, its register can be reassigned to a
+later interval. SAFE for straight-line forward execution. UNSAFE
+for any backward CFG edge (loops): JMP_BACK to a position INSIDE
+an EARLIER interval re-reads the register expecting the earlier
+value but finds the new (time-shared) one.
+
+Surfaced at v5.6.22 auto-enable bisection on
+`PP_ALREADY_INCLUDED`'s nested while loops:
+- rbx assigned to `cnt` for [135876, 135900] — covered the
+  `while (i < cnt)` condition LOAD inside the outer loop
+- After lidx=2 expired, rbx reassigned to `p` for [135963, 136057]
+- Outer loop iteration JMP_BACK re-executed the cnt LOAD at
+  CP 135900 — but rbx now held `p`'s value
+- Wrong loop count → infinite loop / wrong branch
+
+**Fix**: extend `interval.last_cp = ra_end` for every interval —
+picker can no longer time-share registers (intervals never expire
+before fn end). Effectively single-register-per-local-for-whole-fn
+= greedy-equivalent. Proper time-sharing needs cross-BB liveness
+analysis (extend last_cp through backward CFG edges) — pinned
+future slot.
+
+=== PHASE O4 SPLIT (v5.6.19/20/22 — 1→3 slots) ===
+
+Originally pinned as full Poletto-Sarkar linear-scan in one slot
+(~600-900 LOC). Structural reality: no vreg layer, no cross-BB
+liveness, every emit fn hardcoded RAX/RCX. Made one-slot
+infeasible. Split into:
+- v5.6.19 = Phase O4a: per-fn live-interval infra (ra_first/ra_last
+  arrays, dump knob). Ships intervals; no codegen change. Also
+  fixed a pre-existing v4.8.4 latent sizing bug — `ra_counts[256]`
+  was 256 BYTES (32 i64 slots) but write loop wrote 256 i64s;
+  overflow into adjacent global memory; existing peephole tolerated
+  it because high-idx use-counts default to 0; interval tracking
+  needed correct sizing.
+- v5.6.20 = Phase O4b: Poletto-Sarkar picker. Replaces v4.8.4
+  greedy use-count picker. Insertion-sort intervals by first_cp
+  (deterministic tie-break by lidx), walk forward, expire active
+  intervals, assign free reg or spill furthest-next-use.
+  CYRIUS_REGALLOC_PICKER_CAP=N from day 1 for bisection.
+- v5.6.22 = Phase O4c (partial): auto-enable infra DISABLED by
+  default + picker correctness fix (loop-back time-share — extend
+  last_cp = ra_end). Default-on attempt at this slot surfaced two
+  bugs: (1) inline-asm layout collision (fixed v5.6.23); (2) ECALLPOPS
+  r12-r14 clobber (fixed v5.6.24).
+- v5.6.24 = default-on flip + the ECALLPOPS rewrite.
+
+**Lesson**: when a pinned slot is structurally infeasible after recon,
+SPLIT into legitimate phases (cascading +N is fine) rather than
+band-aiding or scope-cutting. Bandaids/threshold tweaks/auto-enable+
+patch are shortcuts. Splits are pre-planned decompositions.
+
+=== EPOPARG MIRROR GAP (v5.6.25 — aarch64 push/pop-cancel completion) ===
+
+v5.6.9 shipped push/pop-cancel for x86 (381 pairs eliminated).
+v5.6.11's memory said "aarch64 mirror fires too" — but only the
+EPOPR path. EPOPARG(S, n) emits the SAME `ldr xN, [sp], #16` for
+N=0..7. For N=0 the encoding is identical to EPOPR's pop-x0
+(0xF84107E0). EPOPR did the v5.6.9 adjacency check; EPOPARG
+DIDN'T. Every 1-arg call site (EPUSHR; ECALLPOPS(1) → EPOPARG(S, 0))
+paid 8 bytes of redundant push+pop.
+
+Bytescan recon under v5.6.24 default-on regalloc found 2,569 such
+pairs in native aarch64 cc5. 13-LOC fix in EPOPARG mirroring
+EPOPR's `GCP == _last_push_cp` rewind, gated on `n == 0`. Native
+aarch64 cc5 **517,376 → 497,008 B (−20,368 B / −3.94%)** — bigger
+than v5.6.11's combine-shuttle shrinkage.
+
+**Audit pattern when reusing a documented optimization**: when an
+existing fix is documented as "also fires for X", verify ALL emit
+paths for X — not just the primary one. Mirror-gap bugs hide in
+the secondary paths that nobody re-audited.
+
+=== PHASE O5 MAXIMAL-MUNCH DEAD END (v5.6.26-attempted, dropped) ===
+
+Phase O5 was originally pinned for v5.6.26 (after Phase O4
+regalloc landed). Goal: fuse adjacent operations into single
+instructions (mul+add → MADD on aarch64; mov-imm + push →
+push-imm on x86). Recon under v5.6.24 default-on regalloc:
+- aarch64 mul+add adjacent pairs: **0** across cc5_native_arm + 8
+  math-heavy tcyr tests (bigint, u128, mulh64, keccak, sha1, base64,
+  hashmap, vec). cyrius's stack-machine IR keeps a `str x0, [sp,
+  #-16]!` between every sub-expression result and consumer, so
+  `mul+add` pairs are SEPARATED by push/pop pairs. Fusion window
+  doesn't open without a separate IR-level push-elision pass.
+- x86 push-imm fusion (`mov eax, imm32; push rax` → `push imm32`):
+  2,861 sites in cc5 (recon), but rewriting fails because EMOVI
+  has a SIDE EFFECT (sets rax = imm) that subsequent code may
+  read. Forward jumps patched by EPATCH land at the post-EMOVI
+  position; rewriting changes what's at that position semantically.
+  ~71% of sites have ambiguous rax usage by conservative heuristic.
+
+**Pinned long-term, no slot**. Both branches need an IR-level
+push-elision pass to make the fusion windows actually open. v5.6.26
+shipped peephole refinement + doc completion instead.
+
+=== BISECTION METHODOLOGY (saved v5.6.17, used v5.6.22 + v5.6.24) ===
+
+The v5.6.17 IR-pass bisection pattern (CYRIUS_<PASS>_CAP=N env knob
++ binary-search) keeps paying dividends. v5.6.22 used
+CYRIUS_REGALLOC_AUTO_CAP=N + CYRIUS_REGALLOC_PICKER_CAP=N to
+narrow time-share bug to "PP_ALREADY_INCLUDED + 3rd reassignment"
+in ~10 minutes. v5.6.24 used the same knob to narrow the
+ECALLPOPS bug to "test_str_short = 118th auto-enabled fn + its
+9-arg _argv call". Both saved hours.
+
+**Pattern for new codegen passes**: ship a CAP env knob in the
+SAME slot as the pass itself, not later. Costs ~5 LOC, makes
+bisection trivial when something breaks.
+'''
+
+[[entries]]
+name = "stdlib_alloc_grow_step_vs_requested_size"
+description = "Bump-allocator grow logic must cover the requested allocation, not a fixed delta — fixed step `0x100000` regardless of requested size returned pointers past the brk/mmap for any alloc(>1MB)"
+category = "cyrius"
+content = '''
+BUG SHAPE: The cyrius stdlib bump allocator (`lib/alloc.cyr`,
+`lib/alloc_macos.cyr`) grew the heap by exactly `0x100000`
+whenever `_heap_ptr` crossed `_heap_end`, regardless of how far
+past the new pointer was. Any single `alloc(size > 1 MB)` near
+the grow boundary returned a pointer past the newly-mapped
+region — `alloc()` reported success, and the caller's first
+tail-write SIGSEGV'd at an unmapped address.
+
+Pre-fix (Linux brk path):
+    _heap_ptr = new_ptr;
+    if (_heap_ptr > _heap_end) {
+        var new_end = _heap_end + 0x100000;   // fixed delta
+        var result = syscall(12, new_end);
+        ...
+        _heap_end = new_end;
+    }
+    return ptr;                                // past new _heap_end
+
+Post-fix (v5.6.34 Linux):
+    var new_end = (_heap_ptr + 0xFFFFF) & (0 - 0x100000);
+    // round up to next 1MB grain; one brk per grow covers any size
+
+Post-fix (v5.6.34 macOS):
+    while (_heap_end < _heap_ptr) {
+        // loop 1MB mmaps; preserves per-step contiguity guard
+        // (a single hinted mmap can legitimately return a
+        // different base for larger requests)
+    }
+
+WHERE IT BIT: sit v0.6.1 S-33 triage. The 16 MiB zlib retry
+buffer in `object_db.cyr:read_object` allocates in one call
+via `alloc(16 * 1024 * 1024)`. On a 100-commit fixture, the
+grow boundary fell inside this allocation — SIGSEGV on first
+write into the tail past the 1 MB mapped region.
+
+BROADER LESSON: any bump-allocator grow step must compare
+against the requested allocation size, not a hardcoded delta.
+The fixed-step pattern is fine ONLY when the hot path is
+known to be many small allocations; the moment a consumer
+does one large allocation, the pattern silently miscompiles
+into returned-pointer-past-mapped-region.
+
+DETECTION: `tests/tcyr/alloc_grow.tcyr` covers this directly
+(4 MB + 16 MB tail-writes + 1000×64 B after jumbos + 128 MB
+single block). Extend when adding new alloc paths.
+
+RELATED LATENT SUSPECT: sit's same 2026-04-24 ticket reports
+a second symptom — `sit fsck` reports ~20% of objects
+unreadable after the grow fix — which MAY be a different
+cyrius stdlib memory-corruption mode (stale pointer /
+double-commit in the bump allocator beyond the grow bug),
+or a dep-layer bug (patra / sankoch). Pinned as v5.6.35
+triage; do not assume it's a cyrius bug without the
+prescribed patra bytes-roundtrip + sankoch symmetry first.
+'''
+
+[[entries]]
+name = "sit_symptom_2_was_sankoch_encoder_not_cyrius"
+description = "v5.6.35 — sit's 'fsck reports unreadable objects at scale' was a sankoch deflate encoder bug, not a cyrius alloc bug. Triage methodology that pinned it: standalone replay of dumped buffers + in-process roundtrip instrumentation + per-row checksum around dep boundary calls."
+category = "cyrius"
+content = '''
+PROBLEM SHAPE: sit reported "after fixing the alloc grow bug,
+20% of objects come back unreadable at scale, first bad at ~commit
+15, scales with N." Three plausible layers (patra / sankoch /
+cyrius latent corruption) — fix-before-triage forbidden.
+
+WHAT THE TRIAGE LOOKED LIKE (cyrius v5.6.35):
+
+1. Reproduce the failure end-to-end. Build sit against current
+   cyrius + deps, run the 100-commit fixture, confirm the
+   reported failure rate (53/247 unreadable on the documented
+   fixture).
+
+2. Eliminate patra: write a standalone cyrius program that
+   exercises patra with sit-shaped row inserts (STR + INT +
+   BYTES schema) at the failure scale. 1600+ rows across
+   single-process, cross-session (close+reopen), query-then-
+   insert, and cross-process patterns — all clean. Rules out
+   patra.
+
+3. Eliminate cyrius alloc: instrument sit's `write_typed_object`
+   with a pre/post checksum of the `compressed` buffer around
+   the `patra_insert_row` call. Match across all 300 inserts
+   means the buffer isn't being mutated in transit. Rules out
+   in-call buffer mutation by the dep boundary.
+
+4. Eliminate sit-side aliasing: in the same sit instrumentation,
+   add an in-process `zlib_decompress(compressed, clen, ...)`
+   immediately after `zlib_compress` returns the positive
+   `clen`. If THAT fails (50/300 did) — bug is in the encoder
+   for those specific inputs, not in any post-encoder buffer
+   handling.
+
+5. Confirm input-determinism: dump every `<hash>.full` and
+   `<hash>.cz` to sidecar files. Replay each `.full` through
+   sankoch in a fresh process (no patra, no sit, no cyrius
+   pressure). 50/300 fail standalone with byte-identical output
+   to what sit produced. Encoder is deterministic on input.
+
+6. Save the smallest failing input as a minimal repro
+   (~50-line standalone cyrius program reading the bytes from
+   stdin and asserting roundtrip). Hand off to sankoch.
+
+WHAT IT WASN'T:
+- Not patra. patra ROUNDTRIPS bytes correctly.
+- Not cyrius alloc. v5.6.34's grow fix was sufficient for
+  alloc-side correctness; the 50/300 failures persist with
+  v5.6.34's fix in place.
+- Not sit-side. Sit passes the right buffer + length to patra;
+  the buffer isn't mutated in transit; the buffer can't be
+  decompressed even microseconds after compress returns in the
+  same process under the same lock.
+
+WHY THE BUG DIDN'T SHOW IN SANKOCH'S OWN TEST SUITE: sankoch's
+roundtrip tests use synthetic byte patterns (random fills,
+text-like fills) that don't trigger the bad symbol distribution
+the encoder mishandles. The bug needed sit's tree-object byte
+shape (mix of `100644 file_<i>.txt\0` ASCII + 32-byte binary
+hashes per entry) at specific lengths to surface. Lesson: a
+roundtrip-test-corpus that doesn't include real consumer-shape
+inputs has dead spots.
+
+RESOLUTION: 3 sankoch tags (2.0.1 → 2.0.2 fixed 51/53; 2.0.3
+fixed remaining 2). Cyrius v5.6.35 = dep-pin bump 2.0.1 → 2.0.3
+in `cyrius.cyml` + active `tests/regression-sit-status.sh` gate.
+
+GENERALIZE: when triaging a "consumer X reports issue Y at
+scale" against a stack of deps, the dump-and-replay pattern
+turns multi-layer state-interaction bugs into single-layer
+deterministic repros. Save: input-to-suspect, output-of-suspect,
+and the calling-program's pre/post state if relevant. Replay
+each in isolation. The layer that reproduces the failure with
+NONE of the calling state is the layer that owns the bug.
+'''
+
+[[entries]]
+name = "two_consecutive_platform_drift_pins_were_both_fn_main_fixture_bugs"
+description = "v5.6.33 (Mach-O) and v5.6.36 (PE) — two consecutive 'platform drift' regression pins on cyrius's roadmap turned out to be the SAME test-fixture bug, not actual compiler regressions"
+category = "cyrius"
+content = '''
+PATTERN OBSERVED: v5.6.33 and v5.6.36 were both pinned as
+"platform drift" regressions — Mach-O syscall(60,42) exits 1 not
+42 on macOS Sequoia (v5.6.33), PE syscall(60,42) exits 0x40010080
+not 42 on Win11 24H2 (v5.6.36). Both attributed to OS loader
+hardening (Sequoia dyld strictness, 24H2 CET shadow-stack /
+DllCharacteristics enforcement). Both turned out to be the SAME
+test-fixture bug.
+
+THE FIXTURE BUG: each gate's source used
+  fn main() { syscall(60, 42); return 0; }
+
+In cyrius this is a function definition that is NEVER CALLED.
+There is no auto-invoked `main()`. Top-level statements ARE the
+program entry. With no top-level code, the entry prologue's
+branch-over-fn-bodies (patched by `EJMP0`/`EPATCH`) lands on the
+EEXIT/EEXIT_PE tail, which calls the platform's exit routine with
+whatever happened to be in the arg-slot register / x0:
+- macOS arm64: BSD `_exit(x0)` — x0 = argc (= 1 from shell) → rc=1.
+- Linux x86_64: `exit(rax)` syscall — rax content varies.
+- Windows PE: `kernel32!ExitProcess(rcx)` — rcx may have inherited
+  state from runtime, on Win11 24H2 it landed on 0x40010080 (an
+  NTSTATUS-shape value with high-nibble 0x4 =
+  STATUS_SEVERITY_INFORMATIONAL, which made PowerShell report
+  `ApplicationFailedException` instead of a plain non-zero
+  exit code).
+
+THE 30-SECOND CHECK that disproves both:
+  $ cat <<EOF | cc5 > /tmp/probe; chmod +x /tmp/probe
+  syscall(60, 42);
+  EOF
+  $ /tmp/probe; echo $?
+  42
+
+If THAT exits 42, the platform/loader/codegen is fine and the
+gate's `fn main()` fixture is the only bug.
+
+V5.6.36 ALSO VERIFIED: on Win11 24H2, patching the cyrius-
+emitted PE's DllCharacteristics from 0x0000 (no flags) →
+0x0160 (DYNAMIC_BASE | NX_COMPAT | HIGH_ENTROPY_VA) produced
+byte-identical exit behavior — both forms exit 42 with the
+corrected source, both exit 0x40010080 with the broken source.
+**Win11 24H2 does NOT require security flags.** That whole
+suspect class was wrong.
+
+GENERALIZED RULE (already in feedback memory
+`feedback_verify_slot_premise_first.md`): when triaging
+"platform drift since vX.Y.Z" reports for cyrius, FIRST
+verify the test fixture exercises what it claims to test.
+The 30-second top-level-syntax probe is cheaper than ANY
+investigation premise based on the broken fixture.
+
+WHY IT KEPT HAPPENING: gate fixture authors who came from C/Rust
+backgrounds wrote `fn main()` assuming entry-point convention
+that doesn't exist in cyrius. The same pattern bit two
+consecutive gate authors. v5.6.33 and v5.6.36 both ship with the
+fixture rewrite + a CHANGELOG paragraph explicitly documenting
+the misdiagnosis class.
+
+PINNED FOR FUTURE: when adding a regression gate that needs to
+"return value N from a cyrius program", use `syscall(60, N)` at
+top level, not `fn main() { syscall(60, N); return 0; }`. If the
+gate needs a helper function, define it then call it from
+top-level:
+  fn add3(a, b, c) { return a + b + c; }
+  syscall(60, add3(10, 20, 12));
+'''
+
+[[entries]]
+name = "libssl_needs_fdlopen_not_dynlib_open"
+description = "v5.6.37 — libssl's OPENSSL_init_ssl uses a recursive pthread mutex whose __kind field lives in the glibc TCB. cyrius's dynlib_bootstrap_tls zeroed TCB reads __kind=0 (non-recursive); same-thread re-entry deadlocks on futex."
+category = "cyrius"
+content = '''
+WHAT BREAKS: pre-v5.6.37 `lib/tls.cyr::_tls_init` loaded libssl
+via `dynlib_open` on top of `dynlib_bootstrap_tls`'s 4096-byte
+zeroed TCB + `arch_prctl(ARCH_SET_FS)`. That's enough for
+`%fs:N` reads and IFUNC resolvers. It is NOT enough for libssl.
+
+libssl 3's `OPENSSL_init_ssl` uses a recursive pthread mutex
+inside the glibc TCB. The mutex's `__kind` field (offset varies
+by glibc version, but it's in the TCB region) determines
+whether a same-thread re-entry is legal. On a real
+glibc-initialised process, `__kind = PTHREAD_MUTEX_RECURSIVE_NP`
+(= 1) because `__libc_pthread_init` set it. On cyrius's zeroed
+stub, `__kind = 0 = PTHREAD_MUTEX_TIMED_NP` (non-recursive).
+libssl re-enters → CAS 0→1 (acquire), CAS 0→1 fails (already
+held), CAS 1→2 (mark contended), `futex(mutex, WAIT, 2, NULL)`.
+Single-threaded process → nothing wakes it → indefinite hang.
+
+Symptom: `strace` shows
+`futex(0x??cc118, FUTEX_WAIT_PRIVATE, 2, NULL)` with no
+subsequent syscalls. The futex address falls inside cyrius's
+bump heap (same range as `dynlib_bootstrap_tls`'s TCB).
+
+FIX (shipped v5.6.37): route libssl through `fdlopen`, not
+`dynlib_open`. `fdlopen_init_full` invokes
+`~/.cyrius/dlopen-helper` through the real
+`ld-linux-x86-64.so.2`, which runs `_dl_start` +
+`__libc_start_main` + full `__libc_pthread_init`. By the
+time control returns to cyrius, the process has a
+fully-initialised glibc TCB (DTV, stack_guard,
+pthread_kind, `__libc_multiple_threads`, the whole set).
+Subsequent `dlopen("libssl.so.3")` (via
+`fdlopen_dlopen(state)`) loads libssl against real glibc;
+all pthread primitives work.
+
+WHEN YOU NEED FDLOPEN VS DYNLIB:
+- **Use `dynlib_open`** for libraries whose symbols cyrius
+  calls but that don't need real pthread state — libresolv
+  for DNS lookups, libcrypto for isolated hash/AES calls
+  (no init_ssl-style recursive mutex), libsystemd for
+  journal writes, etc.
+- **Use `fdlopen_dlopen`** for libraries that use pthread
+  primitives as part of their own init — libssl, libpq,
+  libcurl, anything that calls `pthread_once` /
+  `pthread_mutex_lock` with recursive expectation during
+  startup. If you're not sure, fdlopen is safe; dynlib is
+  faster but brittle.
+
+CONSUMER REQUIREMENT (v5.6.37+): `lib/tls.cyr` no longer
+auto-includes `lib/fdlopen.cyr` because cyrius's preprocessor
+expanded-output cap is 1 MB and heavy stdlib consumers
+(`tests/tcyr/large_input.tcyr`) already run at 98%. Callers
+of `lib/tls.cyr` MUST include fdlopen.cyr first:
+
+    include "lib/fdlopen.cyr"   # ← required as of v5.6.37
+    include "lib/tls.cyr"
+
+Without the fdlopen include, cc5 warns about undefined
+functions (`fdlopen_helper_available`, `fdlopen_init_full`,
+etc.) and the binary SIGILLs on the first `tls_available()`
+call.
+
+DEBUGGING PATTERN FOR FUTURE PTHREAD-STUB-DEADLOCK BUGS:
+1. `strace -f` the hanging program. Find the last futex
+   with no subsequent syscalls.
+2. Match the futex address against `/proc/<pid>/maps`.
+3. If it falls inside cyrius's bump heap (TCB region), the
+   library's pthread primitive is using stub-TCB state.
+4. The fix is either (a) extend the stub to cover whatever
+   field the library reads, or (b) switch to fdlopen so the
+   library gets a real glibc.
+5. (a) is version-specific and fragile; (b) works once the
+   fdlopen helper is installed.
+'''
+
+[[entries]]
+name = "version_string_must_not_be_hardcoded_in_source"
+description = "v5.6.39 — cc5 --version drifted at 5.6.29-1 for 9 releases because the version was hardcoded in src/main.cyr and version-bump.sh's regex didn't match the -N hotfix suffix. Fix: route through auto-generated src/version_str.cyr; never hardcode versions in source."
+category = "cyrius"
+content = '''
+LESSON: any version string baked at compile time MUST come from
+an auto-generated file the bump script writes via heredoc, NOT
+from a hardcoded source literal updated via regex sed.
+
+WHY: the regex shape is brittle to suffix conventions. cyrius's
+version-bump.sh used a grep gate:
+
+    grep -Eq '"cc5 [0-9]+\.[0-9]+\.[0-9]+\\n"' src/main.cyr
+
+That matches `X.Y.Z\n` but not `X.Y.Z-N\n`. When v5.6.29-1
+shipped (hotfix suffix per the documented `-N` convention),
+the literal `"cc5 5.6.29-1\n"` no longer matched the gate.
+The grep returned empty, the sed was skipped, and the bump
+emitted `warning: no cc5 version string found in src/main.cyr`
+to stderr — silently logged, never escalated. The bump
+"succeeded" but the literal stayed at 5.6.29-1. Subsequent
+9 bumps repeated the same silent failure. `cc5 --version`
+got stuck at `5.6.29-1` until a USER caught it via Starship
+prompt observation.
+
+`src/main_win.cyr` had the same bug shape with WORSE drift:
+the bumper only ever swept `main.cyr`, never `main_win.cyr`,
+so `cc5_win --version` had been stuck at `5.5.0` since
+v5.5.0 ever shipped.
+
+WRONG FIX: extend the regex to `[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?\\n`
+to accept the `-N` suffix. Re-introduces the same bug class
+for any future suffix shape (`-rc1`, `-pre`, `-alpha2`,
+date-stamp suffixes, etc.). The bug class is "version string
+in source = brittle".
+
+RIGHT FIX (shipped v5.6.39): eliminate hardcoded literals.
+Generate `src/version_str.cyr` from `VERSION` via heredoc.
+Sources `include` the generated file and reference vars.
+No regex, no per-file sweeping, no suffix vulnerability.
+
+GENERALIZED RULE: any time a build script's job is to "rewrite
+a literal in source", consider whether the literal can be
+moved to a generated include file instead. Generated files
+are simple (heredoc, single-pass write); regex-rewriting
+literals is a fragile pattern that drifts silently the moment
+the source format violates the regex's assumptions.
+
+DETECTION (look for these patterns when triaging build-script
+issues):
+
+    if grep -Eq 'PATTERN' source-file; then
+        sed -i ...
+    else
+        echo "warning: pattern not found"
+    fi
+
+This shape is the silent-drift recipe. Replace with:
+
+    cat > generated-file <<EOF
+    var X = "$NEW";
+    var X_LEN = ${#NEW};
+    EOF
+
+And `include` the generated file from the source.
+
+BUMP SCRIPT MUST REGENERATE ON SAME-VERSION INVOCATION too —
+otherwise the documented "regenerate without bumping" path
+silently no-ops. cyrius's version-bump.sh moves the
+`src/version_str.cyr` write BEFORE the
+`if [ "$NEW" = "$OLD" ]; then exit 0; fi` early-exit gate.
+'''
+
+[[entries]]
+name = "stdlib_tls_hook_surface_via_fn_pointer_not_callback_registry"
+description = "v5.6.40 — lib/tls.cyr exposes ALPN/mTLS via tls_connect_with_ctx_hook(sock, host, hook_fp, hook_ctx) + tls_dlsym(name) instead of registering callbacks per concern (set_alpn / set_verify / set_cert). One hook fn-pointer + one symbol-resolver = bounded surface; consumers compose freely."
+category = "cyrius"
+content = '''
+LESSON: when a stdlib module wraps a C library that exposes
+N configuration knobs (ALPN, mTLS, verify cb, session
+tickets, SNI override, ...), do NOT mirror N knobs into
+the stdlib API. Expose ONE pre-handshake hook that runs on
+the underlying object, plus ONE symbol-resolver that hands
+the consumer the raw C function pointers from the
+already-loaded library. Two surface elements. Done.
+
+WHY: per-knob mirroring (`tls_set_alpn(ctx, list)`,
+`tls_set_verify(ctx, cb)`, `tls_set_cert(ctx, cert, key)`,
+...) explodes the stdlib's surface area linearly with
+demand. Each new sandhi/ARK/whatever consumer that needs
+something cyrius didn't anticipate becomes a new stdlib
+slot — and the stdlib starts encoding library-specific
+domain knowledge (what ALPN protocol-list bytes look like,
+what the verify callback ABI is) it has no business owning.
+
+The hook approach inverts that: cyrius owns "we have a
+TLS connection in progress and you can configure its
+SSL_CTX before SSL_new fires". The CONSUMER owns "I want
+to set ALPN protocols using SSL_CTX_set_alpn_protos with
+this specific byte string". `tls_dlsym` lets the consumer
+reach the underlying lib's symbol without re-bootstrapping
+fdlopen on every call (the stdlib already holds the handle
+from `_tls_init`).
+
+CONCRETE SHAPE (v5.6.40):
+
+    fn alpn_hook(user_data, ssl_ctx) {
+        var fn_set = tls_dlsym("SSL_CTX_set_alpn_protos");
+        return fncall3(fn_set, ssl_ctx, &alpn_bytes, 12);
+    }
+    var tls = tls_connect_with_ctx_hook(fd, host, &alpn_hook, 0);
+
+Stdlib does NOT know what ALPN is. The consumer encodes the
+1-byte-length-prefixed protocol list, calls
+`SSL_CTX_set_alpn_protos` directly via `tls_dlsym`, returns
+0/non-zero to signal continue/abort. mTLS is the same shape
+with `SSL_CTX_use_certificate_file` + `SSL_CTX_use_PrivateKey_file`.
+
+WHEN TO USE THIS PATTERN: stdlib module wraps a foreign
+library where (a) the library's own configuration surface
+is wide and growing (OpenSSL, libcurl, libsqlite3,
+libuv, ...), and (b) cyrius has no architectural reason to
+own the per-knob semantics. Expose handle + hook + dlsym;
+let consumers compose.
+
+WHEN NOT TO USE: when cyrius DOES want to own the
+semantics (e.g., `lib/syscalls.cyr` deliberately hides
+arch differences — exposing a "syscall hook" would
+defeat the abstraction).
+
+GENERALIZED API SHAPE for foreign-library stdlib wrappers:
+
+    <module>_<verb>_with_<thing>_hook(args, hook_fp, hook_ctx)
+    <module>_dlsym(name) -> fnptr
+
+The default `<module>_<verb>(args)` becomes a 1-line
+wrapper passing zeros — no behavior change for existing
+callers.
+'''
+
+[[entries]]
+name = "sysv_odd_stack_args_rsp_alignment_violation"
+description = "v5.6.41 — SysV ABI requires rsp 16-aligned at every CALL (so callee sees rsp+8 16-aligned at entry). Cyrius's ECALLPOPS for n>6 args used add rsp, 48 unconditionally; for odd nextra (N=7,9,11) this left rsp 8-aligned at CALL, propagating misalignment until something downstream did SSE on a stack-saved value (libssl/libc prologs) and SIGSEGV'd at first instruction. Win64 path was already correct via framesize-mod-15 alignment branch; SysV path missed it."
+category = "cyrius"
+content = '''
+LESSON: when a cyrius function takes more than 6 formal params,
+the 7th+ arg goes on the stack via SysV. For an ODD number of
+stack args (N=7, 9, 11), the caller-side push sequence + the
+existing `add rsp, 48` cleanup leaves rsp 8-aligned at the
+CALL instruction — violating the SysV ABI rule that `(%rsp+8)
+must be 16-aligned at function entry`.
+
+The misalignment is silent under cyrius-only call chains
+because cyrius prologs don't use SSE. It only surfaces when
+something downstream — typically a libssl / libc fn whose
+prolog uses `movdqa` / SSE saves on stack-saved values —
+faults at its first instruction.
+
+DETECTION: a SIGSEGV reported as "at the first instruction
+of an extern symbol" called from a fn with 7+ params is the
+canonical signature. Pre-v5.6.41, sandhi's `tls_connect`
+from a 7-param `sandhi_conn_open_fully_timed` SIGSEGV'd
+inside libssl's prolog — exactly this shape.
+
+ABI MATH: SysV says `(%rsp+8) is 16-aligned at function
+entry`. Means `%rsp` itself = 8 mod 16 (the +8 accounts for
+the retaddr the CALL just pushed). Means before the CALL,
+`%rsp` must be 16-aligned (so retaddr-push leaves it 8-aligned
+at entry).
+
+WIN64 vs SysV: Win64's `ECALLPOPS` always allocates
+`framesize = 32 (shadow) + nextra*8`, rounded up to 16:
+
+    if ((framesize & 15) != 0) { framesize = framesize + 8; }
+
+That's the alignment branch SysV was missing. SysV's path
+emitted `add rsp, 48` regardless, leaving:
+
+    rsp_after_pops = rsp_after_n_pushes + 48
+                   = R - N*8 + 48
+                   = R - (N-6)*8
+
+For nextra = N - 6:
+- nextra = 1: rsp = R - 8 (8-aligned, BAD)
+- nextra = 2: rsp = R - 16 (16-aligned, OK)
+- nextra = 3: rsp = R - 24 (8-aligned, BAD)
+- nextra = 4: rsp = R - 32 (16-aligned, OK)
+- nextra = 5: rsp = R - 40 (8-aligned, BAD)
+
+FIX SHAPE: for odd nextra, shift step-2 stack writes from
+`[rsp + (6+i)*8]` down to `[rsp + (5+i)*8]` AND change the
+final `add rsp, 48` to `add rsp, 40`. This drops one fewer
+reg-arg slot, lands the extras at the SAME `[rbp+16+...]`
+offsets in the callee from rbp's POV after CALL+push rbp
++mov rbp,rsp, AND keeps rsp 16-aligned at the CALL site.
+ECALLCLEAN releases the corresponding 8 bytes of alignment
+padding in the symmetric branch.
+
+WRONG FIX (caught by `tests/tcyr/fncall_ceiling.tcyr` in
+v5.6.41 first-attempt): `add rsp, 48; sub rsp, 8` after the
+existing logic. This DOES align rsp but moves the stack args
+8 bytes higher in the caller frame, so callee reads them at
+`[rbp+24]` instead of `[rbp+16]` — alignment fixed, layout
+broken. Right answer changes both the writes AND the final
+sp-adjust together, so the args land at the same callee-side
+offsets while rsp still ends 16-aligned.
+
+DETECTION (codebase-side): grep `ECALLPOPS` and look for any
+caller-side calling-convention logic that doesn't have a
+parity check on the total arg count. Win64's pattern (always
+align to 16 via framesize-mod-15) is the reference.
+
+SELF-HOST FIXPOINT IS NECESSARY BUT NOT SUFFICIENT: cc5's
+3-step self-host (cc5_a → cc5_b → cc5_c byte-identical)
+verifies codegen DETERMINISM, not codegen CORRECTNESS for
+ABI rules cc5 itself doesn't trigger. cc5 callees don't use
+SSE in their prologues, so an alignment bug stays latent
+until a downstream consumer (sandhi via libssl) hits it.
+After any change to ECALLPOPS / ECALLCLEAN /
+ESTORESTACKPARM, run `tests/tcyr/fncall_ceiling.tcyr` AND
+`tests/tcyr/sysv_odd_stack_args.tcyr` (which has callers
+with 7/8/9/10/11 params hitting an SSE-using leaf).
+'''
+
+[[entries]]
+name = "pp_ifdef_pass_helpers_must_take_src_base"
+description = "v5.6.42 — same-class fix as v5.6.30. PP_IFDEF_PASS copies preprocessed content back to S+0 capped at 524288 B; helpers (PP_HASH/PP_DEFINE/PP_DEFINED/PP_GETVAL/PP_EVAL_IF) reading via S+pos for source > 524288 B land in stale heap. v5.6.30 fixed PP_DERIVE_*; v5.6.42 closed the rest by threading src_base through the family."
+category = "cyrius"
+content = '''
+LESSON: `lex_pp.cyr`'s `PP_IFDEF_PASS` operates on a `tmp`
+mmap buffer (full uncapped size, can be up to the 2 MB
+preprocess_out limit) but copies the source back to `S+0`
+capped at 524288 B (the size of `input_buf`). Helpers that
+take a position and read via `load8(S + pos + i)` are
+correct for `pos < 524288` but read STALE heap bytes for
+`pos >= 524288`.
+
+The bug surfaces as: a `#define` / `#ifdef` / `#if` /
+`#derive` directive at offset > 524288 in PP_IFDEF_PASS's
+processing gets a wrong hash (PP_HASH reads garbage), so
+the directive is misprocessed silently — a name doesn't
+get registered, an ifdef block emits when it shouldn't, etc.
+
+v5.6.30 fixed this for `PP_DERIVE_*` (struct-deriving
+helpers: serialize, deser, accessors) by threading
+`src_base` through the helpers + `PP_PARSE_STRUCT_DEF`.
+v5.6.42 closed the rest of the family — `PP_HASH`,
+`PP_DEFINE`, `PP_DEFINED`, `PP_GETVAL`, `PP_EVAL_IF` —
+which were still using `S + pos` for source reads.
+
+FIX SHAPE:
+
+    # Before:
+    fn PP_HASH(S, pos) { ... load8(S + pos + i) ... }
+    fn PP_DEFINE(S, pos) { ... }
+    # ... etc
+
+    # After:
+    fn PP_HASH(src_base, pos) { ... load8(src_base + pos + i) ... }
+    fn PP_DEFINE(S, src_base, pos) { ... }   # S kept for flag-table writes at S+0x90800
+    # ... etc
+
+CALLERS:
+- `PP_PASS` reads from raw input at S+0 → passes `S` as src_base.
+- `PP_IFDEF_PASS` reads from the `tmp` mmap buffer → passes `tmp` as src_base.
+
+DETECTION: grep `lex_pp.cyr` for any helper that takes a
+`pos` parameter and reads via `load8(S + pos + ...)` or
+`load8(S + pos)`. If that helper is called from
+`PP_IFDEF_PASS` with a `pos` derived from walking the `tmp`
+buffer, it has the same bug.
+
+WHY THE BUG IS LATENT FOR MOST TEST FIXTURES: top-level
+`#define` / `#ifdef` / `#if` directives in the source are
+caught by `PP_PASS` on the first pass, so they never reach
+`PP_IFDEF_PASS`. The bug only triggers when a directive
+appears INSIDE included content that PP_PASS doesn't
+process (typically nested-include cases that need a 2nd
+pass) AND the directive lands past offset 524288 in the
+expanded output.
+
+REGRESSION GATE: `tests/tcyr/preprocessor_past_cap.tcyr`
+(v5.6.42) exercises the helpers under > 524288 B
+expansion. The fix is defensive — even when the test
+doesn't trip the latent path, the code shape is now
+correct by inspection.
+'''
+
+[[entries]]
+name = "heap_cap_growth_pattern_compiler_grows_to_fit_language"
+description = "v5.6.40 + v5.6.43 — when a stdlib bump or test fixture pushes a compiler cap (preprocessor buffer / output_buf / fixup table / fn count), the right answer is to grow the cap, not trim the stdlib / test / language. Reshuffle methodology: top-down sed substitution + disambiguation discipline for new-addr-equals-old-addr collision points."
+category = "cyrius"
+content = '''
+LESSON: when a dep bump (patra 1.6.0 → 1.8.3 at v5.6.40,
+sigil 2.9.0 → 2.9.3 at v5.6.43) or a test fixture pushes a
+compiler-internal cap, the correct response is to grow the
+cap. Suggesting that the user trim a stdlib include or test
+fixture to fit the existing cap is telling them to
+minimize their language because the compiler can't keep up
+— that's the wrong direction.
+
+Caps that hit during v5.6.x:
+- v5.6.40: preprocess_out 1 MB → 2 MB (patra 1.8.3 +
+  full stdlib include set crossed 1 MB by ~280 B on
+  large_input.tcyr).
+- v5.6.43: output_buf 1 MB → 2 MB (sigil 2.9.3's bigger
+  code put `large_input.tcyr` ELF output at ~1.08 MB —
+  past the 1 MB cap).
+
+RESHUFFLE METHODOLOGY (proven in v5.6.40, repeated cleanly
+in v5.6.43):
+
+1. **Bump the buffer size** at its base offset (e.g.,
+   `preprocess_out [1048576]` → `[2097152]`).
+2. **Shift every region after** by the delta. Apply
+   substitutions TOP-DOWN (highest old offset first)
+   to avoid sed collisions.
+3. **Update cap-check sites** in `EB` / `EMITELF_*`
+   (1048576 → 2097152 in the `if (filesz > ...)` and
+   diagnostic strings).
+4. **Update the brk syscall arg** in every main_*.cyr.
+5. **Update heap-map docs** in main.cyr (authoritative)
+   and the 4 main_*.cyr siblings. Watch for stale
+   "21.5 MB" / "22.5 MB" total-heap mentions.
+
+DISAMBIGUATION DISCIPLINE — the real cost of the reshuffle:
+
+When NEW(region_A) = OLD(region_B), a global sed can't
+tell them apart. v5.6.40 caught five collision points:
+
+1. `var O = S + 0x64A000` was OLD output_buf base; NEW
+   codebuf is also 0x64A000. Disambiguation: syntactic
+   shape — `var O = S + 0x...;` always means output_buf
+   base, while `S + 0x64A000 + cp/coff` means codebuf.
+2. `var pfx = S + 0x64A000 + 131072` was OLD output_buf
+   tail used as scratch. Comment was the ONLY clue.
+3. `0x150B000` was OLD fixup_tbl (16-byte stride),
+   NEW ir_cp (4-byte stride). Disambiguation: stride
+   in the access pattern.
+4. `0x13CA000` was OLD ir_state, NEW ir_blocks.
+   Disambiguation: ir_state accessors are bare or
+   `+8/+10/+18/+20`; ir_blocks accesses are `+ bi * 32`.
+5. `0xECA000` was OLD ir_nodes, NEW struct_fnames.
+   Disambiguation: per-file usage — ir.cyr uses 0xECA000
+   as ir_nodes; parse_types.cyr uses it as struct_fnames.
+   `replace_all` per-file was safe.
+
+ACCEPTANCE CHECK after a reshuffle:
+
+- 3-step self-host fixpoint (`cc5_a → cc5_b → cc5_c → cc5_d`
+  byte-identical). Heap shifts are 32-bit immediates →
+  byte counts shouldn't change unless the substitution
+  chain corrupted something.
+- `tests/tcyr/fncall_ceiling.tcyr` AND
+  `tests/tcyr/sysv_odd_stack_args.tcyr` (post-v5.6.41) —
+  these exercise calling-convention paths that cc5 itself
+  doesn't trip. If a reshuffle subtly broke a code path,
+  these gates surface it where self-host wouldn't.
+- `tests/tcyr/large_input.tcyr` + `large_source.tcyr` +
+  `preprocessor_past_cap.tcyr` — the "include everything"
+  fixtures that exercise the new cap end-to-end.
+
+WHY 1 MB → 2 MB AND NOT 4 MB: doubling each cap raise is
+the right increment because the next pressure point is
+typically 6–18 months out (current dep growth rates).
+Going to 4 MB pre-emptively wastes ~15 MB of heap budget
+when no consumer needs it. v5.6.40's 1→2 cap raise lasted
+3 patches before sigil 2.9.3 needed the next one; v5.6.43's
+output_buf raise will likely last longer (output sizes
+grow slower than preprocess sizes since codebuf is also
+1 MB capped).
+'''

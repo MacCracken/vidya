@@ -59,8 +59,15 @@ content/
 └── cyrius/                — Cyrius-specific (P6, future)
     ├── language.toml
     ├── types.toml
-    ├── implementation.toml
-    └── ecosystem.toml
+    ├── dependencies.toml
+    ├── ecosystem.toml
+    ├── field_notes/       — practical lessons from real software
+    │   ├── language.toml
+    │   ├── compiler.toml
+    │   ├── kernel.toml
+    │   └── ...
+    └── archive/           — historical design log
+        └── implementation.toml   (moved here at v5.6.17)
 ```
 
 ## Migration Rules

@@ -655,3 +655,70 @@ nested varargs — for now, if you need those shapes, pass a
 pointer or a single `u64` and unpack.
 '''
 
+
+[[entries]]
+name = "fn_main_is_not_the_entry_point"
+description = "`fn main() { ... }` is just a function definition — cyrius has no auto-call for it; top-level statements are the program entry"
+category = "cyrius"
+content = '''
+THE TRAP:
+
+    fn main() {
+        syscall(60, 42);
+        return 0;
+    }
+
+Compiles clean. Runs. Exits with 0, or 1, or whatever argc was
+— but never 42.
+
+WHY:
+
+Cyrius does not have a C-style `int main(void)` convention.
+There is no implicit `bl _main` / `call main` emitted by the
+compiler. The entry point is the top-level statements in the
+compilation unit, emitted in order after all function bodies.
+See `src/main.cyr` / `src/main_aarch64.cyr`:
+
+    (pass 2) parse + emit every `fn` body into codebuf
+    EPATCH(jmp_patch)            ← branch-over-fn-bodies lands here
+    PARSE_ENUM_DEF(init pass)    ← enum init code
+    EMIT_GVAR_INITS(S)           ← gvar init code
+    PARSE_PROG(S)                ← YOUR top-level stmts run here
+    EVLOAD(last_var); EEXIT(S)   ← exit with last-assigned var, or x0
+
+A source consisting of only `fn main() { … }` has no top-level
+code. After the parser finishes emitting `main`'s body as a
+function (never called from anywhere), `PARSE_PROG` sees EOF
+and emits nothing. The initial `b jmp_patch` that the entry
+prologue emitted (to skip past the fn bodies) is then patched
+to land directly on `EEXIT`, which exits with whatever was in
+x0 / rax.
+
+On Mach-O arm64 this is dramatic: the argv prologue pushes
+x0 (argc) before the branch, so the `EEXIT` tail's
+`movz x16,#1; svc #0x80` (= BSD `_exit(x0)`) exits with argc,
+which is 1 when invoked from the shell.
+
+CORRECT SHAPE:
+
+    syscall(60, 42);
+
+At top level. If you want helpers, define them as `fn`s and
+call them from top level:
+
+    fn add3(a, b, c) { return a + b + c; }
+    syscall(60, add3(10, 20, 12));
+
+WHERE THIS BIT US:
+
+v5.6.33 was pinned as "macOS arm64 runtime regression" on
+`ssh ecb` based on a `fn main()` fixture exiting 1 not 42.
+There was no compiler regression; the fixture never exercised
+what it thought it did. `otool -tv` showed `fn main`'s body
+correctly emitting `adrp x16, 4; ldr x16, [x16]; br x16`
+through `__got[0] = _exit` — it just never executed.
+
+Linux has the same trap but argc is often 0 at process entry,
+so the symptom looks like "exit 0" instead of "exit argc." Same
+root cause; different flavor of wrong answer.
+'''

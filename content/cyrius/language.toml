@@ -29,13 +29,30 @@ produces output matching Linux cross-build byte-for-byte).
 Build: sh bootstrap/bootstrap.sh (40ms)
 Compile: cyrius build src/main.cyr build/myapp   (auto-resolves deps from cyrius.cyml)
 Test: cyrius test src/test.cyr
-Audit: sh scripts/check.sh (self-host + heap + 78 .tcyr + fmt + lint; 19 gates, v5.5.40)
-Version: cc5 --version → "cc5 5.5.40\n" (x86_64 Linux default).
-        cc5_aarch64 (Linux aarch64 cross). cc5_win 5.5.40 (Windows x86_64 PE;
-        native self-host v5.5.10+; .reloc + DYNAMIC_BASE ASLR v5.5.35;
+Audit: sh scripts/check.sh (self-host + heap + 87 .tcyr + fmt + lint; 26 gates, v5.6.43)
+Version: cc5 --version → "cc5 5.6.43\n" (x86_64 Linux default).
+        cc5_aarch64 (Linux aarch64 + macOS Mach-O cross). cc5_win 5.6.43 (Windows
+        x86_64 PE; native self-host v5.5.10+; .reloc + DYNAMIC_BASE ASLR v5.5.35;
         Win64 ABI completion — stack-var + __chkstk + struct-by-value return +
         varargs syntax — v5.5.36).
 Strict: cc5 --strict (v5.4.19; undefined-fn warnings become hard errors)
+Regalloc: default-ON since v5.6.24 — every x86 fn (no inline asm in body) gets
+        Poletto-Sarkar linear-scan picker pinning up to 5 hot locals to
+        rbx/r12-r15. Override via CYRIUS_REGALLOC_AUTO_CAP=0 (disable) or
+        CYRIUS_REGALLOC_AUTO_CAP=N (cap at first N fns, bisection). Picker
+        intervals dump via CYRIUS_REGALLOC_DUMP=1; per-assignment cap via
+        CYRIUS_REGALLOC_PICKER_CAP=N. Inline-asm fns auto-skipped (asm
+        hardcodes [rbp-N] disps that the regalloc save block shifts —
+        v5.6.23 misdiagnosis-correction fix).
+IR pipeline: CYRIUS_IR=1 records IR + emits x86; CYRIUS_IR=3 also runs the
+        optimization passes (LASE since v5.6.14; const-fold since v5.6.16;
+        bitmap liveness DCE since v5.6.17; DSE + fixed-point driver since
+        v5.6.18). 3-step fixpoint b==c required at BOTH IR=0 and IR=3 since
+        v5.6.16. Real binary shrinkage from per-pass NOP-fill is pinned to
+        v5.6.27 (codebuf compaction).
+Profiling: CYRIUS_PROF=1 (v5.6.5; clock_gettime wall-clock; cross-platform
+        v5.6.6 — kernel32!GetTickCount64 on PE, libSystem._clock_gettime_nsec_np
+        on Mach-O via __got[6]).
 
 IMPORTANT: Never use raw `cat file | cc5` for projects. Always use `cyrius build`
 which resolves deps from cyrius.cyml and auto-prepends includes. Raw cc5 misses
@@ -44,18 +61,34 @@ Raw cc5 is only for: compiler self-hosting, one-liner tests, bootstrap chain.
 
 Source: src/main.cyr (entry) + src/frontend/*.cyr (parser split into 6 files
 v5.5.38: parse/types/expr/decl/ctrl/fn; lexer split v5.5.38: lex + lex_pp)
-+ src/backend/*.cyr + src/common/*.cyr. Legacy cc3 source (src/cc/ +
++ src/backend/*.cyr + src/common/*.cyr (includes ir.cyr — 40 IR opcodes plus
+v5.6.12 IR_RAW_EMIT, v5.6.14 IR_RAX_CLOBBER). Legacy cc3 source (src/cc/ +
 compiler*.cyr) retired v5.5.39 — 3,333 LOC of dead code removed.
-Version: 5.5.40 — 78 .tcyr test files, 5 fuzz harnesses, 16 benchmarks, heap audit,
-self-hosting byte-identical. Stdlib unchanged — 59+ modules including the
-v5.5.26/v5.5.28 NSS identity quartet (lib/pwd.cyr + lib/grp.cyr + lib/shadow.cyr +
-lib/pam.cyr — pure-cyrius musl-pattern readers that bypass glibc NSS for
+Version: 5.6.43 — 87 .tcyr test files, 5 fuzz harnesses, 14 benchmarks, heap audit,
+self-hosting byte-identical at IR=0 AND IR=3. Stdlib — 60+ modules including
+sha1.cyr promoted v5.6.13 from `_wss_sha1` (NIST FIPS 180-4 vectors), the
+v5.5.26/v5.5.28 NSS identity quartet (lib/pwd.cyr + lib/grp.cyr + lib/shadow.cyr
++ lib/pam.cyr — pure-cyrius musl-pattern readers that bypass glibc NSS for
 getpwuid/getgrouplist/pam semantics; unix_chkpwd fork for non-root auth) + the
-v5.5.28/v5.5.34 lib/fdlopen.cyr foreign-dlopen for full-libc access + 6 deps
-(sakshi, patra at 1.5.5 via cyrius distlib, sigil 2.9.x with HKDF/SHAKE/SHA-512,
-yukti, mabda, sankoch). Compiler:
-488,864 B x86_64 (cc5 5.5.28), ~347KB aarch64 cross, ~554KB cc5_win (Windows PE
-cross; native self-host on Win11 v5.5.10+).
+v5.5.28/v5.5.34 lib/fdlopen.cyr foreign-dlopen for full-libc access +
+lib/overflow.cyr (v5.6.2; saturating + checked +|/-|/+?/-? helpers) +
+lib/tls.cyr ALPN/mTLS hook surface (v5.6.40 — `tls_dlsym` + `tls_connect_with_ctx_hook`)
++ 6 deps (sakshi 2.0.0, patra 1.8.3 via cyrius distlib — bumped 1.6.0→1.8.3 at
+v5.6.40 for INSERT OR IGNORE / STR-keyed B+ tree indexes / page-slab allocator /
+prepared statements, sigil 2.9.0 with HKDF/SHAKE/SHA-512, yukti 2.1.1, mabda
+2.5.0, sankoch 2.1.0 — bumped 2.0.3 → 2.1.0 at v5.6.43 for DEFLATE
+compress perf wins, wire-format identical). Compiler:
+531,888 B x86_64 (cc5 5.6.42; +112 B vs v5.6.41 from PP_DEFINE/DEFINED `src_base`
+threading), 411,520 B aarch64 cross, 526,856 B cc5_win (Windows PE cross; native
+self-host on Win11 v5.5.10+), 410,944 B cc5_aarch64_macho_cross (v5.6.40 added
+the missing ir.cyr include). v5.6.40 doubled preprocess_out 1MB→2MB; brk now
+0x168B000 (22.5MB). v5.6.41 fixed SysV 16-byte stack alignment for
+odd-stack-arg callers (sandhi-blocking 7-arg-frame tls_connect SIGSEGV).
+Native aarch64 cc5 output (Pi 4) is 497,008 B at v5.6.25 — the v5.6.25 EPOPARG
+push/pop-cancel completion shaved 20,368 B (−3.94%) by closing the v5.6.11
+aarch64 mirror gap (1-arg call sites paid 8 B redundant push+pop). Real binary
+shrinkage from accumulated NOP-fill landed at v5.6.27 codebuf compaction
+(542,928 → 531,392 B, −11,536 B / −2.13%).
 Frontend/backend/common architecture.
 Compound assignment (+=, -=, *=, %=), negative literals, undefined function
 diagnostic (escalatable via --strict). Multi-width types (i8/i16/i32/i64),
@@ -78,17 +111,23 @@ for struct-by-value / float / variadic / aarch64 7-8 arg — see docs/ffi/.
 1MB codebuf, 128KB tok_names, 4096 functions, 8192 variables, 262K tokens,
 512KB input, 256KB str_data, 16384 fixups, 64 structs. Capacity meter
 (CYRIUS_STATS=1, default 85% warnings, cyrius capacity subcommand).
-Heap map: brk 0x150B000 (21MB), aarch64 synced. Integrity: tests/heapmap.sh
-(43 regions, 0 overlaps, 0 warnings).
+Heap map: brk 0x168B000 (22.5MB; v5.6.40 doubled preprocess_out from 1MB→2MB
+and shifted everything after forward 1MB), aarch64 synced. Integrity:
+tests/heapmap.sh (43 regions, 0 overlaps, 0 warnings).
 Dependencies via cyrius.cyml [deps] — git fetch + symlink into lib/. yukti-style
 single-file dist bundle is the stdlib-dep convention (dist/<name>.cyr).
 [release] table in cyrius.cyml (v5.4.18) — single source of truth for toolchain
 bins/scripts consumed by release.yml + install.sh + pulsar.cyr.
-Constant folding, tail call opt, DCE (bitmap O(T+N)), jump tables (dense
-switches), dead-store elimination. Return-by-value small structs (ret2/rethi).
-IR layer (v5.0.0): 40 opcodes, CFG, LASE, DBE. Per-arch asm dispatch via
-#ifdef CYRIUS_ARCH_{X86,AARCH64} (v5.3.16); new consumers should prefer
-#ifplat syntax (v5.4.19).
+Constant folding (parse-time `_cfo` since v3.x; IR-level v5.6.16 catches the
+parse-missed long-tail — 130 folds / 774 B NOP-fill on cc5 self-compile),
+tail call opt, DCE (bitmap O(T+N) for unreachable fns; bitmap-liveness in IR
+v5.6.17 — 678 kills / 2,010 B NOP-fill on cc5 self-compile), jump tables
+(dense switches), dead-store elimination, return-by-value small structs
+(ret2/rethi). IR layer (v5.0.0): 40 opcodes, CFG, LASE, DBE — extended
+v5.6.12 with IR_RAW_EMIT (parse-emit boundary marker) + v5.6.14 with
+IR_RAX_CLOBBER (EMULH/EIDIV/ELODC opaque-clobber marker). Per-arch asm
+dispatch via #ifdef CYRIUS_ARCH_{X86,AARCH64} (v5.3.16); new consumers should
+prefer #ifplat syntax (v5.4.19).
 Inline small fns (2 params, 16 tokens via token replay).
 PIC codegen for object; mode (LEA + R_X86_64_PC32, no DT_TEXTREL — glibc 2.38+
 dlopen-safe). _cyrius_init export wraps top-level code as a callable function
@@ -272,7 +311,7 @@ KEY LESSONS:
 
 [[entries]]
 name = "known_limitations"
-description = "Current limitations and gotchas when writing Cyrius code (updated v4.8.5)"
+description = "Current limitations and gotchas when writing Cyrius code (updated v5.6.43)"
 category = "cyrius"
 content = '''
 FIXED (no longer limitations — do NOT work around these):
@@ -355,11 +394,27 @@ CURRENT LIMITATIONS:
 10. INCLUDE IN KERNEL MODE: Not supported. kernel; mode blocks require
     single-file source or external concatenation.
 
-11. PREPROCESSOR OUTPUT CAP: Expanded source hard-capped at 1 MB via
-    `PP_IFDEF_PASS` size guard (added in the 4.8.4 retag). Programs whose
-    transitive include graph expands past 1 MB error out with a clear
-    message — split the unit or prune includes. Bote 2.5.0 sits at ~525 KB
-    post-expansion, well within headroom.
+11. PREPROCESSOR OUTPUT CAP: Expanded source hard-capped at 2 MB via
+    `PP_IFDEF_PASS` size guard. v4.8.4 retag added the guard at 1 MB;
+    v5.6.40 doubled to 2 MB after patra 1.8.3 + the full stdlib include
+    set crossed 1 MB on `large_input.tcyr` by ~280 B. Programs whose
+    transitive include graph expands past 2 MB error out with a clear
+    message — but the right fix is almost always to grow the cap, not
+    trim the program. The `feedback_grow_compiler_to_fit_language`
+    rule is explicit on this. Bote 2.5.0 (the original cap-tripper)
+    sits at ~525 KB post-expansion, well within current headroom.
+
+12. ELF OUTPUT CAP: Generated binary hard-capped at 2 MB via
+    EMITELF_USER / EMITELF_SHARED / EMITELF_OBJ filesz checks +
+    Mach-O EMITMACHO. v5.6.43 doubled from 1 MB after sigil 2.9.3's
+    bigger code put `large_input.tcyr` ELF output at ~1.08 MB. Same
+    grow-the-cap rule applies. Heap reshuffle: 16 regions shifted
+    +1 MB at v5.6.43; brk 22.5 MB → 23.5 MB.
+
+13. CODEBUF CAP: Generated machine code hard-capped at 1 MB. Has
+    NOT been raised in v5.6.x — cc5's own codebuf usage is around
+    520 KB / 1 MB at v5.6.43, still half-full. If a future consumer
+    crosses this, it gets the same heap-reshuffle treatment.
 
 12. CYRIUS `/` AND `%` ARE SIGNED: The `/` operator lowers to `idiv`,
     not `div`. For u64 operations where the top bit is meaningful
@@ -3186,4 +3241,772 @@ Both run clean via direct `build/cc5` compile. The `cyrius test`
 harness currently has a dep-auto-prepend ordering bug that breaks
 any test whose deps reference stdlib (tracked as pre-existing in
 CHANGELOG); check.sh gates use direct compile and are unaffected.
+'''
+
+[[entries]]
+name = "v56x_features"
+description = "v5.6.x feature additions — preprocessor, attributes, overflow operators, IR optimization arc"
+category = "cyrius"
+content = '''
+=== PREPROCESSOR EXTENSIONS (v5.6.1) ===
+
+#else / #elif / #ifndef now work alongside the existing #ifdef / #endif:
+
+    #ifdef CYRIUS_TARGET_LINUX
+        var fd = file_open("/proc/self/exe", 0);
+    #elif CYRIUS_TARGET_WIN
+        var fd = win_get_image_handle();
+    #else
+        # macOS / other platforms fall here
+    #endif
+
+    #ifndef CYRIUS_BAREMETAL
+        println("running on hosted platform");
+    #endif
+
+State machine is per nesting level (4-state encoding stored at heap
+0x97F10): EMITTING / SEARCHING / DONE / OUTER_SKIP. `#elif` after a
+taken `#ifdef` branch is correctly skipped; nested blocks inside a
+parent's skip path don't re-trigger emit.
+
+Closes the long-standing v5.4.x gap where paired `#ifdef` was the only
+way to branch. The 60+ stdlib paired-`#ifdef` sites can migrate to the
+cleaner form at leisure — no breaking change.
+
+=== EXPLICIT OVERFLOW OPERATORS (v5.6.2) ===
+
+9 new tokens make integer-overflow intent visible at the call site:
+
+    +%  -%  *%      # wrapping (alias for bare + - *; 2's complement wrap)
+    +|  -|  *|      # saturating (clamp to i64::MIN / i64::MAX)
+    +?  -?  *?      # checked (panic on overflow with exit code 57)
+
+Wrapping ops are bytes-identical to the bare operator — they document
+intent, no runtime cost. Saturating and checked variants compile to
+calls into lib/overflow.cyr helpers (`_sat_add_i64`, `_sat_sub_i64`,
+`_sat_mul_i64`, `_chk_add_i64`, `_chk_sub_i64`, `_chk_mul_i64`).
+
+Checked-panic uses `syscall(60, 57)`. Exit code 57 is reserved to
+distinguish overflow panics from POSIX signal exits and from
+assert-summary returns. Production / kernel code should prefer
+explicit wrapping + range guards over `+?` for hot paths; `+?` is
+intended for boundary checks where overflow is genuinely a bug.
+
+=== ATTRIBUTES — #must_use, @unsafe, #deprecated (v5.6.3 + v5.6.4) ===
+
+Function-level attributes flag intent at declaration; the compiler
+warns at call sites or compile time. All three are stored in a 4-bit
+mask in fn_flags[fi] at heap 0xFC000.
+
+#must_use (v5.6.3, bit 0):
+    #must_use
+    fn checked_op(x): i64 { return x * 2; }
+
+    fn main() {
+        checked_op(21);          # warning: result of #must_use fn discarded
+        var r = checked_op(21);  # OK
+        return checked_op(21);   # OK
+    }
+
+The diagnostic fires only at expression-statement discard (`fn();`).
+Assignment, `return fn();`, arg-passing, and conditional sites
+(`if (fn())`) are unaffected. Method-call discards are deferred for
+future patch.
+
+@unsafe (v5.6.3, bit 1 reserved; block-form keyword token 123):
+    @unsafe {
+        store64(some_raw_ptr, 0);
+        var x = load64(some_other_raw_ptr);
+    }
+
+Advisory only — no runtime cost. Nested `@unsafe` blocks emit a
+stylistic warning ("nested unsafe is redundant") but compile.
+
+#deprecated (v5.6.4, bit 2; required string argument):
+    #deprecated("use sha256_init() — sha1 is collision-broken")
+    fn sha1_init() { ... }
+
+Warns at every call site (unlike #must_use's discard-only). The
+required string lives in fn_deprecated_msg at heap 0x104000 (4096 ×
+8 B token offsets). Useful for ecosystem-wide migration: ship the
+deprecated marker in version N, give consumers one or two minor
+versions of warning, remove in version N+2.
+
+=== IR OPTIMIZATION ARC (v5.6.5 — v5.6.27) ===
+
+The v5.6.x minor is the **compiler optimization arc**. Six phases
+labelled O1 through O6:
+
+  O1 (v5.6.5):    FNV-1a FINDFN hash + CYRIUS_PROF baseline
+  O2 (v5.6.7-11): post-emit codebuf peephole — 5 categories
+                  • cat 1: `x * 2^n → shl/lsl` strength reduction
+                  • cat 2: ECONDCMP → `test rax, rax` flag-reuse
+                            (BIGGEST WIN: -21,856 B / -4.15 %)
+                  • cat 3: redundant push/pop cancel (CP rewind)
+                  • cat 4: commutative shuttle elim x86 (-16,960 B)
+                  • cat 5: commutative shuttle elim aarch64
+                            (closes O2; native aarch64 cc5 -17,672 B)
+  O3 (v5.6.12-18, ✅ closed):
+                  • O3a (v5.6.12-15): IR instrumentation + correctness
+                    audit — IR_RAW_EMIT markers in 15 parse_*.cyr
+                    direct-emit blocks; LASE bug found and fixed
+                    (parse_ctrl.cyr loop_top IR_NOP landing pads);
+                    ESETCC IR-emit-order inversion fixed (record IR
+                    AFTER sub-emit)
+                  • O3b (v5.6.16): IR-level constant fold (130 folds /
+                    774 B NOP-fill at IR=3 on cc5 self-compile)
+                  • O3b-fix (v5.6.17): bitmap liveness + DCE — fixed
+                    via CYRIUS_DCE_CAP bisection methodology
+                    (IR_RAX_CLOBBER reads RCX, not writes; same for
+                    IR_ADD_IMM_X1 + IR_RAW_EMIT). 678 kills /
+                    2,010 B NOP-fill at IR=3.
+                  • O3c (v5.6.18): dead-store elimination + fixed-
+                    point driver. 15 DSE / 6,099 B NOP-fill at IR=3
+                    in 3 fixpoint iterations (cascade caught 3 more
+                    folds 132→135). Copy-prop deferred long-term
+                    (recon: 0 B direct savings on stack-machine IR).
+  O4 (v5.6.19-24, ✅ closed): linear-scan register allocation.
+                  • O4a (v5.6.19): per-fn live-interval infrastructure
+                  • O4b (v5.6.20): Poletto-Sarkar picker
+                  • O4c (v5.6.22): auto-enable infra (DISABLED) +
+                    picker correctness fix (loop-back time-share)
+                  • v5.6.23: misdiagnosis correction —
+                    asm/regalloc layout collision (body-scan token 48)
+                  • v5.6.24: **default-on flip** + SysV ECALLPOPS
+                    r12-r14 clobber fix (codegen-scratch-must-be-
+                    caller-saved rule). cc5 +20,304 B for save/
+                    restore overhead.
+  O5 (dropped): maximal-munch instruction selection. Recon found
+                    0 fused-op candidates (cyrius's stack-machine IR
+                    keeps a push between sub-expression results and
+                    consumers); push-imm rewrite has rax-side-effect
+                    + forward-jump-target issues. Pinned long-term —
+                    needs an IR-level push-elision pass first. v5.6.26
+                    shipped peephole refinement + doc completion in
+                    place of the original O5 scope.
+  O6 (v5.6.27, pinned): codebuf compaction (NOP harvest with
+                            jump+fixup repair) — REAL binary shrinkage,
+                            sweeps accumulated NOP-fill from O3 passes
+                            (~6,099 B at IR=3) plus picker patches
+                            (~16 KB at default-on cc5)
+
+Late-arc bonus shrinkage:
+  v5.6.25: aarch64 EPOPARG push/pop-cancel completion (closed v5.6.11
+           mirror gap; native aarch64 cc5 −20,368 B / −3.94 %)
+
+=== IR PIPELINE ENV VARS ===
+
+CYRIUS_IR=1     Record IR while emitting x86 (no optimization passes)
+CYRIUS_IR=2     Verbose IR dump (incl. ir_dump per fn)
+CYRIUS_IR=3     Record IR + run apply_lase + ir_const_fold + ir_dce
+                (the optimization mode; 3-step b==c required)
+
+CYRIUS_DCE_CAP=N
+                Cap DCE kills at first N candidates. -1 = uncapped
+                (default at IR=3). Set to a small value to bisect
+                wrongly-killed nodes during future IR-pass debug
+                (v5.6.17 bisection methodology — saved as a load-
+                bearing knob; same pattern saved cycles at v5.6.22
+                regalloc time-share bug + v5.6.24 ECALLPOPS bug).
+
+CYRIUS_REGALLOC_AUTO_CAP=N
+                (v5.6.22 infra, default-on at v5.6.24) Cap auto-
+                regalloc at first N x86 fns (no inline asm). Default
+                = uncapped. Set 0 to disable; positive N for bisection.
+
+CYRIUS_REGALLOC_DUMP=1
+                (v5.6.19) Print per-fn live intervals to stderr.
+
+CYRIUS_REGALLOC_PICKER_CAP=N
+                (v5.6.20) Cap picker assignments per fn. Bisection knob.
+
+CYRIUS_PROF=1   (v5.6.5; cross-platform v5.6.6) Wall-clock total
+                compile time via clock_gettime (Linux syscall 228
+                / aarch64 113 / kernel32!GetTickCount64 on PE /
+                libSystem._clock_gettime_nsec_np on Mach-O via
+                __got[6]).
+
+=== BYTE-IDENTITY GATE EXPANSION ===
+
+Since v5.6.16, the 3-step fixpoint must hold at BOTH IR_ENABLED=0
+AND IR_ENABLED=3. Two distinct invariants:
+
+  IR=0:  cc5_a (built from main.cyr at IR=0) compiles main.cyr to
+         cc5_b. cc5_b compiles main.cyr to cc5_c. b == c.
+
+  IR=3:  cc5_a compiled with CYRIUS_IR=3 produces cc5_b (with
+         optimization-pass NOP-fill applied). cc5_b run with
+         CYRIUS_IR=3 produces cc5_c. b == c.
+
+The IR=0 and IR=3 outputs DIFFER from each other (NOPs in place of
+optimized-out instructions), but each is internally self-consistent.
+Real binary shrinkage waits for v5.6.22 codebuf compaction.
+
+=== STATE-DOC SPLIT (v5.6.16) ===
+
+CLAUDE.md is now preferences/process/procedures only. Volatile state
+(version, cc5 size, in-flight slots, recent shipped releases,
+consumers, verification hosts) lives in docs/development/state.md.
+Per-release narrative lives in docs/development/completed-phases.md.
+The architecture doc (docs/architecture/cyrius.md) is the durable
+"how / why" — design decisions that change rarely.
+
+This split catches the rot pattern where every release was appending
+a sentence to CLAUDE.md's "Current State" paragraph until it became
+unmaintainable. The pattern generalizes: durable rules in the
+top-level instruction file; volatile state in a refreshed-per-
+release sibling doc.
+
+=== POST-OPTIMIZATION-ARC PATCHES (v5.6.28 — v5.6.43) ===
+
+After the O1-O6 arc closed at v5.6.27, the rest of v5.6.x
+ran correctness fixes, dep bumps, and heap reshuffles. The
+significant ones:
+
+  v5.6.30 (preprocessor):  PP_DERIVE_* `src_base` fix —
+                            PP_IFDEF_PASS reads past 524288 B
+                            input_buf cap returned stale heap;
+                            v5.6.42 closed the rest of the
+                            same-class family (PP_HASH /
+                            PP_DEFINE / PP_DEFINED / PP_GETVAL /
+                            PP_EVAL_IF).
+  v5.6.31 (PE/Win11):      HIGH_ENTROPY_VA SIGSEGV — EREAD_PE/
+                            EWRITE_PE used `mov rax, [rsp+0x28]`
+                            for kernel-written DWORD, picking up
+                            4 B of stack garbage. Fix: 32-bit
+                            `mov eax` (auto-zero-extends).
+                            HIGH_ENTROPY_VA enabled by default.
+  v5.6.32 (aarch64 native): missing `include "src/common/ir.cyr"`
+                            in main_aarch64_native.cyr (latent
+                            since v5.6.12 O3a). Earlier
+                            "macOS drift" framing was wrong.
+  v5.6.33 / v5.6.36:       Mach-O / Win11 PE gate fixture
+                            rewrites. Both pinned as "platform
+                            drift" but were `fn main() { ... }`
+                            fixtures that never ran main()
+                            (cyrius has no auto-call). See
+                            `feedback_verify_slot_premise_first`.
+  v5.6.34:                 stdlib `alloc` grow-undersize SIGSEGV —
+                            lib/alloc.cyr grew by fixed 0x100000
+                            regardless of size; alloc(>1MB) near
+                            boundary SIGSEGV'd. Fix: round to
+                            1 MB grain on Linux; loop on macOS.
+  v5.6.35:                 sankoch 2.0.1 → 2.0.3 dep pin (sit
+                            symptom 2 closed via sankoch's deflate
+                            encoder fix; cyrius itself unchanged).
+  v5.6.37:                 SSL_connect deadlock — libssl routed
+                            through fdlopen instead of dynlib_open
+                            so libssl gets a real glibc TCB.
+                            BREAKING: tls.cyr consumers must
+                            include fdlopen.cyr first (PP cap
+                            blocks auto-include).
+  v5.6.38:                 .so emission slot premise check —
+                            removed dead SYSV_HASH (14 LOC).
+                            Third consecutive premise-disprove
+                            slot.
+  v5.6.39:                 cc5 --version drift fix — version
+                            string drifted from 5.6.29-1 across
+                            9 releases because version-bump.sh's
+                            regex didn't match `-N` hotfix
+                            suffix. Fix: removed hardcoded
+                            literals; src/version_str.cyr is
+                            auto-generated from VERSION.
+  v5.6.40:                 lib/tls.cyr ALPN/mTLS hook surface —
+                            tls_dlsym + tls_connect_with_ctx_hook.
+                            Sandhi-blocking. + patra 1.6.0 →
+                            1.8.3 + preprocess_out 1 MB → 2 MB
+                            heap reshuffle.
+  v5.6.41:                 SysV 16-byte stack alignment fix for
+                            odd-stack-arg callers. ECALLPOPS's
+                            `add rsp, 48` left rsp 8-aligned at
+                            CALL when nextra was odd; downstream
+                            libssl SSE-using prologs SIGSEGV'd.
+                            See field_notes/compiler.toml for
+                            the calling-convention math.
+  v5.6.42:                 PP_DEFINE/DEFINED `src_base` hardening
+                            (closes v5.6.30 same-class) +
+                            heap-map fix-through (stale
+                            `0xA0000 fixup_tbl` docs in 4 main
+                            files; v5.6.27 had repurposed the
+                            region 16 patches ago).
+  v5.6.43:                 v5.6.x closeout — sigil 2.9.0 → 2.9.3
+                            + sankoch 2.0.3 → 2.1.0 + output_buf
+                            1 MB → 2 MB heap reshuffle (16
+                            regions shifted +1 MB; brk 22.5 →
+                            23.5 MB). Last patch of v5.6.x.
+
+=== v5.6.x CLOSING METRICS ===
+
+  Date range:           2026-04-13 → 2026-04-25 (12 days)
+  Patch count:          44 (v5.6.0 through v5.6.43)
+  cc5 size delta:       508,880 → 531,888 B (+23,008 B / +4.5 %)
+                         Tradeoff: regalloc save/restore
+                         overhead + alignment branches outweigh
+                         peephole shrinkage at IR=0.
+  Native aarch64 cc5:   471,360 → 463,768 B (−7,592 B / −1.6 %).
+  check.sh gates:       22 → 26 (preprocessor_past_cap +
+                         sysv_odd_stack_args + regression-tls-live
+                         + regression-macho-cross-build).
+  .tcyr files:          84 → 87.
+  Deps refreshed:       patra 1.6.0 → 1.8.3, sigil 2.9.0 → 2.9.3,
+                         sankoch 2.0.1 → 2.1.0.
+  Heap brk:             0x150B000 (21 MB) → 0x178B000 (23.5 MB).
+
+  Optimization arc landed: O1 / O2(5/5) / O3(a-c) / O4(a-c).
+  Optimization arc dropped: O5 (maximal-munch — recon found
+                             zero fused-op candidates on cyrius's
+                             stack-machine IR; pinned long-term).
+                            O6 landed at v5.6.27 (codebuf
+                             compaction; −11,536 B / −2.13 %).
+'''
+
+[[entries]]
+name = "cyrius_for_agents"
+description = "Read-this-first rules for agents writing or modifying Cyrius code. Every item below caused a real mistake by an agent at least once."
+category = "cyrius"
+content = '''
+This entry is the consolidated short list of "things an agent
+must know before writing Cyrius code." Each rule cites the
+slot or memory entry where an agent (often me) made the
+mistake first.
+
+== TOP-LEVEL CODE IS THE PROGRAM ENTRY POINT ==
+
+Cyrius has NO auto `main()` call. The program is whatever
+top-level statements appear at file scope, executed in
+order. A `fn main() { ... }` definition is just a function;
+nothing calls it unless you do.
+
+    # WRONG — main() never runs:
+    fn main() {
+        syscall(60, 42);
+        return 0;
+    }
+
+    # RIGHT — top-level statement is the entry:
+    var rc = main();
+    syscall(60, rc);
+
+    # OR — skip the wrapper:
+    syscall(60, 42);
+
+This caused the v5.6.33 / v5.6.36 platform-drift slots —
+the broad-scope test fixtures had `fn main() { syscall(60,
+42); }` which never ran; the entry trampoline branched
+over the dead body and `EEXIT` saw a stale arg register.
+The user spent two slots framing it as platform drift
+before catching the fixture bug.
+
+== `.tcyr` TESTS NEED EXPLICIT EXIT ==
+
+`assert_summary()` returns the FAILURE count, not 0/non-0
+status. Tests must explicitly use it as the exit code:
+
+    # WRONG — exit code is the failure count, but the CI
+    # runner does `if [ "$ec" -ne 0 ]; then FAIL; fi`,
+    # so a passing test (assert_summary returns the pass
+    # count) is reported as FAIL by CI:
+    assert_summary();
+
+    # ALSO WRONG — same problem from a different angle:
+    return assert_summary();
+
+    # RIGHT — exit 0 on full pass, non-zero on failure:
+    var r = assert_summary();
+    syscall(60, r);
+
+I (claude) did this wrong on v5.6.41's
+`sysv_odd_stack_args.tcyr` and CI failed despite local
+check.sh passing (because check.sh greps the summary
+string first; CI checks the exit code first).
+
+== MISSING `lib/foo.cyr` INCLUDE = UD2 SIGILL ==
+
+Cyrius's --strict mode escalates undefined-fn references
+to errors, but the default mode warns then patches the
+call site to `0F 0B 0F 0B 90` (`ud2; ud2; nop`) so the
+crash is loud SIGILL (exit 132) instead of silent jump
+into trampoline. So if you see exit 132 from a test or
+program, add the missing `include "lib/X.cyr"`.
+
+Common ones agents miss:
+- `lib/string.cyr` — provides `streq`, `strlen`, `memcpy`,
+  `memset`, `memeq`. Without it, anything that calls these
+  SIGILLs.
+- `lib/syscalls.cyr` — provides `SYS_*` constants and the
+  `syscall` builtin. (Actually `syscall` is intrinsic, but
+  the constants come from this file.)
+- `lib/fdlopen.cyr` — required by `lib/tls.cyr` post-v5.6.37
+  (PP cap blocks auto-include). Tests using TLS must include
+  fdlopen first.
+- `lib/sha1.cyr`, `lib/keccak.cyr`, `lib/ct.cyr` — required
+  by sigil 2.9.x post-v5.6.43.
+
+The error message at compile time names every undef fn —
+read it.
+
+== NO COMPARISONS INSIDE FN-CALL ARGS (HISTORICAL — FIXED v0.9.0/v3.4.10) ==
+
+Pre-v3.4.10 cyrius's parser couldn't fold comparison
+expressions inside function-call arguments — `assert(ps !=
+0, "msg")` would generate wrong code. FIXED. Modern code
+can use comparisons in args freely. This rule is preserved
+in older agent training data and shouldn't be applied to
+current cyrius.
+
+== NO `var x` REDECL IN SAME SCOPE ==
+
+`var x = 1; var x = 2;` is a parse error. Use plain
+reassignment: `var x = 1; x = 2;`. Or open a new scope
+with `{ var x = 2; }` if you want shadowing.
+
+== MIXED `&&` / `||` REQUIRES PARENS ==
+
+`a > 0 && b > 0 || c > 0` fails to parse — no
+precedence-based disambiguation. Always parenthesize:
+`a > 0 && (b > 0 || c > 0)` or `(a > 0 && b > 0) || c > 0`.
+
+== `var buf[N]` IS BYTES, NOT i64 SLOTS ==
+
+`var buf[8]` is 8 bytes (1 i64 slot). For an N-element
+i64 array, write `var buf[N * 8]`. Easy mistake.
+
+== STRINGS ARE C-STRINGS BY DEFAULT ==
+
+`"hello"` is a 6-byte buffer (5 chars + null terminator).
+Functions like `strlen` give the un-null-counted length.
+For a heap-allocated counted string with O(1) length, use
+`Str` from `lib/string.cyr` (`var s = str_from("hello");`).
+
+== `\n` IS ONE BYTE ==
+
+When passing a string literal length to `syscall(SYS_WRITE,
+1, "hello\n", N)`, count `\n` as 1 byte. Common mistake:
+counting `\n` as 2 bytes (`\` + `n`).
+
+    # CORRECT byte counts:
+    "hello\n"           is  6 bytes
+    "got\nback\n"       is  9 bytes
+    "exit: "            is  6 bytes
+
+== SYSCALL ARITY WARNINGS ARE REAL ==
+
+`syscall(SYS_WRITE, 1, msg, len)` takes 4 args. If you write
+3 or 5, cyrius warns at compile time but emits anyway. The
+warning means the wrong number of registers got loaded —
+the syscall will see the WRONG args.
+
+If you see `warning:lib/syscalls_x86_64_linux.cyr:N: syscall
+arity mismatch` in your build output, fix the syscall arity
+at the call site shown in the diagnostic.
+
+== CYRIUS `/` AND `%` ARE SIGNED ==
+
+The `/` operator lowers to `idiv`, not `div`. For unsigned
+operations where the high bit matters (cryptographic
+mulmod, hash mixing, high-entropy counters), use the stdlib's
+`u64_mulmod` / `u64_powmod` / `u128_divmod` from
+`lib/u128.cyr` — they handle unsigned semantics internally.
+
+== FUNCTION ORDERING IS RELAXED (v0.9.7+) ==
+
+You can reference a function before its definition. The
+compiler does a pre-scan pass to register all fn names +
+sigs. Mutual recursion just works. Pre-v0.9.7 required
+forward declaration; that's gone.
+
+== INLINE ASM OFFSETS ARE FRAGILE ==
+
+`asm { ... }` blocks that hardcode `[rbp-N]` offsets to
+read locals depend on:
+- The fn's param count (each param after rdi takes a slot)
+- The fn's local index (var declaration order)
+- Whether `#regalloc` is active (shifts locals -8 per saved reg)
+
+`fncall0..fncall8` in `lib/fnptr.cyr` are the canonical
+examples. v5.6.23 added a body-scan that auto-skips regalloc
+for fns with `asm` bodies; you don't need to manually opt
+out, but you also can't expect inline asm to combine
+cleanly with regalloc within the same fn.
+
+== `#ifdef` IS PREPROCESSOR-ONLY, NO RUNTIME QUERY ==
+
+`CYRIUS_ARCH_X86` and `CYRIUS_ARCH_AARCH64` are set during
+preprocessing, NOT at runtime. You CAN'T do
+`if (CYRIUS_ARCH_X86) { ... }` — that's a runtime ident
+lookup that fails. Use `#ifdef CYRIUS_ARCH_X86 ...
+#endif` instead.
+
+== INCLUDES ARE INCLUDE-ONCE BY FILENAME ==
+
+`include "lib/foo.cyr"` will be inlined at most once per
+compilation unit, even if multiple files include it. The
+preprocessor tracks already-included filenames in
+`include_fnames` at heap 0xC0000.
+
+Caveat: relative paths and absolute paths to the same file
+ARE different from the include-once perspective. Stick to
+the conventional `include "lib/foo.cyr"` shape and you're
+fine.
+
+== HEAP REGIONS ARE FIXED (NOT MMAP'D ON DEMAND) ==
+
+cc5 reserves a 23.5 MB heap (post-v5.6.43) at `S =
+syscall(SYS_BRK, 0); syscall(SYS_BRK, S + 0x178B000);`.
+Every region (preprocess_out at 0x44A000, codebuf at
+0x64A000, etc.) is at a fixed offset within S. There's no
+allocator — the layout is hardcoded.
+
+If you're compiling code that crosses a cap (preprocessor
+output > 2 MB, codebuf > 1 MB, output_buf > 2 MB, fn
+table > 4096 entries), the compile errors out with a
+clear message and a "tip:" pointing at the fix.
+
+When sticky agents propose "trim the test fixture to fit"
+— REJECT that. The compiler grows to fit the language,
+never the other way around. `feedback_grow_compiler_to_fit_language`
+is the explicit rule. Cap-raise patches happened at v5.6.40
+(preprocess_out 1MB→2MB) and v5.6.43 (output_buf 1MB→2MB).
+
+== NEVER USE RAW `cat file.cyr | cc5` FOR PROJECTS ==
+
+`cyrius build src/main.cyr build/myapp` resolves
+`cyrius.cyml` deps and namespaces them as
+`lib/{depname}_{basename}` for namespaced deps.
+
+Raw `cat | cc5` skips dep resolution. It's only correct
+for: compiler self-host (cc5 has no deps), one-liner
+tests, and the bootstrap chain.
+
+== WHEN STUCK, ASK THE USER ==
+
+This isn't a language rule but a process rule baked into
+CLAUDE.md. Cyrius's user explicitly directs work; agents
+who decide to defer / split / re-slot work without asking
+end up burning entire minor versions on dropped requests
+(cf. v5.6.x's 1/3 deferment rate). When a slot is harder
+than expected, surface findings and ask — don't unilaterally
+shrink scope.
+'''
+
+[[entries]]
+name = "tcyr_test_conventions"
+description = "How to write a `.tcyr` test that passes both local check.sh and CI without surprises. The exit-code rule + the assert_eq idiom + the test_group banner."
+category = "cyrius"
+content = '''
+`.tcyr` files are runnable Cyrius programs that follow the
+test-suite contract. The CI runner expects:
+
+1. Exit code 0 on full pass, non-zero on any failure.
+2. Standard output ending in a `N passed, M failed` summary
+   line that matches `[0-9]* passed, [0-9]* failed`.
+
+Both invariants come from `lib/assert.cyr`'s `assert_eq` /
+`assert` / `test_group` / `assert_summary` helpers PLUS an
+explicit exit syscall using the assert-summary return value.
+
+== CANONICAL `.tcyr` SHAPE ==
+
+    include "lib/alloc.cyr"
+    include "lib/assert.cyr"
+    # ... whatever else your tests need ...
+
+    alloc_init();
+
+    test_group("feature group 1");
+    assert_eq(actual1, expected1, "feature 1 case A");
+    assert_eq(actual2, expected2, "feature 1 case B");
+
+    test_group("feature group 2");
+    assert(some_predicate, "feature 2 condition");
+
+    var r = assert_summary();
+    syscall(60, r);
+
+== WHY `var r = assert_summary(); syscall(60, r);` ==
+
+`assert_summary()` returns the COUNT of failures (NOT a
+0/1 boolean). Without an explicit exit syscall:
+- Local `check.sh` greps the "X passed, Y failed" line
+  and PASSES if Y == 0 — even if the binary exits with
+  the pass count as its exit code.
+- CI uses `if [ "$ec" -ne 0 ]; then FAIL; fi` PLUS the
+  passed/failed grep. CI's exit-code check trips first
+  → the test reports FAIL at CI even when local says PASS.
+
+The explicit `syscall(60, r)` aligns both runners: r==0
+on full pass, r>0 on any failure, exit code matches.
+
+The CI vs local divergence bit me on v5.6.41's first
+`sysv_odd_stack_args.tcyr` attempt. Don't repeat that.
+
+== TEST GROUPING ==
+
+`test_group("name")` prints a banner header and resets the
+in-group counters. The summary aggregates across all groups.
+Use one group per logical area; the assertion message is
+the per-case description.
+
+== ASSERTION HELPERS (lib/assert.cyr) ==
+
+    assert(expr, "message")           # expr must be non-zero
+    assert_eq(actual, expected, "msg") # actual == expected
+    assert_neq(actual, ne_val, "msg")  # actual != ne_val
+    assert_summary()                   # returns failure count
+
+== WHEN LOCAL `check.sh` PASSES BUT CI FAILS ==
+
+Two common causes:
+1. Test missing the explicit `syscall(60, r)` exit (above).
+2. Test uses `cyrius test` features that need `cyrius deps`
+   to have run first — CI runs deps before the suite, but
+   if you compile a one-off via `cat file | cc5` locally
+   without deps, you'll see undef-fn errors that CI doesn't.
+
+Inspect CI's exact runner shell — `.github/workflows/ci.yml`
+section "Test suite (.tcyr)" is the source of truth.
+
+== CHECK.SH-ONLY GATES (NOT IN .tcyr) ==
+
+`tests/regression-*.sh` files (ending in `.sh`, not `.tcyr`)
+are shell-driven gates wired directly into `check.sh`.
+They have their own exit-code conventions (0 = PASS, non-0
+= FAIL) and don't go through `lib/assert.cyr`.
+
+Use `.tcyr` for assertion-driven correctness tests; use
+`tests/regression-*.sh` for environment / external-tool
+regression gates (Mach-O exit code under ssh, PE exit
+code under ssh cass, sit fsck on a fixture, etc.).
+'''
+
+[[entries]]
+name = "agent_anti_patterns_during_v56x"
+description = "Specific anti-patterns that consumed real time during the v5.6.x optimization arc. Read these before proposing similar fixes."
+category = "cyrius"
+content = '''
+The v5.6.x line ran 44 patches over 12 days. Roughly 1/3 of
+the originally-pinned work got deferred to v5.7.x because
+agent decisions burned slot budget. The list below is the
+recurring anti-patterns the user has called out — agent
+behavior, not language usage. Agents working on cyrius
+should treat this as a blocklist of moves NOT to make.
+
+== ANTI-PATTERN: SCAFFOLDS-MD AS A "TRACKING DOC" ==
+
+When the user asked "where do partially-landed scaffolds
+go?", I (claude) proposed creating `docs/development/scaffolds.md`
+as a central inventory. The user (correctly) called this
+out:
+
+  > "WHY THE FUCK WE NEED ALL THESE DOCS... COMMENTS LIKE
+  > THANK TAKE UP UNNECESSARY SPACE IN THE SOURCE! ADRS
+  > EXIST FOR A FUCKING REASON"
+
+The two valid homes for "why this exists" content are:
+1. The function's own docstring at the source site.
+2. An ADR (Architectural Decision Record) in `docs/adr/`
+   for "we decided X, here's why."
+
+A "scaffolds.md" inventory is neither — it's a junk-drawer
+that grows forever and nobody reads. The right pattern is:
+each scaffold's reason for existing lives next to the
+scaffold in the source. Reading the function explains the
+function.
+
+== ANTI-PATTERN: TRIM THE LANGUAGE TO FIT THE COMPILER ==
+
+When a stdlib bump or test fixture pushes a compiler cap,
+the wrong move is to suggest trimming the workload to fit
+the existing cap. The right move is to grow the cap.
+
+I made this mistake on v5.6.40 (proposed dropping a stdlib
+include from `large_input.tcyr` so it would fit the 1 MB
+preprocessor cap). User correction:
+
+  > "you'r telling me to drop a lib thats not something
+  > you even can suggest bro!"
+
+Right answer for v5.6.40 was raising the preprocessor cap
+1 MB → 2 MB. Same shape repeated cleanly at v5.6.43 for
+output_buf. See `feedback_grow_compiler_to_fit_language`
+memory entry.
+
+== ANTI-PATTERN: SCOPE-CUT MID-SLOT ==
+
+Once a slot pins N items, ship N items OR ASK the user to
+split into multiple complete-within-sub-scope slots. Never
+silently ship 1/N and defer the rest.
+
+The user wrote `feedback_no_scope_cut` after I'd done this
+multiple times during v5.6.x. The pattern: I'd hit a
+sub-task that turned out harder than expected, and instead
+of asking, I'd "defer to next slot" without filing where.
+This is how the v5.6.x deferment rate ballooned.
+
+== ANTI-PATTERN: SEE-A-BUG-WALK-PAST-IT ==
+
+If you see a real bug while doing the assigned work AND the
+fix is small + well-scoped, fix it. Don't file it for later
+unless the user explicitly says so.
+
+I did this on v5.6.40 with `main_aarch64_macho.cyr` (missing
+`include "src/common/ir.cyr"`). I noted it explicitly,
+called it "pre-existing", and said "leaving it for a
+separate slot." User correction:
+
+  > "did you just see an issue you could fix but choose to
+  > leave it alone without I doubt any follow up?"
+
+Bundled into v5.6.40 with a comment cross-referencing
+v5.6.32. See `project_v5640_patra_and_2mb_cap.md`.
+
+== ANTI-PATTERN: SLIP / DEFER / RE-SLOT WITHOUT ASKING ==
+
+Slipping, deferring, re-pinning is the USER's call, not
+the agent's. When the work is harder than expected, STOP
+and report findings, don't unilaterally split.
+
+CLAUDE.md spells this out:
+
+  > When stuck, ASK the user — never decide to defer, slip,
+  > or split work mid-execution. Splits are planned
+  > decisions made *before* starting; reactive scope
+  > changes when stuck are deferment and count as slipping.
+
+Memory entry: `feedback_never_slip`.
+
+== ANTI-PATTERN: SKIP THE CLAUDE.MD CLOSEOUT STEPS ==
+
+CLAUDE.md spells out an 11-step closeout pass before every
+minor/major bump. Steps 1-3 are mechanical, 4-8 are
+judgment-call, 9 is security re-scan, 10 is downstream
+check, 11 is vidya sync.
+
+I tried to hand-wave the judgment-call passes during
+v5.6.42 ("heap-map audit clean", "refactor: no candidates",
+etc.). User correction:
+
+  > "BUT YOU FAIL AT WHAT ON YOUR DAMN CLAUDE FILE FOR
+  > THESE SPECIFIC THINGS!"
+
+The judgment-call passes are where bugs hide. The
+heap-map audit's actual job is finding stale region
+docs, write-only data, cap-pressure points — not
+just confirming "looks right." Real fix-throughs
+shipped at v5.6.43 (stale `0xA0000 fixup_tbl` in 4 main
+files; v5.6.27 had repurposed that region 16 patches
+ago and the docs never caught up).
+
+== ANTI-PATTERN: ATTRIBUTING REGRESSIONS TO PLATFORM DRIFT ==
+
+Three consecutive v5.6.x slots (v5.6.33 macOS, v5.6.36
+Win11, v5.6.38 .so emission) were initially pinned as
+"platform drift" / "compiler regression" only to be
+disproven on first investigation. Each was a fixture bug
+or misframed roadmap entry. Memory entry:
+`feedback_verify_slot_premise_first`.
+
+Always reproduce the failure + inspect the failing
+artifact (`otool -tv`, `objdump`, `xxd`) BEFORE adopting
+a roadmap slot's suspect list.
 '''
