@@ -722,3 +722,119 @@ Linux has the same trap but argc is often 0 at process entry,
 so the symptom looks like "exit 0" instead of "exit argc." Same
 root cause; different flavor of wrong answer.
 '''
+
+[[entries]]
+name = "var_buf_in_library_functions"
+description = "`var buf[N]` inside a library function is static data — every call shares the SAME buffer, and any Str borrowing from it dangles after the next call"
+category = "cyrius"
+content = '''
+THE TRAP:
+
+    fn parse_file(path) {
+        var buf[262144];                       # NOT stack — static data
+        var n = file_read_all(path, &buf, 262144);
+        return parse(str_new(&buf, n));        # Str's data ptr → static buf
+    }
+
+This is the compounded form of "var buf[N] is BYTES not ELEMENTS,
+and lives in the binary." Sized properly, the first call works
+fine. The second call overwrites the buffer in-place; every Str
+the first call returned now points at the second file's bytes.
+
+You see this as parsed values bleeding across calls — IDs become
+suffixes/prefixes of later IDs, descriptions become fragments of
+the most-recently-read file. Nothing crashes; everything is just
+wrong.
+
+The build emits a hint:
+
+    warning: large static data (262144 bytes) — consider alloc()
+    for buffers >4K
+
+Heed it. Library helpers that hand out heap pointers must heap-
+allocate the backing memory:
+
+    fn parse_file(path) {
+        var buf = alloc(262144);               # fresh per call
+        var n = file_read_all(path, buf, 262144);
+        return parse(str_new(buf, n));
+    }
+
+Now the Str's data ptr aliases an alloc that lives until process
+exit; consecutive calls keep their backing memory.
+
+WHERE THIS BIT US:
+
+vidya 2.3.0 — `lib/toml.cyr::toml_parse_file` shipped with
+`var buf[262144]`. `vidya stats` segfaulted on the first
+content-loading command after the cyrius 4.5.0 → 5.7.0 upgrade
+because every concept's parsed Str pointed into the *last*
+concept.toml's bytes; `concept_id` returned 0/garbage and
+`path_join(0, fname)` faulted at NULL+offset. Workaround: read
+the file into `alloc(N)` in the caller and call `toml_parse(...)`
+directly, bypassing the leaky helper. Permanent fix belongs
+upstream in cyrius stdlib.
+
+This trap is invisible at single-call test scope. Every stdlib
+helper that returns Str/buf-borrowing values must be exercised
+with at least two consecutive calls in tests, otherwise the bug
+sleeps until the second consumer arrives.
+'''
+
+[[entries]]
+name = "stdlib_str_to_cstr_key_migration"
+description = "cyrius 5.x stdlib lookups (toml_get, toml_get_sections, …) now take cstr keys; passing str_from(\"…\") silently returns 0/nothing"
+category = "cyrius"
+content = '''
+THE CHANGE:
+
+In older stdlib (cyrius 4.x toml.cyr era), keyed lookups accepted
+Str arguments:
+
+    toml_get(pairs, str_from("id"))            # used to work
+
+The 5.x rewrite implemented these via `str_eq_cstr(key_in_pair, key_arg)`,
+which expects the *second* argument to be a null-terminated C string:
+
+    fn str_eq_cstr(s, cstr) {
+        var slen = str_len(s);
+        var clen = strlen(cstr);               # ← walks until NUL
+        if (slen != clen) { return 0; }
+        return memeq(str_data(s), cstr, slen);
+    }
+
+Pass a Str (no NUL terminator) and `strlen` reads past the buffer
+into whatever follows in memory. The returned `clen` is some
+random non-matching length, so the equality check fails and every
+lookup returns 0.
+
+This is silent: the program does not crash inside `toml_get`. It
+crashes downstream — in vidya's case, when a 0 id flowed into
+`path_join(0, fname)` and faulted at NULL.
+
+CORRECT SHAPE (cyrius 5.7+):
+
+    toml_get(pairs, "id")
+    toml_get_sections(sections, "best_practices")
+
+Plain string literals (cstrs in cyrius). Any place you wrapped a
+key in `str_from(...)` for a stdlib lookup helper is wrong now.
+
+GENERAL RULE:
+
+When a stdlib function's parameter is named `cstr`, `name`, or
+`key` and the implementation calls `strlen` on it, the argument
+MUST be a null-terminated C string — string literals qualify,
+`str_from(...)` results do not. Read the helper before you call
+it; the type sigil is just `var`, so the contract is in the body.
+
+WHERE THIS BIT US:
+
+vidya 2.3.0 — every concept_id/title/topic/description/tags from
+`concept.toml` came back as 0 after the 5.7.0 stdlib refresh.
+Combined with the static-data buffer aliasing (see
+`var_buf_in_library_functions`), the symptom presented as
+"all topics share garbled fragments of the last file" — two
+unrelated stdlib bugs stacking. The first lookup that returned
+non-zero would have been a coincidence.
+'''

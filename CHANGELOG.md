@@ -33,6 +33,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trusts `${file:VERSION}` instead of grepping the manifest, and
   release tags accept both `v2.3.0` and `2.3.0` shapes.
 
+### Fixed
+- Concept loader rewritten to call `toml_parse` directly on a heap-
+  allocated read buffer instead of `lib/toml.cyr::toml_parse_file`.
+  The stdlib helper uses `var buf[262144]`, which the cyrius compiler
+  treats as **static data** (not stack-local) — every `toml_parse_file`
+  call shares the same backing memory, so the first 59 of 60 concept's
+  parsed Str values dangled into the last-read file's bytes once the
+  cyrius 5.7.0 stdlib refresh exposed the path. The build's "large
+  static data" warning is the upstream tell.
+- All `toml_get` / `toml_get_sections` callers updated from
+  `str_from("key")` to bare cstr literals. The 5.x stdlib lookup
+  helpers compare via `str_eq_cstr`, which calls `strlen` on the
+  second argument — Str values lack a NUL terminator, so every lookup
+  silently returned 0, leaving concepts with null ids and triggering
+  a `path_join(0, fname)` segfault during content load.
+- Documented both stdlib gotchas as new entries in
+  `content/cyrius/field_notes/language.toml`
+  (`var_buf_in_library_functions`, `stdlib_str_to_cstr_key_migration`).
+
 ### Removed
 - Orphan `lib/http_server.cyr` — superseded by sandhi stdlib.
 
