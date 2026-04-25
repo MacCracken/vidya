@@ -22,8 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now resolve through sandhi.
 - CI/release workflows bumped to Cyrius 5.7.0 (from 4.5.0).
 - Build manifest migrated `cyrius.toml` → `cyrius.cyml` with
-  `[deps] stdlib = [...]` and `[deps.sakshi]` git stanza, matching
-  the yukti layout. Stdlib now declares `sandhi` as a dep.
+  `[deps] stdlib = [...]`, `[deps.sakshi]`, and `[deps.sandhi]`
+  git stanzas, matching the yukti layout. Sandhi is pinned to
+  `1.0.0` (`dist/sandhi.cyr`); will move into the stdlib list
+  on its fold-in landing per the cyrius 5.6.x roadmap.
+- CI/release workflows ported to the yukti pattern: toolchain
+  version is now derived from `cyrius.cyml` (no env pin), `cyrius
+  deps` + `cyrius deps --verify` run before build to materialize
+  stdlib modules, docs check looks for `cyrius.cyml`, version-verify
+  trusts `${file:VERSION}` instead of grepping the manifest, and
+  release tags accept both `v2.3.0` and `2.3.0` shapes.
 
 ### Removed
 - Orphan `lib/http_server.cyr` — superseded by sandhi stdlib.
