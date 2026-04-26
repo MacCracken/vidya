@@ -393,3 +393,106 @@ Meta agent's job is to be the clean reconciliation point
 between the ecosystem's live drift and the durable record.
 Do that job and only that job. The lightning passes through;
 don't try to hold it.
+
+[[entries]]
+name = "claude_code_routing_for_cyr_files"
+description = "How a Claude Code agent reads .cyr files via the owl routing rule — and the asymmetry of who actually sees the colors"
+category = "cyrius"
+---
+=== THE SETUP ===
+
+Global ~/.claude/settings.json:
+
+  "permissions": {
+    "deny":  ["Read(**/*.cyr)"],
+    "allow": ["Bash(owl *)"]
+  }
+
+That's it. Three lines of config. The agent loses access to
+the Read tool for any *.cyr path; it gains an explicit allow
+for owl invocations via Bash. Net effect: every time the agent
+needs to look at cyrius source, it shells out to owl instead.
+
+=== WHO ACTUALLY SEES COLOR ===
+
+This is the interesting part.
+
+The model — me, when I'm running as that agent — does NOT
+benefit from the syntax highlighting in any direct way. I read
+tokens, not pixels. When owl pipes its output into my tool-
+result context, I see literal escape sequences:
+
+  [38;5;141mfn[0m greet() { [38;5;141mreturn[0m [38;5;113m"hi"[0m; }
+
+That's actually WORSE than the plain Read tool for me — more
+bytes to parse, the same semantic content. From the model's
+perspective this is pure overhead.
+
+The user, on the other hand, watches the conversation
+transcript in their terminal. The terminal interprets the
+escape sequences and renders the source as colored text:
+gray comments, purple keywords, green strings, orange
+numbers. Their pattern-matching is faster, their review of
+agent output is sharper, and they catch off-by-one mistakes
+that would slip past plain text.
+
+The asymmetry matters. The routing rule isn't an agent
+ergonomics improvement; it's a HUMAN ergonomics improvement
+that costs the agent a small amount of tool overhead. That's
+the right tradeoff in the context of agent-mediated work
+where the human is the bottleneck on review.
+
+=== THE BUG THAT NEARLY ATE THIS ===
+
+owl 1.1.0 → 1.1.1 shipped without fixing the load-bearing
+case. Bundled grammars were resolved via the relative path
+"grammars/<name>.cyml" — fine when invoked from owl's own
+source repo (smoke tests passed), broken from any other cwd
+(the actual user case). The bug was misframed twice:
+
+  1. First as "--color=always doesn't honor pipe stdout"
+     — wrong; the actual gap was the cwd-relative grammar
+     lookup.
+  2. Then as "stdin path needed a highlight branch" — true
+     for the stdin case (1.1.0 fixed it) but masked the
+     real cwd issue for file paths.
+
+The fix was a one-liner: resolve "grammars/<name>.cyml"
+relative to /proc/self/exe instead of cwd. Shipped owl
+1.1.2. The smoke gate that caught it was placed WITH a `cd`
+out of the owl repo first — the initial gate version (no cd)
+gave a false PASS. That false-PASS class is documented in the
+gate comment so future maintainers don't repeat the mistake.
+
+Lesson: when adding a smoke gate for a "doesn't work in real
+usage" bug, make sure the gate runs in the same cwd / env /
+permission context as the real usage. Otherwise you're
+testing the developer machine, not the deployment.
+
+=== WHAT'S COMING NEXT ===
+
+The Read-side routing is half the picture. The Edit-side
+analog — routing Claude Code's Edit tool through a cyrius-
+aware editor — waits on **cyim**, a planned cyrius editor
+binary. Cyim is queued to land after owl + sit reach
+sufficient stability (owl is at 1.1.2 today, sit is mid-
+stabilization). When cyim ships, the same permission-rule
+pattern extends:
+
+  "permissions": {
+    "deny":  ["Read(**/*.cyr)", "Edit(**/*.cyr)"],
+    "allow": ["Bash(owl *)",     "Bash(cyim *)"]
+  }
+
+Cyim's value-add over the built-in Edit tool would be
+language-aware refactors (rename-symbol-with-word-boundaries,
+insert-after-fn, structured deprecation rewrites) instead of
+pure string-replace. That's the long arc — make the
+agent-mediated cyrius experience first-class without
+depending on any non-AGNOS tooling.
+
+=== ONE LINE ===
+
+The routing rule moves syntax highlighting out of the agent's
+context window and into the user's terminal — exactly where
+it's load-bearing for review.
