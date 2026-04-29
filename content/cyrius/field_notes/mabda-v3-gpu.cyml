@@ -103,51 +103,73 @@ Three non-obvious gotchas that ate the most time:
 All three live as gotchas in vidya/content/direct_drm_gpu_compute.
 
 [[entries]]
-name = "phase_b4_store_blocker"
-description = "Phase B.4 — compute shader memory write still wedging"
+name = "phase_b4_store_blocker_resolved"
+description = "Phase B.4 — RESOLVED 2026-04-27: native compute store landed 0xDEADBEEF on Cezanne"
 category = "cyrius"
 ---
-A shader that consists only of register moves + s_endpgm dispatches
-cleanly. The moment you add a memory-store instruction (global_store_dword,
-flat_store_dword, or s_store_dword), the SQ raises gfx_v9_0_bad_op_irq
-and the GPU resets.
+RESOLVED 2026-04-27. Pure-Cyrius compute dispatch writes a
+deterministic value (`out[0] = 0xDEADBEEF`) to a host-visible BO,
+fence signals in 0 ms, output reads back byte-exact. First end-to-end
+Cyrius → AMDGPU → memory round-trip on Cezanne (gfx90c).
 
-What tried so far, in order:
-  - Multiple store-instruction encodings (global / flat / scalar,
-    with and without GLC/SLC cache bits) — all fail identically.
-  - Output buffer VA moved from 256 MiB up through 64 GiB — no help.
-  - AMDHSA vs AMDPAL clang target — byte-identical ISA emitted.
+The 12-session block was three independent bugs stacking, none of
+which were the queue-preamble theory the prior entry was chasing:
 
-Three more fixes applied from subsequent research, after which the
-symptom changed but not in the way we want:
-  - TRAP_PRESENT bit in PGM_RSRC2 (was missing, now set).
-  - 16 dwords of s_nop 0 padding after s_endpgm (AMDGPU ABI
-    requirement — SQ prefetches past shader end).
-  - ACQUIRE_MEM packet before DISPATCH_DIRECT (I-cache invalidate).
-  - Fixed wrong register offset: 0xB864 is SE2, not TMPRING_SIZE.
-    I was silently disabling SE2 every dispatch.
-  - Added SE2/SE3 writes at 0xB864/0xB868.
-  - Bumped RSRC1.SGPRS from 0 (8 regs) to 1 (16 regs) per radv's
-    num_sgprs + VCC(2) + flat_scratch(3) requirement.
+1. Mesa-VAs in `AMD_DEBUG=ib` are pointers into Mesa's address
+   space. When you copy packets out of a working IB dump, every VA
+   in there belongs to a Mesa BO that does not exist in your
+   process. Three of our IB BOs were unmapped Mesa-VAs (shader,
+   USER_DATA pointer target, and a CP-internal fence pad). The CP
+   walked into unmapped pages mid-dispatch. Fix: allocate our own
+   BOs at HIGH VAs and substitute every VA ourselves; never let a
+   Mesa VA leak into a packet we submit.
+   See: feedback_mesa_va_not_magic.md.
 
-After all of the above: no more GPU resets on dispatch, but the
-output buffer still reads the sentinel (no write lands). The SQ isn't
-faulting anymore — the store just isn't reaching memory. Different
-failure mode, more research needed.
+2. Cyrius signed division on canonical-high VAs is off by 1.
+   `va / (1 << 32)` rounds toward zero, which bites on any high-half
+   address. Replaced every `va / 2^N` extraction with `>> N` shifts.
+   See: feedback_cyrius_signed_div_high_va.md.
 
-Likely remaining issues:
-  - radv emits a "queue preamble" on first submit that we don't:
-    CP_COHER_START_DELAY, TA_CS_BC_BASE_ADDR, etc. Set-once state
-    that the kernel's amdgpu_cs context-init may not reproduce
-    identically for our raw-ioctl path.
-  - SH_MEM_CONFIG / SH_MEM_BASES are RLC-gated (userspace can't
-    write them). Kernel programs them per-VMID at device init,
-    but the VMID our CS lands on might not be in the compute-VMID
-    pool that gets the full init.
+3. The shader binary we were submitting was the wrong ABI.
+   AMDPAL clang emits PAL-shaped prologues that expect different
+   USER_DATA register conventions than what our PM4 set up. Built a
+   minimal s_mov_b32 + global_store_dword + s_endpgm shader from
+   scratch, byte-exact against radv's output for the same operation,
+   and the dispatch immediately worked.
 
-Prudent next step when this thread resumes: install OpenCL on the
-host, strace a simple compute write, diff the CS chunks and register
-writes against ours. That's ground truth.
+What was NOT the bug (despite each being plausible):
+  - CPC pre-dispatch state — irrelevant on Cezanne
+  - MEC scheduler initialization — kernel handles it
+  - SH_MEM_CONFIG / RLC-gated registers — context init was fine
+  - Queue preamble missing — our IB on its own works
+  - VA aperture (32-bit vs 64-bit) — the issue was unmapped VAs,
+    not high VAs; HIGH VAs work great once your BOs actually exist
+    at them
+  - WRITE_DATA-only IBs as a diagnostic — these wedge Cezanne so
+    badly only MODE2 reset recovers; never use NOP-only or
+    WRITE_DATA-only IBs for triage. See:
+    feedback_write_data_on_cezanne.md.
+
+Phase B.4 protocol that actually unblocked it:
+
+  a) AMD_DEBUG=ib dump radv's working compute (the simplest possible
+     "store one dword" workload).
+  b) Diff our PM4 against the dump byte-for-byte. PACKET3 count fields
+     are `count_minus_1` — one off-by-one in the count desyncs the
+     entire CP stream and presents as "GPU hangs at dispatch." See:
+     feedback_pm4_count_minus_1_naming.md.
+  c) Replace every Mesa-VA in the diff with our own BO's VA, allocated
+     fresh at HIGH addresses.
+  d) Add WRITE_DATA progress markers to OUR fence BO (not Mesa's). When
+     the dispatch hangs, the marker shows you which packet didn't
+     execute — pinpoints which VA was unmapped.
+  e) Verify the GPU actually ran — sync-obj signal + RC=0 looks
+     identical between real completion and TDR recovery. The CPU-readable
+     marker is the proof. See: feedback_verify_gpu_actually_ran.md.
+
+Steady follow-up: B.5 (backend abstraction) immediately after this
+landed; B.4-style debugging now lives in `programs/native_compute_store.cyr`
+as a regression keep-alive.
 
 [[entries]]
 name = "research_pattern_that_worked"
@@ -220,3 +242,475 @@ dist/mabda_native.cyr (vs VMA alone at 20K lines).
 The v3.x era keeps both backends. v4.0 retires the wgpu path
 consumer-driven — once every consumer has been running native in
 production across a full release cycle.
+
+[[entries]]
+name = "phase_b5_backend_abstraction"
+description = "Phase B.5 — fnptr-table dispatch so wgpu and native share the same @public API"
+category = "cyrius"
+---
+After B.4 landed, the next problem was structural: the wgpu+C path
+and the native path had to coexist behind the same @public surface
+without per-call branching. Solved with a fnptr table struct (the
+`Backend`) per backend, selected at compile time via
+`MABDA_BACKEND_KIND`.
+
+Layout (120 bytes, v1):
+  [+0]   ctx_create_from_preinit  (i64 fnptr)
+  [+8]   ctx_release
+  [+16]  buffer_create
+  [+24]  buffer_write
+  [+32]  buffer_read
+  [+40]  buffer_release
+  [+48]  shader_module_create
+  [+56]  shader_module_release
+  [+64]  compute_dispatch
+  [+72]  device_wait_idle
+  [+80]  kind   (BACKEND_KIND_NULL/WGPU/AMD/NVIDIA/INTEL = 0/1/2/3/4)
+  [+88]  texture_create_2d_rgba8       ← v1 expansion (textures)
+  [+96]  texture_write
+  [+104] texture_read
+  [+112] texture_release
+
+Append-after-kind invariant: every future v(N+1) slot lands at offset
+`120 + 8*K`. `kind` stays at 80 forever so that scanning a Backend
+struct from a v0 caller never misreads a fnptr as the kind word.
+
+Public dispatch site is six lines (e.g. `gpu_buffer_create`):
+    if (ctx == 0) { return Err(gpu_err(ERR_INVALID, ...)); }
+    var b = gpu_context_backend(ctx);
+    if (b == 0) { return Err(...); }
+    var slot = backend_get_slot(b, BACKEND_SLOT_BUFFER_CREATE);
+    if (slot == 0) { return Err(...); }
+    return fncall3(slot, ctx, size, usage_flags);
+
+Both backends register identical-shape wrappers in their `*_new()`:
+  - `backend_wgpu_new()` — 14 wrappers around the existing wgpu
+    helpers; Test 11 + 12 in phase0.cyr exercise the buffer + texture
+    paths byte-exact.
+  - `backend_native_new()` — 14 wrappers around direct DRM ioctls;
+    `programs/native_compute_store.cyr` exercises the compute path
+    end-to-end.
+
+GpuContext grew 32 → 96 bytes to dual-interpret for both backends:
+  wgpu  view: instance / adapter / device / queue
+  native view: fd / ctx_id / stub_handle / stub_va  +  per-context
+               cached IB and fence BOs (see native_dispatch_caching).
+The struct header documents both interpretations explicitly so a
+reader doesn't have to grep both backends to understand what offset
++24 means.
+
+Test scaffolding: `tests/tcyr/mabda_v3.tcyr` now has 403 CPU
+assertions covering all dispatch paths via mock-backend stubs (slot
+fnptrs that count calls + capture args). No GPU needed; runs in CI.
+
+The mock-backend pattern was unexpectedly load-bearing. Every public
+dispatcher gets a CPU test that registers a counter+capture stub,
+calls the @public API, and asserts the right slot fired with the
+right args. This pinned a misrouted slot-id constant (`_BUFFER_READ`
+was reading `_BUFFER_WRITE`) before any GPU code ran.
+
+[[entries]]
+name = "phase_c_textures_complete"
+description = "Phase C.5 — texture round-trip on both backends, 8192-byte byte-exact verify"
+category = "cyrius"
+---
+Phase C.5 added the four texture slots (create_2d_rgba8, write, read,
+release) to the Backend interface and shipped real implementations
+on both backends.
+
+wgpu side (Step 5.5):
+  Real implementations using existing helpers. Each TextureHandle is
+  a 32-byte struct: `[+0] handle / [+8] view / [+16] sampler /
+  [+24] width|height packed`. queue_write_texture writes the rows;
+  copy_texture_to_buffer + map-sync read-back. Test 12 in phase0
+  verifies byte-exact across a 64×32 RGBA8 image.
+
+Native side (Steps 5.1, 5.2 + plumbing 5.3, 5.4):
+  Native textures are not "linear BOs" — they're blit-targets sitting
+  at a separate VA base (`_NATIVE_TEXTURE_VA_BASE = 0xFFFF800100A00000`).
+  Each native TextureHandle wraps `(handle, va, width, height,
+  pitch, stride, size_bytes)`. Today's path is CPU-staging
+  (write = ioctl-based vmap copy; read = sync + readback through the
+  CPU-mapped VA). The PM4 blit path is Phase D's job.
+
+`programs/native_texture_e2e.cyr` walks a 64×32 image with a
+non-trivial pattern (every byte is `(x*7 + y*13) ^ 0x5A`) through
+create → write → read → byte-exact compare → release. 8,192 bytes
+verified per run. Cleanup ioctls all return 0.
+
+Both backends now share `gpu_texture_*` from `src/texture.cyr` —
+which is itself just a 6-line dispatcher that does
+`backend_get_slot(ctx->backend, _TEXTURE_*) → fncallN`. Consumers
+write one code path, the backend selector picks the implementation.
+
+This was the first time a non-buffer resource went through the v1
+backend interface. The "append-after-kind" invariant from B.5 paid
+off — adding 4 slots was a 4-line struct extension and zero churn
+on existing v0 callers.
+
+[[entries]]
+name = "phase_c_render_groundwork"
+description = "Phase C.6 — GFX9 render-pipeline design doc + render-target primitive + PM4 builders"
+category = "cyrius"
+---
+Three independent prerequisites for the native graphics path,
+shipped in order to maximize forward motion under bounded research
+budgets:
+
+Step 6.1 — `docs/proposals/v3-native-render-design.md` (333 lines).
+The write-up of what GFX9 graphics-pipeline state actually consists
+of: the SH_REG block (PGM_LO/HI, USER_DATA, PGM_RSRC1/2 for VS+PS),
+the CONTEXT_REG block (color targets, depth state, raster state),
+the UCONFIG_REG block (primitive topology, scissor), the IB packet
+sequence (set state → set vertex bindings → DRAW_INDEX_AUTO), and
+the shader ABI for a minimal vertex+fragment program. Names every
+register with its offset and what radv writes to it. This is the
+artifact future research agents read before touching graphics PM4.
+
+Step 6.3 — `native_rt_create_2d_rgba8` / `native_rt_release_2d_rgba8`
+at `_NATIVE_RT_VA_BASE = 0xFFFF800101000000`. Render targets are
+allocated separately from textures because:
+  a) RT VAs need GTT placement (CPU readback) for early dev; textures
+     don't.
+  b) RT pitch alignment differs from texture pitch alignment on
+     gfx90c — collapse them later if the constraints converge.
+RTs use the same TextureHandle shape (32-byte struct) so they slot
+into existing render-pipeline scaffolding.
+
+Step 6.4 — PM4 packet builders for the `SET_CONTEXT_REG` (0x69) +
+`DRAW_INDEX_AUTO` (0x2D) packets:
+  native_pm4_set_context_reg(buf, off, base_addr, count, regs)
+  native_pm4_set_context_reg_one(buf, off, addr, val)
+  native_pm4_set_context_reg_pair(buf, off, addr, val0, val1)
+  native_pm4_draw_index_auto(buf, off, index_count, src_sel)
+
+Tests use synthetic-but-aligned register addresses pending Step 6.5
+(real radv-validated addresses for the gfx90c context-state block).
+The PACKET3 count_minus_1 convention from
+feedback_pm4_count_minus_1_naming.md was load-bearing here too —
+SET_CONTEXT_REG is a sequential write of `count` dwords starting
+at `base_addr + offset_dwords`, so a one-off in the count desyncs
+the CP stream the same way it did for SET_SH_REG.
+
+Phase C.6 deliberately stopped short of 6.2 (real shader bytes for
+a minimal vertex+fragment pair) because that one is research-budget,
+not chugging-cadence — see `gfx9_graphics_shader_abi_research`.
+
+[[entries]]
+name = "native_dispatch_caching"
+description = "Per-context cached IB + fence BOs eliminate ~7 syscalls per dispatch"
+category = "cyrius"
+---
+First-pass native dispatch (`native_compute_dispatch_simple`)
+allocated + VA-mapped + freed an IB BO and a fence BO around every
+single dispatch. That's seven ioctls per dispatch (create, mmap-info,
+gem-mmap, va-map for IB; same trio for fence; minus a couple
+duplicates). Acceptable for "first dispatch ever," not acceptable
+for any benchmark that submits >1 dispatch per second.
+
+Step 4f.iv replaced this with `native_compute_dispatch_cached`. The
+GpuContext now carries:
+  ib_handle / ib_va / ib_addr           (cached IB BO + mmap)
+  fence_handle / fence_va / fence_addr  (cached fence BO + mmap)
+
+Allocated once in `gpu_context_new_native`, freed once in
+`gpu_context_release`. Steady-state dispatch reuses the same BOs:
+overwrite the IB bytes (never grow past the initial cap), reset
+the fence to a sentinel before submit, wait for it to flip after.
+
+Wins: ~7 syscalls/dispatch saved → roughly 0 extra syscalls beyond
+the actual `cs` submit + `wait` pair. Falls out of "obviously
+correct" once you realize each dispatch's IB is the same shape
+(SET_SH_REG + ACQUIRE_MEM + DISPATCH_DIRECT) just with different
+VAs/sizes baked into the registers.
+
+Validation: `programs/native_compute_store.cyr` runs two
+back-to-back dispatches with different output values; both land
+correctly with no allocation churn between them.
+
+Caveat: the cached IB has a fixed size cap (currently a few
+hundred dwords). Larger workloads (real graphs, indirect dispatch)
+will need a grow-on-demand path. Tracked in the punch list.
+
+This pattern should generalize: cache anything the consumer reuses
+per frame. Render-target descriptor tables, bind groups (when
+bindless lands), USER_DATA staging buffers — all candidates for
+per-context cached BOs.
+
+[[entries]]
+name = "gfx9_graphics_shader_abi_research"
+description = "Research-pending — what a minimal vertex + fragment shader looks like in raw GFX9 bytes for the native render path"
+category = "cyrius"
+---
+RESEARCH-PENDING (planned Phase C, Step 6.2). Captured here so a
+future agent can pick this up without re-deriving the framing.
+
+Goal: produce raw GFX9 (gfx90c) ISA bytes for the simplest possible
+vertex + fragment shader pair that can render a single full-screen
+triangle into a native RT, callable from the PM4 packet sequence
+defined in Step 6.4 (`docs/proposals/v3-native-render-design.md`).
+
+What we know:
+  - The compute shader bytes for `out[0] = 0xDEADBEEF` were derived
+    from radv's output and verified byte-exact (Phase B.4 close).
+    Same methodology applies here: AMD_DEBUG=ib dump radv rendering
+    a single colored triangle, extract the VS+FS binaries from the
+    dump, port to our PM4 + USER_DATA conventions.
+  - SH_REG block layout for gfx90c VS/FS: PGM_LO/HI (canonical-high
+    VA, two registers), PGM_RSRC1/2 (control fields — float mode,
+    SGPR/VGPR counts, USER_SGPR count, etc.), and a USER_DATA[0..15]
+    window for shader-visible immediates.
+  - Vertex pulling for a "no input buffer, vertex-id-driven" triangle
+    works without binding any vertex buffer — the VS uses
+    `v0 = vertex_id` and computes positions from it. radv does this
+    for clear-shader fast paths.
+
+What's unknown / open research:
+  - Exact USER_DATA layout for our path. radv's USER_DATA[0..3]
+    typically holds the descriptor-set base; we don't need that, so
+    bytes 0..15 are free for whatever immediates we want (e.g. a
+    color constant).
+  - PS_INPUT_CNTL block layout — how many input components come from
+    VS, what interpolation mode, what swizzle.
+  - The exact set of CONTEXT_REG values needed BEFORE the PM4 stream
+    works. Step 6.1 enumerated the set; 6.2 will need to assign
+    actual values for "minimal triangle to a single RGBA8 RT."
+
+Suggested research-agent prompt (reuses the B.3 pattern):
+  - Frame: "I have working compute dispatch. I have the SH_REG and
+    CONTEXT_REG slots populated for compute. I need a graphics
+    pipeline that draws one triangle into a single RGBA8 RT on
+    gfx90c, no vertex buffer, no descriptor sets."
+  - Ask for: exact ISA bytes, exact CONTEXT_REG values, exact PM4
+    packet ordering.
+  - Ground-truth source: radv `si_emit_graphics`, `radv_meta_clear`'s
+    fast-clear path, and an `AMD_DEBUG=ib` dump of `vkCmdClearColorImage`
+    on a render-target image (NOT a transfer image).
+
+Acceptance: the IB sequence renders a known color into a 4×4 RGBA8
+RT, the RT reads back byte-exact (CPU-mappable RT VA), no GPU reset.
+
+Once this lands, Phase 8 (WGSL → GFX9 lowering) becomes the open
+problem; before this lands, Phase 8 has no codegen target.
+
+[[entries]]
+name = "gfx9_pipeline_pm4_three_block_split"
+description = "GFX9 graphics pipeline state has THREE distinct PM4 lifetimes — caching it as one block at pipeline_create is wrong"
+category = "cyrius"
+---
+The instinct on first read of GFX9 graphics PM4 is that pipeline
+state can be encoded once at pipeline-create time, cached as a byte
+buffer, and spliced into the IB at draw time. That instinct is
+**wrong**, and Mesa radv proves it: graphics PM4 splits into three
+distinct lifetimes, not one. v3-backend-interface.md v2 originally
+claimed the single-block model and got corrected post-research.
+
+THE THREE LIFETIMES:
+
+1. **pipeline-static SH-reg block** (`pipeline_sh_block`):
+   SPI_SHADER_PGM_LO/HI for VS+PS, RSRC1/2 control fields,
+   USER_DATA layout, SPI_SHADER_POS_FORMAT, _Z_FORMAT, _COL_FORMAT.
+   Built at pipeline_create. Re-emitted only on pipeline change.
+
+2. **pipeline-static CTX-reg block** (`pipeline_ctx_block`): the
+   subset of context regs that are actually pipeline-determined —
+   blend mode (CB_BLEND0_CONTROL, CB_COLOR_CONTROL, CB_TARGET_MASK,
+   CB_SHADER_MASK), raster mode (PA_SU_SC_MODE_CNTL, PA_CL_CLIP_CNTL,
+   PA_CL_VS_OUT_CNTL), depth-test mode (DB_SHADER_CONTROL,
+   DB_RENDER_CONTROL), AA (PA_SC_AA_CONFIG, PA_SC_LINE_CNTL),
+   primitive topology (VGT_SHADER_STAGES_EN). Built at pipeline_create,
+   re-emitted only on pipeline change. radv calls this `ctx_cs`.
+
+3. **RT-dependent CTX-reg block** (`pass_target_block`): the subset
+   of context regs that depend on the bound framebuffer —
+   CB_COLOR0_BASE, _PITCH, _SLICE, _INFO, _ATTRIB, DB_* (if depth),
+   PA_SC_SCREEN_SCISSOR, PA_SC_WINDOW_SCISSOR, PA_CL_VPORT_*. The
+   pipeline doesn't own these — the RT does — so they cannot be
+   cached at pipeline_create. radv emits via `radv_emit_fb_color_state`
+   at command-buffer time, not pipeline-create time.
+
+4. **per-draw tail** (`draw_tail`): VGT_NUM_INSTANCES,
+   per-draw USER_DATA values (push constants, dynamic descriptor
+   pointers), DRAW_INDEX_AUTO packet itself.
+
+WHY THE FALLACY HAPPENS:
+
+The compute path's "encode shader VA + RSRC + dispatch in one
+buffer" pattern (Phase B.4) misleads. Compute is simpler — no RT,
+no viewport, no scissor, no per-draw resources beyond what the
+shader's USER_DATA registers carry. Graphics adds two extra
+lifetime tiers (RT-bind, per-draw) that compute doesn't have.
+
+WHEN THIS BIT US:
+
+mabda v3 Step 6.7 — first draft of v2 backend-interface proposal
+asserted "encode pipeline state once at render_pipeline_create,
+splice into IB at draw time" without external verification. A
+research agent reading Mesa radv source reported back: radv
+splits into `ctx_cs` (pipeline) and `cs` (per-cmd-buffer), with
+RT state explicitly NOT cached at pipeline-create.
+Caught at proposal time before any code landed — the v2.1 revision
+documents the 3-block model and feeds Step 6.8c.
+
+REFERENCES:
+- Mesa: `src/amd/vulkan/radv_pipeline_graphics.c` for `ctx_cs`.
+- Mesa: `src/amd/vulkan/radv_cmd_buffer.c::radv_emit_fb_color_state`
+  for RT-dependent context regs.
+- AMD GPUOpen "Understanding GPU context rolls" — explains why
+  context-reg writes are batched separately from SH-reg writes
+  (each one triggers a context roll on the geometry pipeline).
+- mabda: `docs/proposals/v3-backend-interface.md` v2.1 section
+  "GFX9 PM4 block split" — the cut applied.
+
+LESSON FOR FUTURE NATIVE-PM4 WORK:
+
+Before claiming any state is "cacheable at create-time", check
+what radv does with the same state at the same lifetime. The
+byte-exact-vs-Mesa protocol (feedback_pm4_verify_against_mesa_ib)
+is also a lifetime-validation protocol — if radv re-emits a
+block per cmd-buffer, you can't cache it per-pipeline.
+
+[[entries]]
+name = "wgpucolor_is_4_doubles_not_a_packed_u32"
+description = "WGPUColor in webgpu.h v29 is `{double r,g,b,a;}` (32 bytes); packing clear values as RGBA8 u32 loses 56 bits/channel of precision"
+category = "cyrius"
+---
+THE SHAPE:
+
+WGPUColor in webgpu-native v29 is four `double`s — 32 bytes total —
+not a packed u32:
+
+    typedef struct WGPUColor {
+        double r; double g; double b; double a;
+    } WGPUColor;
+    // deps/wgpu-native/include/webgpu/webgpu.h:1954
+
+`WGPURenderPassColorAttachment.clearValue` embeds a `WGPUColor` by
+value at offset 40 of the 72-byte attachment struct. Mabda's
+existing wgpu path matches this — `color_write_f64(c, att+40)` in
+`src/render_pass.cyr`, with `Color` defined as f64-backed in
+`src/color.cyr`.
+
+THE TRAP:
+
+Backend-interface slot signatures want to keep the arg count low
+(fncall ceiling — see feedback_cyrius_param_ceiling.md). The
+tempting shortcut is to pack the clear color as a single u32 in
+`0xRRGGBBAA` byte order — one arg, fits any fncall shape, "obviously
+fine for an 8-bit-per-channel render target".
+
+It's not fine. Two reasons:
+
+1. **Precision loss.** WebGPU's clear value is double-precision
+   per channel. 8-bit packing throws away 56 bits per channel.
+   For RGBA8 RTs the visible result happens to be the same in
+   most cases, but the wgpu path stops being byte-exact with the
+   native path on any non-trivial clear value (any value that
+   doesn't round-trip cleanly through u8).
+2. **HDR / wide-gamut / sRGB clears.** Float clear values
+   (e.g. `0.5` linear, `1.5` HDR, `-0.1` for clearing into
+   negative-component formats) cannot be expressed in `0xRRGGBBAA`.
+   Any consumer using a non-RGBA8_UNORM target with a non-trivial
+   clear sees garbage on the u32-packed path.
+
+THE FIX:
+
+Pass the clear color as a pointer to a 32-byte block of 4 f64
+values (or pass mabda's f64-backed `Color` handle, which has the
+right shape). Slot signature:
+
+    render_pass_begin (ctx, rt_ptr, clear_color_ptr) → pass_ptr
+
+The wrapper memcpys 32 bytes into the WGPURenderPassColorAttachment
+at offset 40 on the wgpu path, or unpacks into the corresponding
+PM4 register write on the native path.
+
+WHEN THIS BIT US:
+
+mabda v3 Step 6.7 v2 draft. The first draft of the slot signature
+was `render_pass_begin (ctx, rt_ptr, clear_rgba8) → pass_ptr` with
+clear_rgba8 a packed u32. A research agent verifying the wgpu API
+reported back that WGPUColor is f64×4. Caught at proposal-time;
+v2.1 revision uses the f64 pointer shape.
+
+GENERAL RULE:
+
+When designing a slot interface that wraps a wgpu function, READ
+the relevant struct definition in `webgpu.h` before deciding the
+arg shape. Type-quantization shortcuts (u32-pack a struct that's
+actually 4×double) silently lose information that some consumers
+use. Mabda's existing render path already had the f64 shape right;
+the slot wrapper should match the existing convention, not invent
+a smaller-arg version.
+
+[[entries]]
+name = "wgsl_to_gfx9_lowering_research"
+description = "Research-pending — the 10-step WGSL→GFX9 lowering pipeline that lets consumer shaders run on the native backend"
+category = "cyrius"
+---
+RESEARCH-PENDING (planned Phase 8). The big multi-session bite.
+Captured here so the framing survives between sessions.
+
+Today: consumer shaders are WGSL strings. The wgpu backend hands
+them to wgpu-native, which hands them to naga, which hands them to
+the platform driver. The native backend has nothing to translate
+WGSL with — every dispatch in `programs/native_compute_store.cyr`
+uses a hand-encoded, byte-exact ISA blob.
+
+Phase 8 closes this gap: a Cyrius-native WGSL → GFX9 ISA compiler
+that lives inside mabda. Without it, the native backend is a
+demo that only runs the shaders we hard-code; with it, every
+existing wgpu consumer's WGSL runs on either backend.
+
+Sub-steps from the punch list (each a session-sized chunk):
+
+  8.1  WGSL lexer + parser → AST. Tokens, expression grammar, struct
+       and entrypoint declarations. Validate against the WGSL spec's
+       reference grammar.
+  8.2  AST → typed IR (SSA-form, type-checked). Resolve names, infer
+       types, lower implicit conversions.
+  8.3  IR → naga-shaped intermediate. Match the shape of naga's IR
+       module so tools that target naga can also target ours.
+  8.4  IR → GFX9 LLIR. Strip down LLVM-IR-shaped passes; keep only
+       what GFX9 needs.
+  8.5  Register allocation. Greedy linear-scan over SGPR + VGPR
+       pools; spills go to scratch (need a scratch BO in the
+       Backend interface).
+  8.6  Instruction selection. WGSL ops → GFX9 ISA. Handle vector
+       ops, texture sampling intrinsics, atomic ops.
+  8.7  Encoding. IR → raw GFX9 bytes. The encode tables are large
+       (~1500 instructions) but mechanical.
+  8.8  Validation harness. Compile the same WGSL through ours and
+       through naga; diff the resulting ISA after a normalization
+       pass. Where diffs are legitimate (different reg-alloc,
+       different scheduling), record them; where they aren't, fix.
+  8.9  Wire into Backend interface. `_SHADER_MODULE_CREATE` for the
+       native backend now compiles WGSL → ISA → BO instead of
+       error-out.
+  8.10 Performance pass. Run mabda's existing GPU benches on both
+       backends; iterate codegen until the gap closes.
+
+Why this is "research-budget" not "chugging-cadence": the WGSL
+spec is ~200 pages; the GFX9 ISA reference is ~700 pages; naga's
+codegen is ~30K lines of Rust. Even with research-agent help,
+8.1-8.4 are each multi-session, and 8.5-8.7 are each multi-week.
+
+Pragmatic milestone targets:
+  - 8.1-8.3 sufficient: parse WGSL, type-check, produce a typed
+    IR. Compute-only path. Validates against naga's IR for the
+    benchmark shaders mabda already has.
+  - 8.4-8.7 sufficient: emit ISA byte-exact against radv for a
+    handful of canonical kernels (saxpy, reduction, prefix-sum,
+    convolution).
+  - 8.8-8.10 sufficient: every existing mabda GPU bench runs on
+    the native backend with measurable performance.
+
+Don't start 8.x until 6.2 + 6.3 + 6.4 + 6.5 + 6.6 (the graphics
+pipeline) lands — Phase 8 needs both compute and graphics codegen
+targets in place.
+
+Reference points:
+  - naga's IR shape (Rust): match this for tooling compatibility.
+  - radv's ACO compiler (the "new" radv codegen): the closest
+    open-source point of comparison for what we'd be writing.
+  - Mesa's GFX9 ISA tables: ground-truth encoding tables.

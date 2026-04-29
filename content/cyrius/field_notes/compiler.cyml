@@ -3254,3 +3254,343 @@ when no consumer needs it. v5.6.40's 1→2 cap raise lasted
 output_buf raise will likely last longer (output sizes
 grow slower than preprocess sizes since codebuf is also
 1 MB capped).
+"""
+
+[[entries]]
+name = "ts_lex_jsx_lookahead_is_arrow_jsx_terminators"
+description = "TS_LOOKAHEAD_IS_ARROW's COLON-branch must treat JSX closing tokens as scope terminators or it false-positives on unrelated arrows far past the expression"
+category = "cyrius"
+tags = ["ts", "lex", "jsx", "lookahead", "v5.7.6"]
+content = """
+Filed: v5.7.6 P4.3d (the bug that rolled back v5.7.5 P4.3d-2).
+
+When TS_LOOKAHEAD_IS_ARROW determines whether `(` starts an arrow
+function, it scans for the matching `)`, then checks what follows.
+If COLON, it enters a secondary scan for `=>` (return-type form
+`(args): T => body`).
+
+The COLON-branch's secondary scan tracked LPAREN/RPAREN/LBRACKET/
+RBRACKET/LT/GT for depth, and treated LBRACE/SEMI/COMMA at depth==0
+as terminators. JSX tokens were SKIPPED — none of them affected
+depth, none terminated.
+
+For ternary `a ? (<JSX/>) : (<JSX2/>)` followed by REAL JSX text +
+much later an arrow function in the same source: the COLON-branch
+scanned past the else-branch's RPAREN (depth → 0), past JSX
+closing tokens (JSX_EXPR_CLOSE, JSX_CLOSE_END, etc. — all skipped),
+into adjacent code, and FOUND an unrelated `=>` at depth==0.
+LOOKAHEAD returned 1 (arrow), parser entered ARROW_PAREN, then
+ARROW_PARAMS errored on the JSX_OPEN_START at the start of
+`(<JSX/>)`.
+
+Fix: COLON-branch treats JSX_EXPR_CLOSE / JSX_CLOSE_END /
+JSX_FRAGMENT_CLOSE / JSX_SELF_CLOSE / JSX_OPEN_END as terminators
+at depth==0. A closed-out JSX construct can't be inside an arrow
+return-type position, so `=>` past it is unrelated.
+
+Why this resisted bisect at v5.7.5 P4.3d-2: the bug requires (1) a
+ternary with JSX-containing parens, (2) an unrelated arrow function
+SOMEWHERE later in the same source. Single-line removal can't isolate
+because it depends on TWO non-adjacent constructs. Removing either
+makes the test pass; the bug only manifests in their combination.
+
+The disambig change matters: same fix may apply to other lookahead
+heuristics that walk past JSX without recognizing scope.
+"""
+
+[[entries]]
+name = "ts_lex_jsx_disambig_byteskip_only"
+description = "Pre-flight BYTE_SKIP balance check is sufficient JSX-vs-generic-arrow disambiguation; the v5.7.3 post-> ( heuristic false-positives on JSX text starting with ("
+category = "cyrius"
+tags = ["ts", "lex", "jsx", "disambig", "v5.7.6"]
+content = """
+Filed: v5.7.6 P4.3d.
+
+v5.7.3 introduced a heuristic for `<` in expression context:
+scan ahead to matching `>` at depth 0; if next char is `(`,
+bail (it's a generic arrow `<T>(args)`). Otherwise proceed
+as JSX.
+
+This false-positives on real JSX where the open tag's text
+content starts with `(`, like `<span>(optional)</span>`.
+Lex bails on `<span>`, falls through to LT operator, then
+`/` of `</span>` becomes regex, then unterminated regex
+error (code 11).
+
+Fix v5.7.6: removed the post-`>` `(` heuristic entirely.
+Pre-flight BYTE_SKIP balance check (already present in
+v5.7.5) does the right thing for both cases:
+- Real JSX: BYTE_SKIP finds matching close tag, succeeds.
+- Generic arrow `<T>(args) => body`: BYTE_SKIP never finds
+  `</T>` close (generic types have no closing tag); walks
+  to EOF; returns start (bail).
+
+Lesson: a heuristic that returns false based on adjacent
+characters is fragile. A semantic check (does this construct
+balance?) is more robust and serves as the disambiguator
+naturally.
+"""
+
+[[entries]]
+name = "ts_lex_jsx_mode_stack_design"
+description = "JSX lexing uses the existing template-stack with mode values 4=JSX_TAG, 5=JSX_TEXT, 8=JSX_EXPR — main TS_LEX loop dispatches per-mode"
+category = "cyrius"
+tags = ["ts", "lex", "jsx", "modes", "v5.7.6"]
+content = """
+Filed: v5.7.6 P4.3d.
+
+JSX lexing in v5.7.6 reuses the existing template-literal
+mode stack (TS_TEMPLATE_STACK_OFF) by adding three new
+mode values:
+
+- 4 = JSX_TAG_MODE: inside `<TAG ...>` open or `</TAG>`
+  close, expecting attrs or close-of-tag. Dispatched
+  to TS_LEX_JSX_TAG.
+- 5 = JSX_TEXT_MODE: between tags, expecting children
+  (text, JSX expr, nested elements). Dispatched to
+  TS_LEX_JSX_TEXT.
+- 8 = JSX_EXPR_MODE: inside `{...}` of JSX expr. Main
+  TS_LEX loop runs normal expression tokenization;
+  matching `}` (handled in `}` operator) pops mode 8
+  + emits JSX_EXPR_CLOSE.
+
+Existing values: 0/1 = template body, 2 = `${...}`
+template-interp, 3 = nested brace marker (reused for
+nesting inside both 2 and 8).
+
+Why this design works: the main TS_LEX loop's top-of-loop
+mode check naturally dispatches to per-mode handlers.
+Each call processes ONE structural token + transition;
+on next iteration the mode (possibly different) drives
+the next dispatch. JSX expression bodies tokenize as
+regular TS — no duplication of dispatch logic.
+
+The TS_LEX_JSX entry point pushes mode 4 (or 5 for
+fragment) and returns; the walker is GONE — main loop
+takes over.
+
+The brace marker (3) reuse means JSX expressions can
+contain object literals, function bodies, etc. without
+needing separate marker values. The matching-} logic
+distinguishes `}` of object literal (top=3 → emit RBRACE)
+from `}` of JSX expr (top=8 → emit JSX_EXPR_CLOSE) from
+`}` of template interp (top=2 → close interp).
+"""
+
+
+[[entries]]
+name = "cx_drift_silent_accumulation_lesson"
+description = "main_cx.cyr accumulated 4+ silent drift breakages over v5.6.x + v5.7.x because no CI gate ever built it. v5.7.11 fix + gate."
+category = "cyrius"
+tags = ["cx", "drift", "ci-gate", "v5.7.11"]
+---
+src/main_cx.cyr (the cyrius-x bytecode entry) accumulated
+silent drift across many minor releases because no CI gate
+built it. Each addition to the shared frontend that x86 and
+aarch64 picked up silently broke cx without anyone noticing:
+
+- v5.6.12 added IR_RAW_EMIT to common/ir.cyr; main.cyr +
+  main_aarch64.cyr included ir.cyr; main_cx.cyr did not.
+  parse_expr.cyr references IR_RAW_EMIT → main_cx.cyr fails
+  parse with "undefined variable 'IR_RAW_EMIT'".
+- v5.6.x optimization arc added _AARCH64_BACKEND /
+  _flags_reflect_rax / _last_push_cp / _last_emovca_cp /
+  _last_movca_popr_cp / _INLINE_OK / _LOOPVAR_OK globals to
+  x86 + aarch64 emit. Never added to cx emit. parse_*.cyr
+  references all of them.
+- v5.5.x platform completion added _TARGET_MACHO /
+  _TARGET_PE to x86 + aarch64 emit. Same pattern.
+- main_cx.cyr's brk extension was 0x54A000 (5.5 MB) — never
+  reached the tok_types region at S+0x74A000 (7.5 MB). cc5_cx
+  SIGSEGV'd at LEX the moment a non-empty input landed any
+  token. Probably broken since whatever earlier reshuffle
+  put tok_types at 0x74A000.
+
+Each surfaced one at a time as v5.7.11 plowed through; each
+fix revealed the next missing piece.
+
+The PERMANENT FIX is the CI gate, not the per-piece adds.
+tests/regression-cx-build.sh (scripts/check.sh gate 4u)
+verifies cc5 builds main_cx.cyr cleanly + cc5_cx starts
+clean on empty/trivial input. Drift cannot recur silently —
+any future shared-frontend addition that breaks cx fails
+check.sh immediately.
+
+Lesson for new backends (RISC-V at v5.7.13): add the CI
+gate the moment the backend builds. Don't wait for "real
+testing" — drift accumulates in the gap between "compiles"
+and "runs through full test suite". A 5-line gate that
+verifies build-only is enough to catch 90% of drift; the
+remaining 10% surfaces when the runtime gates are added.
+
+Sister memory: feedback_dont_assume_unmaintained.md (don't
+pitch retiring drifted subsystems; fix them).
+
+
+[[entries]]
+name = "target_cx_backend_marker_path_b"
+description = "v5.7.12 _TARGET_CX backend marker for path-B guards on direct x86-byte emits in shared frontend codepaths."
+category = "cyrius"
+tags = ["cx", "backend-marker", "path-b", "v5.7.12"]
+---
+parse_*.cyr (the shared frontend) emits raw x86 instruction
+bytes via EB(S, 0xNN) / E2(S, 0xNNNN) / E3(S, 0xNNNNNN)
+calls in many code paths. On x86 and aarch64 builds those
+calls produce native or arch-specific bytes (aarch64 uses
+arch-conditional branches). On cx the same calls write x86
+bytes into the CYX bytecode stream — corrupting the output.
+
+v5.7.12 ships path B: a `_TARGET_CX` flag (=1 only when
+backend/cx/emit.cyr is the active include; =0 in x86 +
+aarch64 emit) gates direct-x86-emit sites. Pattern:
+
+  if (_TARGET_CX == 0) {
+      EB(S, 0x48); EB(S, 0x8D); EB(S, 0x05);  // x86 LEA
+  }
+
+7 sites guarded in v5.7.12 (per
+docs/audit/2026-04-27-cx-direct-emit-inventory.md):
+parse_decl.cyr struct field load; parse_expr.cyr PIC fn-addr,
+&local x86 LEA, PIC closure-literal addr, f64 cmp x86 SETcc
+chain; parse_fn.cyr struct-return rep movsb, regalloc
+save/restore.
+
+The high-volume offender was regalloc save/restore — every
+fn with `_cur_fn_regalloc > 0` (which is most of them post-
+v5.6.24 default-on regalloc) leaked `48 89 5d f8 4c 89 65 f0`
+etc. callee-save chains into the cx bytecode stream. Path-B
+guard wrap on the 5-line save and 5-line restore blocks
+removed the bulk of the noise.
+
+Path B is the TACTICAL fix; path A (replace direct emits
+with named abstract ops in each backend) is pinned long-term
+in the roadmap. Path A becomes the right move when RISC-V
+(v5.7.13) makes the guard pattern unwieldy or 2+ new direct-
+emit sites slip past static analysis.
+
+Pre-existing unfixed: cx codegen literal-arg propagation
+bug (syscall(60, 42) bytecode emits `movi r0, 0` instead of
+`movi r0, 60` / `movi r0, 42`). Pinned as a v5.7.x patch
+slot — not a v5.7.12 regression.
+
+
+[[entries]]
+name = "heap_reshuffle_pattern_v5_7_10"
+description = "v5.7.10 input_buf 512KB → 1MB via +0x100000 shift of 95 distinct heap-region addresses. Disambiguation discipline."
+category = "cyrius"
+tags = ["heap", "reshuffle", "input_buf", "v5.7.10"]
+---
+v5.7.10 widened input_buf 524 288 B → 1 048 576 B because
+hisab/dist/hisab.cyr was at 96% of the cap (505,237 B) and
+actively censoring upstream to fit; every consumer of hisab
+inherited the full 505 KB via cyrius's [deps] auto-prepend,
+leaving 19 KB of budget for its own source.
+
+The cap-value bump itself was 18 sites (3 per main_*.cyr
+file × 6 files) plus 1 PP IFDEF copy-back cap in lex_pp.cyr.
+The HARD work was the heap reshuffle: input_buf at 0..0x80000
+was packed back-to-back with compiler-state regions starting
+at 0x8C100. Widening input_buf to 0..0x100000 collided with
+all of them.
+
+**95 distinct heap-region addresses** in 0x80000..0xFFFFF
+shifted +0x100000 to land in 0x180000..0x1FFFFF. **NOT
++0x80000** — the naive shift would have collided with 3
+existing 6-digit squatters (fn_deprecated_msg at 0x104000,
+FNV-1a fn-name hash at 0x10C000, vname_offsets at 0x11A000,
+brk arg at 0x122000, vsize at 0x12A000, vtype at 0x13A000,
+output_buf at 0x14A000). +0x100000 lifts cleanly into the
+empty 0x180000..0x1FFFFF range. Verified via comm -12 on
+predicted-shifted vs existing-addresses pre-shift = zero
+collisions.
+
+brk extension UNCHANGED at 0x348C000 (52.5 MB) — the
+shifted regions pack into already-allocated heap. v5.7.7's
+fixup-cap-1M brk was already large enough.
+
+Sed sweep: regenerated by awk from the address list (95
+distinct), applied via `find src -name '*.cyr' -exec sed -i
+-f /tmp/shift.sed {} +`. Bare-hex comment refs (96 of them)
+shifted in a separate pass; 4 boundary-comment over-shifts
+hand-corrected (where 0x80000 was the input_buf END, not a
+region address — should have stayed 0x80000 for tok_names
+range or become 0x100000 for new input_buf end).
+
+Lesson for the next reshuffle (input_buf 1MB → 2MB if
+hisab-class folds compound further):
+- ALWAYS run the comm collision check between predicted
+  shifted addresses and existing addresses pre-shift.
+- Bare-hex sweeps over-shift boundary comments — manually
+  verify any "X ends at 0xN" / "regions below 0xN" comments
+  after the sed pass.
+- brk extension is a separate decision from the shift delta.
+  Don't bump brk unless the new region layout actually
+  overflows the allocation.
+
+Reference cap-bump trajectory: input_buf 256 KB → 512 KB
+(v3.6.7) → 1 MB (v5.7.10). Sister memory:
+feedback_cap_bumps_recurring.md.
+
+[[entries]]
+name = "forked_helper_offset_typo_cx_backend_v5_7_23"
+description = "v5.7.23 cx codegen literal-arg propagation bug — TOKVAL read from wrong heap region"
+category = "cyrius"
+---
+v5.7.23 (2026-04-27) — single-character typo fix in
+`src/backend/cx/emit.cyr`'s `TOKVAL` helper. Backend-fork
+hazard pattern: when a backend module forks shared frontend
+helpers, every offset literal is a candidate for typo.
+
+The bug: `TOKVAL` in cx backend read tokens from
+`S + 0x94A000 + i*8` instead of the canonical
+`S + 0xB4A000 + i*8` write site in `src/frontend/lex.cyr:99`.
+0x94A000 is a zero-initialized gap region between
+`tok_types` (0x74A000) and `tok_values` (0xB4A000) in the
+heap map; PEEKV(S) therefore always returned 0 in cc5_cx.
+
+Surface: `syscall(60, 42)` emitted `MOVI r0, 0` for both
+args, plus a spurious `warning: syscall arity mismatch`
+on stderr (because `sc_num` got read as 0 = SYS_READ
+arity 3, not 60 = SYS_EXIT arity 1; the parser's argc==0
+branch reads `sc_num = _cfv` and `_cfv` was 0). The
+implicit-exit syscall's `60` literal propagated correctly
+because main_cx's epilogue synthesizes the exit syscall
+through a hard-coded path rather than the lex token
+table.
+
+Origin: introduced at v5.7.12 path-B work when the cx
+backend module forked `TOKTYP`/`TOKVAL`/`PEEKV` from the
+x86 emit module. `TOKTYP`'s `0x74A000` was copied
+correctly; `TOKVAL`'s `0xB4A000` was hand-typed and
+fat-fingered to `0x94A000`. The v5.7.12
+`regression-cx-roundtrip.sh` gate explicitly noted
+"Exit-code propagation through `syscall(60, X)`" as out
+of scope, slotting the audit as future work — v5.7.23
+closed it.
+
+The fix is one character: 0x94A000 → 0xB4A000.
+
+Audit pattern for similar forked-helper bugs:
+```
+grep -rn "0x[0-9A-F]\{6\}A000" src/backend/
+```
+Diff each region's reads/writes against the canonical
+write sites in `src/frontend/lex.cyr` +
+`src/frontend/parse_*.cyr`. A 30-second numerical
+cross-check at fork time would have caught this.
+
+Detection method that worked: instrument the suspect
+emit fn to print the value it receives. CX_MOVI showed
+val=0 for the user syscall args but val=60 for the
+implicit exit — the asymmetry pointed at the parser-side
+read path, not the emit path. Then `grep -rn "fn TOKVAL"
+src/` produced 4 hits across backends; the offset
+divergence between cx (0x94A000) and x86/aarch64
+(0xB4A000) was immediately visible.
+
+Lesson: when a fork is mostly a copy-paste of a small
+table of magic numbers (heap offsets, opcode tables, cap
+constants), invest 30 seconds in a `diff -y` between fork
+and origin BEFORE shipping. The cost of finding the
+typo via downstream surfacing is days; the cost of
+finding it via cross-check is seconds.

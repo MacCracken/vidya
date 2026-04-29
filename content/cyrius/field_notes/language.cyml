@@ -885,6 +885,143 @@ indent it or fence it inside a code block — the parser only
 matches `---` at column 0.
 
 [[entries]]
+name = "global_init_order_silent_zero"
+description = "Top-level `var X = expr` initializers run in source order; forward references silently resolve to 0 (no warning)"
+category = "cyrius"
+---
+THE BUG:
+
+Cyrius initializes top-level `var X = expr;` declarations in source
+declaration order. If `expr` references a constant declared LATER in
+the same file, that reference resolves to `0` (the default
+zero-initialized value) at the time `X` is evaluated. No warning,
+no error — `X` ends up holding the wrong value, and downstream
+consumers silently see the wrong value too.
+
+    # In src/foo.cyr (single file, declaration order matters):
+
+    var COMPUTED = FLAG_A | FLAG_B | FLAG_C;   # → 0, NOT 7
+
+    # ... 200 lines later ...
+
+    var FLAG_A = 0x1;
+    var FLAG_B = 0x2;
+    var FLAG_C = 0x4;
+
+    # COMPUTED reads as 0 throughout the program.
+
+A trivial assertion surfaces it instantly:
+
+    fn test() {
+        assert_eq(COMPUTED, FLAG_A | FLAG_B | FLAG_C, "computed = OR");
+        # → fails with "got 0, expected 7"
+    }
+
+WHERE THIS BIT US:
+
+mabda v3 Step 4f.ii (BO page-perms tightening). Added named
+perm-bitmask constants near the top of `src/backend_native.cyr`:
+
+    var _NATIVE_PERM_FULL = AMDGPU_VM_PAGE_READABLE
+                          | AMDGPU_VM_PAGE_WRITEABLE
+                          | AMDGPU_VM_PAGE_EXECUTABLE;
+
+at line 117. The `AMDGPU_VM_PAGE_*` constants lived at line 391+ in
+the same file. Result: `_NATIVE_PERM_FULL` evaluated to `0` at load
+time. Every BO got mapped with `perms = 0` — no read, no write, no
+execute. Every dispatch TDR'd at the 10-second AMDGPU timeout with
+"post-dispatch marker stale" + "output unchanged."
+
+Visible failure mode looked like a wedged GPU — ~30 minutes spent
+on hardware-iteration hypotheses (firmware near-permanent-wedge
+rule, ring corruption, bad VAs) before a CPU regression test
+`assert_eq(_NATIVE_PERM_FULL, R|W|X)` returned `got 0, expected 14`
+and pinned the actual cause.
+
+Fix: one-line move. `_NATIVE_PERM_*` block relocated below the
+`AMDGPU_VM_PAGE_*` defs. Code that was "wrong since the moment I
+typed it" started working immediately on hardware.
+
+WORKAROUND PATTERN until the lint lands:
+
+  1. For computed-from-other-constants globals, place the
+     definition AFTER its dependencies (forced reordering).
+  2. Add CPU regression tests that assert the *value* of every
+     computed perm/flag/size constant. These are 5-line tests
+     that catch this class of bug before any hardware
+     iteration.
+  3. When refactoring top-level declarations, re-run the value
+     assertions. Reordering is a top-level change with non-local
+     consequences in Cyrius.
+
+UPSTREAM STATUS:
+
+Slotted for review + fix in `cyrius 5.7.32` (per the language-agent
+review queue, 2026-04-28). Three candidate fixes in priority order:
+(a) `cyrius lint` warning for forward references in top-level
+initializers, (b) compile-time error if the language requires
+declaration order, (c) runtime check that warns when a `var`
+initializer reads zero-initialized memory the compiler can
+statically identify as a forward reference.
+
+The current behavior (silent zero) is the worst of both worlds —
+neither permissive enough to allow the forward reference, nor
+strict enough to surface the mistake. Pick one.
+
+Affects ANY computed-from-other-constants global: size
+calculations, page perms, bit-packed enum compositions,
+refactors that reorder top-level declarations, the common
+"define module constants near the top of the file for grep-
+ability" pattern.
+
+[[entries]]
+name = "var_bracket_size_must_be_literal"
+description = "`var name[N]` requires N to be an integer literal; `var name[CONST_IDENT]` is rejected at parse"
+category = "cyrius"
+---
+The `var name[N]` stack-local syntax requires N to be an integer
+literal at parse time. Even if `CONST_IDENT` is a `var` initialized
+to a constant integer expression, the parser rejects it.
+
+    var TEX_STRUCT_SIZE = 32;
+
+    fn build_texture() {
+        var tex[TEX_STRUCT_SIZE];  # REJECTED at parse
+        var tex[32];               # OK — literal
+    }
+
+This is consistent with the existing rule that `var name[N]` is
+"N bytes of frame storage" (see `var_name_bracket_is_bytes_not_elements`).
+The bytes are computed at parse, not at runtime, so the parser
+needs the value before any name resolution runs.
+
+WORKAROUNDS:
+
+  1. Use a literal directly. If the value is shared between several
+     declarations, write the literal in each spot and add a comment
+     pointing to the documented size.
+  2. Heap-allocate instead. `alloc(TEX_STRUCT_SIZE)` works fine —
+     `alloc` takes a runtime expression, no parser constraint.
+  3. Use an enum constant. Enums are compile-time-resolved before
+     `var` declarations parse, but in practice the compiler still
+     wants a literal here, so test before you bet on it.
+
+WHERE THIS BIT US:
+
+mabda v3 Step 5.6 (native texture slot wrappers). Wanted
+
+    var tex[NATIVE_TEX_STRUCT_SIZE];
+
+with `NATIVE_TEX_STRUCT_SIZE = 32` defined elsewhere. Parser rejected
+it. Used `var tex[32]` with a `# 32 = NATIVE_TEX_STRUCT_SIZE` comment.
+
+The class of programs this affects: any helper that declares a
+fixed-size frame buffer based on a structurally-meaningful constant
+(struct size, packed-descriptor size, fixed-array stride). Until the
+parser supports identifier-as-array-size, the constant has to be
+duplicated as a literal at the call site.
+
+[[entries]]
 name = "sandhi_service_layer_dep"
 description = "sandhi (सन्धि — junction) is the cyrius 5.x service-boundary stdlib: HTTP client/server, TLS, service discovery. Ships with the toolchain — declare as `\"sandhi\"` in `[deps] stdlib = [...]`"
 ---
