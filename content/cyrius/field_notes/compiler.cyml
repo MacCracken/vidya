@@ -3594,3 +3594,195 @@ constants), invest 30 seconds in a `diff -y` between fork
 and origin BEFORE shipping. The cost of finding the
 typo via downstream surfacing is days; the cost of
 finding it via cross-check is seconds.
+
+
+[[entries]]
+name = "verify_slot_premise_aarch64_f64_stubs_v5_7_30"
+description = "aarch64 f64 basic-op stubs returned 0 for years before v5.7.30 surfaced them via premise verification on a polyfill task"
+category = "cyrius"
+subcategory = "field_notes_compiler"
+---
+v5.7.30 was originally pinned as "aarch64 f64_exp polyfill" — a
+narrow targeted addition. **Premise verification before
+implementation** uncovered a much bigger bug: every f64 basic
+op on aarch64 was already broken. `EMIT_F64_BINOP` and 6 sibling
+emits in `src/backend/aarch64/emit.cyr` were stubs (`return 0;`).
+`f64_add(1.0, 2.0)` returned 2.0 (the second arg, since the
+parser left it in x0 and EMIT_F64_BINOP emitted nothing), with
+stack leak from the unpopped first arg. Probably broken since
+v5.4.x when aarch64 cross-build first shipped.
+
+The user-direction at v5.7.30 entry: split into two slots.
+v5.7.30 ships basic ops; v5.7.31 ships polyfills using working
+basic ops. Both shipped same day (2026-04-28).
+
+**Lesson**: verify slot premise before implementing. The
+roadmap framing ("polyfill") implied basic ops already worked.
+A 5-minute test (`assert f64_add(2.0, 3.0) == 5.0` cross-built
+to aarch64, run on the Pi) would have caught this years
+earlier. Pinned method: any aarch64-targeted slot starts with
+"run a basic-op smoke test on the Pi" before designing.
+
+This is the same shape as v5.7.34's catch — v5.7.27 raised
+x86 codebuf 1MB→3MB but DIDN'T raise aarch64's matching cap
+in `src/backend/aarch64/emit.cyr` `EB()`. Backend parity
+checks are routinely missed because the tests live one
+ssh hop away.
+
+[[entries]]
+name = "audit_silent_skip_is_false_green_v5_7_36"
+description = "scripts/check.sh's silent-skip on missing fmt/lint binaries reported false-PASS; same shape as v5.7.29 set -e abort masking"
+category = "cyrius"
+subcategory = "field_notes_compiler"
+---
+Pre-v5.7.36 `scripts/check.sh` resolved `CYRFMT` /
+`CYRLINT` only as `$ROOT/build/cyrfmt` / `cyrlint`. On a
+fresh checkout (only `build/cc3` + `build/cc5` committed),
+those paths don't exist; the audit emitted `skip: cyrfmt
+not built` / `skip: cyrlint not built` and counted nothing
+toward pass/fail. A green "52/52 PASS" report on a build
+that hadn't actually formatted or linted anything.
+
+Surfaced when the user re-set up the toolchain on a fresh
+Arch install and ran `sh scripts/check.sh` against an
+already-installed-via-tarball toolchain. The installed
+binaries lived at `~/.cyrius/bin/cyrfmt` / `cyrlint` but
+check.sh's resolution didn't try PATH, so both gates
+silently skipped.
+
+v5.7.36 fix:
+1. `CYRFMT` / `CYRLINT` resolution falls back to
+   `command -v <tool>` if the in-repo build/ path is empty.
+2. The `skip: not built` branch became
+   `check "format/lint (stdlib)" "1"` — a real FAIL with a
+   message pointing at `cyrius lsp` / `cyriusly setup` /
+   manual build instructions.
+
+**Lesson**: silent skips in audit gates are equivalent to
+v5.7.29's `set -e` + `tail` masking — the failure mode is
+"green report but the test never ran." Any new gate added
+to check.sh should FAIL-loud when its prerequisite tooling
+is absent, not skip. Pinned method: fresh-install
+rehearsal once per minor (last: never; first: v5.7.36)
+catches this class because a fresh checkout exposes the
+"binary not built yet" path.
+
+[[entries]]
+name = "distlib_per_module_read_cap_v5_7_36"
+description = "cyrius distlib's per-module read buffer was 65535 bytes; modules > 64 KB silently truncated mid-bundle"
+category = "cyrius"
+subcategory = "field_notes_compiler"
+---
+`cmd_distlib` in `cbt/commands.cyr` allocates a per-module
+read buffer to slurp each source file into memory before
+writing to the bundle. Pre-v5.7.36 size: `alloc(65536)` /
+`file_read_all(..., 65535)`. Source files larger than 64
+KB had their tail bytes truncated silently — no error, no
+warning, the bundle file just ended early.
+
+Mabda hit it generating its dist after hardware-iter accretion
+pushed at least one module past 64 KB. Bumped to 262144 (256
+KB) at v5.7.36 — three quarters of breathing room on top of
+mabda's current need.
+
+`tests/regression-distlib-large-module.sh` (gate 4ar)
+synthesises a ~78 KB module with a sentinel on the last
+line, runs `cyrius distlib`, asserts the bundle contains
+the sentinel. Pre-v5.7.36 the test fails (sentinel
+truncated); post-v5.7.36 passes.
+
+**Lesson**: per-module read buffers in `cbt/commands.cyr`
+need explicit caps that scale with consumer growth. The
+fixup table cap pattern (16K → 32K → 262K → 1M across
+v5.x) is the precedent — bump the static cap until a
+fourth bump, then convert to a dynamic vec. The first
+bump is fine; the third is the warning sign.
+
+[[entries]]
+name = "auto_deps_gate_inflates_self_host_size_v5_7_38"
+description = "Adding `cyrius soak` to the auto-deps gate caused cmd_soak's compile() of src/main.cyr to prepend all manifest deps and blow the 2MB expanded-source cap"
+category = "cyrius"
+subcategory = "field_notes_compiler"
+---
+v5.7.38 added `.scyr` (soak) + `.smcyr` (smoke) discovery to
+`cmd_soak` / `cmd_smoke`. Adding both verbs to the auto-deps
+gate (cbt/cyrius.cyr line 122) caused the built-in self-host
+loop inside `cmd_soak` to fail with:
+
+```
+[1/1] error: expanded source exceeds 2MB (2317668 bytes) in PP_IFDEF_PASS iter=0
+=== soak complete: 0/1 passed, 1 failed ===
+```
+
+Root cause: `cmd_soak`'s built-in loop calls
+`compile("src/main.cyr", cc5_t)`. With auto-deps active,
+`_dep_includes` is populated with the cyrius project's six
+manifest deps (sigil/sakshi/patra/yukti/mabda/sankoch). The
+six dep bundles get prepended to src/main.cyr's 7,400-LOC
+compiler source → expanded source crosses the 2 MB
+preprocessor cap → fail.
+
+Fix: `_skip_deps = 1` save/restore around the built-in loop.
+The `.scyr` walker (after) restores `_skip_deps` so user
+harnesses get the same auto-prepend as `.tcyr`/`.bcyr`/
+`.fcyr` (per the v5.7.21 fuzz parity slot).
+
+```cyr
+fn cmd_soak(iters) {
+    var saved_skip_deps = _skip_deps;
+    _skip_deps = 1;       # built-in loop compiles src/main.cyr — no auto-prepend
+    ...iterations + .tcyr suite...
+    _skip_deps = saved_skip_deps;
+    ...walk .scyr files (auto-prepend OK here)...
+}
+```
+
+**Lesson**: auto-deps gate is a coarse on/off per command.
+Any `cmd_*` that calls `compile()` against sources near
+the 2 MB cap (i.e. compiling cyrius itself, or any
+multi-thousand-LOC consumer entry point) needs `_skip_deps`
+guarding around those specific calls. The cap raise from 1
+MB → 2 MB landed at v5.6.40; another bump to 4 MB or beyond
+should be considered if a third command hits this shape
+(third = cap exhaustion signal per the
+`heap_cap_growth_pattern` entry above).
+
+[[entries]]
+name = "lsp_globals_before_fn_definitions_v5_7_39"
+description = "cyrius requires top-level `var X` to be declared before any fn body that references X — applies to programs/cyrius-lsp.cyr's symbol-table backing buffers too"
+category = "cyrius"
+subcategory = "field_notes_compiler"
+---
+v5.7.39 added a symbol indexer to programs/cyrius-lsp.cyr
+with parallel-array globals (`_sym_name_off`, `_sym_path_off`,
+etc., backing buffers `_sym_names_buf`, `_sym_paths_buf`,
+`_lsp_indexed_buf`). All declared at top-level BEFORE the
+fn definitions that reference them, then allocated inside
+`lsp_index_init()` called from `main()` after `alloc_init()`.
+
+This works because cyrius parses the file in source order:
+when the parser hits `fn handle_definition() { ... uses
+_sym_name_off ... }`, the global var slot has already been
+declared (at top level above the fn). The runtime initialization
+(via `alloc()` in main()) happens later — fn bodies don't run
+until called.
+
+If the globals were declared BELOW the fn definitions,
+compile would fail with `undefined variable '_sym_name_off'`.
+Same forward-ref-init class as v5.7.32 cyrlint warns about
+for `var X = expr_using_Y` shapes — but that's compile-time
+parse order, this is global-decl-before-fn-body order.
+
+**Lesson**: when adding a substantial program (cyrlint,
+cyrius-lsp, programs/api_surface.cyr) with state shared
+across multiple fns, declare ALL state globals as a single
+block at the top of the file (after stdlib includes,
+before any fn). Init via a fn called from main(), not
+inline at the global decl. This avoids both:
+- forward-ref-init errors (v5.7.32 cyrlint shape)
+- `undefined variable` parse errors (fn body referencing
+  a global declared later)
+
+The pattern is mechanical; the bug surfaces every time
+state is added incrementally and a global is "where the
+fn that uses it lives." Centralize.
