@@ -3786,3 +3786,159 @@ inline at the global decl. This avoids both:
 The pattern is mechanical; the bug surfaces every time
 state is added incrementally and a global is "where the
 fn that uses it lives." Centralize.
+
+[[entries]]
+name = "distlib_64kb_truncation_v5736"
+description = "cyrius distlib silently truncated modules >64 KB pre-5.7.36 — mabda's backend_native.cyr surfaced it"
+category = "cyrius"
+---
+Pre-5.7.36 (`cbt/commands.cyr` Step 6.5(b) era), `cyrius distlib`
+read each `[lib].modules` source file into a fixed 64-KB buffer:
+
+```cyrius
+var fbuf = alloc(65536);
+var flen = file_read_all(mod_path, fbuf, 65535);
+```
+
+Files larger than 65535 bytes had their tail silently dropped from
+the bundled `dist/<pkg>.cyr`. No warning, no error, no diagnostic.
+The bundle still compiled — it just had every `fn` defined past
+byte 65535 quietly missing. Consumers pulling `[deps.<pkg>]` would
+hit unresolved-symbol link failures.
+
+**Trigger case:** mabda's `src/backend_native.cyr` grew past 64 KB
+during the Phase C (texture + render) work. `backend_native_new`,
+the `native_texture_*` family, and `native_rt_*` family — all
+defined past line 1500 — vanished from `dist/mabda.cyr`. The
+truncation only surfaced when a regenerate-and-link sweep on a
+fresh dev box (post-Arch reinstall) tried to use the regenerated
+bundle.
+
+**Fixed upstream in cyrius 5.7.36** (commit `8c75f3f`,
+`repairs to installer and check.sh` — bumps the per-module read
+buffer 64 KB → 256 KB and the `file_read_all` cap to 262143). The
+comment in `cbt/commands.cyr` after the fix explicitly credits
+mabda for surfacing the wall:
+
+> v5.7.36: per-module read buffer raised 64KB → 256KB. mabda
+> surfaced the wall when its dist generation truncated at the
+> 65535-byte read cap (single-module sources outgrew 64KB after
+> hardware-iter accretion). 256KB is the next breathing room
+> without committing to a dynamic vec — revisit if a module ever
+> crosses 192KB.
+
+**Lessons that generalize:**
+
+1. Fixed-cap byte buffers in toolchain code are a recurring class —
+   `stale_fixed_cap_pattern` (this file) covered prior instances
+   (cc3 stdin truncation, etc.). The read-buffer-as-source-of-
+   silent-truncation shape is the same. Worth a sweep across cyrius
+   for `alloc(<small_const>)` patterns where the data is
+   user-controlled.
+2. **Diagnostic, even if hard-fail isn't appropriate.** A
+   `warning: module X exceeds N-byte read buffer; output may be
+   truncated` would have made this a 5-minute fix instead of a
+   what-symbol-is-missing investigation. File-IO with implicit caps
+   should always emit a "you hit the cap" diagnostic when the read
+   matches the buffer size exactly (high-confidence truncation
+   indicator).
+3. **Bundle gates as CI.** Mabda's CI runs `cyrius distlib` and
+   diff-checks `dist/<pkg>.cyr`. The diff would catch ANY drift,
+   including silent truncation — but only if the project actually
+   re-runs distlib after every source bump. The session 26 surface
+   happened because the pre-existing committed `dist/mabda.cyr` was
+   built BEFORE backend_native.cyr crossed 64 KB; the truncation
+   was latent until regen.
+
+The 256-KB cap is breathing room, not a permanent answer. If any
+future module crosses 192 KB, revisit the cap or move to a
+dynamic-grow buffer (vec-style; cyrius stdlib has the primitive).
+
+[[entries]]
+name = "lint_fmt_per_file_in_5_7"
+description = "cyrius lint and cyrius fmt --check became per-file in 5.7.x — the bare repo-wide invocation is gone"
+category = "cyrius"
+---
+In Cyrius 5.7.x the `lint` and `fmt --check` subcommands take a
+single file argument and require it; the bare repo-wide invocation
+documented in older project CLAUDE.mds (e.g. mabda pre-2026-04-30)
+errors with `Usage: cyrius lint <file.cyr>`.
+
+```sh
+# Pre-5.7.x (no longer works):
+cyrius lint
+cyrius fmt --check
+
+# 5.7.x (current):
+cyrius lint src/foo.cyr
+cyrius fmt src/foo.cyr --check
+```
+
+**Project-wide form is now `cyrius audit`** — wraps a `check.sh`
+that runs the cyrius compiler's own self-host + regression suite.
+**Two caveats** caught when bringing up mabda on a fresh Arch box
+post-reinstall (2026-04-30):
+
+1. `install.sh` did not copy `scripts/check.sh` into `~/.cyrius/bin/`
+   pre-5.7.36. `cyrius audit` errored with
+   `/home/.../check.sh: No such file or directory`. Fixed in 5.7.36
+   via the `repairs to installer and check.sh` commit; before then,
+   the workaround was to copy the script manually.
+2. Even when `check.sh` is installed, it runs the cyrius compiler's
+   OWN self-host audit (LLVM regression tests, target-specific
+   bring-up gates). For DOWNSTREAM consumer projects (mabda, soorat,
+   etc.), this is the wrong gate — it tests cyrius, not the
+   consumer's surface.
+
+**Right-shape for downstream consumer CI/local sweeps:** a shell
+loop over the project's source tree.
+
+```sh
+for f in src/*.cyr; do cyrius lint "$f" || exit 1; done
+for f in src/*.cyr; do cyrius fmt "$f" --check >/dev/null || exit 1; done
+```
+
+This is what mabda CI uses post-5.7.30. Worth flagging in any
+project's CLAUDE.md / CI workflow that still describes the bare
+form — the toolchain bumped without anyone noticing for a couple of
+release cycles.
+
+**Cross-pollination:** the per-file shape may eventually grow into
+a `--all` or `--recursive` mode upstream. Until then, the loop is
+the contract. Don't write project-side wrappers that assume
+otherwise.
+
+[[entries]]
+name = "fn_keyword_in_param_position"
+description = "v5.7.46: `fn` is reserved keyword and cannot be used as a parameter name even in helper fns; cyrius parser surfaces this with 'expected identifier, got reserved keyword fn' error at the NEXT fn definition, not the offending one"
+category = "cyrius"
+---
+**Discovered at v5.7.46 lib/test.cyr v1 ship.** Tried writing
+`fn test_each(cases_vec, fn) { ... fncall1(fn, ...); ... }`
+where `fn` was the parameter name (intended to mean "the
+callback fn pointer"). The parser rejected with:
+
+```
+error:lib/fnptr.cyr:234: expected identifier, got reserved
+keyword 'fn' (cannot be used as an identifier; rename the
+variable/field/fn)
+```
+
+**Note the file path**: error reports at `lib/fnptr.cyr:234`,
+which is the NEXT fn definition (`fn fncall5(fp, a, b, c, d, e)`)
+the parser encountered after the offending param. The `fn`-as-
+parameter-name in `test_each` polluted the parser state somehow,
+and `fn fncall5` looked like garbled syntax to the recovery
+path.
+
+**Convention** (matches lib/callback.cyr): use `fp` (function
+pointer) as the parameter name when you want to receive a fn
+pointer. Both `lib/callback.cyr` (v5.0.x) and `lib/test.cyr`
+(v5.7.43) follow this — `fn for_each(v, fp)`,
+`fn test_each(cases_vec, fp)`.
+
+**Lesson**: cyrius's reserved keywords (fn, var, if, while,
+return, etc.) are unconditionally reserved — not just
+contextually. Don't shadow them as identifiers anywhere. Error
+messages on this can be confusing because the parser may
+recover into the next definition before reporting.

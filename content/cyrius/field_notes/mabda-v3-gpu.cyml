@@ -714,3 +714,337 @@ Reference points:
   - radv's ACO compiler (the "new" radv codegen): the closest
     open-source point of comparison for what we'd be writing.
   - Mesa's GFX9 ISA tables: ground-truth encoding tables.
+
+[[entries]]
+name = "gfx9_graphics_shader_abi_resolved"
+description = "Phase C Step 6.2(b) RESOLVED 2026-04-30 — minimal VS+FS for the native render path landed via clang+llvm-objdump Layer-1 cross-check"
+category = "cyrius"
+---
+RESOLVED 2026-04-30. Closes the `gfx9_graphics_shader_abi_research`
+entry from Phase C scaffolding. Two shaders landed in
+`src/backend_native.cyr`:
+
+  - `native_gfx9_shader_solid_red` — 92 bytes. 4× v_mov_b32 (RGBA
+    constants 1.0/0.0/0.0/1.0) + `exp mrt0 done vm` + s_endpgm +
+    16-NOP prefetch padding. The trivial fragment shader.
+  - `native_gfx9_shader_fullscreen_triangle_vs` — 116 bytes. The
+    standard radv NDC pattern `(vid&1)*4-1, (vid>>1)*4-1` driving
+    `exp pos0 done`. 10 instructions of arithmetic
+    (v_lshlrev_b32 / v_and_b32 / v_add_u32 -1 / v_cvt_f32_i32) +
+    constants for z/w + EXP + s_endpgm + padding.
+
+The technique that worked: **clang+llvm-objdump as Layer-1
+cross-check** (extension of the Phase B.4 protocol from compute to
+graphics). Workflow:
+
+  1. Write a tiny CL kernel that does the SAME ARITHMETIC the VS
+     needs — for the fullscreen triangle, `int xi = (vid & 1) * 4 - 1;
+     int yi = ((vid >> 1) & 1) * 4 - 1;` driving an output. The CL
+     kernel uses AMDHSA compute ABI (kernel arg via SGPR USER_DATA);
+     the graphics VS uses graphics ABI (vid in v0). DIFFERENT ABIs
+     for I/O, but the **VOP1/VOP2 arithmetic encodings are identical**.
+  2. `clang -target amdgcn--amdhsa -mcpu=gfx90c -O2 -nogpulib -c
+     vid_to_pos.cl -o vid_to_pos.o`.
+  3. `llvm-objdump -d --triple=amdgcn--amdhsa --mcpu=gfx90c
+     vid_to_pos.o`.
+  4. Read the encoded bytes for the arithmetic ops; transcribe with
+     citation. The disassembly text shows mnemonic + bytes side by
+     side, e.g. `v_lshlrev_b32_e32 v3, 2, v2 // 24060482`.
+  5. For the I/O bytes (system VGPR reads, EXP instructions), hand-
+     encode against the GFX9 ISA spec — these have NO compute analog.
+
+Encoding extraction (cross-checked, all confirmed by disassembly):
+  - VOP1 marker: bits 25-31 = 0x3F → top byte 0x7E
+  - VOP2 marker: bit 31 = 0, bits 30-25 = opcode (6 bits)
+  - VOP1 opcode 0x01 = v_mov_b32; 0x05 = v_cvt_f32_i32
+  - VOP2 opcode 0x12 = v_lshlrev_b32; 0x13 = v_and_b32;
+                0x34 = v_add_u32 (use -1 inline = 193 = 0xC1
+                instead of v_subrev_u32 + 1)
+  - VOP src table: 128 = 0.0 inline, 129 = 1, 130 = 2, 132 = 4,
+                   192-208 = -1..-16, 240-247 = ±0.5/1/2/4 floats,
+                   242 = 1.0, 256-511 = VGPR 0-255
+  - EXP marker: bits 26-31 = 0x3E → top byte 0xF8
+  - EXP word 0: en[0:3] | tgt[4:9] | compr[10] | done[11] | vm[12]
+  - EXP tgt: 0 = mrt0, 12 = pos0, 32+i = param_i
+  - SOPP s_endpgm: 0xBF810000; SOPP s_nop 0: 0xBF800000
+
+Graphics-ABI specifics (NOT in compute precedent):
+  - VS entry: v0 = vertex_id, v1 = instance_id (always loaded;
+    clobberable since trivial VS doesn't use it). Uses RSRC2_VS = 0
+    (no USER_SGPR preload).
+  - FS entry: SPI computes pixel coord into v0+ but for our trivial
+    solid-color FS we don't read inputs. SPI_PS_INPUT_ENA = 0 on
+    some GFX9 firmware causes hangs; radv-tested safe minimum is
+    0x2 (PERSP_SAMPLE_ENA). Codified as
+    `GFX9_SPI_PS_INPUT_HANG_QUIRK_MIN`.
+  - Position export must have done=1 (no exp param needed when FS
+    has no varyings). Color export has done=1 + vm=1.
+
+Reference CL kernel preserved in
+`docs/proposals/v3-shader-bytes-capture.md` § "Layer 1 — shader ISA
+bytes via clang" so any future contributor can re-derive the
+arithmetic encodings on demand. No external bytes anchored to a
+specific LLVM build version — re-run clang any time.
+
+Acceptance gate satisfied so far: structural (CPU value-asserts pin
+every emitted dword). Layer-2 (byte-exact-vs-radv-IB diff) is the
+remaining gate, currently driven by the `programs/diagnostics/
+radv_capture/` headless Vulkan capture program (see
+`pm4_layer2_capture_paths`). The Phase B.4 protocol was the precedent;
+session 26 extended it cleanly to graphics.
+
+[[entries]]
+name = "mesa_gfx9_json_authoritative_register_source"
+description = "Mesa src/amd/registers/gfx9.json is the single source of truth for GFX9 MMIO register addresses — never transcribe from memory or design docs"
+category = "cyrius"
+---
+**The lesson the protocol exists to enforce.** During Step 6.2(a)
+on 2026-04-30, three SPI shader format register addresses
+(POS_FORMAT, Z_FORMAT, COL_FORMAT) shipped with **scrambled values**
+— transcribed from memory + a design-doc note that turned out to be
+wrong:
+
+| Register | What 6.2(a) shipped | Authoritative |
+|---|---|---|
+| `R_SPI_SHADER_POS_FORMAT` | `0xA710` ❌ | `0xA70C` |
+| `R_SPI_SHADER_Z_FORMAT`   | `0xA708` ❌ | `0xA710` |
+| `R_SPI_SHADER_COL_FORMAT` | `0xA70C` ❌ | `0xA714` |
+
+POS was at Z's address; COL was at POS's address; Z was at a
+non-format register entirely. Caught only when 6.5(a) cross-checked
+against the authoritative Mesa register table — the bug would have
+shipped to hardware as a "wave fails to launch / wrong format /
+silent corruption" debugging session.
+
+**Source of truth (fetch every time):**
+`https://gitlab.freedesktop.org/mesa/mesa/-/raw/main/src/amd/registers/gfx9.json`
+
+The JSON has `register_mappings` (per-register `name`, `chips`,
+`map.at` byte address) and `register_types` (per-register field
+bit-positions + enum refs) and `enums` (ColorFormat,
+SurfaceNumber, CBMode, etc.). Filter `register_mappings` by
+`'gfx9' in chips` to scope to the gen.
+
+**Lookup script (preserved in `docs/proposals/v3-shader-bytes-
+capture.md` § "Authoritative source for register addresses"):**
+
+```python
+import json
+with open('gfx9.json') as f:
+    d = json.load(f)
+WANT = {'CB_TARGET_MASK', 'SPI_SHADER_POS_FORMAT', 'CB_COLOR0_INFO', ...}
+for r in d['register_mappings']:
+    n = r.get('name')
+    if n in WANT and 'gfx9' in r.get('chips', []):
+        b = r['map']['at']
+        # mabda 0xA shorthand for context regs:
+        m = b - 0x1E000 if 0x28000 <= b < 0x29000 else b
+        print(f'  R_{n:35s} byte=0x{b:06X}  mabda=0x{m:06X}')
+```
+
+**Mabda discipline going forward:** every `R_*` constant in
+`src/backend_native.cyr` carries a citation comment of the form
+`# Mesa 0x028XYZ` or `# Mesa gfx9.json R_00BXYZ_NAME`. If you can't
+cite it, you haven't verified it. Plus a CPU value-assert in
+`tests/tcyr/mabda_v3.tcyr` so a typo surfaces at CPU test time, not
+at hardware-debug time. Same rule applies to bitfield-composed
+value constants (e.g. `CB_COLOR_CONTROL_NORMAL_COPY = 0xCC0010` —
+the encoded register, NOT bare ROP3 `0xCC` which would mis-set
+DEGAMMA + MODE; see `cb_color_control_field_shorthand_trap`).
+
+This is the GPU-specific instance of the broader pattern: **don't
+ship register addresses or bit patterns without an upstream-source
+citation.** For ISA bytes the upstream source is clang+llvm-objdump
+(see `gfx9_graphics_shader_abi_resolved`). For PM4 packets the
+source is `RADV_DEBUG=hang` IB capture (see
+`pm4_layer2_capture_paths`). For register addresses + bit positions,
+it's `gfx9.json`.
+
+[[entries]]
+name = "phase_c_step_65_pm4_composer_landed"
+description = "Phase C Step 6.5(b) RESOLVED 2026-04-30 — clear-triangle PM4 stream composer in 4 blocks, structural verification by CPU asserts"
+category = "cyrius"
+---
+RESOLVED 2026-04-30. Step 6.5(b) lands
+`native_pm4_build_render_clear_triangle(buf, vs_va, fs_va, rt_va,
+rt_width, rt_height)` as the top-level composer for a single trivial
+clear-triangle dispatch on the GFX ring. Four-block split per
+`docs/proposals/v3-backend-interface.md` v2.1:
+
+  1. **pipeline_sh** (per-pipeline, 48 B) — VS+PS PGM_LO/HI/RSRC1/
+     RSRC2 via two SET_SH_REG packets, each writing 4 contiguous
+     regs starting at the PGM_LO of each stage.
+  2. **pipeline_ctx** (per-pipeline mode-static, 240 B) — color/
+     blend masks, raster mode, clip control, stage enable, SPI I/O,
+     depth disabled, AA off. Two grouped + 17 singleton context-reg
+     writes.
+  3. **pass_target** (per-pass RT-extent dependent, 152 B) — screen
+     and generic scissors (extent), viewport scale/offset (NDC →
+     pixel with y-flip via f32 negation), Z viewport range, CB_COLOR0
+     RT bind (BASE/BASE_EXT/VIEW/INFO/ATTRIB/DCC).
+  4. **draw_tail** (per-draw, 12 B) — single DRAW_INDEX_AUTO with
+     vcount=3 + AUTO_INDEX initiator.
+
+Plus ACQUIRE_MEM cache invalidate (28 B), UConfig graphics regs
+(VGT_PRIMITIVE_TYPE + VGT_NUM_INSTANCES, 24 B), and NOP padding to
+256-dword (1024-byte) alignment. Total emit ~492 B per dispatch.
+
+Each block is its own helper fn (`native_pm4_build_render_pipeline_sh`,
+`_pipeline_ctx`, `_pass_target`, `_draw_tail`) so each is
+independently CPU-testable. The top-level composer chains them.
+
+Helpers `native_int_to_f32_bits(i)` + `native_f32_neg_bits(f32)` —
+viewport math needs f32 bit patterns for non-integer scale/offset
+(e.g. 256x256 RT → XSCALE = 128.0 = 0x43000000). Routed through
+stdlib `f64_from(int)` and color.cyr's `f64_to_f32(f64bits)`.
+Negation is sign-bit XOR.
+
+**6 bug catches during 6.5(b) implementation, all caught at CPU
+assert time before HW:**
+
+  A. `R_SPI_SHADER_*_FORMAT` addresses scrambled in 6.2(a) — see
+     `mesa_gfx9_json_authoritative_register_source`.
+  B. PGM_HI mask `& 0xFFFFFFFF` produced `0xFFFF80` (24 bits of high
+     VA bytes) due to Cyrius logical right shift — corrected to
+     `& 0xFF` to match compute precedent. See language.cyml's
+     `the_logical_shift_trap` for the underlying language gotcha;
+     this is the GPU-specific instance.
+  C. CB_COLOR_CONTROL design-doc value `0xCC` was field-shorthand;
+     real composed value is `0xCC0010` — see
+     `cb_color_control_field_shorthand_trap`.
+  D. Six test arithmetic errors (header count_minus_1 off-by-ones,
+     VA-shift result miscomputed for canonical-high VAs, cumulative
+     pass_target offsets). All test-side, no code bugs. Listed in
+     the session 26 handoff for future-you.
+
+**What's verified vs gated:** every emitted dword is structurally
+verified by the 75 new CPU asserts in `tests/tcyr/mabda_v3.tcyr`
+(`test_native_pm4_render_*`). The SEMANTIC correctness — does this
+PM4 stream actually produce the right GPU behavior on Cezanne — is
+gated on Layer-2 byte-exact-vs-radv-IB diff. See
+`pm4_layer2_capture_paths` for the capture protocol.
+
+The 4-block split is **load-bearing for Step 6.8c** (native render
+slot wrappers). `_backend_native_render_pipeline_create` will
+build pipeline_sh + pipeline_ctx once and cache them;
+`_backend_native_render_pass_begin` builds pass_target per pass;
+`_backend_native_render_pass_draw` emits draw_tail per draw. **A
+single-block PM4 cache at pipeline_create was the rejected v2.0
+design** — re-read `gfx9_pipeline_pm4_three_block_split` if tempted
+in 6.8c.
+
+[[entries]]
+name = "cb_color_control_field_shorthand_trap"
+description = "Design-doc CB_COLOR_CONTROL value 0xCC was field-shorthand for ROP3, not the encoded register — the bare value mis-sets MODE and DEGAMMA"
+category = "cyrius"
+---
+The `docs/proposals/v3-native-render-design.md` design table listed
+`CB_COLOR_CONTROL = 0xCC — DEFAULT_BLEND_OP_DEST=NONE, NORMAL ROP`.
+That looks like an emit-able register value. **It isn't.**
+
+CB_COLOR_CONTROL has these fields per Mesa gfx9.json (which gives
+the authoritative bit positions):
+  - bit 0:    DISABLE_DUAL_QUAD
+  - bit 3:    DEGAMMA_ENABLE
+  - bits 4-6: MODE (CBMode enum: 0=DISABLE, 1=NORMAL, 2=ELIMINATE_FAST_CLEAR, ...)
+  - bits 16-23: ROP3 (the raster operation, 0xCC = COPY_SOURCE)
+
+Interpreting bare `0xCC` as the register value:
+  - bit 0 = 0 (OK)
+  - bit 3 = 1 → DEGAMMA_ENABLE on (BAD — we want gamma untouched)
+  - bits 4-6 = 0b100 = 4 → MODE=CB_DECOMPRESS (DEFINITELY WRONG)
+  - bits 16-23 = 0 → ROP3=0 (BLACKOUT — output all zeros)
+
+The intent was "encode ROP3 with the value 0xCC", which is
+`0xCC << 16 = 0xCC0000`, plus `MODE = CB_NORMAL = 1 << 4 = 0x10`,
+union = **`0xCC0010`**. The composed value lives in
+`src/backend_native.cyr` as `GFX9_CB_COLOR_CONTROL_NORMAL_COPY`.
+
+**The class:** "X = 0xVAL" in a hardware design table is **shorthand
+for a field**, not the encoded register. Always check whether the
+value is the FIELD value or the COMPOSED-INTO-REGISTER value. The
+gfx9.json `register_types` block enumerates field bit-positions —
+compose explicitly:
+
+```cyrius
+# CB_COLOR_CONTROL composition:
+#   MODE  = CB_NORMAL << 4    = 0x10
+#   ROP3  = 0xCC      << 16   = 0xCC0000
+#   union                     = 0xCC0010
+var GFX9_CB_COLOR_CONTROL_NORMAL_COPY = 0xCC0010;
+```
+
+Same shape applies to CB_COLOR0_INFO (FORMAT << 2 | NUMBER_TYPE << 8
+| COMP_SWAP << 11 = `0x28` for RGBA8 unorm linear) and
+CB_COLOR0_ATTRIB (RESOURCE_TYPE << 28 = `0x10000000` for 2D linear
+single-sample). Both composed in `src/backend_native.cyr` Step 6.5(a).
+
+**Cross-pollination:** the same shorthand-vs-encoded ambiguity bites
+in any register table. When porting register state from Mesa source,
+look at how Mesa COMPOSES the value (`S_028808_MODE(V_028808_NORMAL)`
+macros etc.) — that's the encoded value. Bare table entries like
+"NORMAL ROP" name the intent, not the bit pattern.
+
+[[entries]]
+name = "pm4_layer2_capture_paths"
+description = "Two paths to capture an RADV_DEBUG=hang IB dump for Layer-2 PM4 byte-diff: native Hyprland+vkcube (spot-check) or headless Vulkan capture program (load-bearing, becomes UI-test harness)"
+category = "cyrius"
+---
+Mabda's "Layer 2" verification protocol byte-diffs Cyrius-emitted
+PM4 streams against radv's output for an equivalent Vulkan
+dispatch. To capture the radv reference IB, two paths:
+
+**(a) Native desktop session + vkcube — spot-check path.** Run
+`RADV_DEBUG=hang vkcube` from a Wayland or X session on the same
+machine the dev work happens on. radv inserts an artificial hang
+and dumps the IB just before submit. Simplest if you're physically
+at the machine. **SSH-incompatible** — vkcube needs a real swapchain
+surface; X11 forwarding renders on the local GPU (wrong reference);
+Xvfb lacks DRI3 → vkcube segfaults (confirmed dead-end in mabda
+session 25c, 2026-04-28). Use this for one-off "did my latest tweak
+match radv?" diffs while iterating on fixes.
+
+**(b) Headless Vulkan capture program — load-bearing path.** A C
+program that creates an offscreen RGBA8 image (no swapchain) and
+submits a `vkCmdDraw` clear-triangle. `RADV_DEBUG=hang` captures
+the IB the same way. Works over SSH. Self-contained.
+
+**The headless path was promoted to first-class deliverable on
+2026-04-30** because the LONG-TERM VALUE is much higher than the
+short-term capture need: it's the foundation for **UI-level
+golden-image regression testing across the AGNOS consumers**
+(soorat / rasa / aethersafta / kiran). Each consumer will need
+pixel-level regression tests; a parameterized "submit a draw,
+capture pixels + IB" harness IS that primitive. Mabda's PM4-diff
+need is just the first customer.
+
+**Phasing for `programs/diagnostics/radv_capture/`:**
+
+  1. Minimum-viable capture (~50-150 LoC C, 1 session): hardcoded
+     Step 6.5 clear-triangle, `RADV_DEBUG=hang ./capture > clear.ib`.
+     Outputs IB dump to stdout + RGBA8 readback to a file via a
+     side-channel.
+  2. Generalize for golden diff: parameterize `--width`, `--height`,
+     `--vshader`, `--fshader`, `--vcount`, `--out-pixels`. Mabda's
+     own integration tests (`render_e2e.cyr`,
+     `render_graph_e2e.cyr`) produce reference pixels via the same
+     harness; becomes a CI gate against the wgpu path.
+  3. Cross-consumer adoption: with `--shader-tree <wgsl|spv|isa>`,
+     soorat / aethersafta / kiran land golden-image regression tests.
+     The Tier-2 `examples/stdlib-consumer/` deliverable becomes
+     "pixel-identical output across both backends." Real story.
+
+**What does NOT work as a capture path:**
+  - Pure SSH (no display server) — vkcube fails at swapchain
+    creation.
+  - SSH X11 forwarding (`ssh -X`) — renders on local GPU, wrong
+    reference.
+  - `xvfb-run vkcube` — Xvfb lacks DRI3 → vkcube segfaults.
+
+**Cross-pollination:** the technique generalizes beyond mabda. Any
+project that needs to byte-diff its driver-level output against a
+trusted reference (radv, anv, iris, nouveau) faces the same capture
+problem. The headless-render pattern is the universal answer.
+Mesa's own `piglit` and `dEQP-VK` test suites use this shape — when
+building the headless capture program, crib from those projects'
+fixture scaffolding. Don't reinvent.
