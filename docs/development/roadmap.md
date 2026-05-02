@@ -1,11 +1,11 @@
 # Vidya — Development Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-05-01
+> **Status**: Active | **Last Updated**: 2026-05-02
 >
-> **Version**: 2.3.2 | **Cyrius**: 5.8.3
-> **Topics**: 60 (36 fully covered, 24 added since v2.2 — most still need backfill)
+> **Version**: 2.3.3 | **Cyrius**: 5.8.3
+> **Topics**: 60 (44 fully covered, 16 still partial — P0C-1 complete, P0C-2/3/4 remaining)
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 411 source files (288 mainstream-lang + 78 ASM + 45 Cyrius); concept files: 60
+> **Examples**: 498 source files; concept files: 60
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -14,35 +14,34 @@
 
 ## Current State
 
-### Original 36 topics — fully covered (11/11 languages each)
+### 44 topics — fully covered (11/11 languages each)
 
-algorithms, allocators, binary_formats, boot_and_startup, code_generation,
-compiler_bootstrapping, concurrency, design_patterns, elf_and_executable_formats,
-error_handling, filesystems, input_output, instruction_encoding,
-intermediate_representations, interrupt_handling, iterators, kernel_topics,
-lexing_and_parsing, linking_and_loading, macro_systems, memory_management,
-module_systems, optimization_passes, ownership_and_borrowing, pattern_matching,
-performance, process_and_scheduling, quantum_computing, security, strings,
-syscalls_and_abi, testing, tracing, trait_and_typeclass_systems, type_systems,
-virtual_memory
+**Original 36** — algorithms, allocators, binary_formats, boot_and_startup,
+code_generation, compiler_bootstrapping, concurrency, design_patterns,
+elf_and_executable_formats, error_handling, filesystems, input_output,
+instruction_encoding, intermediate_representations, interrupt_handling,
+iterators, kernel_topics, lexing_and_parsing, linking_and_loading,
+macro_systems, memory_management, module_systems, optimization_passes,
+ownership_and_borrowing, pattern_matching, performance,
+process_and_scheduling, quantum_computing, security, strings, syscalls_and_abi,
+testing, tracing, trait_and_typeclass_systems, type_systems, virtual_memory
 
-396 source files (36 × 11). All 11 languages green for these.
+**Added in v2.3.2** — fixed_point_arithmetic
 
-### 24 new topics added since v2.2 — partial coverage
+**Added in v2.3.3 — P0C-1 game-engine cluster (8 topics)** — collision_detection_2d,
+game_ai_decisions, game_loop_architecture, grid_pathfinding, maze_generation,
+projectile_physics, sprite_rendering, state_machines
 
-These landed alongside cyrius-doom, mabda v3 GPU, and ENCOM's Hits content
-work. Most still need non-Cyrius backfill (see P0C below).
+498 source files across these 44 topics + concept-only stubs. All available
+languages green for fully-covered topics.
+
+### 16 topics — still partial coverage
 
 **Graphics cluster (mabda v3 + cyrius-doom) — 9 topics, 0 of 99 non-Cyrius slots filled**
 - bindless_resources, bloom_and_glow, direct_drm_gpu_compute,
   explicit_gpu_synchronization, framebuffer_rendering, gpu_memory_pooling,
-  line_rasterization, render_graph_architecture, sprite_rendering
-
-**Game-engine cluster (cyrius-doom + ENCOM's Hits) — 8 topics, partial**
-- collision_detection_2d (X+Y), fixed_point_arithmetic (X+Y),
-  game_ai_decisions (X+Y), game_loop_architecture (none),
-  grid_pathfinding (none), maze_generation (none),
-  projectile_physics (X+Y), state_machines (X+Y)
+  line_rasterization, render_graph_architecture, *(sprite_rendering moved
+  to fully-covered above)*
 
 **Database cluster — 3 topics, Cyrius-only**
 - btree_indexing (Y), sql_parsing (Y), write_ahead_logging (none)
@@ -51,11 +50,12 @@ work. Most still need non-Cyrius backfill (see P0C below).
 - compression (none), concurrent_file_access (none),
   jsonl_format (none), page_management (Y)
 
-Coverage legend in matrix: R/P/C/G/T/S/Z = Rust/Python/C/Go/TS/Shell/Zig,
+Coverage legend: R/P/C/G/T/S/Z = Rust/Python/C/Go/TS/Shell/Zig,
 X/A = x86_64/AArch64 ASM, Q = OpenQASM, Y = Cyrius.
 
-411 examples across 60 topics. Gap to 60 × 11 = 660: **~249 source files**
-(plus per-topic AArch64 follow-ups where x86_64 already exists).
+498 examples across 60 topics. Gap to full 11/11 across the remaining 16
+topics: **~166 source files** (P0C-2: 99, P0C-3: 30, P0C-4: 37 — see
+remaining backfill plan below).
 
 ---
 
@@ -129,31 +129,24 @@ Useful for the dev workflow — edit a `.cyr` file, query immediately.
 
 ---
 
-## P0C — Backfill non-Cyrius coverage on the 24 new topics
+## P0C — Backfill non-Cyrius coverage on the new topics
 
-This is the largest concrete gap: ~249 source files across 24 topics × 11
-languages. Sized as a multi-release sweep, prioritized by cluster maturity.
+The original P0C estimate was ~249 source files across 24 topics. P0C-1
+landed in v2.3.2 (`fixed_point_arithmetic`, 9 files) and v2.3.3
+(remaining 8 game-engine topics, 78 files). Remaining: **~166 source
+files across 16 topics** in clusters P0C-2, P0C-3, P0C-4.
 
-### P0C-1 — Game-engine cluster (8 topics, ~80 source files)
+### P0C-1 — Game-engine cluster — **Done** (v2.3.2 + v2.3.3)
 
-Six of the eight have x86_64 + Cyrius implementations already; the other
-two (game_loop_architecture, grid_pathfinding) are concept-only. Extend
-each to all 11 languages, mirroring the original-36 pattern.
+All 9 game-engine topics now 11/11:
+- v2.3.2: fixed_point_arithmetic
+- v2.3.3: collision_detection_2d, game_ai_decisions, game_loop_architecture,
+  grid_pathfinding, maze_generation, projectile_physics, sprite_rendering,
+  state_machines
 
-| Topic | Has | Needs |
-|---|---|---|
-| collision_detection_2d | X, Y | RPCGTSZA, Q |
-| fixed_point_arithmetic | X, Y | RPCGTSZA, Q |
-| game_ai_decisions | X, Y | RPCGTSZA, Q |
-| projectile_physics | X, Y | RPCGTSZA, Q |
-| sprite_rendering | X, Y | RPCGTSZA, Q |
-| state_machines | X, Y | RPCGTSZA, Q |
-| game_loop_architecture | — | All 11 |
-| grid_pathfinding | — | All 11 |
-| maze_generation | — | All 11 |
-
-(maze_generation is closer to game-engine than systems/misc — moved here
-for the backfill plan.)
+87 source files added (9 + 78). Cross-language byte parity verified for
+the deterministic-PRNG topics (game_ai_decisions, maze_generation): seed=42
+produces identical wall bytes / dispatch outputs across all 11 languages.
 
 ### P0C-2 — Graphics cluster (9 topics, ~99 source files)
 
@@ -313,4 +306,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-01 (v2.3.2)*
+*Last Updated: 2026-05-02 (v2.3.3)*

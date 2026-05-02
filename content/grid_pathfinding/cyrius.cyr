@@ -1,0 +1,357 @@
+# Grid Pathfinding — Cyrius reference (runnable)
+# BFS + A* on a small 8×8 grid. 4-connected (up/down/left/right).
+# 0 = walkable, 1 = blocked. Manhattan heuristic for A*.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# --- Grid constants ---
+var GW = 8;                  # width
+var GH = 8;                  # height
+var GN = 64;                 # GW * GH
+
+# --- State buffers (raw byte / i64 storage; load/store-indexed) ---
+var grid[64];                # walkability: 0=open, 1=blocked
+var visited[64];             # BFS/A* closed set
+var came_from[512];          # parent cell index per node (i64 each)
+var bfs_queue[512];          # FIFO queue (cell indices, i64 each)
+var open_set[512];           # A* open list (cell indices, i64 each)
+var g_score[512];            # A* g (i64 per node)
+var f_score[512];            # A* f (i64 per node)
+
+# --- Helpers ---
+
+fn idx(x, y) { return y * GW + x; }
+
+fn abs_i(v) { if (v < 0) { return 0 - v; } return v; }
+
+fn manhattan(ax, ay, bx, by) {
+    return abs_i(ax - bx) + abs_i(ay - by);
+}
+
+fn grid_clear() {
+    var i = 0;
+    while (i < GN) { store8(&grid + i, 0); i = i + 1; }
+}
+
+fn grid_block(x, y) { store8(&grid + idx(x, y), 1); }
+
+fn state_init() {
+    var i = 0;
+    while (i < GN) {
+        store8(&visited + i, 0);
+        store64(&came_from + i * 8, 0 - 1);
+        i = i + 1;
+    }
+}
+
+# Trace path length from goal back to start via came_from table.
+fn trace_length(start, goal) {
+    if (start == goal) { return 0; }
+    var len = 0;
+    var curr = goal;
+    while (curr != start) {
+        var parent = load64(&came_from + curr * 8);
+        if (parent < 0) { return 0 - 1; }   # disconnected
+        curr = parent;
+        len = len + 1;
+        if (len > GN) { return 0 - 1; }     # cycle guard
+    }
+    return len;
+}
+
+# --- BFS ---
+
+fn bfs(start, goal) {
+    state_init();
+
+    var qhead = 0;
+    var qtail = 0;
+    store64(&bfs_queue + qtail * 8, start);
+    qtail = qtail + 1;
+    store8(&visited + start, 1);
+
+    while (qhead < qtail) {
+        var curr = load64(&bfs_queue + qhead * 8);
+        qhead = qhead + 1;
+
+        if (curr == goal) { return trace_length(start, goal); }
+
+        var cx = curr % GW;
+        var cy = curr / GW;
+
+        # Try each of 4 neighbors. Bare repeated blocks are cheaper to
+        # parse for cyrius than a helper-with-coords approach.
+
+        # up
+        if (cy > 0) {
+            var n = curr - GW;
+            var v = load8(&visited + n);
+            var b = load8(&grid + n);
+            if (v == 0) {
+                if (b == 0) {
+                    store8(&visited + n, 1);
+                    store64(&came_from + n * 8, curr);
+                    store64(&bfs_queue + qtail * 8, n);
+                    qtail = qtail + 1;
+                }
+            }
+        }
+        # down
+        if (cy < GH - 1) {
+            var n = curr + GW;
+            var v = load8(&visited + n);
+            var b = load8(&grid + n);
+            if (v == 0) {
+                if (b == 0) {
+                    store8(&visited + n, 1);
+                    store64(&came_from + n * 8, curr);
+                    store64(&bfs_queue + qtail * 8, n);
+                    qtail = qtail + 1;
+                }
+            }
+        }
+        # left
+        if (cx > 0) {
+            var n = curr - 1;
+            var v = load8(&visited + n);
+            var b = load8(&grid + n);
+            if (v == 0) {
+                if (b == 0) {
+                    store8(&visited + n, 1);
+                    store64(&came_from + n * 8, curr);
+                    store64(&bfs_queue + qtail * 8, n);
+                    qtail = qtail + 1;
+                }
+            }
+        }
+        # right
+        if (cx < GW - 1) {
+            var n = curr + 1;
+            var v = load8(&visited + n);
+            var b = load8(&grid + n);
+            if (v == 0) {
+                if (b == 0) {
+                    store8(&visited + n, 1);
+                    store64(&came_from + n * 8, curr);
+                    store64(&bfs_queue + qtail * 8, n);
+                    qtail = qtail + 1;
+                }
+            }
+        }
+    }
+    return 0 - 1;   # unreachable
+}
+
+# --- A* with Manhattan heuristic ---
+# Open-set is a flat array; we linear-scan for the lowest f. For 64
+# cells this is trivially cheap. A real implementation would use a
+# binary heap or pairing heap.
+
+fn astar(sx, sy, gx, gy) {
+    state_init();
+    var i = 0;
+    while (i < GN) {
+        store64(&g_score + i * 8, 0x7FFFFFFFFFFFFFFF);   # +inf
+        store64(&f_score + i * 8, 0x7FFFFFFFFFFFFFFF);
+        i = i + 1;
+    }
+
+    var start = idx(sx, sy);
+    var goal = idx(gx, gy);
+    store64(&g_score + start * 8, 0);
+    store64(&f_score + start * 8, manhattan(sx, sy, gx, gy));
+
+    var open_n = 0;
+    store64(&open_set + open_n * 8, start);
+    open_n = open_n + 1;
+
+    while (open_n > 0) {
+        # Find min-f in open set
+        var best_i = 0;
+        var best_f = load64(&f_score + load64(&open_set) * 8);
+        var k = 1;
+        while (k < open_n) {
+            var node = load64(&open_set + k * 8);
+            var fv = load64(&f_score + node * 8);
+            if (fv < best_f) { best_f = fv; best_i = k; }
+            k = k + 1;
+        }
+        var curr = load64(&open_set + best_i * 8);
+
+        if (curr == goal) { return load64(&g_score + goal * 8); }
+
+        # Remove from open by swap-with-last
+        open_n = open_n - 1;
+        if (best_i != open_n) {
+            store64(&open_set + best_i * 8, load64(&open_set + open_n * 8));
+        }
+        store8(&visited + curr, 1);
+
+        var cx = curr % GW;
+        var cy = curr / GW;
+
+        # 4 neighbors. Each: tentative_g = g[curr] + 1; if better, relax.
+        var tg = load64(&g_score + curr * 8) + 1;
+
+        # up
+        if (cy > 0) {
+            var n = curr - GW;
+            if (load8(&visited + n) == 0) {
+                if (load8(&grid + n) == 0) {
+                    var ng = load64(&g_score + n * 8);
+                    if (tg < ng) {
+                        store64(&came_from + n * 8, curr);
+                        store64(&g_score + n * 8, tg);
+                        var h = manhattan(n % GW, n / GW, gx, gy);
+                        store64(&f_score + n * 8, tg + h);
+                        store64(&open_set + open_n * 8, n);
+                        open_n = open_n + 1;
+                    }
+                }
+            }
+        }
+        # down
+        if (cy < GH - 1) {
+            var n = curr + GW;
+            if (load8(&visited + n) == 0) {
+                if (load8(&grid + n) == 0) {
+                    var ng = load64(&g_score + n * 8);
+                    if (tg < ng) {
+                        store64(&came_from + n * 8, curr);
+                        store64(&g_score + n * 8, tg);
+                        var h = manhattan(n % GW, n / GW, gx, gy);
+                        store64(&f_score + n * 8, tg + h);
+                        store64(&open_set + open_n * 8, n);
+                        open_n = open_n + 1;
+                    }
+                }
+            }
+        }
+        # left
+        if (cx > 0) {
+            var n = curr - 1;
+            if (load8(&visited + n) == 0) {
+                if (load8(&grid + n) == 0) {
+                    var ng = load64(&g_score + n * 8);
+                    if (tg < ng) {
+                        store64(&came_from + n * 8, curr);
+                        store64(&g_score + n * 8, tg);
+                        var h = manhattan(n % GW, n / GW, gx, gy);
+                        store64(&f_score + n * 8, tg + h);
+                        store64(&open_set + open_n * 8, n);
+                        open_n = open_n + 1;
+                    }
+                }
+            }
+        }
+        # right
+        if (cx < GW - 1) {
+            var n = curr + 1;
+            if (load8(&visited + n) == 0) {
+                if (load8(&grid + n) == 0) {
+                    var ng = load64(&g_score + n * 8);
+                    if (tg < ng) {
+                        store64(&came_from + n * 8, curr);
+                        store64(&g_score + n * 8, tg);
+                        var h = manhattan(n % GW, n / GW, gx, gy);
+                        store64(&f_score + n * 8, tg + h);
+                        store64(&open_set + open_n * 8, n);
+                        open_n = open_n + 1;
+                    }
+                }
+            }
+        }
+    }
+    return 0 - 1;
+}
+
+# --- Tests ---
+
+fn test_manhattan() {
+    assert_eq(manhattan(0, 0, 0, 0), 0, "manhattan(0,0,0,0) == 0");
+    assert_eq(manhattan(0, 0, 3, 4), 7, "manhattan(0,0,3,4) == 7");
+    assert_eq(manhattan(7, 7, 0, 0), 14, "manhattan(7,7,0,0) == 14");
+    assert_eq(manhattan(2, 5, 5, 2), 6, "manhattan(2,5,5,2) == 6");
+    return 0;
+}
+
+fn test_bfs_empty_grid() {
+    grid_clear();
+    var len = bfs(idx(0, 0), idx(7, 7));
+    assert_eq(len, 14, "BFS on empty grid: 14 steps from (0,0) to (7,7)");
+    return 0;
+}
+
+fn test_bfs_same_start_end() {
+    grid_clear();
+    var len = bfs(idx(3, 3), idx(3, 3));
+    assert_eq(len, 0, "BFS same start/goal: length 0");
+    return 0;
+}
+
+fn test_bfs_around_wall() {
+    # Vertical wall down column x=4, rows 0..6 (cell (4,7) open as gap)
+    grid_clear();
+    var y = 0;
+    while (y < 7) { grid_block(4, y); y = y + 1; }
+    var len = bfs(idx(0, 0), idx(7, 0));
+    # Must go around: down to row 7, across, back up. Optimal length 21.
+    assert_eq(len, 21, "BFS routes around the wall in 21 steps");
+    return 0;
+}
+
+fn test_bfs_unreachable() {
+    # Wall off (7,7) completely with a cross at (6,7) and (7,6)
+    grid_clear();
+    grid_block(6, 7);
+    grid_block(7, 6);
+    var len = bfs(idx(0, 0), idx(7, 7));
+    assert_eq(len, 0 - 1, "unreachable goal returns -1");
+    return 0;
+}
+
+fn test_astar_empty_grid() {
+    grid_clear();
+    var len = astar(0, 0, 7, 7);
+    assert_eq(len, 14, "A* on empty grid: 14 steps");
+    return 0;
+}
+
+fn test_astar_matches_bfs_with_obstacle() {
+    # A* and BFS must agree on length when edge weights are uniform.
+    grid_clear();
+    var y = 0;
+    while (y < 7) { grid_block(4, y); y = y + 1; }
+    var bfs_len = bfs(idx(0, 0), idx(7, 0));
+    var astar_len = astar(0, 0, 7, 0);
+    assert_eq(bfs_len, astar_len, "A* and BFS agree on length for uniform-cost grid");
+    return 0;
+}
+
+fn test_astar_unreachable() {
+    grid_clear();
+    grid_block(6, 7);
+    grid_block(7, 6);
+    var len = astar(0, 0, 7, 7);
+    assert_eq(len, 0 - 1, "A* unreachable returns -1");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_manhattan();
+    test_bfs_empty_grid();
+    test_bfs_same_start_end();
+    test_bfs_around_wall();
+    test_bfs_unreachable();
+    test_astar_empty_grid();
+    test_astar_matches_bfs_with_obstacle();
+    test_astar_unreachable();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

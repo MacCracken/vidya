@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.3] — 2026-05-02
+
+### Added
+- **P0C-1 game-engine cluster — all 8 topics backfilled to 11/11**
+  (78 new source files; validator sweep 420/420 → 498/498):
+  - **`state_machines`** — 9 new lang files mirroring the FSM test
+    set (PlayerState/GameState enums, committed-state timers,
+    transition detection, idle-shoot-tick-idle).
+  - **`projectile_physics`** — 9 new lang files; 1000-frame energy
+    decay with `|vy| < 2 * GRAVITY` threshold (matches the v2.3.2
+    convergence calibration); semi-implicit Euler stability bounded
+    at 1000 units rise.
+  - **`sprite_rendering`** — 9 new lang files; framebuffer + blit
+    + transparency + clipping + scaled-blit + depth-sort. Shell
+    port uses a 16×16 logical FB to keep wall-clock reasonable
+    (all 8 test scenarios still exercised).
+  - **`game_ai_decisions`** — 9 new lang files; PCG PRNG, stat
+    scoring, AI dispatch (high-dunk-stat at close range → DUNK).
+  - **`collision_detection_2d`** — 9 new lang files; AABB-vs-AABB,
+    circle-vs-circle (squared-distance), AABB-vs-circle clamp,
+    point-in-shape, swept AABB time-of-impact.
+  - **`game_loop_architecture`** — 11 new lang files (concept-only
+    topic; full coverage from scratch, with cyrius.cyr designed
+    first as the reference). Fixed-timestep accumulator, spiral-
+    of-death cap (5 × dt), update/render separation, deterministic
+    timestamps.
+  - **`grid_pathfinding`** — 11 new lang files; BFS + A* on an
+    8×8 4-connected grid with Manhattan heuristic. A* and BFS
+    must agree on path length for uniform-cost grids — verified
+    across all 11 ports.
+  - **`maze_generation`** — 11 new lang files; iterative recursive
+    backtracker on an 8×8 grid with PCG PRNG. **Cross-language byte
+    parity confirmed for seed=42**: `cells[0]=13, cells[27]=12,
+    cells[63]=6` across Rust/Python/C/Go/TS/Shell/Zig/x86_64/
+    AArch64/Cyrius (the PCG output sequence agrees because every
+    port uses signed-i64 wrapping arithmetic).
+
+### Changed
+- **VERSION** 2.3.2 → 2.3.3.
+- **Topic coverage**: 60 topics, 25 → 33 fully covered (the
+  original 36 + fixed_point_arithmetic + 8 P0C-1). Per-language
+  counts:
+  - Rust/Python/C/Go/TypeScript/Shell/Zig/OpenQASM: 36 → 44 each
+  - x86_64 ASM: 36 → 44 (3 P0C-1 topics added asm_x86_64.s; 5
+    already had it)
+  - AArch64 ASM: 36 → 44 (all 8 P0C-1 topics added asm_aarch64.s)
+  - Cyrius: 36 → 44 (3 P0C-1 topics added cyrius.cyr; 5 already had it)
+  - Examples: 411 → 498 (78 new source files; +21%)
+
+### Notes (worth promoting to field-notes in a follow-up)
+- **AArch64 `cmp xN, #imm` 12-bit limit**: `cmp` accepts only
+  0–4095 unsigned. Larger values (e.g. 4166 = DT_US/4) need
+  `ldr xN, =imm` first, same as `mov` 16-bit limit. Surfaced in
+  game_loop_architecture's port.
+- **AArch64 register clobber across `bl`**: any helper called
+  via `bl` clobbers caller-saved x0–x18. Functions that cache
+  loop state in caller-saved regs across calls (e.g. `manhattan`
+  in grid_pathfinding's A*, `idx` in maze_generation) must use
+  callee-saved x19–x28 or recompute after each call. Caught
+  cross-call clobber bugs in grid_pathfinding/asm_x86_64.s and
+  maze_generation/asm_x86_64.s during port.
+- **Bash subshell + stateful PRNG**: `$(rng_next)` runs the
+  function in a subshell; `_rng_state` mutations don't propagate.
+  Fix: stateful side-effect setter (`rng_next` writes a global
+  `RNG_OUT`), callers read the global. Caught in
+  game_ai_decisions/shell.sh.
+
 ## [2.3.2] — 2026-05-02
 
 ### Added

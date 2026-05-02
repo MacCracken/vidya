@@ -1,0 +1,314 @@
+# Maze Generation — Cyrius reference (runnable)
+# Recursive backtracker (iterative DFS) on an 8x8 grid.
+# Each cell stores 4 wall bits (N/S/E/W). Algorithm carves passages
+# by removing walls between current cell and a random unvisited
+# neighbor, building a perfect maze (one path between any two cells).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# --- Grid + wall constants ---
+var GW = 8;
+var GH = 8;
+var GN = 64;
+
+var WN = 1;       # north wall bit
+var WS = 2;       # south
+var WE = 4;       # east
+var WW = 8;       # west
+var WALLS_ALL = 15;
+
+# --- State ---
+var maze[64];        # wall bits per cell, 1=wall present
+var visited[64];     # visited flag per cell
+var dfs_stack[512];  # DFS stack (cell indices, i64 each)
+var nbuf[32];        # scratch: 4 candidate neighbors × i64
+
+# --- Deterministic PRNG (PCG, matches game_ai_decisions) ---
+var _rng_state = 12345;
+
+fn rng_seed(s) { _rng_state = s; }
+
+fn rng_next() {
+    _rng_state = _rng_state * 6364136223846793005 + 1442695040888963407;
+    # Logical >> on cyrius — top bits give better distribution. Mask to
+    # keep result positive so % below behaves predictably.
+    return (_rng_state >> 33) & 2147483647;
+}
+
+fn rng_range(max) {
+    if (max <= 0) { return 0; }
+    var r = rng_next();
+    if (r < 0) { r = 0 - r; }
+    return r - (r / max) * max;
+}
+
+# --- Helpers ---
+
+fn idx(x, y) { return y * GW + x; }
+
+fn opposite_dir(d) {
+    if (d == WN) { return WS; }
+    if (d == WS) { return WN; }
+    if (d == WE) { return WW; }
+    if (d == WW) { return WE; }
+    return 0;
+}
+
+fn maze_init() {
+    var i = 0;
+    while (i < GN) {
+        store8(&maze + i, WALLS_ALL);
+        store8(&visited + i, 0);
+        i = i + 1;
+    }
+}
+
+# Encode a candidate neighbor as one i64: (dir<<24) | (nx<<8) | ny.
+# Decode via masks below. This avoids allocating a struct per neighbor.
+fn enc_neighbor(dir, nx, ny) {
+    return (dir * 16777216) + (nx * 256) + ny;
+}
+fn dec_dir(e) { return (e >> 24) & 255; }
+fn dec_nx(e)  { return (e >> 8)  & 255; }
+fn dec_ny(e)  { return e & 255; }
+
+fn collect_unvisited(x, y) {
+    var n = 0;
+    # north
+    if (y > 0) {
+        var ni = idx(x, y - 1);
+        if (load8(&visited + ni) == 0) {
+            store64(&nbuf + n * 8, enc_neighbor(WN, x, y - 1));
+            n = n + 1;
+        }
+    }
+    # south
+    if (y < GH - 1) {
+        var ni = idx(x, y + 1);
+        if (load8(&visited + ni) == 0) {
+            store64(&nbuf + n * 8, enc_neighbor(WS, x, y + 1));
+            n = n + 1;
+        }
+    }
+    # west
+    if (x > 0) {
+        var ni = idx(x - 1, y);
+        if (load8(&visited + ni) == 0) {
+            store64(&nbuf + n * 8, enc_neighbor(WW, x - 1, y));
+            n = n + 1;
+        }
+    }
+    # east
+    if (x < GW - 1) {
+        var ni = idx(x + 1, y);
+        if (load8(&visited + ni) == 0) {
+            store64(&nbuf + n * 8, enc_neighbor(WE, x + 1, y));
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+# Carve a passage between (x,y) and (nx,ny) by clearing the
+# corresponding wall bits on BOTH cells (mark wall as gone).
+fn carve(x, y, dir, nx, ny) {
+    var ci = idx(x, y);
+    var ni = idx(nx, ny);
+    var cv = load8(&maze + ci);
+    var nv = load8(&maze + ni);
+    # Clear bit `dir` on current; clear opposite bit on neighbor.
+    var od = opposite_dir(dir);
+    store8(&maze + ci, cv & (255 - dir));
+    store8(&maze + ni, nv & (255 - od));
+}
+
+# Iterative recursive backtracker. Walls are removed as we visit.
+fn maze_generate(start_x, start_y) {
+    maze_init();
+    var sp = 0;
+    var start = idx(start_x, start_y);
+    store64(&dfs_stack + sp * 8, start);
+    sp = sp + 1;
+    store8(&visited + start, 1);
+
+    while (sp > 0) {
+        var top = load64(&dfs_stack + (sp - 1) * 8);
+        var tx = top % GW;
+        var ty = top / GW;
+        var k = collect_unvisited(tx, ty);
+        if (k == 0) {
+            # backtrack
+            sp = sp - 1;
+        } else {
+            var pick = rng_range(k);
+            var enc = load64(&nbuf + pick * 8);
+            var d = dec_dir(enc);
+            var nx = dec_nx(enc);
+            var ny = dec_ny(enc);
+            carve(tx, ty, d, nx, ny);
+            store8(&visited + idx(nx, ny), 1);
+            store64(&dfs_stack + sp * 8, idx(nx, ny));
+            sp = sp + 1;
+        }
+    }
+}
+
+# --- Verification helpers ---
+
+fn count_visited() {
+    var i = 0;
+    var n = 0;
+    while (i < GN) {
+        if (load8(&visited + i) != 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Count walls present across the grid. Each interior wall is shared
+# between two cells, so we count carefully: walls on the N/W edges of
+# each cell (avoiding double-count) + grid border. For a perfect maze
+# on n cells, exactly (n-1) interior walls have been removed.
+fn count_removed_walls() {
+    var removed = 0;
+    var y = 0;
+    while (y < GH) {
+        var x = 0;
+        while (x < GW) {
+            var w = load8(&maze + idx(x, y));
+            # check N (only if y > 0, else it's the border)
+            if (y > 0) {
+                if ((w & WN) == 0) { removed = removed + 1; }
+            }
+            # check W (only if x > 0)
+            if (x > 0) {
+                if ((w & WW) == 0) { removed = removed + 1; }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return removed;
+}
+
+# Wall consistency: for every cell, if its E wall is gone, its eastern
+# neighbor's W wall must also be gone. Same for N/S.
+fn walls_consistent() {
+    var y = 0;
+    while (y < GH) {
+        var x = 0;
+        while (x < GW) {
+            var w = load8(&maze + idx(x, y));
+            # east
+            if (x < GW - 1) {
+                var nw = load8(&maze + idx(x + 1, y));
+                var east_open = ((w & WE) == 0);
+                var nw_west_open = ((nw & WW) == 0);
+                if (east_open != nw_west_open) { return 0; }
+            }
+            # south
+            if (y < GH - 1) {
+                var sw = load8(&maze + idx(x, y + 1));
+                var south_open = ((w & WS) == 0);
+                var sw_north_open = ((sw & WN) == 0);
+                if (south_open != sw_north_open) { return 0; }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 1;
+}
+
+# --- Tests ---
+
+fn test_init_state() {
+    maze_init();
+    assert_eq(load8(&maze + 0), WALLS_ALL, "init: cell 0 has all walls");
+    assert_eq(load8(&maze + 63), WALLS_ALL, "init: cell 63 has all walls");
+    assert_eq(load8(&visited + 0), 0, "init: cell 0 not visited");
+    return 0;
+}
+
+fn test_full_coverage() {
+    rng_seed(42);
+    maze_generate(0, 0);
+    assert_eq(count_visited(), GN, "all 64 cells visited");
+    return 0;
+}
+
+fn test_perfect_maze_wall_count() {
+    rng_seed(42);
+    maze_generate(0, 0);
+    # Perfect maze: exactly (cells - 1) interior walls removed.
+    assert_eq(count_removed_walls(), GN - 1, "perfect maze: GN-1 walls removed");
+    return 0;
+}
+
+fn test_wall_consistency() {
+    rng_seed(42);
+    maze_generate(0, 0);
+    assert_eq(walls_consistent(), 1, "wall pairs are consistent (E↔W, N↔S)");
+    return 0;
+}
+
+fn test_determinism() {
+    # Same seed produces same maze.
+    rng_seed(42);
+    maze_generate(0, 0);
+    var first_cell_walls = load8(&maze + 0);
+    var mid_cell_walls = load8(&maze + 27);
+    var last_cell_walls = load8(&maze + 63);
+
+    rng_seed(42);
+    maze_generate(0, 0);
+    assert_eq(load8(&maze + 0),  first_cell_walls,  "deterministic: cell 0 same");
+    assert_eq(load8(&maze + 27), mid_cell_walls,    "deterministic: cell 27 same");
+    assert_eq(load8(&maze + 63), last_cell_walls,   "deterministic: cell 63 same");
+    return 0;
+}
+
+fn test_different_seeds_differ() {
+    # Two different seeds must produce different mazes (with high probability).
+    rng_seed(1);
+    maze_generate(0, 0);
+    var snap1 = 0;
+    var i = 0;
+    while (i < GN) { snap1 = snap1 + load8(&maze + i); i = i + 1; }
+
+    rng_seed(2);
+    maze_generate(0, 0);
+    var snap2 = 0;
+    i = 0;
+    while (i < GN) { snap2 = snap2 + load8(&maze + i); i = i + 1; }
+
+    assert(snap1 != snap2, "different seeds produce different mazes");
+    return 0;
+}
+
+fn test_starting_cell_visited() {
+    rng_seed(42);
+    maze_generate(3, 5);
+    assert_eq(load8(&visited + idx(3, 5)), 1, "start cell is marked visited");
+    # And every other cell, since it's a perfect maze
+    assert_eq(count_visited(), GN, "all cells reachable from non-corner start");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_init_state();
+    test_full_coverage();
+    test_perfect_maze_wall_count();
+    test_wall_consistency();
+    test_determinism();
+    test_different_seeds_differ();
+    test_starting_cell_visited();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,128 @@
+# Game Loop Architecture — Cyrius reference (runnable)
+# Fixed-timestep accumulator loop with spiral-of-death cap.
+# Tests use deterministic per-frame elapsed-time inputs (no real clock).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# --- Constants (microseconds; i64 — wraps at 292 years) ---
+var DT_US = 16667;                 # ~1/60 second
+var MAX_ACCUM = 83335;             # 5 * DT_US — spiral-of-death cap
+
+# --- Loop state ---
+# Fields: accumulator (us), total update count, total render count.
+struct GameLoop { accum; update_count; render_count; }
+
+# --- Step the loop given a per-frame elapsed-time delta ---
+# Returns: number of fixed-step updates that fired this frame.
+fn loop_step(loop_p, elapsed_us) {
+    var p: *i64 = loop_p;
+    var accum = *p + elapsed_us;
+
+    # Spiral-of-death cap: never let the accumulator exceed MAX_ACCUM.
+    # Without this, a long pause grows accum unboundedly, demanding more
+    # updates per frame, making it worse. Accept slowdown over desync.
+    if (accum > MAX_ACCUM) { accum = MAX_ACCUM; }
+
+    # Drain accumulator in fixed-size chunks.
+    var updates = 0;
+    while (accum >= DT_US) {
+        accum = accum - DT_US;
+        updates = updates + 1;
+    }
+
+    *p = accum;
+    *(p + 1) = *(p + 1) + updates;
+    *(p + 2) = *(p + 2) + 1;     # exactly one render per frame
+    return updates;
+}
+
+# --- Tests ---
+
+fn test_exact_dt_fires_one_update() {
+    var loop = GameLoop { 0, 0, 0 };
+    var u = loop_step(&loop, DT_US);
+    assert_eq(u, 1, "exactly one update per dt");
+    var p: *i64 = &loop;
+    assert_eq(*(p + 1), 1, "update_count = 1");
+    return 0;
+}
+
+fn test_under_dt_no_update() {
+    var loop = GameLoop { 0, 0, 0 };
+    var u = loop_step(&loop, DT_US / 2);
+    assert_eq(u, 0, "no update when elapsed < dt");
+    return 0;
+}
+
+fn test_catchup_50ms() {
+    # 50000us / 16667us = 2.999 → 2 fixed-step updates
+    var loop = GameLoop { 0, 0, 0 };
+    var u = loop_step(&loop, 50000);
+    assert_eq(u, 2, "50ms produces 2 fixed-step updates");
+    return 0;
+}
+
+fn test_spiral_of_death_cap() {
+    # 1000ms (one full second) hang — capped at MAX_ACCUM (5 * dt).
+    var loop = GameLoop { 0, 0, 0 };
+    var u = loop_step(&loop, 1000000);
+    assert(u <= 5, "spiral cap: at most 5 updates per call");
+    assert(u >= 5, "spiral cap: drains all 5 capped updates");
+    return 0;
+}
+
+fn test_render_per_frame() {
+    var loop = GameLoop { 0, 0, 0 };
+    loop_step(&loop, DT_US);
+    loop_step(&loop, DT_US);
+    loop_step(&loop, DT_US);
+    var p: *i64 = &loop;
+    assert_eq(*(p + 2), 3, "3 renders for 3 frames");
+    assert_eq(*(p + 1), 3, "3 updates total");
+    return 0;
+}
+
+fn test_accumulator_remainder() {
+    # 1.5 * dt → 1 update with ~0.5 * dt left in accumulator
+    var loop = GameLoop { 0, 0, 0 };
+    var one_and_half = DT_US + (DT_US / 2);
+    loop_step(&loop, one_and_half);
+    var p: *i64 = &loop;
+    var remainder = *p;
+    assert(remainder > DT_US / 4, "remainder is positive");
+    assert(remainder < DT_US, "remainder < full dt");
+    return 0;
+}
+
+fn test_input_update_render_separation() {
+    # The classic separation: poll input once, run as many updates as
+    # the accumulator dictates, render exactly once. Here we verify
+    # that across uneven frames (slow + fast + slow) the update count
+    # tracks total elapsed time, not frame count.
+    var loop = GameLoop { 0, 0, 0 };
+    loop_step(&loop, 30000);   # slow frame: 30ms → 1 update (8333 left)
+    loop_step(&loop, 5000);    # fast frame:  5ms → 0 updates (13333)
+    loop_step(&loop, 30000);   # slow frame: 30ms (43333 → 2 updates, 9999 left)
+    var p: *i64 = &loop;
+    assert_eq(*(p + 1), 3, "3 updates from 65ms total");
+    assert_eq(*(p + 2), 3, "3 renders from 3 frames");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_exact_dt_fires_one_update();
+    test_under_dt_no_update();
+    test_catchup_50ms();
+    test_spiral_of_death_cap();
+    test_render_per_frame();
+    test_accumulator_remainder();
+    test_input_update_render_separation();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
