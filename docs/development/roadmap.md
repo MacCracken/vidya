@@ -2,11 +2,11 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-02
 >
-> **Version**: 2.4.0 | **Cyrius**: 5.8.14
-> **Topics**: 62 (62 fully covered) — **P1 in flight (2/6)**
+> **Version**: 2.4.1 | **Cyrius**: 5.8.14
+> **Topics**: 64 (64 fully covered) — **P1 in flight (4/6)**
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 682 source files; concept files: 62
-> **Validator**: 682/682 green
+> **Examples**: 704 source files; concept files: 64
+> **Validator**: 704/704 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -32,15 +32,16 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.3.9 | 2026-05-02 | **P0C-2b complete — graphics batch 2 (3 topics × 11 langs)** — `bindless_resources` (64-slot descriptor table, slot-0 sentinel, LIFO free-list), `gpu_memory_pooling` (1024-byte bump allocator with alignment + reset), `explicit_gpu_synchronization` (compute + transfer timeline semaphores with signal/wait/wait_all and monotonic invariant). 33 new source files; validator 605/605 → 638/638. **All-first-try clean — no asm or language-specific debugging needed.** |
 | 2.3.10 | 2026-05-02 | **P0C-2c complete — final P0C patch (2 topics × 11 langs)** — `direct_drm_gpu_compute` (GEM BO + VA-map + submit + syncobj-wait simulation), `render_graph_architecture` (DAG with topo sort + barrier derivation + dead-pass culling + cycle detection). 22 new source files; validator 638/638 → **660/660**. **🎉 P0 → P0C arc complete — all 60 topics at 11/11 languages.** |
 | 2.4.0 | 2026-05-02 | **P1 kickoff — Networking & Infrastructure (minor bump)** — 2 new topics × 11 langs: `networking_fundamentals` (TCP socket state machine + bind/listen/connect/send/recv/close lifecycle, port-reuse + half-closed semantics), `http_and_web_protocols` (HTTP/1.1 request parser — sequential parse, case-insensitive header lookup, Content-Length body framing, malformed-request rejection). 24 new source files; validator 660/660 → **682/682**. P1 is 2/6 topics in flight; tls_and_encryption + dns slated for 2.4.1, ipc + serialization for 2.4.2. |
+| 2.4.1 | 2026-05-02 | **P1 batch 2 — 2 new topics × 11 langs** — `tls_and_encryption` (TLS 1.3 handshake state machine, cipher-suite negotiation rejecting legacy 1.2 suites, certificate chain validation with issuer/subject linkage to trust root, AEAD seal/open with tag verification + hostname check), `dns` (in-memory resolver: zone with A/AAAA/CNAME/MX/TXT, recursive lookup with depth-bounded CNAME chase, TTL cache with monotonic clock, negative caching). 22 new source files; validator 682/682 → **704/704**. P1 is 4/6 topics in flight; ipc + serialization slated for 2.4.2. |
 
 ---
 
 ## Current State
 
-### 62 topics fully covered (11/11 languages) — P0 → P0C complete + P1 in flight (2/6) 🚀
+### 64 topics fully covered (11/11 languages) — P0 → P0C complete + P1 in flight (4/6) 🚀
 
 The original 36 P0 topics, plus 24 P0C additions (v2.3.2–v2.3.10),
-plus 2 P1 additions (v2.4.0):
+plus 4 P1 additions (v2.4.0–v2.4.1):
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
@@ -54,16 +55,17 @@ plus 2 P1 additions (v2.4.0):
 - v2.3.9 P0C-2b (3): bindless_resources, gpu_memory_pooling,
   explicit_gpu_synchronization
 - v2.3.10 P0C-2c (2): direct_drm_gpu_compute, render_graph_architecture
-- **v2.4.0 P1 (2): networking_fundamentals, http_and_web_protocols**
+- v2.4.0 P1 (2): networking_fundamentals, http_and_web_protocols
+- **v2.4.1 P1 (2): tls_and_encryption, dns**
 
-`vidya stats` reports `Topics: 62, Complete: 62 (all 11 languages),
-Examples: 682`; validator 682/682 green.
+`vidya stats` reports `Topics: 64, Complete: 64 (all 11 languages),
+Examples: 704`; validator 704/704 green.
 
-### 0 topics partial; 4 P1 topics still planned
+### 0 topics partial; 2 P1 topics still planned
 
 The 2.3.x patch backlog is complete. P1 (Networking & Infrastructure)
-is in flight — 2 of 6 shipped in 2.4.0, the rest follow in 2.4.1
-(tls_and_encryption + dns) and 2.4.2 (ipc + serialization).
+is 4/6 shipped (v2.4.0 + v2.4.1). The final batch — ipc + serialization
+— ships in v2.4.2.
 
 ---
 
@@ -207,14 +209,14 @@ P1 opened with v2.4.0; runs across 3 patch releases (2.4.0/1/2):
 |---|---|---|
 | **networking_fundamentals** | ✅ shipped 2.4.0 | TCP socket state machine, bind/listen/connect/send/recv/close lifecycle, port-reuse + half-closed semantics |
 | **http_and_web_protocols** | ✅ shipped 2.4.0 | HTTP/1.1 request parser — sequential parse, case-insensitive headers, Content-Length body framing |
-| **tls_and_encryption** | planned 2.4.1 | TLS handshake state machine, certificate chain validation, cipher suite negotiation, AEAD primitives |
-| **dns** | planned 2.4.1 | Resolver state machine, record types (A, AAAA, CNAME, MX, TXT), packet wire format, caching with TTL |
+| **tls_and_encryption** | ✅ shipped 2.4.1 | TLS 1.3 handshake state machine, certificate chain validation, cipher suite negotiation (TLS 1.3 only), AEAD seal/open with tag check |
+| **dns** | ✅ shipped 2.4.1 | Resolver state machine, record types (A, AAAA, CNAME, MX, TXT), TTL cache with monotonic clock, negative caching, depth-bounded CNAME chase |
 | **ipc** | planned 2.4.2 | Shared memory regions, named pipes, Unix sockets, message-passing primitives |
 | **serialization** | planned 2.4.2 | Length-prefix framing, varint encoding, zero-copy parsing patterns |
 
 6 topics × 11 langs = 66 new examples + 6 concept files. Sized as
 3 patch sub-releases of 2 topics each, mirroring the 2.3.x cadence.
-2/6 shipped in 2.4.0.
+4/6 shipped (2.4.0 + 2.4.1).
 
 ---
 
@@ -303,4 +305,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-02 (v2.4.0) — **P1 in flight; 62/62 at 11/11; 4 P1 topics planned***
+*Last Updated: 2026-05-02 (v2.4.1) — **P1 in flight; 64/64 at 11/11; 2 P1 topics planned***

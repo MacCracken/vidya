@@ -1,0 +1,50 @@
+id = "dns"
+title = "DNS — Domain Name System"
+topic = "Networking"
+description = "Hierarchical name resolution (RFC 1034/1035, plus RFC 9499 for current terminology). The wire format is a 12-byte header + variable-length labels. Resolution walks the delegation tree (root → TLD → authoritative), but most queries are answered from the recursive resolver's TTL-bounded cache. Record types (A, AAAA, CNAME, MX, TXT, NS, SOA) cover essentially every production DNS use case; DNSSEC adds chain-of-trust signatures; DoH/DoT add transport encryption."
+tags = ["dns", "rfc-1035", "rfc-9499", "resolver", "cache", "ttl", "a-record", "aaaa", "cname", "mx", "dnssec", "doh", "dot"]
+related_topics = ["networking_fundamentals", "tls_and_encryption", "concurrent_file_access", "performance"]
+
+[[best_practices]]
+title = "Trust the TTL — that's the whole point of caching"
+explanation = "Records carry a TTL (seconds the resolver may keep the answer). Setting TTL too high makes failovers slow; too low defeats caching. Typical: 300s (5 min) for records you change rarely, 60s for records under active migration. The resolver is required to honor TTL; clients caching beyond TTL break failover."
+
+[[best_practices]]
+title = "Follow CNAME chains, but bound the depth"
+explanation = "A CNAME points to another name; the resolver re-queries that name. Loops are real (foo → bar → foo) and unbounded chains are a DoS vector. RFC 1034 §3.6.2 doesn't mandate a limit; libcurl uses 16, BIND uses 16. Fail closed at a small limit."
+
+[[best_practices]]
+title = "Separate the resolver from the application — caching belongs in the OS or a sidecar"
+explanation = "Apps that do their own DNS resolution + caching reinvent (badly) what systemd-resolved/unbound/dnsmasq already do correctly. Use getaddrinfo(); let the OS handle TTL, cache eviction, and DNSSEC. Custom resolvers belong in two places: high-performance load balancers and DNS-aware service meshes."
+
+[[best_practices]]
+title = "Validate DNSSEC at the resolver, not at the application"
+explanation = "DNSSEC (RFC 4033) signatures chain from the root to each zone. Validation requires walking that chain — the resolver's job, not the app's. Apps should set the AD (Authenticated Data) flag on queries and check it on responses; trusting the AD bit means trusting your local resolver, which you already do."
+
+[[gotchas]]
+title = "TTL is in seconds, not milliseconds"
+explanation = "The wire format encodes TTL as a 32-bit unsigned integer of SECONDS. Confusing it with milliseconds (treating 300 as 300ms) means caches expire 1000× too fast and you hammer the upstream. Confusing the other way (treating 300000ms as 300000s) holds stale records for 3.5 days."
+bad_example = "var cache_until = now_ms() + ttl;  // ttl is seconds, not ms"
+good_example = "var cache_until = now_ms() + ttl * 1000;"
+
+[[gotchas]]
+title = "CNAME at the apex (zone root) is forbidden"
+explanation = "RFC 1034 forbids a CNAME alongside other records at the same name. The zone apex (`example.com`) typically has SOA and NS records, so a CNAME there is illegal. Some providers offer 'CNAME flattening' (synthesize an A record at query time) but the protocol-level constraint stands."
+bad_example = "// Add a CNAME from example.com to elb-12345.aws.com — rejected by validators"
+good_example = "// Use ALIAS / ANAME (provider-specific synthesis) or A/AAAA records at the apex"
+
+[[gotchas]]
+title = "Negative answers (NXDOMAIN) cache too — and the TTL is in the SOA, not the question"
+explanation = "When a name doesn't exist, the resolver caches the negative answer. The TTL for negative caching comes from the SOA record's MINIMUM field (RFC 2308), not from the question's record. Apps that re-query a typo'd hostname every second don't help — the resolver answers from negative cache without a network round trip."
+bad_example = "// Tight retry loop for getaddrinfo() on a missing name — burns CPU, adds nothing"
+good_example = "// Backoff on EAI_NONAME; the TTL is set by the zone's SOA, typically 300s+"
+
+[[performance_notes]]
+title = "Cache-hit lookup costs ~5-50µs locally"
+explanation = "systemd-resolved or nscd hits an in-process hash; the syscall overhead is the main cost. Cold lookups (cache miss) cost ~5-50ms over the network — three orders of magnitude more. The cache hit ratio dominates DNS performance."
+evidence = "systemd-resolved cache hit: 10-30µs from getaddrinfo(). Cold: 10-30ms from a recursive resolver in the same DC; 50-200ms cross-region."
+
+[[performance_notes]]
+title = "DoH adds 1 RTT (TLS) over UDP DNS, but reuses the connection for batched queries"
+explanation = "DNS over HTTPS (RFC 8484) trades one TLS handshake (~1 RTT) for query encryption + integrity. Subsequent queries on the same DoH connection cost only the HTTP request RTT. For browsers (~100 queries/page), DoH amortizes the handshake to near-zero."
+evidence = "Cloudflare 1.1.1.1 DoH: cold ~50ms (TLS handshake), warm ~5-10ms/query. Plain UDP: ~5-10ms/query, no setup."

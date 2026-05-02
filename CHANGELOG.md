@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.1] — 2026-05-02
+
+P1 Networking & Infrastructure — second batch (2 of the planned 6
+new topics). 4/6 P1 topics shipped after this release.
+
+### Added
+- **P1 batch 2 — 2 new topics × 11 languages each, +22 source
+  files** (validator sweep 682/682 → 704/704):
+  - **`tls_and_encryption`** — new topic. Simulation of the four
+    load-bearing TLS 1.3 primitives: handshake state machine
+    (INIT → HELLO_SENT → SERVER_HELLO → CERT_VERIFIED →
+    ESTABLISHED), cipher suite negotiation (TLS 1.3 only —
+    rejects 0x002F legacy 1.2 ciphers), certificate chain
+    validation (issuer/subject linkage to a trust root,
+    rejecting self-signed leafs), AEAD seal/open with auth-tag
+    verification (XOR + sum stub captures the structural
+    property: any byte flip in ciphertext rejects). Hostname-
+    mismatch path tested end-to-end. 16 assertions; 5 in the
+    asm focused subset. OpenQASM uses Bell-pair entanglement
+    as the ECDHE shared-secret + cert-chain analog.
+  - **`dns`** — new topic. In-memory DNS resolver simulation:
+    small zone (A/AAAA/CNAME/MX/TXT records), recursive lookup
+    that follows CNAME chains with a 16-hop depth bound (per
+    RFC convention; libcurl/BIND both use 16), TTL cache with
+    monotonic logical clock + advance_time() for deterministic
+    expiry tests, negative caching for NXDOMAIN. Tests cover:
+    CNAME chain following, CNAME loop detection (depth-bounded),
+    cache hit vs miss, post-expiry re-query, negative cache,
+    coexisting record types for the same name. 15 assertions;
+    5 in the asm focused subset. OpenQASM uses CNOT chaining
+    as the recursive-resolution analog.
+
+### Changed
+- **VERSION** 2.4.0 → 2.4.1.
+- **Topic coverage**: 64 topics, 62 → 64 fully covered. Per-
+  language counts (each):
+  - All 11 languages: 62 → 64.
+  - Examples: 682 → 704 (+22 new source files; +3.2%).
+
+### Notes (recurring patterns worth field-noting)
+- **Cyrius `var name[N]` is N BYTES, not N elements** — bit
+  again writing `tls_and_encryption/cyrius.cyr`. `var
+  leaf_cert[2]` allocates 2 bytes (one byte each for subject
+  and issuer), not 2 i64s; the chain pointer-array
+  `var chain[8]` allocates 8 bytes (1 ptr) instead of 24 bytes
+  (3 ptrs). Already documented in field-note
+  `var_name_bracket_is_bytes_not_elements` — this is the 4th+
+  time it's bitten in vidya content. Worth promoting to a
+  more-prominent CLAUDE.md DO note.
+
+### Verified
+- `cyrius build src/main.cyr build/vidya` — clean.
+- `cyrius test` — 41/41 passing.
+- `cyrius lint src/main.cyr` — 3 pre-existing line-length
+  warnings, no new issues.
+- `scripts/validate-content.sh` — **704/704 green**, 0 failed,
+  0 skipped (full toolchain locally available).
+- `vidya stats` reports `Topics: 64, Complete: 64 (all 11
+  languages), Examples: 704`.
+
+### P1 progress (4 of 6)
+
+| Topic | Status |
+|---|---|
+| networking_fundamentals | ✅ shipped 2.4.0 |
+| http_and_web_protocols | ✅ shipped 2.4.0 |
+| tls_and_encryption | ✅ shipped 2.4.1 |
+| dns | ✅ shipped 2.4.1 |
+| ipc | planned 2.4.2 |
+| serialization | planned 2.4.2 |
+
 ## [2.4.0] — 2026-05-02
 
 **Minor bump opening P1 — Networking & Infrastructure.** First
