@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.7] — 2026-05-02
+
+P0C-4 systems & misc cluster — all 4 topics backfilled to 11/11
+languages (43 new files). Plus cyrius pin bump 5.8.3 → 5.8.14.
+
+### Added
+- **P0C-4 cluster — 4 topics × 11 languages each, +43 source files**
+  (validator sweep 529/529 → 572/572):
+  - **`page_management`** — 10 new lang files (cyrius reference
+    already existed). Tests: header init/verify with magic
+    `0x50415452`, page_count starts at 1, sequential alloc
+    returns 1 then 2, write 42 to page 1 + read back, free + reuse
+    via free-list stack. Layout matches the cyrius reference exactly:
+    header at offset 0, page 0 reserved as null sentinel, data
+    pages at `PAGE_SZ + num * PAGE_SZ`. Languages with first-class
+    file I/O (Rust/Python/C/Go/TS/Zig) use real `open`+`lseek`+
+    `read`+`write`; shell + asm use in-memory simulation matching
+    the WAL convention; OpenQASM uses qubit-as-page-slot analog
+    (allocate/measure/reset).
+  - **`compression`** — 11 new lang files (concept-only topic;
+    cyrius reference designed first). LZ77-shaped 2-byte token
+    stream: `[0, BYTE]` = literal, `[OFFSET, LEN]` = match.
+    Greedy O(n²) match-finder over a 255-byte window. Tests:
+    round-trip on substring repeat (`ABCABCABC`), overlapping
+    RLE match (`AAAAAAAA` with offset=1 length=7), mostly-literal
+    text (`Hello, World!`), decompression bomb guard (single
+    match claiming length 200 with cap=10 → -1), empty input.
+    Asm ports decoder-only with hand-built test token streams
+    from the cyrius greedy encoding. OpenQASM uses entanglement
+    as state-overlap analog (one Hadamard + 3 CNOTs = "1 source +
+    3 back-references").
+  - **`concurrent_file_access`** — 11 new lang files. Single-
+    process exercise of the file-lock state machine via two
+    distinct OPENs of the same path (flock is per-OPEN, so the
+    two fds have independent lock state and can contend in one
+    process). Tests: LOCK_EX write, LOCK_SH read with roundtrip
+    integrity, LOCK_NB exclusive contention (second fd fails
+    while first holds), release + acquire, LOCK_SH coexistence
+    (multiple shared holders). Real `flock` where available
+    (Rust via libc, Python via `fcntl`, C via `<sys/file.h>`,
+    Go via `syscall.Flock`, Zig via `linux.syscall2(.flock)`,
+    Shell via `flock(1)`, asm via raw syscall 73/32). TypeScript
+    in-process state-machine simulation (Node has no built-in
+    flock binding); OpenQASM uses GHZ entanglement as shared-
+    lock analog.
+  - **`jsonl_format`** — 11 new lang files. In-memory JSONL
+    primitives: append records to a flat byte buffer with `\n`
+    separators, build a per-line index (handles the no-trailing-
+    newline edge case from concept.toml's gotcha), extract by
+    index, JSON string escape covering all 5 special chars
+    (`" \ \n \t \r`) with a 2× expansion bounds check, escape ↔
+    unescape roundtrip. Asm ports focus on the
+    escape/unescape/bounds-check (the algorithmic piece);
+    OpenQASM uses the no-entanglement register as
+    independent-records analog.
+- **Cyrius pin 5.8.3 → 5.8.14** (`cyrius.cyml`). No source
+  changes required — the 5.8.x stdlib is API-compatible with
+  the 5.8.3 surface vidya consumes (sandhi, sakshi, syscalls,
+  string, alloc, str, fmt, vec, hashmap, io, fs, tagged, json,
+  fnptr, args, toml). Verified: build clean, `cyrius test` 41/41,
+  full content validator 572/572.
+- **`content/cyrius/field_notes/index.cyml`** — verification
+  range bumped: "Cyrius 2.2 → 5.8.14".
+
+### Changed
+- **VERSION** 2.3.6 → 2.3.7.
+- **Topic coverage**: 60 topics, 48 → 52 fully covered. Per-
+  language counts (each):
+  - Rust/Python/C/Go/TypeScript/Shell/Zig/OpenQASM: 48 → 52
+  - x86_64 ASM / AArch64 ASM: 48 → 52
+  - Cyrius: 48 → 52 (page_management already had it; the other
+    3 topics designed cyrius.cyr first as the reference)
+  - Examples: 529 → 572 (+43 new source files; +8%).
+
+### Notes (recurring patterns worth field-noting later)
+- **Rust 2024 edition: `extern "C"` blocks must be `unsafe`.**
+  Caught by `concurrent_file_access/rust.rs` declaring `flock`/
+  `unlink` libc bindings. Fix: `unsafe extern "C" { ... }`. This
+  is a 2024 hardening that the older `extern "C"` form rejects
+  outright now.
+- **Rust LZ77 decoder: capture `out.len()` before the inner copy
+  loop.** Using the moving `out.len()` inside the loop caused
+  off-by-one corruption on substring matches (offset=3, len=6
+  reading from position 4 instead of 3 after pushing one byte).
+  Other languages' iteration patterns happen to dodge this; only
+  Rust's bytes-pushed-grow-the-vec idiom surfaces it. Worth a
+  field-note (`lz77_capture_start_position`) once the third
+  surfacing happens.
+- **Cyrius `else if` is `elif`.** Re-surfaced writing
+  `jsonl_format/cyrius.cyr`. Already documented in CLAUDE.md /
+  field-notes from v2.3.5 — flagged again here.
+- **Zig `std.io.getStdOut()` removed.** Use `std.debug.print`
+  instead (matches existing zig content ports). Surfaced in
+  `page_management/zig.zig`. Worth a field-note about the Zig
+  stdlib's print API churn (`zig_stdout_api_drift`).
+
+### Verified
+- `cyrius build src/main.cyr build/vidya` — clean (large-static-
+  data warning at 375064 bytes, unchanged from v2.3.6).
+- `cyrius test` — 41/41 passing.
+- `cyrius lint src/main.cyr` — 3 pre-existing line-length
+  warnings (lines 821/822/1141), no new issues.
+- `scripts/validate-content.sh` — **572/572 green**, 0 failed,
+  0 skipped (full toolchain locally available).
+
 ## [2.3.6] — 2026-05-02
 
 P0B-4 content hot-reload. The deferred half of v2.3.5 promoted

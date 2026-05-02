@@ -2,11 +2,11 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-02
 >
-> **Version**: 2.3.6 | **Cyrius**: 5.8.3
-> **Topics**: 60 (48 fully covered, 12 still partial)
+> **Version**: 2.3.7 | **Cyrius**: 5.8.14
+> **Topics**: 60 (52 fully covered, 8 still partial)
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 529 source files; concept files: 60
-> **Validator**: 529/529 green
+> **Examples**: 572 source files; concept files: 60
+> **Validator**: 572/572 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -27,42 +27,38 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.3.4 | 2026-05-02 | **P0B-1 complete** (`/compare` + `/gaps` HTTP routes; 7-of-7 endpoints live) + **P0C-3 complete** (database cluster: btree_indexing, sql_parsing, write_ahead_logging — 31 new files) + vidya.tcyr cstr-key fix |
 | 2.3.5 | 2026-05-02 | **P0B-2 + P0B-3 complete** — memory-resident contract audited and documented; sakshi structured access log on `serve` (path + status + level-routed latency). Field notes promoted: `language/shell_runtime.cyml` (3 entries) + AArch64 ABI consolidation in `language/platform_abi.cyml`. CLAUDE.md + docs/architecture/overview.md rewritten end-to-end. P0B-4 hot-reload deferred. |
 | 2.3.6 | 2026-05-02 | **P0B-4 complete — content hot-reload on `serve`** — inotify watch on every topic dir; per-request drain triggers all-or-nothing rebuild + atomic registry pointer swap; sakshi events per reload (success/failure with timing). End-to-end verified across add/remove/corrupt/restore. Reload latency 17–22ms for 60 topics. **P0B fully done (B-1 → B-4 all shipped).** |
+| 2.3.7 | 2026-05-02 | **P0C-4 complete + cyrius pin bump 5.8.3 → 5.8.14** — systems & misc cluster: `compression` (LZ77-shaped 2-byte tokens, RLE overlap, bomb guard), `concurrent_file_access` (real flock per-OPEN with 2-fd contention), `jsonl_format` (build/index/escape/unescape with 2× expansion bounds check), `page_management` (10 lang ports of the existing cyrius reference). 43 new source files; validator 529/529 → 572/572. |
 
 ---
 
 ## Current State
 
-### 48 topics fully covered (11/11 languages)
+### 52 topics fully covered (11/11 languages)
 
-The original 36 P0 topics, plus 12 added in v2.3.2–v2.3.4. The
-roadmap header previously said 47; the binary's `vidya stats`
-reports 48, and a direct `ls` count over `content/*/` confirms
-48 — one of the topics below was undercounted in the v2.3.4
-CHANGELOG. Numbers reconciled in v2.3.5.
+The original 36 P0 topics, plus 16 added in v2.3.2–v2.3.7:
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
   game_loop_architecture, grid_pathfinding, maze_generation,
   projectile_physics, sprite_rendering, state_machines
 - v2.3.4 P0C-3 (3): btree_indexing, sql_parsing, write_ahead_logging
+- v2.3.7 P0C-4 (4): compression, concurrent_file_access,
+  jsonl_format, page_management
 
-(The 48th — actual identity to be confirmed during the v2.3.6
-content sweep when each partial topic is touched in turn.)
+(Note: the v2.3.5 reconciliation flagged a 47→48 discrepancy
+between roadmap text and the loader's count; identity of the
+"extra" 48th topic still TBD — verify on the v2.3.8 graphics
+sweep when each partial topic is touched in turn.)
 
-### 12 topics still partial
+### 8 topics still partial
 
 **P0C-2 graphics cluster** (8 topics, all 0/11 — needs full 11-lang ports):
 bindless_resources, bloom_and_glow, direct_drm_gpu_compute,
 explicit_gpu_synchronization, framebuffer_rendering, gpu_memory_pooling,
 line_rasterization, render_graph_architecture
 
-**P0C-4 systems & misc** (4 topics, mostly 0/11):
-compression (none), concurrent_file_access (none), jsonl_format (none),
-page_management (cyrius-only)
-
-Gap to full 11/11 across these 12 topics: **~131 source files**
-(11 concept-only × 11 langs each = 121 + page_management's
-remaining 10 langs = 131).
+Gap to full 11/11 across these 8 topics: **~88 source files**
+(8 concept-only × 11 langs each).
 
 ---
 
@@ -136,19 +132,27 @@ Known limits documented (not bugs):
 - Full reload, not incremental. ~20ms; not worth optimising
   until topic count crosses ~500.
 
-### 2.3.7 — P0C-4 systems & misc cluster (4 topics, ~43 files)
+### 2.3.7 — P0C-4 systems & misc cluster ✅ shipped 2026-05-02
 
-Same shape as v2.3.4 P0C-3:
-- **`compression`** — RLE / LZ77-shaped reference; concept-only today.
-- **`concurrent_file_access`** — fcntl locking, advisory vs mandatory;
-  concept-only.
-- **`jsonl_format`** — newline-delimited JSON streaming parser;
-  concept-only.
-- **`page_management`** — has cyrius reference; needs other 10 langs
-  (mirror the v2.3.4 cyrius-already-exists pattern).
+All 4 topics × 11 langs landed (43 new files exactly as estimated).
 
-Estimated: 11 + 11 + 11 + 10 = 43 files (concept-only topics need
-cyrius reference designed first).
+Done:
+- **`compression`** — LZ77-shaped 2-byte token stream, greedy
+  O(n²) match-finder, byte-by-byte overlap-aware decoder, bomb
+  guard. Asm ports decoder-only with hand-built token streams.
+- **`concurrent_file_access`** — real flock per-OPEN with two-fd
+  contention model (single-process equivalent of multi-process
+  contention). TypeScript falls back to in-process state-machine
+  simulation (Node lacks built-in flock binding).
+- **`jsonl_format`** — flat byte-buffer record store, per-line
+  index with no-trailing-newline edge case, JSON string escape
+  with 2× expansion bounds check, escape ↔ unescape roundtrip.
+- **`page_management`** — 10-lang port of the existing cyrius
+  reference (header, page_alloc with free-list, page_read/write,
+  page_free).
+
+Plus: **cyrius pin bump 5.8.3 → 5.8.14** (no API delta; field-
+notes verification range bumped to 5.8.14).
 
 ### 2.3.8 — P0C-2a graphics batch 1 (3 topics, ~33 files)
 
@@ -257,6 +261,7 @@ patch bump for stdlib + language-feature alignment. The cadence:
 History:
 - v2.3.0 — cyrius 5.7.0 (sandhi fold, CYML migration)
 - v2.3.1 — cyrius 5.8.3 (no API delta; field-notes split)
+- v2.3.7 — cyrius 5.8.14 (no API delta; verification range bumped)
 
 ---
 
@@ -279,4 +284,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-02 (v2.3.6)*
+*Last Updated: 2026-05-02 (v2.3.7)*

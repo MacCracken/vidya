@@ -1,0 +1,196 @@
+# Vidya — JSON Lines (JSONL) — Cyrius reference (runnable)
+#
+# JSONL primitives demonstrated:
+#   1. Build a multi-record buffer (records separated by \n).
+#   2. Count records — handles the "no trailing newline" edge case.
+#   3. Build a per-line index (offset + length) for random access.
+#   4. Extract a record by index.
+#   5. JSON string-value escape with bounds check (refuses to write
+#      when the output buffer can't fit the worst-case 2× expansion).
+#   6. Round-trip: escape → unescape recovers the original bytes.
+#
+# All in-memory; no real fs I/O needed for the algorithm itself.
+# (For real concurrent appends, see concurrent_file_access.)
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var jsonl_buf[1024];
+var jsonl_len = 0;
+var line_offsets[64];
+var line_lengths[64];
+var line_count = 0;
+var esc_buf[256];
+var unesc_buf[256];
+
+# --- Build helpers ---
+
+fn jsonl_reset() {
+    jsonl_len = 0;
+    line_count = 0;
+    return 0;
+}
+
+fn jsonl_append_record(rec, rec_len) {
+    var i = 0;
+    while (i < rec_len) {
+        store8(&jsonl_buf + jsonl_len + i, load8(rec + i));
+        i = i + 1;
+    }
+    jsonl_len = jsonl_len + rec_len;
+    store8(&jsonl_buf + jsonl_len, 10);   # '\n'
+    jsonl_len = jsonl_len + 1;
+    return jsonl_len;
+}
+
+# Drop the trailing newline (if any) — to test the edge case.
+fn jsonl_drop_trailing_newline() {
+    if (jsonl_len > 0) {
+        if (load8(&jsonl_buf + jsonl_len - 1) == 10) {
+            jsonl_len = jsonl_len - 1;
+        }
+    }
+    return jsonl_len;
+}
+
+# --- Index ---
+# Build line_offsets / line_lengths by scanning for newlines. Handles
+# the "last line may not have trailing newline" edge case correctly.
+fn jsonl_build_index() {
+    line_count = 0;
+    var line_start = 0;
+    var i = 0;
+    while (i < jsonl_len) {
+        if (load8(&jsonl_buf + i) == 10) {
+            store64(&line_offsets + line_count * 8, line_start);
+            store64(&line_lengths + line_count * 8, i - line_start);
+            line_count = line_count + 1;
+            line_start = i + 1;
+        }
+        i = i + 1;
+    }
+    # Edge case: trailing partial line (no newline before EOF)
+    if (line_start < jsonl_len) {
+        store64(&line_offsets + line_count * 8, line_start);
+        store64(&line_lengths + line_count * 8, jsonl_len - line_start);
+        line_count = line_count + 1;
+    }
+    return line_count;
+}
+
+fn jsonl_line_offset(idx) { return load64(&line_offsets + idx * 8); }
+fn jsonl_line_length(idx) { return load64(&line_lengths + idx * 8); }
+
+fn buf_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# --- JSON string escape ---
+# Escapes " \ \n \t \r — the JSON-required minimum for printable ASCII
+# values. Worst-case output is 2x input (every byte is a 2-byte escape).
+# Returns the escaped length, or -1 if the destination buffer can't
+# fit the worst-case expansion (bounds-check gotcha from concept.toml).
+
+fn json_escape(dst, dst_cap, src, src_len) {
+    if (src_len * 2 > dst_cap) { return 0 - 1; }
+    var w = 0;
+    var i = 0;
+    while (i < src_len) {
+        var c = load8(src + i);
+        if (c == 34) {                # "
+            store8(dst + w, 92); store8(dst + w + 1, 34); w = w + 2;
+        } elif (c == 92) {         # \
+            store8(dst + w, 92); store8(dst + w + 1, 92); w = w + 2;
+        } elif (c == 10) {         # \n
+            store8(dst + w, 92); store8(dst + w + 1, 110); w = w + 2;
+        } elif (c == 9) {          # \t
+            store8(dst + w, 92); store8(dst + w + 1, 116); w = w + 2;
+        } elif (c == 13) {         # \r
+            store8(dst + w, 92); store8(dst + w + 1, 114); w = w + 2;
+        } else {
+            store8(dst + w, c); w = w + 1;
+        }
+        i = i + 1;
+    }
+    return w;
+}
+
+fn json_unescape(dst, dst_cap, src, src_len) {
+    var w = 0;
+    var i = 0;
+    while (i < src_len) {
+        var c = load8(src + i);
+        if (c == 92 && i + 1 < src_len) {
+            var n = load8(src + i + 1);
+            if (n == 34) { store8(dst + w, 34); w = w + 1; i = i + 2; }
+            elif (n == 92) { store8(dst + w, 92); w = w + 1; i = i + 2; }
+            elif (n == 110) { store8(dst + w, 10); w = w + 1; i = i + 2; }
+            elif (n == 116) { store8(dst + w, 9); w = w + 1; i = i + 2; }
+            elif (n == 114) { store8(dst + w, 13); w = w + 1; i = i + 2; }
+            else { store8(dst + w, c); w = w + 1; i = i + 1; }
+        } else {
+            store8(dst + w, c); w = w + 1; i = i + 1;
+        }
+    }
+    return w;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("jsonl_format");
+
+    # --- Test 1: build 3 records, count, extract by index ---
+    jsonl_reset();
+    jsonl_append_record("{\"id\":1}", 8);
+    jsonl_append_record("{\"id\":2}", 8);
+    jsonl_append_record("{\"id\":3}", 8);
+    var n = jsonl_build_index();
+    assert_eq(n, 3, "3 records indexed");
+
+    var off2 = jsonl_line_offset(2);
+    var len2 = jsonl_line_length(2);
+    assert_eq(len2, 8, "third record length 8");
+    assert(buf_eq(&jsonl_buf + off2, "{\"id\":3}", 8), "third record bytes");
+
+    # --- Test 2: no-trailing-newline edge case ---
+    jsonl_drop_trailing_newline();
+    var n2 = jsonl_build_index();
+    assert_eq(n2, 3, "3 records indexed even without trailing newline");
+
+    # --- Test 3: escape covers all 5 special chars ---
+    # input = `say "hi"` + tab + `\n`-literal-byte + `\r`-literal-byte + `\\`
+    # = bytes [s,a,y,SP,",h,i,",TAB,LF,CR,BACKSLASH] = 12 bytes
+    var s3[12];
+    store8(&s3 + 0, 115); store8(&s3 + 1, 97); store8(&s3 + 2, 121); store8(&s3 + 3, 32);
+    store8(&s3 + 4, 34); store8(&s3 + 5, 104); store8(&s3 + 6, 105); store8(&s3 + 7, 34);
+    store8(&s3 + 8, 9); store8(&s3 + 9, 10); store8(&s3 + 10, 13); store8(&s3 + 11, 92);
+    var en = json_escape(&esc_buf, 256, &s3, 12);
+    # 4 plain (s,a,y,SP) + 1 escaped " + 2 plain (h,i) + 1 escaped " + 1 escaped TAB
+    # + 1 escaped LF + 1 escaped CR + 1 escaped \ = 4+2+2+2+2+2+2+2 = 18
+    assert_eq(en, 18, "escape produces 18 bytes from 12");
+
+    # --- Test 4: bounds-check refuses oversized escape ---
+    # 4 chars all needing escape would need 8 bytes; cap is 4 → must fail.
+    var s4[4];
+    store8(&s4 + 0, 34); store8(&s4 + 1, 34); store8(&s4 + 2, 34); store8(&s4 + 3, 34);
+    var en4 = json_escape(&esc_buf, 4, &s4, 4);
+    assert_eq(en4, 0 - 1, "escape refuses when dst can't fit 2x expansion");
+
+    # --- Test 5: round-trip escape → unescape recovers original ---
+    var un = json_unescape(&unesc_buf, 256, &esc_buf, en);
+    assert_eq(un, 12, "unescape recovers 12 bytes");
+    assert(buf_eq(&unesc_buf, &s3, 12), "round-trip bytes match");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

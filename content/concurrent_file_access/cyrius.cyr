@@ -1,0 +1,125 @@
+# Vidya — Concurrent File Access (flock) — Cyrius reference (runnable)
+#
+# Single-process exercise of the file-lock state machine. We can't
+# fork in vidya's content-validator harness (each example is one
+# self-contained run), so we model multi-holder contention by opening
+# the same file with two distinct fds — flock is per-OPEN, not
+# per-process, so two opens of the same path have independent lock
+# state and can contend with each other inside one process.
+#
+# Tests:
+#   1. LOCK_EX → write → LOCK_UN: exclusive write succeeds.
+#   2. LOCK_SH → read → LOCK_UN: shared read succeeds, data round-trips.
+#   3. fd1 LOCK_EX, fd2 LOCK_EX|LOCK_NB: second non-blocking acquire
+#      fails (returns -EWOULDBLOCK).
+#   4. fd1 LOCK_UN, fd2 LOCK_EX|LOCK_NB: now succeeds.
+#   5. fd1 LOCK_SH, fd2 LOCK_SH|LOCK_NB: both shared acquire succeeds
+#      simultaneously (the whole point of LOCK_SH).
+
+include "lib/syscalls.cyr"
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/fmt.cyr"
+include "lib/io.cyr"
+include "lib/assert.cyr"
+
+# x86_64 syscall numbers — vidya targets x86_64 by default.
+enum FlockSys {
+    SYS_FLOCK_X86 = 73;
+}
+
+enum LockOp {
+    LOCK_SH = 1;
+    LOCK_EX = 2;
+    LOCK_UN = 8;
+    LOCK_NB = 4;
+}
+
+fn flock(fd, op) {
+    return syscall(SYS_FLOCK_X86, fd, op);
+}
+
+fn open_rw(path) {
+    # O_RDWR | O_CREAT, mode 0644
+    return syscall(SYS_OPEN, path, 66, 420);
+}
+
+fn write_at(fd, offset, buf, n) {
+    syscall(SYS_LSEEK, fd, offset, 0);
+    return syscall(SYS_WRITE, fd, buf, n);
+}
+
+fn read_at(fd, offset, buf, n) {
+    syscall(SYS_LSEEK, fd, offset, 0);
+    return syscall(SYS_READ, fd, buf, n);
+}
+
+var path_buf[64];
+var write_buf[8];
+var read_buf[8];
+
+fn main() {
+    alloc_init();
+
+    var path = "/tmp/vidya_cfa_test.bin";
+    syscall(SYS_UNLINK, path);
+
+    test_group("concurrent_file_access");
+
+    # --- Test 1: exclusive write ---
+    var fd1 = open_rw(path);
+    assert(fd1 >= 0, "open fd1");
+
+    var rc1 = flock(fd1, LOCK_EX);
+    assert_eq(rc1, 0, "fd1 LOCK_EX");
+
+    store64(&write_buf, 0xDEADBEEF12345678);
+    var w = write_at(fd1, 0, &write_buf, 8);
+    assert_eq(w, 8, "wrote 8 bytes");
+
+    var rc2 = flock(fd1, LOCK_UN);
+    assert_eq(rc2, 0, "fd1 LOCK_UN after write");
+
+    # --- Test 2: shared read with roundtrip ---
+    var rc3 = flock(fd1, LOCK_SH);
+    assert_eq(rc3, 0, "fd1 LOCK_SH");
+
+    store64(&read_buf, 0);
+    var r = read_at(fd1, 0, &read_buf, 8);
+    assert_eq(r, 8, "read 8 bytes");
+    assert_eq(load64(&read_buf), 0xDEADBEEF12345678, "data roundtrip");
+
+    flock(fd1, LOCK_UN);
+
+    # --- Test 3: exclusive contention ---
+    var fd2 = open_rw(path);
+    assert(fd2 >= 0, "open fd2");
+
+    flock(fd1, LOCK_EX);
+    var nb = flock(fd2, LOCK_EX + LOCK_NB);
+    # flock returns -EWOULDBLOCK (= -11) when LOCK_NB cannot acquire.
+    assert(nb < 0, "fd2 non-blocking exclusive blocked while fd1 holds");
+
+    # --- Test 4: release fd1, fd2 can now acquire ---
+    flock(fd1, LOCK_UN);
+    var nb2 = flock(fd2, LOCK_EX + LOCK_NB);
+    assert_eq(nb2, 0, "fd2 acquires after fd1 releases");
+    flock(fd2, LOCK_UN);
+
+    # --- Test 5: shared locks coexist ---
+    var rs1 = flock(fd1, LOCK_SH + LOCK_NB);
+    assert_eq(rs1, 0, "fd1 LOCK_SH non-blocking");
+    var rs2 = flock(fd2, LOCK_SH + LOCK_NB);
+    assert_eq(rs2, 0, "fd2 LOCK_SH non-blocking — coexists with fd1");
+
+    flock(fd1, LOCK_UN);
+    flock(fd2, LOCK_UN);
+    syscall(SYS_CLOSE, fd1);
+    syscall(SYS_CLOSE, fd2);
+    syscall(SYS_UNLINK, path);
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

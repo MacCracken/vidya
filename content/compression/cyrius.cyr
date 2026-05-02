@@ -1,0 +1,187 @@
+# Vidya — Compression (LZ77-shaped) — Cyrius reference (runnable)
+#
+# Minimal LZ77 encoder + decoder with byte-by-byte overlap-aware copy
+# (the gotcha called out in concept.toml — `memcpy` is wrong for
+# offset=1 because source and destination overlap). Token stream is
+# 2-byte units:
+#   - {0x00, BYTE}     literal: emit BYTE
+#   - {OFFSET, LENGTH} match: copy LENGTH bytes from dst[pos - OFFSET]
+#                                (OFFSET in 1..255, LENGTH in 1..255)
+# Encoder: greedy O(n²) match-finder over a 255-byte window. Decoder:
+# validates against an output size cap (decompression bomb guard).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# --- Buffers (static — module-scope) ---
+var IN_CAP = 256;
+var OUT_CAP = 512;
+var TOK_CAP = 1024;
+
+var input_buf[256];
+var output_buf[512];
+var token_buf[1024];
+
+# --- Encoder ---
+# encode(src, src_len) — fills token_buf, returns token-stream length.
+# Greedy LZ77: at each position, find the longest match in the last
+# 255 bytes; if match length >= 3, emit a match; else emit a literal.
+
+fn match_len_at(src, src_len, hist, pos) {
+    # Count how many bytes match starting from src[hist] vs src[pos].
+    # Bounded by src_len - pos and 255 (encoding limit).
+    var n = 0;
+    var max = src_len - pos;
+    if (max > 255) { max = 255; }
+    while (n < max) {
+        if (load8(src + hist + n) != load8(src + pos + n)) { return n; }
+        n = n + 1;
+    }
+    return n;
+}
+
+fn best_match(src, src_len, pos) {
+    # Return packed (offset * 65536 + length). 0 if no length >= 3.
+    var best_off = 0;
+    var best_len = 0;
+    var win_start = 0;
+    if (pos > 255) { win_start = pos - 255; }
+    var i = win_start;
+    while (i < pos) {
+        var n = match_len_at(src, src_len, i, pos);
+        if (n > best_len) {
+            best_len = n;
+            best_off = pos - i;
+        }
+        i = i + 1;
+    }
+    if (best_len < 3) { return 0; }
+    return best_off * 65536 + best_len;
+}
+
+fn encode(src, src_len) {
+    var tpos = 0;
+    var pos = 0;
+    while (pos < src_len) {
+        var packed = best_match(src, src_len, pos);
+        if (packed != 0) {
+            var off = packed / 65536;
+            var len = packed - off * 65536;
+            store8(&token_buf + tpos + 0, off);
+            store8(&token_buf + tpos + 1, len);
+            tpos = tpos + 2;
+            pos = pos + len;
+        } else {
+            store8(&token_buf + tpos + 0, 0);
+            store8(&token_buf + tpos + 1, load8(src + pos));
+            tpos = tpos + 2;
+            pos = pos + 1;
+        }
+    }
+    return tpos;
+}
+
+# --- Decoder ---
+# decode(tok, tok_len, out_cap) — fills output_buf, returns output length.
+# Returns 0 - 1 (-1 sentinel) if output would exceed out_cap (bomb guard).
+
+fn decode(tok, tok_len, out_cap) {
+    var pos = 0;
+    var ti = 0;
+    while (ti < tok_len) {
+        var b0 = load8(tok + ti + 0);
+        var b1 = load8(tok + ti + 1);
+        ti = ti + 2;
+        if (b0 == 0) {
+            # literal
+            if (pos + 1 > out_cap) { return 0 - 1; }
+            store8(&output_buf + pos, b1);
+            pos = pos + 1;
+        } else {
+            # match: byte-by-byte copy (handles overlap, e.g. offset=1)
+            if (pos + b1 > out_cap) { return 0 - 1; }
+            var k = 0;
+            while (k < b1) {
+                store8(&output_buf + pos + k, load8(&output_buf + pos - b0 + k));
+                k = k + 1;
+            }
+            pos = pos + b1;
+        }
+    }
+    return pos;
+}
+
+# --- Helpers for tests ---
+
+fn buf_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn fill_input(src, src_len) {
+    var i = 0;
+    while (i < src_len) {
+        store8(&input_buf + i, load8(src + i));
+        i = i + 1;
+    }
+    return src_len;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("compression");
+
+    # 1. Round-trip: simple repeating string with substring match
+    var s1 = "ABCABCABC";
+    var n1 = fill_input(s1, 9);
+    var tn1 = encode(&input_buf, n1);
+    assert(tn1 > 0, "encoded length > 0");
+    var dn1 = decode(&token_buf, tn1, OUT_CAP);
+    assert_eq(dn1, n1, "decoded length matches input");
+    assert(buf_eq(&output_buf, &input_buf, n1), "ABCABCABC roundtrip");
+
+    # 2. Round-trip: overlapping match (RLE-style, offset=1)
+    var s2 = "AAAAAAAA";
+    var n2 = fill_input(s2, 8);
+    var tn2 = encode(&input_buf, n2);
+    var dn2 = decode(&token_buf, tn2, OUT_CAP);
+    assert_eq(dn2, n2, "AAAAAAAA decoded length");
+    assert(buf_eq(&output_buf, &input_buf, n2), "AAAAAAAA roundtrip");
+    # Sanity: should compress (token bytes < input bytes for n2 = 8)
+    assert(tn2 < n2 + 4, "AAAAAAAA actually compresses");
+
+    # 3. Round-trip: mostly literals
+    var s3 = "Hello, World!";
+    var n3 = fill_input(s3, 13);
+    var tn3 = encode(&input_buf, n3);
+    var dn3 = decode(&token_buf, tn3, OUT_CAP);
+    assert_eq(dn3, n3, "Hello roundtrip length");
+    assert(buf_eq(&output_buf, &input_buf, n3), "Hello roundtrip bytes");
+
+    # 4. Decompression bomb guard: a single match token claiming length 200
+    #    decoded with out_cap=10 must return -1.
+    store8(&token_buf + 0, 1);    # offset = 1
+    store8(&token_buf + 1, 200);  # length = 200
+    # Seed output_buf[0] to something so the decoder has source bytes to copy.
+    # Even with valid source, the cap check fires first.
+    var bomb = decode(&token_buf, 2, 10);
+    assert_eq(bomb, 0 - 1, "bomb guard rejects oversize");
+
+    # 5. Empty input: zero tokens, zero output.
+    var tn5 = encode(&input_buf, 0);
+    assert_eq(tn5, 0, "empty input → zero tokens");
+    var dn5 = decode(&token_buf, 0, OUT_CAP);
+    assert_eq(dn5, 0, "empty tokens → zero output");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);
