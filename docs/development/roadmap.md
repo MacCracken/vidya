@@ -2,7 +2,7 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-02
 >
-> **Version**: 2.3.5 | **Cyrius**: 5.8.3
+> **Version**: 2.3.6 | **Cyrius**: 5.8.3
 > **Topics**: 60 (48 fully covered, 12 still partial)
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 529 source files; concept files: 60
@@ -26,6 +26,7 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.3.3 | 2026-05-02 | **P0C-1 complete** — game-engine cluster: collision_detection_2d, game_ai_decisions, game_loop_architecture, grid_pathfinding, maze_generation, projectile_physics, sprite_rendering, state_machines (78 new files) |
 | 2.3.4 | 2026-05-02 | **P0B-1 complete** (`/compare` + `/gaps` HTTP routes; 7-of-7 endpoints live) + **P0C-3 complete** (database cluster: btree_indexing, sql_parsing, write_ahead_logging — 31 new files) + vidya.tcyr cstr-key fix |
 | 2.3.5 | 2026-05-02 | **P0B-2 + P0B-3 complete** — memory-resident contract audited and documented; sakshi structured access log on `serve` (path + status + level-routed latency). Field notes promoted: `language/shell_runtime.cyml` (3 entries) + AArch64 ABI consolidation in `language/platform_abi.cyml`. CLAUDE.md + docs/architecture/overview.md rewritten end-to-end. P0B-4 hot-reload deferred. |
+| 2.3.6 | 2026-05-02 | **P0B-4 complete — content hot-reload on `serve`** — inotify watch on every topic dir; per-request drain triggers all-or-nothing rebuild + atomic registry pointer swap; sakshi events per reload (success/failure with timing). End-to-end verified across add/remove/corrupt/restore. Reload latency 17–22ms for 60 topics. **P0B fully done (B-1 → B-4 all shipped).** |
 
 ---
 
@@ -93,16 +94,49 @@ Done:
   both rewritten end-to-end (were stale from the pre-v2.0
   Rust era).
 
-Deferred (slot tbd, ahead of 2.3.6 content sweep):
-- **P0B-4 — content hot-reload** (inotify watch + atomic
-  registry pointer swap). Strictly blocked on P0B-2 audit
-  results, which now exist; deferred because the design
-  needs more thought than the rest of v2.3.5 combined
-  (dual-registry memory cost, swap barrier model,
-  partial-failure handling for a bad concept.toml in the
-  middle of a reload). Likely 2.3.5a or a 2.3.6-prelude.
+Deferred to **v2.3.6** (content sweep cascades to 2.3.7+):
+- **P0B-4 — content hot-reload** is the entire payload for the
+  next patch — see "2.3.6" below.
 
-### 2.3.6 — P0C-4 systems & misc cluster (4 topics, ~37 files)
+### 2.3.6 — P0B-4 content hot-reload ✅ shipped 2026-05-02
+
+The deferred half of v2.3.5, promoted to its own focus release.
+Landed exactly as scoped — inotify-driven detection, staged
+build with all-or-nothing partial-failure semantics, atomic
+two-pointer swap, sakshi events per reload outcome.
+
+Done:
+- **Detection** — `inotify_init1(IN_NONBLOCK)` fd, watch per
+  topic dir (filtered to dirs with `concept.toml`). Drained
+  non-blocking at the top of every `handle_request`.
+- **Build** — staged into `_reg_entries_next` /
+  `_reg_index_next`; all-or-nothing (one bad `concept.toml`
+  aborts reload, live registry preserved).
+- **Swap** — single-threaded means two pointer assignments,
+  no barrier.
+- **Re-watch** — `inotify_init_watches()` re-runs after each
+  successful swap so newly-added topic dirs get coverage.
+- **Observability** — `INFO reload OK: <n> topics in <ns>ns
+  (reload #<count>)` / `WARN reload aborted: a concept failed
+  to load (failure #<count>); live registry untouched`.
+
+Verified end-to-end across baseline / add / remove / corrupt /
+restore. Reload latency 17–22ms for 60 topics.
+
+Documented in `docs/architecture/overview.md` as a new
+"Hot-reload contract" section alongside the memory-resident
+contract.
+
+Known limits documented (not bugs):
+- Bump allocator never frees → each reload doubles registry
+  memory permanently. Restart periodically for long sessions.
+- Reload triggered by next HTTP request, not immediately on
+  file change (drain runs in `handle_request`, not in a
+  separate thread or accept-loop hook).
+- Full reload, not incremental. ~20ms; not worth optimising
+  until topic count crosses ~500.
+
+### 2.3.7 — P0C-4 systems & misc cluster (4 topics, ~43 files)
 
 Same shape as v2.3.4 P0C-3:
 - **`compression`** — RLE / LZ77-shaped reference; concept-only today.
@@ -113,10 +147,10 @@ Same shape as v2.3.4 P0C-3:
 - **`page_management`** — has cyrius reference; needs other 10 langs
   (mirror the v2.3.4 cyrius-already-exists pattern).
 
-Estimated: 11 + 11 + 11 + 10 = 43 files (closer than the 37 estimate;
-concept-only topics need cyrius reference designed first).
+Estimated: 11 + 11 + 11 + 10 = 43 files (concept-only topics need
+cyrius reference designed first).
 
-### 2.3.7 — P0C-2a graphics batch 1 (3 topics, ~33 files)
+### 2.3.8 — P0C-2a graphics batch 1 (3 topics, ~33 files)
 
 Pull cyrius references from mabda v3 source tree first, then port:
 - `framebuffer_rendering` (closest sibling to `sprite_rendering`
@@ -124,19 +158,19 @@ Pull cyrius references from mabda v3 source tree first, then port:
 - `line_rasterization` (Bresenham; small, mathematical)
 - `bloom_and_glow` (post-process; visual but compact)
 
-### 2.3.8 — P0C-2b graphics batch 2 (3 topics, ~33 files)
+### 2.3.9 — P0C-2b graphics batch 2 (3 topics, ~33 files)
 
 - `bindless_resources` (descriptor sets, texture binding)
 - `gpu_memory_pooling` (suballocation patterns)
 - `explicit_gpu_synchronization` (semaphores, fences, pipeline barriers)
 
-### 2.3.9 — P0C-2c graphics batch 3 (2 topics + render-graph integration)
+### 2.3.10 — P0C-2c graphics batch 3 (2 topics + render-graph integration)
 
 - `direct_drm_gpu_compute` (the AGNOS-specific direct-ioctl path)
 - `render_graph_architecture` (depends on most of the others —
   framebuffer, sync, bindless)
 
-After 2.3.9, **all 60 topics at 11/11**, ~660+ examples. P0 → P0C
+After 2.3.10, **all 60 topics at 11/11**, ~660+ examples. P0 → P0C
 fully complete.
 
 ---
@@ -245,4 +279,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-02 (v2.3.5)*
+*Last Updated: 2026-05-02 (v2.3.6)*

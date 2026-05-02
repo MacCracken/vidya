@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.6] — 2026-05-02
+
+P0B-4 content hot-reload. The deferred half of v2.3.5 promoted
+to its own focus release. After this patch, P0B is fully done:
+all four sub-tasks (B-1 through B-4) shipped.
+
+### Added
+- **Hot-reload on `serve`**. Inotify watches every topic dir
+  under `content/`; per-request drain detects pending events
+  and triggers an inline full-rebuild + atomic registry swap.
+  No process restart needed when concepts change.
+- **`inotify_init_watches()`** — opens an `IN_NONBLOCK` fd
+  via `syscall(294, 2048)` (`inotify_init1`) and adds watches
+  on `content/` root + every subdir that contains a
+  `concept.toml` (filter matches `load_all`'s — skips
+  `content/cyrius/` and other non-topic dirs). Mask = 970
+  (`IN_MODIFY|IN_CLOSE_WRITE|IN_MOVED_FROM|IN_MOVED_TO|IN_CREATE|IN_DELETE`).
+  Idempotent: closes any prior fd before opening a new one.
+  Re-runs after every successful reload to pick up newly-added
+  topic dirs.
+- **`inotify_drain()`** — non-blocking read loop on the inotify
+  fd. Sets `_reload_pending = 1` if any bytes were drained;
+  exits on EAGAIN (returns immediately when no events queued).
+- **`build_next_registry()` + `swap_registry()` + `do_reload()`**
+  — staged registry build into `_reg_entries_next` /
+  `_reg_index_next`, all-or-nothing semantics (a malformed
+  `concept.toml` aborts the reload and leaves the live
+  registry untouched), atomic two-pointer swap. Sakshi event
+  per reload: `INFO reload OK: <n> topics in <ns>ns (reload #N)`
+  on success, `WARN reload aborted: a concept failed to load`
+  on partial failure.
+- **`_reload_count` + `_reload_failures`** — module-level
+  counters incremented per outcome, included in the sakshi
+  events for ops visibility.
+
+### Changed
+- **VERSION** 2.3.5 → 2.3.6.
+- **`handle_request`** — now calls `inotify_drain()` then
+  conditional `do_reload()` at the top before touching the
+  serve-status global. Per-request overhead on the no-events
+  path is one `read(2)` returning EAGAIN (sub-µs).
+- **`cmd_serve`** — calls `inotify_init_watches()` immediately
+  before entering `sandhi_server_run`.
+- **`docs/architecture/overview.md`** — replaced the prior
+  "Future hot-reload (P0B-4) will change this contract" note
+  with a fully-specified **Hot-reload contract** section
+  covering detection, drain, build, swap, re-watch, and
+  observability. Memory-resident contract section refined to
+  reflect that the route handlers (`http_route` and the
+  `json_*_response` builders) remain forbidden from filesystem
+  I/O, while `handle_request` itself is allowed to call into
+  `inotify_drain` / `do_reload` as the controlled mutation
+  point. Known-limits section gained two entries: "reload is
+  triggered by the next request, not immediately" and "no
+  partial reload."
+
+### Verified
+- `cyrius build src/main.cyr build/vidya` — clean (large-static-data
+  warning bumped 309480 → 375064 bytes from the new 8KB
+  inotify drain buffer + reload-related str literals).
+- `cyrius test` — 41/41 passing (no regressions).
+- **End-to-end smoke** across five scenarios:
+  1. Baseline: 60 topics.
+  2. Add a topic dir (`mkdir + cat > concept.toml`):
+     60 → 61, `INFO reload OK: 61 topics in 17.5ms (reload #1)`,
+     `/info/<new_topic>` returns the full concept.
+  3. Remove the new topic dir:
+     61 → 60, `INFO reload OK: 60 topics in 21.6ms (reload #2)`.
+  4. Corrupt `algorithms/concept.toml` to garbage:
+     `WARN reload aborted: a concept failed to load (failure #1);
+     live registry untouched`. `/stats` still reports 60 topics;
+     `/info/algorithms` still serves the pre-corruption data.
+  5. Restore `algorithms/concept.toml`: stays at 60,
+     `INFO reload OK: 60 topics in 19.7ms (reload #3)`.
+- Reload latency: 17–22ms for 60 topics, dominated by the
+  per-topic TOML parse in `load_concept`. Within the budget
+  for an interactive dev tool.
+
+### Notes for follow-up
+- **Bump allocator never frees** — each successful reload doubles
+  registry memory permanently. Acceptable for sessions with a
+  handful of reloads; for sustained edit cycles, restart
+  periodically. Documented in overview.md "Known limits."
+- **Reload triggered by next request** — drains run in
+  `handle_request`, so an idle process won't reload until the
+  next hit. Workaround: drive a periodic curl. A SIGHUP-driven
+  or accept-loop-integrated trigger is future work.
+
 ## [2.3.5] — 2026-05-02
 
 Service-layer polish + recurring-pattern field notes. Doc-heavy

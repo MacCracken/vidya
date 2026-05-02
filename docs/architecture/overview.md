@@ -93,10 +93,15 @@ by process teardown.
 
 ```
 cmd_serve(port)
+  ├─ inotify_init_watches()                         # IN_NONBLOCK fd,
+  │                                                  # one watch per topic dir
   └─ sandhi_server_run(INADDR_ANY(), port, &handle_request, 0)
        │       (blocking accept loop — process lifetime)
        │
        └─ handle_request(ctx, cfd, buf, blen)        # one per connection
+            ├─ inotify_drain()                       # non-blocking poll;
+            │                                         # sets _reload_pending
+            ├─ if _reload_pending: do_reload()       # rebuild + swap inline
             ├─ sandhi_server_get_path(buf, blen)
             └─ http_route(cfd, path)                 # streq() chain
                  ├─ /stats     → json_stats_response()
@@ -109,64 +114,123 @@ cmd_serve(port)
 ```
 
 Every JSON builder reads only from `reg_list()` / `reg_get()` /
-`vec_get()` — pure in-memory hashmap and vec ops. **No file I/O
-on the request path.**
+`vec_get()` — pure in-memory hashmap and vec ops. **No content
+file I/O during routing.** The only filesystem touch on the
+request path is `inotify_drain` (a non-blocking `read(2)` on a
+single fd, returns EAGAIN cheaply when no events are queued)
+and, when events are present, `do_reload` (a one-shot rebuild
+of the staging registry — see "Hot-reload contract" below).
 
 ## Memory-resident corpus contract (P0B-2)
 
 The `serve` command depends on this invariant; document it here so
 future edits don't quietly break it.
 
-**Contract.** From the moment `cmd_serve` enters
-`sandhi_server_run` until the process exits, the registry
-(`_reg_entries`, `_reg_index`) is read-only and **must not be
-re-loaded, mutated, or re-parsed**. Per-request handlers read
-the registry; they never touch the filesystem.
+**Contract.** Per-request handlers read the live registry
+(`_reg_entries`, `_reg_index`) and **never load concepts
+themselves**. The only mutation point is `do_reload`, called
+inline at the top of `handle_request` after `inotify_drain`
+detects a content change — see "Hot-reload contract" below.
 
 **What the contract guarantees.**
 
-- Constant per-request latency. No `open(2)` / `read(2)` /
-  TOML parse on the hot path. Search hits the in-memory hashmap;
-  list iterates the in-memory vec.
-- No partial-read race. Concurrent requests can never observe
-  a half-loaded concept (because no one is loading anything).
-- Sandhi's accept loop can be single-threaded today and grown
-  to multi-connection later without revisiting load semantics.
+- Sub-millisecond per-request latency on the no-events path
+  (verified at v2.3.5: 20µs–139µs across all endpoints). No
+  TOML parse, no `dir_list`, no `read_file` on the hot path.
+- Single-threaded vidya means the registry pointer pair
+  (`_reg_entries`, `_reg_index`) is observed atomically — a
+  request either sees the entire pre-swap registry or the
+  entire post-swap one, never half of each.
+- All-or-nothing reload. A malformed `concept.toml` mid-reload
+  leaves the live registry untouched (verified by smoke test
+  in v2.3.6).
 
-**What the contract forbids inside `handle_request` and
-everything it transitively calls.**
+**What the contract forbids inside the route handlers
+(`http_route` and everything it transitively calls).**
 
-- `dir_list`, `read_file`, `is_dir`, `path_join` against
-  `_content_dir`.
-- `load_concept`, `load_all`, `reg_init`, `reg_add`.
-- `vec_push` / `map_set` against `_reg_entries` / `_reg_index`
-  (read-only window).
+- `dir_list`, `read_file`, `is_dir`, `path_join`, `load_concept`,
+  `load_all`, `reg_init`, `reg_add` — none of these on the
+  routing path. Reload is the only place new concepts get built;
+  routing only reads.
+- Mutation of `_reg_entries` / `_reg_index` from inside a route
+  handler. The handler observes whatever the most recent
+  `do_reload` swapped in.
 - `alloc()` is allowed for response building — but the bump
   allocator never frees, so be aware that long-running serve
   processes accumulate per-response allocations until restart.
   See "Known limits" below.
 
-**Verified by** `grep -E "read_file|file_read|dir_list|load_concept|fopen|open\(" src/main.cyr` over the line range of `http_route` and `handle_request` — empty match as of v2.3.5. Re-run after any edit to the serve path.
+**Verified by** `grep -E "read_file|file_read|dir_list|load_concept|fopen|open\(" src/main.cyr` over the line range of `http_route` and `json_*_response` — empty match as of v2.3.6. (`handle_request` itself does call `inotify_drain`/`do_reload`, but those are explicitly part of the contract; the prohibition is on the routing branches that follow.) Re-run after any edit to the serve path.
 
-**Future hot-reload (P0B-4)** will change this contract. The
-plan: an inotify watcher on `content/` rebuilds a *new* registry
-in the background, then atomically swaps `_reg_entries` /
-`_reg_index` pointers under a single barrier. Per-request reads
-continue to be lock-free; the swap is the only mutation. Until
-P0B-4 lands, the registry is immutable from `serve` start.
+## Hot-reload contract (P0B-4)
+
+Landed in v2.3.6. Replaces the prior "registry is immutable from
+serve start" invariant with a controlled mutation point.
+
+**Detection.** `inotify_init_watches()` opens a non-blocking
+inotify fd at `cmd_serve` start and adds a watch on each topic
+dir under `content/` (filtered to dirs that contain a
+`concept.toml`, so `content/cyrius/` and other non-topic dirs
+don't generate noise). Mask: `IN_MODIFY | IN_CLOSE_WRITE |
+IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE` (= 970).
+
+**Drain.** `inotify_drain()` runs at the top of every
+`handle_request`. On the no-events path it's a single
+`read(2)` returning -EAGAIN — typically sub-microsecond. When
+events are present, the drain loop reads until EAGAIN and sets
+`_reload_pending = 1`. The drain doesn't parse event records;
+"any bytes read" is sufficient to trigger a reload, which is
+itself a full re-scan.
+
+**Build.** `build_next_registry()` populates a *staging*
+pair (`_reg_entries_next`, `_reg_index_next`) from a fresh
+`dir_list(_content_dir)` sweep. All-or-nothing: any topic dir
+that has a `concept.toml` but fails to load aborts the reload,
+leaks the partial staging pair (the bump allocator can't free
+it, but next reload allocates a fresh one), and leaves the
+live registry untouched. Topic dirs *without* a `concept.toml`
+are skipped silently — same filter as the original `load_all`.
+
+**Swap.** `swap_registry()` is two pointer assignments
+(`_reg_entries = _reg_entries_next; _reg_index = _reg_index_next`).
+Single-threaded means it's atomic by construction; no barrier
+or lock. The next request reads the new pair.
+
+**Re-watch.** After a successful swap, `inotify_init_watches()`
+runs again — closes the prior fd and re-adds watches against
+the now-current topic set. New topic dirs added by the reload
+get watched; deleted ones stop being watched. The init is
+idempotent (closes the prior fd first).
+
+**Observability.** Every reload emits a sakshi event:
+- `INFO reload OK: <n> topics in <ns>ns (reload #<count>)`
+- `WARN reload aborted: a concept failed to load (failure #<count>); live registry untouched`
+
+Verified end-to-end at v2.3.6 across five scenarios: baseline,
+add a topic dir, remove a topic dir, corrupt a concept.toml
+(reload aborts, live registry survives), restore (reload
+succeeds). Reload latency: 17–22ms for 60 topics.
 
 ### Known limits (serve mode)
 
-- **Bump allocator never frees.** Each response alloc accumulates.
-  Long-running serve processes will eventually exhaust the heap.
-  Mitigation today: restart on a cron, or front with a process
-  supervisor that cycles after N requests. A pool/arena reset per
-  request is future work (no roadmap entry yet).
+- **Bump allocator never frees.** Each response alloc and each
+  reload's staging registry accumulates. Long-running serve
+  processes will eventually exhaust the heap. Mitigation today:
+  restart on a cron, or front with a process supervisor that
+  cycles after N reloads or N requests. An arena/pool allocator
+  is future work (no roadmap entry yet).
 - **Single-threaded accept.** Sandhi 1.0.0's `sandhi_server_run`
   serves one connection at a time. Adequate for the local
   agnoshi/hoosh use case; not for public exposure.
-- **No request tracing today** — being added in P0B-3 (sakshi spans
-  around `handle_request` capturing method/path/status/latency).
+- **Reload is triggered by the next request, not immediately.**
+  Because the drain runs in `handle_request`, content changes
+  during an idle period don't reload until the next HTTP hit.
+  Acceptable for an interactive dev tool; if "automatic on
+  edit" semantics are needed, drive a periodic curl (e.g. a
+  10s `curl -s /stats > /dev/null` in another terminal).
+- **No partial reload.** A single touched file triggers a full
+  re-scan of all 60 topics. ~20ms; not worth optimising until
+  topic count crosses ~500.
 
 ## Key Design Decisions
 

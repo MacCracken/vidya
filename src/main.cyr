@@ -248,9 +248,19 @@ fn example_path(e) { return load64(e + 24); }
 # Registry — indexed concept store
 # ================================================================
 
-var _reg_entries = 0;   # vec of concept ptrs
-var _reg_index = 0;     # hashmap: id -> concept ptr
+var _reg_entries = 0;   # vec of concept ptrs (live registry)
+var _reg_index = 0;     # hashmap: id -> concept ptr (live registry)
 var _content_dir = 0;   # Str path to content/
+
+# Hot-reload state (P0B-4) — populated by inotify_init_watches
+# at serve start, drained per request, swapped on change.
+var _inotify_fd = 0 - 1;        # -1 sentinel — disabled until init
+var _reload_pending = 0;        # set by inotify_drain when events present
+var _reload_count = 0;          # successful reload counter (for sakshi)
+var _reload_failures = 0;       # failed reload counter
+var _reg_entries_next = 0;      # staging registry — built then swapped
+var _reg_index_next = 0;
+var _inotify_buf[8192];         # static drain buffer (one-shot read)
 
 fn reg_init() {
     _reg_entries = vec_new();
@@ -498,6 +508,178 @@ fn load_all() {
     }
     sakshi_span_exit();
     return reg_count();
+}
+
+# ================================================================
+# Hot-reload (P0B-4) — inotify watch + atomic registry swap
+# ================================================================
+# Single-threaded vidya means swap = two pointer assignments, no
+# barrier needed. Drain runs at the top of every handle_request;
+# reload runs inline on the request thread when drain finds events.
+# All-or-nothing: a partial-reload failure (one bad concept.toml)
+# leaves the live registry untouched.
+#
+# Bump-allocator note: each reload doubles registry memory, which
+# never frees. Acceptable for a local dev tool reloaded a handful
+# of times per session; document for long-running deployments.
+
+# IN_NONBLOCK + watch mask constants — referenced numerically because
+# the cyrius stdlib's InotifyEvent enum is in syscalls_x86_64_linux
+# (peer module, not directly visible here without per-arch wiring).
+# Mask = IN_MODIFY|IN_CLOSE_WRITE|IN_MOVED_FROM|IN_MOVED_TO|IN_CREATE|IN_DELETE
+#      = 2|8|64|128|256|512 = 970
+fn _hot_reload_mask() { return 970; }
+fn _hot_reload_in_nonblock() { return 2048; }
+
+# Open inotify fd in non-blocking mode and add watches on content/
+# root + every topic subdir. Idempotent: closes any prior fd first.
+# Called once at serve start (cmd_serve) and again after each
+# successful reload (so newly-added topic dirs get watched).
+fn inotify_init_watches() {
+    if (_inotify_fd >= 0) {
+        sys_close(_inotify_fd);
+        _inotify_fd = 0 - 1;
+    }
+    # syscall(294) = SYS_inotify_init1 on x86_64 + aarch64.
+    var fd = syscall(294, _hot_reload_in_nonblock());
+    if (fd < 0) {
+        sakshi_warn("inotify_init1 failed; hot-reload disabled", 41);
+        return 0;
+    }
+    _inotify_fd = fd;
+    var mask = _hot_reload_mask();
+    var croot = to_cstr(_content_dir);
+    sys_inotify_add_watch(fd, croot, mask);
+
+    var dirs = dir_list(_content_dir);
+    var n = vec_len(dirs);
+    var watched = 0;
+    var i = 0;
+    while (i < n) {
+        var dn = vec_get(dirs, i);
+        var dp = path_join(_content_dir, dn);
+        if (is_dir(dp) == 1) {
+            # Only watch topic dirs (same filter as build_next_registry).
+            # Skips content/cyrius/ and any non-topic subdirs so edits to
+            # field notes don't trigger pointless reloads.
+            var tp = path_join(dp, str_from("concept.toml"));
+            if (file_exists(str_data(tp)) == 1) {
+                var cdp = to_cstr(dp);
+                sys_inotify_add_watch(fd, cdp, mask);
+                watched = watched + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "inotify watching ");
+    str_builder_add_int(sb, watched + 1);
+    str_builder_add_cstr(sb, " dirs (root + ");
+    str_builder_add_int(sb, watched);
+    str_builder_add_cstr(sb, " topics)");
+    var line = str_builder_build(sb);
+    sakshi_info(str_data(line), str_len(line));
+    return 0;
+}
+
+# Drain pending inotify events. Non-blocking; returns immediately on
+# EAGAIN. Sets _reload_pending = 1 if any bytes were read.
+fn inotify_drain() {
+    if (_inotify_fd < 0) { return 0; }
+    var got = sys_read(_inotify_fd, &_inotify_buf, 8192);
+    while (got > 0) {
+        _reload_pending = 1;
+        got = sys_read(_inotify_fd, &_inotify_buf, 8192);
+    }
+    return 0;
+}
+
+# Build a fresh registry into _reg_entries_next + _reg_index_next.
+# All-or-nothing: returns 1 on full success, 0 on first concept-load
+# failure (live registry untouched in either case — the caller
+# swaps only on success).
+fn build_next_registry() {
+    _reg_entries_next = vec_new();
+    _reg_index_next = map_new();
+    var dirs = dir_list(_content_dir);
+    var n = vec_len(dirs);
+    var i = 0;
+    while (i < n) {
+        var dn = vec_get(dirs, i);
+        var dp = path_join(_content_dir, dn);
+        if (is_dir(dp) == 1) {
+            # Match load_all's filter: a directory without
+            # concept.toml is not a topic, skip silently. Only
+            # treat "concept.toml present but load failed" as
+            # a hard reload failure.
+            var tp = path_join(dp, str_from("concept.toml"));
+            if (file_exists(str_data(tp)) == 1) {
+                var c = load_concept(dp);
+                if (c == 0) {
+                    # Malformed concept.toml mid-reload. Leak the
+                    # partial _reg_entries_next; live registry in
+                    # _reg_entries / _reg_index is unaffected.
+                    return 0;
+                }
+                vec_push(_reg_entries_next, c);
+                var id = concept_id(c);
+                if (id != 0) {
+                    map_set(_reg_index_next, to_cstr(id), c);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Atomic swap — two pointer assignments under the single accept
+# thread. The next request reads the new pair; older response
+# allocations referencing the old vec/map remain valid until they
+# go out of scope (vec/map are heap-resident, never freed by the
+# bump allocator).
+fn swap_registry() {
+    _reg_entries = _reg_entries_next;
+    _reg_index = _reg_index_next;
+    _reg_entries_next = 0;
+    _reg_index_next = 0;
+    return 0;
+}
+
+# Orchestrator: build, swap on success, log timing + outcome.
+# Re-installs inotify watches after a successful swap so that
+# newly-added topic dirs get covered.
+fn do_reload() {
+    var t0 = _sk_now_ns();
+    var ok = build_next_registry();
+    if (ok != 1) {
+        _reload_failures = _reload_failures + 1;
+        var sb1 = str_builder_new();
+        str_builder_add_cstr(sb1, "reload aborted: a concept failed to load (failure #");
+        str_builder_add_int(sb1, _reload_failures);
+        str_builder_add_cstr(sb1, "); live registry untouched");
+        var line1 = str_builder_build(sb1);
+        sakshi_warn(str_data(line1), str_len(line1));
+        _reload_pending = 0;
+        return 0;
+    }
+    swap_registry();
+    inotify_init_watches();
+    _reload_count = _reload_count + 1;
+    var dt = _sk_now_ns() - t0;
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "reload OK: ");
+    str_builder_add_int(sb, vec_len(_reg_entries));
+    str_builder_add_cstr(sb, " topics in ");
+    str_builder_add_int(sb, dt);
+    str_builder_add_cstr(sb, "ns (reload #");
+    str_builder_add_int(sb, _reload_count);
+    str_builder_add_cstr(sb, ")");
+    var line = str_builder_build(sb);
+    sakshi_info(str_data(line), str_len(line));
+    _reload_pending = 0;
+    return 0;
 }
 
 # ================================================================
@@ -1410,7 +1592,13 @@ fn _serve_log(path, plen, status, elapsed_ns) {
 
 # Connection handler — signature required by sandhi_server_run.
 # P0B-3: structured access log (path + status + latency) per request.
+# P0B-4: drain pending inotify events; if any, full-rebuild + swap
+# the registry inline before serving. The swap happens between two
+# requests so the in-flight one always sees a consistent registry.
 fn handle_request(ctx, cfd, buf, blen) {
+    inotify_drain();
+    if (_reload_pending == 1) { do_reload(); }
+
     var t0 = _sk_now_ns();
     _serve_status = 0;
     var path = sandhi_server_get_path(buf, blen);
@@ -1434,6 +1622,8 @@ fn cmd_serve(port) {
     syscall(1, 1, &pbuf, plen);
     println("");
     sakshi_info("server started", 14);
+
+    inotify_init_watches();
 
     var rc = sandhi_server_run(INADDR_ANY(), _http_port, &handle_request, 0);
     if (rc != 0) {
