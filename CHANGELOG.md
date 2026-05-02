@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.8] — 2026-05-02
+
+P0C-2a graphics batch 1 — 3 topics × 11 languages each (33 new
+source files). Plus `bloom_and_glow/concept.toml` completed
+(was a TODO stub before this release).
+
+### Added
+- **P0C-2a cluster — 3 topics × 11 languages each, +33 source
+  files** (validator sweep 572/572 → 605/605):
+  - **`framebuffer_rendering`** — 11 new lang files (concept-only
+    topic; cyrius reference designed first). 16×16 BGRA8888
+    framebuffer with `fb_clear` (memset), `fb_set`/`fb_get` with
+    explicit bounds-check returning a 0/1 success flag (matching
+    the encom-hits pattern in concept.toml), `draw_hline`/
+    `draw_vline`, `count_lit_pixels`. 18 assertions covering
+    byte-exact BGRA encoding, OOB rejection, line clipping at
+    screen edge. Asm ports use a `.bss` arena with the same
+    test surface; OpenQASM uses qubit-as-pixel encoding.
+  - **`line_rasterization`** — 11 new lang files. All-octant
+    integer Bresenham on a 16×16 byte framebuffer; pure
+    integer math (no floats, no division). 27 assertions
+    covering 7 line types: horizontal (dy=0), vertical
+    (dx=0), positive 45° diagonal, negative 45° diagonal,
+    steep slope (|dy|>|dx|, octant swap), single-point
+    degenerate, reversed start/end produces same pixel set.
+    Asm ports use callee-saved x19+/r12+ to cache loop state
+    across `bl/call fb_set` (per the AArch64 ABI field-note).
+  - **`bloom_and_glow`** — 11 new lang files. 1-pixel additive
+    bloom on a 16×16 single-channel intensity buffer. Each
+    pixel ≥ THRESHOLD=128 contributes `intensity / GLOW_FRAC`
+    to its 4 cardinal neighbors with per-channel saturation
+    clamp at 255 (the wrap-gotcha from concept.toml). 20
+    assertions covering: empty input → empty output, single
+    bright pixel, saturation clamp, threshold cutoff, edge-
+    pixel in-bounds-only glow, two adjacent bright pixels
+    summing at midpoint. OpenQASM uses controlled rotations
+    as amplitude-leakage analog of light-bleed.
+- **`bloom_and_glow/concept.toml` completed** — was a TODO stub.
+  Now has 4 best practices (threshold-before-blur, separable
+  blur, per-channel additive composite with clamp, small-
+  radius retro), 3 gotchas (black-background bloom is just the
+  blur, per-channel saturation never wrap, hard-threshold
+  banding), and 2 performance notes (bandwidth-limited not
+  compute-limited, radius=1 is essentially free).
+
+### Changed
+- **VERSION** 2.3.7 → 2.3.8.
+- **Topic coverage**: 60 topics, 52 → 55 fully covered. Per-
+  language counts (each):
+  - Rust/Python/C/Go/TypeScript/Shell/Zig/OpenQASM: 52 → 55
+  - x86_64 ASM / AArch64 ASM: 52 → 55
+  - Cyrius: 52 → 55 (all 3 topics designed cyrius.cyr first)
+  - Examples: 572 → 605 (+33 new source files; +5.8%).
+
+### Notes (recurring patterns worth field-noting later)
+- **x86_64 caller-saved register clobber across helper calls.**
+  `bloom_and_glow/asm_x86_64.s`'s `apply_bloom` cached `glow`
+  in `r8` across 4 `call fb_add`. SysV ABI marks `r8` as
+  caller-saved, and `fb_add`'s body uses `r8` as scratch — so
+  the second `fb_add` saw garbage instead of the saved glow.
+  Fix: cache in `rbp` (callee-saved) with explicit
+  `push rbp`/`pop rbp` at function entry/exit. Direct sibling
+  of the AArch64 cross-`bl` clobber field-note
+  (`aarch64_callee_saved_and_imm_limits`). Worth a parallel
+  x86_64 entry once it surfaces a third time.
+- **GAS `imul reg, symbol` ambiguity.** `imul rax, FB_W` where
+  `FB_W` is a `.equ` constant gets parsed as `IMUL r64, r/m64`
+  (memory operand) instead of the immediate form, which would
+  read 8 bytes from address `[FB_W]`. Initial cause of the
+  bloom asm failure; fixed by switching to `shl rax, 4` (since
+  FB_W=16). The `cmp r64, symbol` form parses correctly as
+  immediate on GAS — this is `imul`-specific. Worth noting if
+  the pattern shows up again in another asm port.
+
+### Verified
+- `cyrius build src/main.cyr build/vidya` — clean.
+- `cyrius test` — 41/41 passing.
+- `cyrius lint src/main.cyr` — 3 pre-existing line-length
+  warnings (lines 821/822/1141), no new issues.
+- `scripts/validate-content.sh` — **605/605 green**, 0 failed,
+  0 skipped (full toolchain locally available).
+
 ## [2.3.7] — 2026-05-02
 
 P0C-4 systems & misc cluster — all 4 topics backfilled to 11/11

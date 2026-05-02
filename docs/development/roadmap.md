@@ -2,11 +2,11 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-02
 >
-> **Version**: 2.3.7 | **Cyrius**: 5.8.14
-> **Topics**: 60 (52 fully covered, 8 still partial)
+> **Version**: 2.3.8 | **Cyrius**: 5.8.14
+> **Topics**: 60 (55 fully covered, 5 still partial)
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 572 source files; concept files: 60
-> **Validator**: 572/572 green
+> **Examples**: 605 source files; concept files: 60
+> **Validator**: 605/605 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -28,14 +28,15 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.3.5 | 2026-05-02 | **P0B-2 + P0B-3 complete** — memory-resident contract audited and documented; sakshi structured access log on `serve` (path + status + level-routed latency). Field notes promoted: `language/shell_runtime.cyml` (3 entries) + AArch64 ABI consolidation in `language/platform_abi.cyml`. CLAUDE.md + docs/architecture/overview.md rewritten end-to-end. P0B-4 hot-reload deferred. |
 | 2.3.6 | 2026-05-02 | **P0B-4 complete — content hot-reload on `serve`** — inotify watch on every topic dir; per-request drain triggers all-or-nothing rebuild + atomic registry pointer swap; sakshi events per reload (success/failure with timing). End-to-end verified across add/remove/corrupt/restore. Reload latency 17–22ms for 60 topics. **P0B fully done (B-1 → B-4 all shipped).** |
 | 2.3.7 | 2026-05-02 | **P0C-4 complete + cyrius pin bump 5.8.3 → 5.8.14** — systems & misc cluster: `compression` (LZ77-shaped 2-byte tokens, RLE overlap, bomb guard), `concurrent_file_access` (real flock per-OPEN with 2-fd contention), `jsonl_format` (build/index/escape/unescape with 2× expansion bounds check), `page_management` (10 lang ports of the existing cyrius reference). 43 new source files; validator 529/529 → 572/572. |
+| 2.3.8 | 2026-05-02 | **P0C-2a complete — graphics batch 1 (3 topics × 11 langs)** — `framebuffer_rendering` (16×16 BGRA8888, bounds-checked fb_set/get/clear/hline/vline), `line_rasterization` (all-octant integer Bresenham, 7 line types), `bloom_and_glow` (1-pixel additive bloom + saturation clamp + threshold). Plus completed bloom_and_glow concept.toml (was TODO stub). 33 new source files; validator 572/572 → 605/605. |
 
 ---
 
 ## Current State
 
-### 52 topics fully covered (11/11 languages)
+### 55 topics fully covered (11/11 languages)
 
-The original 36 P0 topics, plus 16 added in v2.3.2–v2.3.7:
+The original 36 P0 topics, plus 19 added in v2.3.2–v2.3.8:
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
@@ -44,21 +45,22 @@ The original 36 P0 topics, plus 16 added in v2.3.2–v2.3.7:
 - v2.3.4 P0C-3 (3): btree_indexing, sql_parsing, write_ahead_logging
 - v2.3.7 P0C-4 (4): compression, concurrent_file_access,
   jsonl_format, page_management
+- v2.3.8 P0C-2a (3): framebuffer_rendering, line_rasterization,
+  bloom_and_glow
 
 (Note: the v2.3.5 reconciliation flagged a 47→48 discrepancy
-between roadmap text and the loader's count; identity of the
-"extra" 48th topic still TBD — verify on the v2.3.8 graphics
-sweep when each partial topic is touched in turn.)
+between roadmap text and the loader's count. Still unresolved
+at v2.3.8 — should chase down on the v2.3.9 graphics batch.)
 
-### 8 topics still partial
+### 5 topics still partial
 
-**P0C-2 graphics cluster** (8 topics, all 0/11 — needs full 11-lang ports):
-bindless_resources, bloom_and_glow, direct_drm_gpu_compute,
-explicit_gpu_synchronization, framebuffer_rendering, gpu_memory_pooling,
-line_rasterization, render_graph_architecture
+**P0C-2 graphics cluster — remaining batches** (5 topics, all 0/11):
+bindless_resources, direct_drm_gpu_compute,
+explicit_gpu_synchronization, gpu_memory_pooling,
+render_graph_architecture
 
-Gap to full 11/11 across these 8 topics: **~88 source files**
-(8 concept-only × 11 langs each).
+Gap to full 11/11 across these 5 topics: **~55 source files**
+(5 concept-only × 11 langs each).
 
 ---
 
@@ -154,13 +156,17 @@ Done:
 Plus: **cyrius pin bump 5.8.3 → 5.8.14** (no API delta; field-
 notes verification range bumped to 5.8.14).
 
-### 2.3.8 — P0C-2a graphics batch 1 (3 topics, ~33 files)
+### 2.3.8 — P0C-2a graphics batch 1 ✅ shipped 2026-05-02
 
-Pull cyrius references from mabda v3 source tree first, then port:
-- `framebuffer_rendering` (closest sibling to `sprite_rendering`
-  which is already 11/11 — natural follow-on)
-- `line_rasterization` (Bresenham; small, mathematical)
-- `bloom_and_glow` (post-process; visual but compact)
+All 3 topics × 11 langs landed (33 new files):
+- **`framebuffer_rendering`** — 16×16 BGRA8888 with bounds-
+  checked set/get, hline/vline, lit-pixel count.
+- **`line_rasterization`** — all-octant integer Bresenham
+  covering 7 line types (horizontal, vertical, +/- diagonals,
+  steep, point, reversed).
+- **`bloom_and_glow`** — 1-pixel additive bloom with per-
+  channel saturation clamp + threshold. Concept.toml
+  completed (was a TODO stub).
 
 ### 2.3.9 — P0C-2b graphics batch 2 (3 topics, ~33 files)
 
@@ -284,4 +290,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-02 (v2.3.7)*
+*Last Updated: 2026-05-02 (v2.3.8)*

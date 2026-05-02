@@ -1,0 +1,172 @@
+# Vidya — Line Rasterization (Bresenham) — Cyrius reference (runnable)
+#
+# All-octant integer Bresenham line algorithm on a 16×16 framebuffer.
+# Mirrors the concept.toml best practice "handle all octants": swap
+# x/y roles when |dy| > |dx| (steep lines), negate step directions
+# for negative slopes, draw both endpoints regardless of start/end
+# order. Pure integer math (no floats, no division — only adds and
+# compares).
+#
+# Tests cover the five canonical line types from the BP:
+#   1. Horizontal (dy = 0)
+#   2. Vertical (dx = 0)
+#   3. Positive 45° diagonal (dx = dy > 0)
+#   4. Negative 45° diagonal (dx = -dy)
+#   5. Steep slope (|dy| > |dx|) — octant swap path
+#   6. Single-point degenerate (start == end)
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var FB_W = 16;
+var FB_H = 16;
+var FB_BYTES = 256;       # 16 * 16, one byte per pixel (lit or dark)
+
+var fb_buf[256];
+
+fn fb_clear() {
+    memset(&fb_buf, 0, FB_BYTES);
+    return 0;
+}
+
+fn fb_set(x, y, val) {
+    if (x < 0) { return 0; }
+    if (x >= FB_W) { return 0; }
+    if (y < 0) { return 0; }
+    if (y >= FB_H) { return 0; }
+    store8(&fb_buf + y * FB_W + x, val);
+    return 1;
+}
+
+fn fb_get(x, y) {
+    if (x < 0) { return 0; }
+    if (x >= FB_W) { return 0; }
+    if (y < 0) { return 0; }
+    if (y >= FB_H) { return 0; }
+    return load8(&fb_buf + y * FB_W + x);
+}
+
+fn count_lit() {
+    var n = 0;
+    var i = 0;
+    while (i < FB_BYTES) {
+        if (load8(&fb_buf + i) != 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn iabs(v) {
+    if (v < 0) { return 0 - v; }
+    return v;
+}
+
+fn isign(v) {
+    if (v > 0) { return 1; }
+    if (v < 0) { return 0 - 1; }
+    return 0;
+}
+
+# All-octant integer Bresenham. Marks every visited cell with `val`.
+fn draw_line(x0, y0, x1, y1, val) {
+    var dx = iabs(x1 - x0);
+    var dy = iabs(y1 - y0);
+    var sx = isign(x1 - x0);
+    var sy = isign(y1 - y0);
+    # Single point — draw start and exit.
+    if (dx == 0) {
+        if (dy == 0) {
+            fb_set(x0, y0, val);
+            return 0;
+        }
+    }
+    # err = dx - dy lets one branch handle steep + shallow lines.
+    var err = dx - dy;
+    var x = x0;
+    var y = y0;
+    while (1 == 1) {
+        fb_set(x, y, val);
+        if (x == x1) {
+            if (y == y1) { return 0; }
+        }
+        var e2 = err * 2;
+        if (e2 > 0 - dy) {
+            err = err - dy;
+            x = x + sx;
+        }
+        if (e2 < dx) {
+            err = err + dx;
+            y = y + sy;
+        }
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("line_rasterization");
+
+    # --- Test 1: horizontal (dy=0): from (2,5) to (8,5) inclusive = 7 pixels ---
+    fb_clear();
+    draw_line(2, 5, 8, 5, 1);
+    assert_eq(count_lit(), 7, "horizontal: 7 pixels");
+    assert_eq(fb_get(2, 5), 1, "horizontal endpoint left");
+    assert_eq(fb_get(8, 5), 1, "horizontal endpoint right");
+    assert_eq(fb_get(5, 5), 1, "horizontal midpoint");
+    assert_eq(fb_get(5, 6), 0, "horizontal stays on row");
+
+    # --- Test 2: vertical (dx=0): from (5,2) to (5,8) = 7 pixels ---
+    fb_clear();
+    draw_line(5, 2, 5, 8, 1);
+    assert_eq(count_lit(), 7, "vertical: 7 pixels");
+    assert_eq(fb_get(5, 2), 1, "vertical endpoint top");
+    assert_eq(fb_get(5, 8), 1, "vertical endpoint bottom");
+    assert_eq(fb_get(5, 5), 1, "vertical midpoint");
+    assert_eq(fb_get(6, 5), 0, "vertical stays on column");
+
+    # --- Test 3: positive 45° diagonal: (2,2) to (7,7) = 6 pixels ---
+    fb_clear();
+    draw_line(2, 2, 7, 7, 1);
+    assert_eq(count_lit(), 6, "+diagonal: 6 pixels");
+    assert_eq(fb_get(2, 2), 1, "+diagonal start");
+    assert_eq(fb_get(7, 7), 1, "+diagonal end");
+    assert_eq(fb_get(5, 5), 1, "+diagonal midpoint");
+    assert_eq(fb_get(5, 4), 0, "+diagonal off-line");
+
+    # --- Test 4: negative 45° diagonal: (2,7) to (7,2) = 6 pixels ---
+    fb_clear();
+    draw_line(2, 7, 7, 2, 1);
+    assert_eq(count_lit(), 6, "-diagonal: 6 pixels");
+    assert_eq(fb_get(2, 7), 1, "-diagonal start");
+    assert_eq(fb_get(7, 2), 1, "-diagonal end");
+    assert_eq(fb_get(5, 4), 1, "-diagonal midpoint");
+
+    # --- Test 5: steep line (|dy|>|dx|): (3,1) to (5,11) — dy=10, dx=2 ---
+    # Octant swap: 11 pixels along the long axis.
+    fb_clear();
+    draw_line(3, 1, 5, 11, 1);
+    assert_eq(count_lit(), 11, "steep: 11 pixels");
+    assert_eq(fb_get(3, 1), 1, "steep start");
+    assert_eq(fb_get(5, 11), 1, "steep end");
+
+    # --- Test 6: single point (start == end): 1 pixel ---
+    fb_clear();
+    draw_line(8, 8, 8, 8, 1);
+    assert_eq(count_lit(), 1, "single point: 1 pixel");
+    assert_eq(fb_get(8, 8), 1, "single point lit");
+
+    # --- Test 7: reverse start/end produces the same pixel set ---
+    fb_clear();
+    draw_line(8, 5, 2, 5, 1);
+    assert_eq(count_lit(), 7, "reversed horizontal: 7 pixels");
+    assert_eq(fb_get(2, 5), 1, "reversed: left endpoint still drawn");
+    assert_eq(fb_get(8, 5), 1, "reversed: right endpoint still drawn");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

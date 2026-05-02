@@ -1,0 +1,153 @@
+# Vidya — Framebuffer Rendering — Cyrius reference (runnable)
+#
+# 16×16 BGRA8888 framebuffer (1024 bytes) — small enough for assertion-
+# based byte-exact verification, large enough to exercise stride math
+# and the bounds-check gotcha. Mirrors the encom-hits draw_pixel
+# pattern from concept.toml. Operations covered:
+#   - fb_clear: memset to 0 (the "use memset, not per-pixel loops" BP)
+#   - fb_set: per-pixel BGRA write with x/y bounds check
+#   - fb_get: read back BGRA color at (x, y)
+#   - draw_hline: row-major sequential writes (cache-friendly, BP)
+#   - draw_vline: column-major stride-spaced writes
+#   - count_nonzero_pixels: scans 4-byte BGRA chunks
+#
+# All in-memory; no real display surface. Color encoding: 0xRRGGBB →
+# stored as B,G,R,A=255 (BGRA8888 native byte order, the gotcha).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var FB_W = 16;
+var FB_H = 16;
+var FB_BPP = 4;       # bytes per pixel (BGRA)
+var FB_BYTES = 1024;  # 16 * 16 * 4
+
+var fb_buf[1024];
+
+fn fb_clear() {
+    memset(&fb_buf, 0, FB_BYTES);
+    return 0;
+}
+
+fn fb_set(x, y, color) {
+    if (x < 0) { return 0; }
+    if (x >= FB_W) { return 0; }
+    if (y < 0) { return 0; }
+    if (y >= FB_H) { return 0; }
+    var offset = (y * FB_W + x) * FB_BPP;
+    store8(&fb_buf + offset, color & 255);              # B
+    store8(&fb_buf + offset + 1, (color / 256) & 255);  # G
+    store8(&fb_buf + offset + 2, (color / 65536) & 255); # R
+    store8(&fb_buf + offset + 3, 255);                   # A (always opaque)
+    return 1;
+}
+
+fn fb_get(x, y) {
+    if (x < 0) { return 0; }
+    if (x >= FB_W) { return 0; }
+    if (y < 0) { return 0; }
+    if (y >= FB_H) { return 0; }
+    var offset = (y * FB_W + x) * FB_BPP;
+    var b = load8(&fb_buf + offset);
+    var g = load8(&fb_buf + offset + 1);
+    var r = load8(&fb_buf + offset + 2);
+    return (r * 65536) + (g * 256) + b;
+}
+
+fn draw_hline(x, y, len, color) {
+    var i = 0;
+    while (i < len) {
+        fb_set(x + i, y, color);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn draw_vline(x, y, len, color) {
+    var i = 0;
+    while (i < len) {
+        fb_set(x, y + i, color);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Count pixels whose BGRA chunk is non-zero (ignores alpha-only writes
+# because fb_set always sets A=255 — we want "set" pixels, not "ever-
+# touched" ones, so we check the RGB triple).
+fn count_lit_pixels() {
+    var n = 0;
+    var i = 0;
+    while (i < FB_BYTES) {
+        var b = load8(&fb_buf + i);
+        var g = load8(&fb_buf + i + 1);
+        var r = load8(&fb_buf + i + 2);
+        if (b != 0) { n = n + 1; }
+        elif (g != 0) { n = n + 1; }
+        elif (r != 0) { n = n + 1; }
+        i = i + 4;
+    }
+    return n;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("framebuffer_rendering");
+
+    # Test 1: clear leaves all bytes zero
+    fb_clear();
+    assert_eq(count_lit_pixels(), 0, "clear → 0 lit pixels");
+
+    # Test 2: write red at (5, 7); verify BGRA bytes
+    fb_set(5, 7, 0xFF0000);   # 0xRRGGBB = pure red
+    var off = (7 * FB_W + 5) * FB_BPP;
+    assert_eq(load8(&fb_buf + off), 0, "B=0 at (5,7)");
+    assert_eq(load8(&fb_buf + off + 1), 0, "G=0 at (5,7)");
+    assert_eq(load8(&fb_buf + off + 2), 255, "R=255 at (5,7)");
+    assert_eq(load8(&fb_buf + off + 3), 255, "A=255 at (5,7)");
+
+    # Test 3: fb_get round-trip
+    assert_eq(fb_get(5, 7), 0xFF0000, "get returns 0xFF0000");
+
+    # Test 4: bounds check — out-of-range writes do nothing
+    var lit_before = count_lit_pixels();
+    fb_set(0 - 1, 5, 0x00FF00);
+    fb_set(16, 5, 0x00FF00);
+    fb_set(5, 0 - 1, 0x00FF00);
+    fb_set(5, 16, 0x00FF00);
+    assert_eq(count_lit_pixels(), lit_before, "OOB writes rejected");
+
+    # Test 5: fb_set returns 1 on success, 0 on bounds reject
+    assert_eq(fb_set(3, 3, 0x0000FF), 1, "in-bounds returns 1");
+    assert_eq(fb_set(0 - 5, 3, 0x0000FF), 0, "OOB returns 0");
+
+    # Test 6: horizontal line — 4 pixels in a row
+    fb_clear();
+    draw_hline(2, 8, 4, 0x00FF00);  # (2,8) (3,8) (4,8) (5,8) = green
+    assert_eq(count_lit_pixels(), 4, "hline: 4 pixels lit");
+    assert_eq(fb_get(2, 8), 0x00FF00, "hline pixel (2,8)");
+    assert_eq(fb_get(5, 8), 0x00FF00, "hline pixel (5,8)");
+    assert_eq(fb_get(6, 8), 0, "hline stops at len");
+
+    # Test 7: vertical line — 4 pixels in a column
+    fb_clear();
+    draw_vline(7, 2, 4, 0x0000FF);  # (7,2) (7,3) (7,4) (7,5) = blue
+    assert_eq(count_lit_pixels(), 4, "vline: 4 pixels lit");
+    assert_eq(fb_get(7, 2), 0x0000FF, "vline pixel (7,2)");
+    assert_eq(fb_get(7, 5), 0x0000FF, "vline pixel (7,5)");
+    assert_eq(fb_get(7, 6), 0, "vline stops at len");
+
+    # Test 8: hline that runs partially off-screen — only in-bounds pixels lit
+    fb_clear();
+    draw_hline(14, 5, 4, 0xFF0000);  # would draw (14,5) (15,5) (16,5) (17,5)
+                                      # but 16 and 17 are OOB
+    assert_eq(count_lit_pixels(), 2, "hline clipped to screen edge");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);
