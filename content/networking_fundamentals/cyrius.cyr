@@ -1,0 +1,228 @@
+# Vidya — Networking Fundamentals — Cyrius reference (runnable)
+#
+# In-memory simulation of the TCP socket state machine + lifecycle:
+# bind / listen / connect / accept / send / recv / close. No real
+# syscalls — we model the kernel's per-socket state so the test
+# surface is byte-deterministic and language-portable.
+#
+# The 6-state subset modeled here (RFC 793 has 11; we collapse the
+# transient ones for clarity):
+#
+#   CLOSED → bind+listen → LISTEN
+#   LISTEN → connect-from-peer → SYN_RCVD
+#   SYN_RCVD → established → ESTABLISHED
+#   ESTABLISHED → close → FIN_WAIT
+#   FIN_WAIT → peer-acks → CLOSED
+#
+# Tests:
+#   1. New socket starts CLOSED.
+#   2. bind + listen transitions to LISTEN.
+#   3. Two-way connect: client + server both reach ESTABLISHED.
+#   4. send/recv echoes bytes through the connection.
+#   5. close transitions to FIN_WAIT then CLOSED.
+#   6. Port reuse on a non-CLOSED socket is rejected.
+#   7. recv on CLOSED returns -1.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# State enum
+var ST_CLOSED = 0;
+var ST_LISTEN = 1;
+var ST_SYN_RCVD = 2;
+var ST_ESTABLISHED = 3;
+var ST_FIN_WAIT = 4;
+
+var SOCK_CAP = 8;
+var BUF_CAP = 256;
+
+# Per-socket state (parallel arrays; index = sock_id)
+var sock_state[64];     # 8 * 8 — current state
+var sock_port[64];      # bound port (0 = unbound)
+var sock_peer[64];      # peer sock_id (0 = none)
+var sock_rxbuf[2048];   # 8 sockets × 256-byte rx buf
+var sock_rxlen[64];     # bytes available in rx buf
+
+# Port → sock_id reverse lookup for connect().
+var port_to_sock[65536];
+
+fn net_init() {
+    memset(&sock_state, 0, SOCK_CAP * 8);
+    memset(&sock_port, 0, SOCK_CAP * 8);
+    memset(&sock_peer, 0, SOCK_CAP * 8);
+    memset(&sock_rxbuf, 0, SOCK_CAP * BUF_CAP);
+    memset(&sock_rxlen, 0, SOCK_CAP * 8);
+    memset(&port_to_sock, 0, 65536 * 8);
+    return 0;
+}
+
+fn sock_create() {
+    # Linear scan for free slot. 0 reserved (null).
+    var i = 1;
+    while (i < SOCK_CAP) {
+        if (load64(&sock_state + i * 8) == ST_CLOSED) {
+            if (load64(&sock_port + i * 8) == 0) {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn sock_state_get(s) {
+    if (s == 0) { return 0 - 1; }
+    if (s >= SOCK_CAP) { return 0 - 1; }
+    return load64(&sock_state + s * 8);
+}
+
+# bind(sock, port) → 1 on success, 0 on conflict.
+fn sock_bind(s, port) {
+    if (s == 0) { return 0; }
+    if (s >= SOCK_CAP) { return 0; }
+    if (load64(&port_to_sock + port * 8) != 0) { return 0; }
+    if (load64(&sock_port + s * 8) != 0) { return 0; }
+    store64(&sock_port + s * 8, port);
+    store64(&port_to_sock + port * 8, s);
+    return 1;
+}
+
+# listen(sock) → 1 on transition CLOSED→LISTEN, 0 otherwise.
+fn sock_listen(s) {
+    if (s == 0) { return 0; }
+    if (s >= SOCK_CAP) { return 0; }
+    if (load64(&sock_state + s * 8) != ST_CLOSED) { return 0; }
+    if (load64(&sock_port + s * 8) == 0) { return 0; }
+    store64(&sock_state + s * 8, ST_LISTEN);
+    return 1;
+}
+
+# connect(client_sock, server_port) — handshake completes immediately
+# in single-thread sim. Returns 1 on success.
+fn sock_connect(client, port) {
+    if (client == 0) { return 0; }
+    if (client >= SOCK_CAP) { return 0; }
+    var server = load64(&port_to_sock + port * 8);
+    if (server == 0) { return 0; }
+    if (load64(&sock_state + server * 8) != ST_LISTEN) { return 0; }
+    # Both ends transition to ESTABLISHED (skip transient SYN states).
+    store64(&sock_state + client * 8, ST_ESTABLISHED);
+    store64(&sock_state + server * 8, ST_ESTABLISHED);
+    store64(&sock_peer + client * 8, server);
+    store64(&sock_peer + server * 8, client);
+    return 1;
+}
+
+# send(sock, byte) — write one byte to the peer's rx buffer.
+# Returns 1 on success, 0 if not ESTABLISHED or rx buf full.
+fn sock_send_byte(s, b) {
+    if (s == 0) { return 0; }
+    if (s >= SOCK_CAP) { return 0; }
+    if (load64(&sock_state + s * 8) != ST_ESTABLISHED) { return 0; }
+    var peer = load64(&sock_peer + s * 8);
+    if (peer == 0) { return 0; }
+    var rxlen = load64(&sock_rxlen + peer * 8);
+    if (rxlen >= BUF_CAP) { return 0; }
+    store8(&sock_rxbuf + peer * BUF_CAP + rxlen, b);
+    store64(&sock_rxlen + peer * 8, rxlen + 1);
+    return 1;
+}
+
+# recv(sock) — pop one byte from this socket's rx buf.
+# Returns the byte (0..255) or -1 if no data / not connected.
+fn sock_recv_byte(s) {
+    if (s == 0) { return 0 - 1; }
+    if (s >= SOCK_CAP) { return 0 - 1; }
+    var st = load64(&sock_state + s * 8);
+    if (st != ST_ESTABLISHED) {
+        if (st != ST_FIN_WAIT) { return 0 - 1; }
+    }
+    var rxlen = load64(&sock_rxlen + s * 8);
+    if (rxlen == 0) { return 0 - 1; }
+    var b = load8(&sock_rxbuf + s * BUF_CAP);
+    # Shift the rx buf left by one (deterministic; not fast, but
+    # matches a real recv() draining one byte at a time).
+    var i = 0;
+    while (i < rxlen - 1) {
+        var nx = load8(&sock_rxbuf + s * BUF_CAP + i + 1);
+        store8(&sock_rxbuf + s * BUF_CAP + i, nx);
+        i = i + 1;
+    }
+    store64(&sock_rxlen + s * 8, rxlen - 1);
+    return b;
+}
+
+# close(sock) — ESTABLISHED→FIN_WAIT→CLOSED in one step (single-thread
+# sim collapses the FIN/ACK round-trip).
+fn sock_close(s) {
+    if (s == 0) { return 0; }
+    if (s >= SOCK_CAP) { return 0; }
+    var st = load64(&sock_state + s * 8);
+    if (st == ST_CLOSED) { return 0; }
+    store64(&sock_state + s * 8, ST_FIN_WAIT);
+    var port = load64(&sock_port + s * 8);
+    if (port != 0) {
+        store64(&port_to_sock + port * 8, 0);
+    }
+    # Tear down to CLOSED
+    store64(&sock_state + s * 8, ST_CLOSED);
+    store64(&sock_port + s * 8, 0);
+    store64(&sock_peer + s * 8, 0);
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+    net_init();
+
+    test_group("networking_fundamentals");
+
+    # --- 1. Fresh socket starts CLOSED ---
+    var srv = sock_create();
+    assert_eq(sock_state_get(srv), ST_CLOSED, "new socket = CLOSED");
+
+    # --- 2. bind + listen → LISTEN ---
+    assert_eq(sock_bind(srv, 8080), 1, "bind 8080 succeeds");
+    assert_eq(sock_listen(srv), 1, "listen → 1");
+    assert_eq(sock_state_get(srv), ST_LISTEN, "state = LISTEN");
+
+    # --- 3. Two-way connect: both reach ESTABLISHED ---
+    var cli = sock_create();
+    assert_eq(sock_connect(cli, 8080), 1, "connect → 1");
+    assert_eq(sock_state_get(cli), ST_ESTABLISHED, "client ESTABLISHED");
+    assert_eq(sock_state_get(srv), ST_ESTABLISHED, "server ESTABLISHED");
+
+    # --- 4. send/recv: client → server, then echo back ---
+    assert_eq(sock_send_byte(cli, 65), 1, "send 'A' from client");
+    assert_eq(sock_send_byte(cli, 66), 1, "send 'B' from client");
+    assert_eq(sock_recv_byte(srv), 65, "server recv 'A'");
+    assert_eq(sock_recv_byte(srv), 66, "server recv 'B'");
+    assert_eq(sock_recv_byte(srv), 0 - 1, "server recv empty → -1");
+    # Server echoes back
+    assert_eq(sock_send_byte(srv, 67), 1, "server send 'C'");
+    assert_eq(sock_recv_byte(cli), 67, "client recv 'C'");
+
+    # --- 5. close: state transitions to CLOSED ---
+    assert_eq(sock_close(cli), 1, "close client");
+    assert_eq(sock_state_get(cli), ST_CLOSED, "client CLOSED");
+
+    # --- 6. Port reuse rejected while previous bind active ---
+    var srv2 = sock_create();
+    var bind_dup = sock_bind(srv2, 8080);  # 8080 still bound to srv
+    assert_eq(bind_dup, 0, "bind to in-use port rejected");
+
+    # --- 7. recv on CLOSED returns -1 ---
+    var recv_closed = sock_recv_byte(cli);
+    assert_eq(recv_closed, 0 - 1, "recv on CLOSED → -1");
+
+    # --- After closing srv, port becomes available ---
+    sock_close(srv);
+    assert_eq(sock_bind(srv2, 8080), 1, "bind 8080 after server closed");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

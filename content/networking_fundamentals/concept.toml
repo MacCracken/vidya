@@ -1,0 +1,50 @@
+id = "networking_fundamentals"
+title = "Networking Fundamentals"
+topic = "Networking"
+description = "TCP and UDP socket lifecycle, connection state machine, blocking vs non-blocking I/O, and the few syscall primitives every network program touches. The TCP state machine (CLOSED → LISTEN → SYN_RCVD → ESTABLISHED → FIN_WAIT → CLOSED) is the single load-bearing concept; everything else (HTTP, TLS, gRPC) sits on top. UDP is the negative space — what you get when you remove the state machine."
+tags = ["tcp", "udp", "sockets", "state-machine", "blocking-io", "non-blocking", "epoll", "syscalls", "berkeley-sockets"]
+related_topics = ["http_and_web_protocols", "tls_and_encryption", "concurrency", "syscalls_and_abi"]
+
+[[best_practices]]
+title = "Treat the TCP state machine as the source of truth"
+explanation = "The 11-state TCP FSM (RFC 793) is what your kernel actually tracks. App-level connection state that disagrees with the kernel is the bug. `ss -t state established` is your debugger; reach for it before guessing."
+
+[[best_practices]]
+title = "Non-blocking from day one for any concurrency"
+explanation = "Once you have more than one socket, blocking I/O forces a thread per connection. Non-blocking + epoll/kqueue/io_uring is the modern default. Even a single-connection server benefits — non-blocking accept means the listener never wedges."
+
+[[best_practices]]
+title = "Always close in the right state"
+explanation = "Closing in ESTABLISHED sends FIN, transitions to FIN_WAIT_1. Closing in CLOSE_WAIT (peer already closed) sends FIN, transitions to LAST_ACK. Half-closed connections (one side FIN, the other still sending) are valid and load-bearing for streaming protocols."
+
+[[best_practices]]
+title = "UDP is for when you've measured TCP and it's wrong"
+explanation = "UDP gets you no ordering, no retransmission, no congestion control. You'll reinvent some of those — badly. Pick UDP only when latency-critical (DNS, gaming, RTP) or when you're building QUIC over it. Default to TCP."
+
+[[gotchas]]
+title = "TIME_WAIT eats local ports"
+explanation = "After active close, the closer holds TIME_WAIT for 2×MSL (~60s). On a busy client, you'll exhaust the ephemeral port range (~28K ports) and `connect()` starts returning EADDRNOTAVAIL. Set SO_REUSEADDR + SO_REUSEPORT, or have the server initiate the close."
+bad_example = "// Make 30K outbound connections in 60s; observe EADDRNOTAVAIL on connection 28001."
+good_example = "setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));  // and have the server close first"
+
+[[gotchas]]
+title = "Partial reads/writes are the rule, not the exception"
+explanation = "`send(fd, buf, 1024)` may write 200 bytes and return 200. `recv(fd, buf, 1024)` may return 50 bytes when 1024 are coming. Loop until you've consumed/produced what you need, or wire a length prefix into your protocol."
+bad_example = "send(fd, buf, len);  // assume all bytes went out"
+good_example = "var sent = 0; while (sent < len) { var n = send(fd, buf + sent, len - sent); if (n < 0) break; sent += n; }"
+
+[[gotchas]]
+title = "EAGAIN on a non-blocking socket means try again, not error"
+explanation = "Non-blocking `recv()` returns -1 with errno=EAGAIN/EWOULDBLOCK when no data is ready. This is normal — wait for the fd to become readable (epoll/poll/select) and try again. Treating EAGAIN as a fatal error closes connections that have nothing wrong with them."
+bad_example = "if (recv(fd, ...) < 0) { close(fd); return; }  // closes on EAGAIN"
+good_example = "var n = recv(fd, ...); if (n < 0 && errno == EAGAIN) { /* re-arm epoll, return */ }"
+
+[[performance_notes]]
+title = "Connection setup costs ~100µs locally, ~RTT cross-region"
+explanation = "TCP three-way handshake is one RTT minimum. On localhost: sub-100µs. Same datacenter: 0.5-1ms. Cross-region: 50-200ms. For high-throughput RPC, connection pooling pays for itself within ~10 requests."
+evidence = "Loopback: connect() typically 50-80µs measured. Cross-region (us-east → eu-west): ~120ms RTT × 1 for handshake."
+
+[[performance_notes]]
+title = "epoll's fixed overhead beats select() above ~100 fds"
+explanation = "select() rebuilds its fd_set from scratch every call (O(N) per syscall + O(N) iterate). epoll_wait() returns only ready fds (O(ready) per call). Crossover is ~100 fds; above that, epoll wins by orders of magnitude."
+evidence = "10K idle fds: select() ~5ms/poll, epoll_wait() ~5µs/poll. Three orders of magnitude."

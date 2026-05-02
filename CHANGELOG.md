@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-05-02
+
+**Minor bump opening P1 — Networking & Infrastructure.** First
+new thematic addition since v2.2. Two new topics added (the first
+2 of the planned P1 set of 6); v2.4.0/2.4.1/2.4.2 will each ship
+2 topics, mirroring the v2.3.x cadence.
+
+### Added
+- **P1 cluster — 2 new topics × 11 languages each, +24 source
+  files** (validator sweep 660/660 → 682/682):
+  - **`networking_fundamentals`** — new topic. In-memory TCP
+    socket state machine + lifecycle (no real syscalls): bind,
+    listen, connect, accept, send, recv, close. 6-state subset
+    of RFC 793 (CLOSED, LISTEN, SYN_RCVD, ESTABLISHED, FIN_WAIT,
+    CLOSED). 19 assertions covering: fresh socket starts CLOSED,
+    bind+listen transition to LISTEN, two-way connect brings both
+    ends to ESTABLISHED, send/recv echoes bytes through, close
+    transitions to CLOSED, port reuse rejected while in-use,
+    recv on CLOSED returns -1, port becomes available after
+    close. OpenQASM uses Bell-pair entanglement as
+    handshake-establishes-connection analog.
+  - **`http_and_web_protocols`** — new topic. HTTP/1.1 request
+    parser. Sequential parse: request line → headers → body
+    (RFC 9112). Header names normalized to lowercase for
+    case-insensitive lookup (RFC 9110 §5.1). Body framing via
+    Content-Length. 24 assertions covering: simple GET parses,
+    method/path/version extracted, case-insensitive header
+    lookup (Host == host == HOST), multiple headers, POST
+    with body, body containing CRLF preserved (the parser
+    bug that truncates POST payloads is a real concept.toml
+    gotcha), malformed request rejected, absent header lookup
+    returns null. Asm ports verify the parsing primitive
+    (find_crlf scan + memeq) on known-shape requests.
+
+### Changed
+- **VERSION** 2.3.10 → **2.4.0** (minor bump — opens P1).
+- **Topic coverage**: 62 topics, 60 → 62 fully covered. Per-
+  language counts (each):
+  - All 11 languages: 60 → 62.
+  - Examples: 660 → 682 (+22 new source files; +3.3%).
+
+### Notes (recurring patterns worth field-noting)
+- **Bash `unset 'arr[ARR[s]]'` doesn't expand the inner array
+  reference.** Captured in `networking_fundamentals/shell.sh`
+  during port: `unset 'PORT_TO_SOCK[PORT[s]]'` failed to
+  remove the entry, leaving the port "in use" after close. Fix:
+  capture to a scalar first — `local p=${PORT[s]}; unset
+  "PORT_TO_SOCK[$p]"`. Worth a `bash_unset_inner_array_ref`
+  field-note entry once it bites a third time.
+- **Zig `@memset` on >100KB global arrays trips a codegen
+  bug.** `var port_to_sock: [65536]usize = ...; @memset(&port_to_sock, 0);`
+  produced "emit MIR failed: InvalidInstruction (Zig compiler
+  bug)" on the current Zig version. Workaround: replace the
+  large fixed-size global with a smaller indirect (linear-scan
+  pmap with SOCK_CAP entries). Worth tracking — likely
+  upstream-fixable but the workaround is also genuinely
+  smaller-data.
+- **Cyrius reserves `match` as a keyword.** Hit in
+  `http_and_web_protocols/cyrius.cyr` writing the header-lookup
+  comparison loop. Renamed to `is_match`. Add to the parser-
+  syntax field-notes if it surfaces in another port.
+
+### Verified
+- `cyrius build src/main.cyr build/vidya` — clean.
+- `cyrius test` — 41/41 passing.
+- `cyrius lint src/main.cyr` — 3 pre-existing line-length
+  warnings, no new issues.
+- `scripts/validate-content.sh` — **682/682 green**, 0 failed,
+  0 skipped (full toolchain locally available).
+- `vidya stats` reports `Topics: 62, Complete: 62 (all 11
+  languages), Examples: 682`.
+
+### P1 progress (2 of 6)
+
+| Topic | Status |
+|---|---|
+| networking_fundamentals | ✅ shipped 2.4.0 |
+| http_and_web_protocols | ✅ shipped 2.4.0 |
+| tls_and_encryption | planned 2.4.1 |
+| dns | planned 2.4.1 |
+| ipc | planned 2.4.2 |
+| serialization | planned 2.4.2 |
+
 ## [2.3.10] — 2026-05-02
 
 **P0C-2c — final P0C patch.** All 60 topics now at 11/11

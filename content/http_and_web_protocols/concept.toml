@@ -1,0 +1,50 @@
+id = "http_and_web_protocols"
+title = "HTTP and Web Protocols"
+topic = "Networking"
+description = "HTTP/1.1 wire format (RFC 9112) — request line, headers, optional body — plus the binary frame layer (HTTP/2 RFC 9113, HTTP/3 RFC 9114) and connection upgrade primitives (WebSocket RFC 6455). HTTP/1.1's text format is simple to parse and impossible to optimize past one-request-per-connection. HTTP/2 multiplexes streams over one TCP connection; HTTP/3 replaces TCP with QUIC over UDP for head-of-line-blocking-free transport. The request-response shape stays the same; only the framing changes."
+tags = ["http", "http-1.1", "http-2", "http-3", "quic", "websocket", "rfc-9110", "request-line", "headers", "chunked-encoding", "framing"]
+related_topics = ["networking_fundamentals", "tls_and_encryption", "concurrent_file_access", "input_output"]
+
+[[best_practices]]
+title = "Parse the request line first, then headers, then body — never speculate"
+explanation = "HTTP/1.1 is line-oriented up to the body. Read until \\r\\n for the request line, then read header lines until an empty line, then if Content-Length or Transfer-Encoding says so, read the body. Don't attempt to parse the whole request as a single regex; the framing is sequential by design."
+
+[[best_practices]]
+title = "Header names are ASCII-case-insensitive"
+explanation = "RFC 9110 §5.1: 'Field names are case-insensitive.' `Host`, `host`, and `HOST` are the same header. Store header names normalized (typically lowercase) and compare normalized; otherwise lookups are O(N) per header per query."
+
+[[best_practices]]
+title = "Trust Content-Length for body framing on HTTP/1.1; use Transfer-Encoding: chunked for unknown lengths"
+explanation = "HTTP/1.1 has two body-framing modes: a fixed Content-Length, or chunked Transfer-Encoding (length-prefix per chunk + zero-length terminator). Mixing them is malformed. For known-length responses, Content-Length is cheaper. For streaming where length isn't known up front, chunked is the only standard option."
+
+[[best_practices]]
+title = "HTTP/2 frame layout: 9-byte fixed header + payload, types 0..0xA"
+explanation = "HTTP/2 frames have a 9-byte header (3-byte length, 1-byte type, 1-byte flags, 4-byte stream ID) followed by payload. Types 0..0xA cover DATA, HEADERS, PRIORITY, RST_STREAM, SETTINGS, PUSH_PROMISE, PING, GOAWAY, WINDOW_UPDATE, CONTINUATION. Build a small frame parser that handles this shape and you can implement most of HTTP/2 on top."
+
+[[gotchas]]
+title = "Request line and header lines end with \\r\\n, not just \\n"
+explanation = "RFC 9112 mandates CRLF (`\\r\\n`) line endings. Servers that accept bare \\n (LF-only) are technically non-conformant; clients that send LF-only often get rejected by strict servers (nginx with `lf_strict on`). Parse for \\r\\n; treating bare \\n as a line terminator is a security smell because it can let request smuggling slip through."
+bad_example = "var line_end = strchr(buf, '\\n');  // accepts LF-only line endings"
+good_example = "var line_end = strstr(buf, \"\\r\\n\");  // requires the CR"
+
+[[gotchas]]
+title = "The body is NOT framed by \\r\\n\\r\\n — that's the headers/body separator"
+explanation = "After the empty line (`\\r\\n\\r\\n` between last header and body), the body bytes are exactly Content-Length bytes long, or chunked-encoded. The body itself can contain any bytes including \\r\\n. Stopping the body read at the first \\r\\n inside the body is a classic parser bug that truncates POST payloads."
+bad_example = "// Read body until next \\r\\n — wrong; body may contain CRLFs"
+good_example = "// Read body until exactly Content-Length bytes consumed"
+
+[[gotchas]]
+title = "Header smuggling via duplicate Content-Length / Transfer-Encoding"
+explanation = "If a request has both Content-Length AND Transfer-Encoding: chunked, RFC 9112 §6.1 says Transfer-Encoding wins and Content-Length must be ignored. Some intermediaries get this backwards. The mismatch lets attackers smuggle a second request inside the body of the first — see CVE-2019-18277 et al."
+bad_example = "// If both present, prefer Content-Length (vulnerable to smuggling)"
+good_example = "// If both present, use Transfer-Encoding only; reject if values disagree across hops"
+
+[[performance_notes]]
+title = "HTTP/1.1 keep-alive amortizes TCP setup but serializes requests"
+explanation = "Connection: keep-alive reuses one TCP connection for many requests, saving the ~RTT handshake per request. But responses must come back in order — a slow request blocks all subsequent ones (head-of-line blocking). HTTP/2 multiplexing solves this in the application layer; HTTP/3+QUIC solves it in the transport layer."
+evidence = "Same-region keep-alive: ~10ms overhead/request vs ~100ms for fresh connection. HTTP/2 multiplexing: 100 parallel requests on one connection sustain ~10K req/s on commodity hardware."
+
+[[performance_notes]]
+title = "Parsing cost: <1µs for typical requests on a hand-rolled parser"
+explanation = "HTTP/1.1 request parsing is dominated by string search for `\\r\\n`. A parser that uses memmem (or SIMD-friendly equivalents) and lowercases header names in place can parse a typical 500-byte request in ~500ns. Header table lookup with a small hashmap or linear scan over <20 headers is sub-100ns."
+evidence = "picohttpparser benchmarks at ~1Gbps single-thread on Xeon. Hand-rolled parsers hit 800Mbps without SIMD."

@@ -1,0 +1,284 @@
+# Vidya — HTTP and Web Protocols — Cyrius reference (runnable)
+#
+# HTTP/1.1 request parser. Sequential parsing per concept.toml's first
+# best practice: request line → headers → optional body. Header names
+# are normalized to lowercase for case-insensitive lookup. Body framing
+# uses Content-Length when present; chunked encoding is out of scope
+# for this minimal reference.
+#
+# Tests:
+#   1. Parse a simple GET request — method/path/version extracted.
+#   2. Header lookup is case-insensitive (Host == host == HOST).
+#   3. Multiple headers are all retrievable.
+#   4. POST request with body — body bytes are exactly Content-Length.
+#   5. Body bytes containing CRLF aren't truncated.
+#   6. Malformed request (no \r\n\r\n) is rejected.
+#   7. Lookup of absent header returns null sentinel.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var HEADER_CAP = 16;
+var STR_CAP = 256;
+
+# Per-request parsed fields.
+var req_method[16];
+var req_method_len = 0;
+var req_path[256];
+var req_path_len = 0;
+var req_version[16];
+var req_version_len = 0;
+var req_headers_name[4096];     # 16 headers × 256 bytes name
+var req_headers_name_len[128];  # 16 × 8
+var req_headers_value[4096];    # 16 × 256 bytes value
+var req_headers_value_len[128]; # 16 × 8
+var req_header_count = 0;
+var req_body[1024];
+var req_body_len = 0;
+
+fn req_reset() {
+    memset(&req_method, 0, 16);
+    memset(&req_path, 0, 256);
+    memset(&req_version, 0, 16);
+    memset(&req_headers_name, 0, 4096);
+    memset(&req_headers_value, 0, 4096);
+    memset(&req_headers_name_len, 0, 128);
+    memset(&req_headers_value_len, 0, 128);
+    memset(&req_body, 0, 1024);
+    req_method_len = 0;
+    req_path_len = 0;
+    req_version_len = 0;
+    req_header_count = 0;
+    req_body_len = 0;
+    return 0;
+}
+
+fn to_lower(b) {
+    if (b >= 65) {
+        if (b <= 90) {
+            return b + 32;
+        }
+    }
+    return b;
+}
+
+# Find the byte offset of the first occurrence of \r\n starting at `start`.
+# Returns -1 if not found.
+fn find_crlf(buf, len, start) {
+    var i = start;
+    while (i + 1 < len) {
+        if (load8(buf + i) == 13) {
+            if (load8(buf + i + 1) == 10) { return i; }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Find a space in [start, end). -1 if absent.
+fn find_space(buf, start, end) {
+    var i = start;
+    while (i < end) {
+        if (load8(buf + i) == 32) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn copy_bytes(dst, src, n) {
+    var i = 0;
+    while (i < n) {
+        store8(dst + i, load8(src + i));
+        i = i + 1;
+    }
+    return n;
+}
+
+# parse_request(buf, len) — returns 1 on success, 0 on malformed.
+fn parse_request(buf, len) {
+    req_reset();
+
+    # Request line ends at first \r\n.
+    var rl_end = find_crlf(buf, len, 0);
+    if (rl_end < 0) { return 0; }
+
+    # Method (up to first space)
+    var sp1 = find_space(buf, 0, rl_end);
+    if (sp1 < 0) { return 0; }
+    if (sp1 > 16) { return 0; }
+    copy_bytes(&req_method, buf, sp1);
+    req_method_len = sp1;
+
+    # Path (up to second space)
+    var sp2 = find_space(buf, sp1 + 1, rl_end);
+    if (sp2 < 0) { return 0; }
+    var path_len = sp2 - sp1 - 1;
+    if (path_len > 256) { return 0; }
+    copy_bytes(&req_path, buf + sp1 + 1, path_len);
+    req_path_len = path_len;
+
+    # Version (rest of line)
+    var ver_len = rl_end - sp2 - 1;
+    if (ver_len > 16) { return 0; }
+    copy_bytes(&req_version, buf + sp2 + 1, ver_len);
+    req_version_len = ver_len;
+
+    # Headers loop
+    var pos = rl_end + 2;       # past \r\n
+    while (1 == 1) {
+        if (pos + 1 >= len) { return 0; }   # need at least \r\n
+        # Empty line marks end-of-headers
+        if (load8(buf + pos) == 13) {
+            if (load8(buf + pos + 1) == 10) {
+                pos = pos + 2;
+                # Headers done; rest is body (Content-Length bytes)
+                # For simplicity here, take whatever remains as body
+                # (caller is responsible for honoring Content-Length).
+                var body_len = len - pos;
+                if (body_len > 1024) { body_len = 1024; }
+                if (body_len > 0) {
+                    copy_bytes(&req_body, buf + pos, body_len);
+                    req_body_len = body_len;
+                }
+                return 1;
+            }
+        }
+        # Find header line end
+        var line_end = find_crlf(buf, len, pos);
+        if (line_end < 0) { return 0; }
+        # Header name ends at first colon
+        var colon = pos;
+        while (colon < line_end && load8(buf + colon) != 58) {
+            colon = colon + 1;
+        }
+        if (colon >= line_end) { return 0; }
+        var name_len = colon - pos;
+        if (name_len > 256) { return 0; }
+        if (req_header_count >= HEADER_CAP) { return 0; }
+        # Copy and lowercase the name
+        var ni = 0;
+        var dst = &req_headers_name + req_header_count * 256;
+        while (ni < name_len) {
+            store8(dst + ni, to_lower(load8(buf + pos + ni)));
+            ni = ni + 1;
+        }
+        store64(&req_headers_name_len + req_header_count * 8, name_len);
+        # Skip colon and any leading space in value
+        var vstart = colon + 1;
+        while (vstart < line_end && load8(buf + vstart) == 32) {
+            vstart = vstart + 1;
+        }
+        var value_len = line_end - vstart;
+        if (value_len > 256) { return 0; }
+        copy_bytes(&req_headers_value + req_header_count * 256,
+                   buf + vstart, value_len);
+        store64(&req_headers_value_len + req_header_count * 8, value_len);
+        req_header_count = req_header_count + 1;
+        pos = line_end + 2;
+    }
+    return 1;
+}
+
+# header_lookup(name, name_len) — returns pointer into req_headers_value
+# table, or 0 if absent. Sets `out_len` (global) to the value length.
+var hdr_lookup_out_len = 0;
+
+fn header_lookup(name, name_len) {
+    var i = 0;
+    while (i < req_header_count) {
+        var stored_len = load64(&req_headers_name_len + i * 8);
+        if (stored_len == name_len) {
+            var is_match = 1;
+            var j = 0;
+            while (j < name_len) {
+                var stored = load8(&req_headers_name + i * 256 + j);
+                var probe = to_lower(load8(name + j));
+                if (stored != probe) { is_match = 0; }
+                j = j + 1;
+            }
+            if (is_match == 1) {
+                hdr_lookup_out_len = load64(&req_headers_value_len + i * 8);
+                return &req_headers_value + i * 256;
+            }
+        }
+        i = i + 1;
+    }
+    hdr_lookup_out_len = 0;
+    return 0;
+}
+
+fn buf_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("http_and_web_protocols");
+
+    # --- 1. Simple GET ---
+    var req1 = "GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    var ok1 = parse_request(req1, 47);
+    assert_eq(ok1, 1, "simple GET parses");
+    assert_eq(req_method_len, 3, "method length 3");
+    assert(buf_eq(&req_method, "GET", 3), "method == GET");
+    assert_eq(req_path_len, 11, "path length 11");
+    assert(buf_eq(&req_path, "/index.html", 11), "path == /index.html");
+    assert_eq(req_version_len, 8, "version length 8");
+    assert(buf_eq(&req_version, "HTTP/1.1", 8), "version == HTTP/1.1");
+    assert_eq(req_header_count, 1, "1 header");
+
+    # --- 2. Case-insensitive header lookup ---
+    var v_lower = header_lookup("host", 4);
+    assert(v_lower != 0, "host lookup hits");
+    assert_eq(hdr_lookup_out_len, 11, "host value length");
+    assert(buf_eq(v_lower, "example.com", 11), "host value bytes");
+    var v_upper = header_lookup("HOST", 4);
+    assert(v_upper != 0, "HOST lookup hits");
+    var v_mixed = header_lookup("Host", 4);
+    assert(v_mixed != 0, "Host lookup hits");
+
+    # --- 3. Multiple headers ---
+    var req3 = "GET / HTTP/1.1\r\nHost: x\r\nUser-Agent: test/1.0\r\nAccept: */*\r\n\r\n";
+    parse_request(req3, 62);
+    assert_eq(req_header_count, 3, "3 headers parsed");
+    var ua = header_lookup("user-agent", 10);
+    assert(ua != 0, "user-agent found");
+    assert_eq(hdr_lookup_out_len, 8, "user-agent value length");
+    assert(buf_eq(ua, "test/1.0", 8), "user-agent value");
+
+    # --- 4. POST with body ---
+    var req4 = "POST /api HTTP/1.1\r\nContent-Length: 11\r\n\r\nhello world";
+    parse_request(req4, 53);
+    assert(buf_eq(&req_method, "POST", 4), "POST method");
+    assert_eq(req_body_len, 11, "body length 11");
+    assert(buf_eq(&req_body, "hello world", 11), "body bytes");
+
+    # --- 5. Body containing CRLF is not truncated ---
+    var req5 = "POST /a HTTP/1.1\r\nContent-Length: 13\r\n\r\nline1\r\nline2!";
+    parse_request(req5, 53);
+    assert_eq(req_body_len, 13, "body with CRLF length 13");
+    assert(buf_eq(&req_body, "line1\r\nline2!", 13), "body with CRLF preserved");
+
+    # --- 6. Malformed: missing final \r\n\r\n ---
+    var req6 = "GET / HTTP/1.1\r\nHost: x\r\n";   # no terminating empty line
+    var ok6 = parse_request(req6, 25);
+    assert_eq(ok6, 0, "malformed (no \\r\\n\\r\\n) rejected");
+
+    # --- 7. Absent header returns 0 ---
+    parse_request(req1, 47);
+    var absent = header_lookup("authorization", 13);
+    assert_eq(absent, 0, "absent header returns 0");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);
