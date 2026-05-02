@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.5] — 2026-05-02
+
+Service-layer polish + recurring-pattern field notes. Doc-heavy
+release; no new content topics.
+
+### Added
+- **P0B-3: structured access log on `serve`** in `src/main.cyr`.
+  New `_serve_log(path, plen, status, elapsed_ns)` helper
+  formats one line per request:
+  `GET <path> -> <status> (<elapsed_ns>ns)`, level-routed
+  through sakshi (200s → INFO, 4xx → WARN, 5xx → ERROR). New
+  module-level `_serve_status` global captured by each
+  `send_*` leaf so `handle_request` can include the status in
+  the access line. Latency captured from `_sk_now_ns()`
+  delta around `http_route()`. Smoke-tested on every endpoint:
+  ```
+  [INFO] GET /stats -> 200 (56222ns)
+  [INFO] GET /list -> 200 (138995ns)
+  [INFO] GET /info/algorithms -> 200 (43150ns)
+  [WARN] GET /nope -> 404 (20007ns)
+  [WARN] GET /search -> 400 (20198ns)
+  ```
+- **`content/cyrius/field_notes/language/shell_runtime.cyml`**
+  — new file, 3 entries, promoting recurring bash-port gotchas
+  surfaced 4× across v2.3.2–v2.3.4 backfills:
+  - `bash_subshell_clobbers_stateful_helpers` — `$(fn)` runs in
+    a subshell; mutations don't propagate to the parent. Use
+    a side-effect global. (Hit 4×: game_ai_decisions,
+    maze_generation, btree_indexing, write_ahead_logging.)
+  - `bash_pre_increment_set_e_zero_exit` — `(( i++ ))` returns
+    OLD value; when `i=0`, exit code 1 → `set -e` aborts.
+    Use `i=$((i+1))`. (Hit in sql_parsing.)
+  - `bash_bc_not_posix_mandatory` — `bc` absent on default
+    Arch / Alpine / minimal NixOS; use `awk` for fp math.
+    (Hit in quantum_computing.)
+- **AArch64 ABI gotcha entry** appended to
+  `content/cyrius/field_notes/language/platform_abi.cyml`
+  (4 → 5 entries): `aarch64_callee_saved_and_imm_limits`
+  consolidates three encoding/calling-convention pitfalls
+  surfaced repeatedly across v2.3.3–v2.3.4 asm ports —
+  cross-`bl` clobber of x0–x18 (rescue: cache in x19–x28
+  callee-saveds OR recompute), `cmp xN, #imm` 12-bit unsigned
+  ceiling (rescue: `ldr x16, =imm` literal-pool form), and
+  `mov xN, #imm` 16-bit ceiling (same rescue). Hit 4× across
+  game_loop_architecture, grid_pathfinding, maze_generation,
+  btree_indexing, sql_parsing.
+
+### Changed
+- **VERSION** 2.3.4 → 2.3.5.
+- **`docs/architecture/overview.md` rewritten end-to-end.**
+  Was stale from the pre-v2.0 Rust era (talked about
+  `src/lib.rs`, MCP/bote, 33 topics × 10 langs, Rust feature
+  flags). Now reflects current Cyrius reality: two-layer
+  diagram (content + Cyrius CLI), startup vs per-command vs
+  per-request data flow, six numbered design decisions, and a
+  dedicated **Memory-resident corpus contract (P0B-2)**
+  section covering what the contract guarantees, what it
+  forbids on the request path, and how P0B-4 will change it.
+- **`CLAUDE.md` rewritten end-to-end.** Same staleness as
+  overview.md. Replaced the cargo/clippy/audit/deny work-loop
+  steps with cyrius-toolchain steps (`cyrius lint / fmt /
+  test / bench / build / run / deps`), added a "Toolchains —
+  which tool for which surface" section with two tables
+  (Surface 1 = vidya project Cyrius commands; Surface 2 =
+  per-language content validators with exact invocations
+  pulled from `scripts/validate-content.sh`). Explicit
+  "never run cargo against the project" prohibition; Rust
+  carve-out for content `.rs` files via `rustc`.
+- **`content/cyrius/field_notes/index.cyml`** — Language
+  Gotchas section count 29 → 33 (added 3 from
+  shell_runtime.cyml + 1 from platform_abi.cyml); split count
+  5 → 6 files; per-file lines added for shell_runtime.cyml
+  and updated for platform_abi.cyml (4 → 5).
+
+### Verified
+- **P0B-2 audit**: `reg_init` + `load_all` run once at startup
+  (lines 1425, 1433); `cmd_serve` enters `sandhi_server_run`
+  blocking accept loop without re-loading; every JSON
+  response builder reads only `reg_list()`/`reg_get()` (pure
+  in-memory hashmap+vec). Zero file I/O on the request path,
+  verified by grep over the
+  `http_route` + `handle_request` line range. Contract now
+  documented as a featured section in
+  `docs/architecture/overview.md`.
+- `cyrius build src/main.cyr build/vidya` — clean.
+- `cyrius test` — 41/41 passing (10 test groups).
+- End-to-end serve smoke (build/vidya serve 18390 + curl
+  /stats /list /info/algorithms /nope /search) — all five
+  responses correct, all five access-log lines emitted with
+  matching status + latency.
+
+### Deferred to a follow-up
+- **P0B-4 — content hot-reload (inotify watch on `content/`,
+  atomic `_reg_entries` / `_reg_index` swap).** Roadmap had
+  this in 2.3.5; deferred because (a) it strictly blocks on
+  P0B-2 audit results — landed here — but (b) the design
+  needs more thought than the rest of v2.3.5 combined. The
+  inotify driver, the swap barrier, the dual-registry memory
+  cost, and the question of whether P0B-4 should also handle
+  partial-failure (one bad concept.toml shouldn't kill the
+  whole reload) all want their own release. Slotted into a
+  future patch, likely 2.3.5a or as a prelude to 2.3.6.
+
 ## [2.3.4] — 2026-05-02
 
 ### Added

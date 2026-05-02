@@ -2,8 +2,8 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-02
 >
-> **Version**: 2.3.4 | **Cyrius**: 5.8.3
-> **Topics**: 60 (47 fully covered, 13 still partial)
+> **Version**: 2.3.5 | **Cyrius**: 5.8.3
+> **Topics**: 60 (48 fully covered, 12 still partial)
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 529 source files; concept files: 60
 > **Validator**: 529/529 green
@@ -25,14 +25,19 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.3.2 | 2026-05-02 | **Roadmap rewrite** + **P0C-1 kickoff** (`fixed_point_arithmetic` 11/11) + Cyrius validation in `validate-content.sh` + 14 latent failures fixed + 3 parser-syntax field-note entries |
 | 2.3.3 | 2026-05-02 | **P0C-1 complete** — game-engine cluster: collision_detection_2d, game_ai_decisions, game_loop_architecture, grid_pathfinding, maze_generation, projectile_physics, sprite_rendering, state_machines (78 new files) |
 | 2.3.4 | 2026-05-02 | **P0B-1 complete** (`/compare` + `/gaps` HTTP routes; 7-of-7 endpoints live) + **P0C-3 complete** (database cluster: btree_indexing, sql_parsing, write_ahead_logging — 31 new files) + vidya.tcyr cstr-key fix |
+| 2.3.5 | 2026-05-02 | **P0B-2 + P0B-3 complete** — memory-resident contract audited and documented; sakshi structured access log on `serve` (path + status + level-routed latency). Field notes promoted: `language/shell_runtime.cyml` (3 entries) + AArch64 ABI consolidation in `language/platform_abi.cyml`. CLAUDE.md + docs/architecture/overview.md rewritten end-to-end. P0B-4 hot-reload deferred. |
 
 ---
 
 ## Current State
 
-### 47 topics fully covered (11/11 languages)
+### 48 topics fully covered (11/11 languages)
 
-The original 36 P0 topics, plus 11 added in v2.3.2–v2.3.4:
+The original 36 P0 topics, plus 12 added in v2.3.2–v2.3.4. The
+roadmap header previously said 47; the binary's `vidya stats`
+reports 48, and a direct `ls` count over `content/*/` confirms
+48 — one of the topics below was undercounted in the v2.3.4
+CHANGELOG. Numbers reconciled in v2.3.5.
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
@@ -40,7 +45,10 @@ The original 36 P0 topics, plus 11 added in v2.3.2–v2.3.4:
   projectile_physics, sprite_rendering, state_machines
 - v2.3.4 P0C-3 (3): btree_indexing, sql_parsing, write_ahead_logging
 
-### 13 topics still partial
+(The 48th — actual identity to be confirmed during the v2.3.6
+content sweep when each partial topic is touched in turn.)
+
+### 12 topics still partial
 
 **P0C-2 graphics cluster** (8 topics, all 0/11 — needs full 11-lang ports):
 bindless_resources, bloom_and_glow, direct_drm_gpu_compute,
@@ -51,7 +59,9 @@ line_rasterization, render_graph_architecture
 compression (none), concurrent_file_access (none), jsonl_format (none),
 page_management (cyrius-only)
 
-Gap to full 11/11 across these 13 topics: **~135 source files**.
+Gap to full 11/11 across these 12 topics: **~131 source files**
+(11 concept-only × 11 langs each = 121 + page_management's
+remaining 10 langs = 131).
 
 ---
 
@@ -60,29 +70,37 @@ Gap to full 11/11 across these 13 topics: **~135 source files**.
 Each patch is sized for one focused session. Pattern: bump VERSION,
 do the work, validator green, CHANGELOG section, ship.
 
-### 2.3.5 — Service-layer polish + recurring-pattern field notes
+### 2.3.5 — Service-layer polish + recurring-pattern field notes ✅ shipped 2026-05-02
 
-Smaller, doc-heavy release. Two threads:
+Most of the planned scope landed; **P0B-4 deferred**.
 
-**P0B-2/3/4 service-layer wrap-up** (~4 hr):
-- **P0B-2** — Verify or implement memory-resident mode. Audit
-  `cmd_serve` to confirm requests don't re-read concept files per
-  hit; if they do, hoist the registry into a process-lifetime
-  allocation. Document the contract in `docs/architecture/overview.md`.
-- **P0B-3** — Sakshi request tracing on serve. Wrap the connection
-  handler with structured spans (method, path, status, latency).
-- **P0B-4** — Content hot-reload (after P0B-2). Inotify watch on
-  `content/`, registry rebuild without restart.
+Done:
+- **P0B-2** — Memory-resident mode audited (clean: `reg_init` +
+  `load_all` once at startup; `handle_request` does zero file I/O).
+  Contract documented as a featured section in
+  `docs/architecture/overview.md`.
+- **P0B-3** — Sakshi structured access log on `serve`:
+  per-request `GET <path> -> <status> (<elapsed_ns>ns)`, level-
+  routed (200s INFO, 4xx WARN, 5xx ERROR). Status capture via
+  module-level `_serve_status` global set in each `send_*` leaf.
+- **`language/shell_runtime.cyml`** — new file, 3 entries
+  (subshell-clobbers-stateful-helpers, `(( i++ )) + set -e`,
+  `bc` not POSIX-mandatory).
+- **`language/platform_abi.cyml`** — AArch64 ABI consolidation
+  entry (cross-`bl` clobber + 12-bit cmp + 16-bit mov immediate
+  ceilings, with literal-pool rescue).
+- **Doc rewrites** — CLAUDE.md + `docs/architecture/overview.md`
+  both rewritten end-to-end (were stale from the pre-v2.0
+  Rust era).
 
-**Recurring-pattern field notes** (~3 entries, deferred from CHANGELOG
-notes in v2.3.2/v2.3.3/v2.3.4):
-- New `content/cyrius/field_notes/language/shell_runtime.cyml` —
-  bash subshell + stateful PRNG, `(( i++ )) + set -e` interaction,
-  `bc` not POSIX-mandatory (use `awk`).
-- New entry in `language/platform_abi.cyml` — AArch64 callee-saved
-  register convention; cross-`bl` clobber of x0–x18; `cmp xN, #imm`
-  12-bit unsigned limit; `mov xN, #imm` 16-bit limit (use
-  `ldr xN, =literal` literal-pool form).
+Deferred (slot tbd, ahead of 2.3.6 content sweep):
+- **P0B-4 — content hot-reload** (inotify watch + atomic
+  registry pointer swap). Strictly blocked on P0B-2 audit
+  results, which now exist; deferred because the design
+  needs more thought than the rest of v2.3.5 combined
+  (dual-registry memory cost, swap barrier model,
+  partial-failure handling for a bad concept.toml in the
+  middle of a reload). Likely 2.3.5a or a 2.3.6-prelude.
 
 ### 2.3.6 — P0C-4 systems & misc cluster (4 topics, ~37 files)
 
@@ -227,4 +245,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-02 (v2.3.4)*
+*Last Updated: 2026-05-02 (v2.3.5)*

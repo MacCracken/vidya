@@ -1029,16 +1029,24 @@ fn cmd_gaps() {
 
 var _http_port = 8390;
 
+# Per-request status, set by the send_* leaves and read by handle_request
+# for the structured access-log line. Single-threaded accept (sandhi 1.0.0)
+# means no race; revisit if multi-connection lands.
+var _serve_status = 0;
+
 fn send_json(cfd, body, body_len) {
+    _serve_status = HTTP_OK;
     return sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json", body, body_len, 0);
 }
 
 fn send_404(cfd) {
+    _serve_status = HTTP_NOT_FOUND;
     var body = "{\"error\":\"not found\"}";
     return sandhi_server_send_response(cfd, HTTP_NOT_FOUND, "Not Found", "application/json", body, strlen(body), 0);
 }
 
 fn send_400(cfd) {
+    _serve_status = HTTP_BAD_REQUEST;
     var body = "{\"error\":\"bad request\"}";
     return sandhi_server_send_response(cfd, HTTP_BAD_REQUEST, "Bad Request", "application/json", body, strlen(body), 0);
 }
@@ -1371,11 +1379,50 @@ fn http_route(cfd, path) {
     return send_404(cfd);
 }
 
-# Connection handler — signature required by sandhi_server_run
+# Format and emit a single-line structured access log via sakshi:
+#   GET <path> -> <status> (<elapsed_ns>ns)
+# Status routes the level: 2xx = info, 4xx = warn, 5xx/other = error.
+fn _serve_log(path, plen, status, elapsed_ns) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "GET ");
+    if (plen > 0) {
+        str_builder_add_cstr(sb, path);
+    } else {
+        str_builder_add_cstr(sb, "(no-path)");
+    }
+    str_builder_add_cstr(sb, " -> ");
+    str_builder_add_int(sb, status);
+    str_builder_add_cstr(sb, " (");
+    str_builder_add_int(sb, elapsed_ns);
+    str_builder_add_cstr(sb, "ns)");
+    var line = str_builder_build(sb);
+    var data = str_data(line);
+    var dlen = str_len(line);
+    if (status >= 200 && status < 300) {
+        sakshi_info(data, dlen);
+    } elif (status >= 400 && status < 500) {
+        sakshi_warn(data, dlen);
+    } else {
+        sakshi_error(data, dlen);
+    }
+    return 0;
+}
+
+# Connection handler — signature required by sandhi_server_run.
+# P0B-3: structured access log (path + status + latency) per request.
 fn handle_request(ctx, cfd, buf, blen) {
+    var t0 = _sk_now_ns();
+    _serve_status = 0;
     var path = sandhi_server_get_path(buf, blen);
-    if (strlen(path) == 0) { return send_400(cfd); }
-    return http_route(cfd, path);
+    var plen = strlen(path);
+    if (plen == 0) {
+        var rc0 = send_400(cfd);
+        _serve_log(path, 0, _serve_status, _sk_now_ns() - t0);
+        return rc0;
+    }
+    var rc = http_route(cfd, path);
+    _serve_log(path, plen, _serve_status, _sk_now_ns() - t0);
+    return rc;
 }
 
 fn cmd_serve(port) {

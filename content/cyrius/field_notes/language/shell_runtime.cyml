@@ -1,0 +1,222 @@
+# Cyrius Field Notes — Language Gotchas (shell runtime)
+# Bash gotchas surfaced repeatedly during vidya content backfill: subshell
+# scoping clobbering stateful helpers, `(( i++ ))` returning the old value
+# under set -e, and `bc` not being POSIX-mandatory.
+# 3 entries.
+
+[[entries]]
+name = "bash_subshell_clobbers_stateful_helpers"
+description = "`$(fn)` runs the function in a subshell — global mutations do NOT propagate to the caller; use a side-effect global instead"
+category = "cyrius"
+---
+THE TRAP (4× repeat across v2.3.3 → v2.3.4 backfill):
+
+A stateful helper (e.g. a PRNG) updates a global, then the caller
+captures the return value via `$(...)`. The mutation is silently
+lost — `$(...)` runs the body in a forked subshell, and the
+subshell's environment changes never reach the parent.
+
+    _rng_state=42
+
+    rng_next() {
+        _rng_state=$(( _rng_state * 6364136223846793005 + 1442695040888963407 ))
+        echo $(( _rng_state & 0xFFFFFFFF ))
+    }
+
+    # WRONG — every call returns the same number:
+    for i in 1 2 3; do
+        x=$(rng_next)        # subshell: _rng_state mutates, then dies
+        echo "x=$x"
+    done
+
+The `for` loop body runs in the parent shell, so the parent's
+`_rng_state` is the only one that matters — and it never updates.
+First call: subshell forks, computes new state, echoes 32-bit
+slice, exits, parent's `_rng_state` is unchanged. Second call:
+subshell forks again from the same parent state. All three `x`
+values match.
+
+CORRECT SHAPE — side-effect global, no `$(...)`:
+
+    _rng_state=42
+    RNG_OUT=0
+
+    rng_next() {
+        _rng_state=$(( _rng_state * 6364136223846793005 + 1442695040888963407 ))
+        RNG_OUT=$(( _rng_state & 0xFFFFFFFF ))
+    }
+
+    for i in 1 2 3; do
+        rng_next             # runs in parent shell — both globals update
+        echo "x=$RNG_OUT"
+    done
+
+The function call (without `$(...)`) executes in the current
+shell. Both the state and the output land in the parent.
+
+WHERE THIS BIT US:
+
+  v2.3.3  game_ai_decisions/shell.sh — PCG PRNG via `$(rng_next)`.
+          Every "random" stat came back identical; the AI dispatch
+          test failed deterministically with the wrong action.
+          1st surfacing.
+  v2.3.3  maze_generation/shell.sh — same pattern, masked the
+          PCG state-machine entirely. 2nd surfacing.
+  v2.3.4  btree_indexing/shell.sh — `node_new_leaf` mutated a
+          counter, returned the new id via stdout. Subshell
+          captured the id but the parent never saw the bump,
+          so every "new" leaf got id=1. 3rd surfacing.
+  v2.3.4  write_ahead_logging/shell.sh — full WAL state (offsets,
+          last-applied-lsn, in-memory page cache) was held in
+          globals; every `wal_append=$(append ...)` clobbered
+          them. 4th surfacing — broke replay tests in 6
+          different scenarios before the pattern was noticed.
+
+WHY IT REPEATS: The `$(fn)` form looks like a clean
+return-value capture, the way a Rust or Python function returns.
+Bash makes the same syntax mean "fork a subshell, read its
+stdout." The two are visually identical; the semantics are
+opposite.
+
+GENERAL RULE for bash ports of stateful algorithms in vidya:
+- If the function only reads globals and produces output:
+  `result=$(fn args)` is fine.
+- If the function MUTATES any global: never use `$(...)`. Use
+  a `_OUT` companion global, call the function bare, read the
+  global. Document it: `# rng_next: writes _rng_state, sets RNG_OUT`.
+- If you can't tell at a glance: assume it mutates and use the
+  side-effect form.
+
+This pattern is documented in the Bash man page under "Command
+Substitution" — but only obliquely: "the command is executed in
+a subshell environment." No example, no warning. Easy to miss.
+
+[[entries]]
+name = "bash_pre_increment_set_e_zero_exit"
+description = "`(( i++ ))` evaluates to the OLD value of i; when i=0 that's exit code 0 → set -e aborts the script"
+category = "cyrius"
+---
+THE TRAP:
+
+    set -euo pipefail
+    i=0
+    while [[ $i -lt 10 ]]; do
+        # ... do work ...
+        (( i++ ))                # script exits here on first iteration
+    done
+    echo "done"                  # never printed
+
+`(( expr ))` exits with status 0 if the expression is non-zero,
+status 1 if it's zero. The C-style `i++` is post-increment: it
+evaluates to the OLD value, then bumps. When `i=0`, the
+expression evaluates to 0, the arithmetic command exits 1, and
+`set -e` treats it as a failure and aborts.
+
+This bites every counter that starts at 0. The first iteration
+hits the wall; the rest never run. The visible symptom is a
+truncated loop, no error message — `set -e` aborts silently
+unless `set -E` + a trap is also set.
+
+CORRECT SHAPES — three options, all equivalent:
+
+    i=$((i + 1))            # plain assignment, always exit 0
+    : $(( i++ ))             # leading `:` is a no-op, swallows the
+                              # arithmetic command's exit status
+    (( ++i ))                # PRE-increment: evaluates to NEW value,
+                              # which is non-zero (assuming i was >= 0)
+
+Pick `i=$((i+1))`. It's unambiguous, doesn't depend on knowing
+the post/pre-increment distinction, and matches the explicit
+arithmetic form used elsewhere.
+
+WHERE THIS BIT US:
+
+  v2.3.4  sql_parsing/shell.sh — counter loop over SQL token
+          stream. First iteration aborted; the parse table built
+          to one entry then the script silently terminated.
+
+WHY IT'S NOT IN MOST BASH STYLE GUIDES: the interaction is
+between two features (`set -e` + `(( ))` exit semantics) that
+each have their own documented behaviour, but the combination
+isn't called out together. ShellCheck (SC2219) flags
+`(( i++ ))` only in the narrow case of a standalone arithmetic
+command — not in loops, not when `set -e` is active. In
+practice, the only reliable defence is "use `i=$((i+1))` for
+counter increments, period."
+
+GENERAL RULE for bash ports in vidya: **never use `(( i++ ))`
+or `(( i-- ))` as a standalone statement**. Use
+`i=$((i+1))` / `i=$((i-1))`. It's two extra characters and
+it's safe under any `set` flags.
+
+[[entries]]
+name = "bash_bc_not_posix_mandatory"
+description = "`bc` isn't part of POSIX-mandatory userland; default Arch + minimal Alpine omit it. Use `awk` for floating-point math (sqrt/log/exp)"
+category = "cyrius"
+---
+THE TRAP:
+
+    # Compute sqrt of x in shell
+    val=$(echo "scale=10; sqrt($x)" | bc -l)
+
+`bc` is a POSIX **utility**, but POSIX-2017 doesn't require
+distributions to ship it by default. Default Arch installs
+omit it (`pacman -S bc` is needed). Alpine's `BusyBox bc` is a
+limited subset. NixOS minimal builds don't include it.
+
+Result: a shell script that uses `bc` works on Ubuntu, fails
+silently or with "command not found" on Arch / Alpine / minimal
+NixOS / many container base images. CI may pass while local
+runs on a fresh Arch box don't.
+
+CORRECT SHAPE — `awk` for floating-point math. POSIX requires
+`awk` (it's been in `/usr/bin/awk` on every Linux/BSD since the
+1980s) and the math built-ins (`sqrt`, `log`, `exp`, `sin`,
+`cos`, `atan2`, `**` for power) cover everything `bc -l` does
+short of arbitrary precision.
+
+    sqrt_helper() {
+        awk -v x="$1" 'BEGIN { printf "%.10f\n", sqrt(x) }'
+    }
+
+    log_helper() {
+        awk -v x="$1" 'BEGIN { printf "%.10f\n", log(x) }'
+    }
+
+    exp_helper() {
+        awk -v x="$1" 'BEGIN { printf "%.10f\n", exp(x) }'
+    }
+
+    pow_helper() {
+        awk -v b="$1" -v e="$2" 'BEGIN { printf "%.10f\n", b**e }'
+    }
+
+`-v name=value` plumbs the shell value into awk safely (no
+shell-injection risk via the script string). `BEGIN` runs the
+block before any input is read, so awk doesn't wait on stdin.
+
+WHERE THIS BIT US:
+
+  v2.3.2  quantum_computing/shell.sh — three helpers used
+          `bc -l` for state-vector amplitude math (sqrt for
+          normalisation, log/exp for entropy bounds, ** for
+          gate matrix powers). Default-Arch `validate-content.sh`
+          run failed on all three; Ubuntu CI passed. Replaced
+          with awk, identical numerical output to ~1e-15.
+
+GENERAL RULE for shell ports in vidya: **assume only the POSIX
+core is present**. That means `awk`, `sed`, `grep`, `cut`,
+`tr`, `sort`, `uniq`, `head`, `tail`, `wc`, `printf`, `read`,
+`test` / `[`, `expr` (for integer arithmetic — but bash's
+`$(( ))` is preferred), and the bash arithmetic forms. No
+`bc`, no `dc`, no GNU-only extensions to coreutils, no
+`gawk`-specific features.
+
+For arbitrary-precision integer math: bash's `$(( ))` works
+to 64 bits, beyond that use `python3 -c "..."` (POSIX-y enough
+on Linux distros that ship a python3) or stay in 64 bits.
+
+For arbitrary-precision floating-point: there's no portable
+answer. If the algorithm needs > 53-bit floats, port to a
+language other than shell.
+

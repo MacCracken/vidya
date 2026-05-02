@@ -1,7 +1,8 @@
 # Cyrius Field Notes — Language Gotchas (platform & ABI)
 # Per-OS preprocessor target flags, struct return by value, variadic fns,
-# and the fncall6-into-extern-C arg-count ceiling.
-# 4 entries.
+# the fncall6-into-extern-C arg-count ceiling, and AArch64 cross-`bl`
+# register clobber + immediate-encoding limits.
+# 5 entries.
 
 [[entries]]
 name = "per_os_target_flags_win_vs_linux"
@@ -157,4 +158,196 @@ Cyrius project that builds a function-table-of-extern-C-fns
 abstraction: `samvada` (sd_bus C shim), future
 `vidya_logind`-style packages, anything wrapping libc beyond
 the stdlib. Document at the boundary; don't trial-and-error.
+
+[[entries]]
+name = "aarch64_callee_saved_and_imm_limits"
+description = "AArch64 cross-`bl` clobbers x0–x18 (caller-saved); `cmp xN, #imm` is 12-bit unsigned, `mov xN, #imm` is 16-bit — larger values need ldr literal-pool"
+category = "cyrius"
+---
+THREE CONJOINED AArch64 ABI / encoding gotchas, all surfaced
+during the v2.3.3 → v2.3.4 vidya backfill. Different in
+mechanism, identical in symptom: the assembler accepts the
+source, the binary runs, the output is wrong.
+
+═══════════════════════════════════════════════════════════════
+1. Caller-saved vs callee-saved across `bl`
+═══════════════════════════════════════════════════════════════
+
+AArch64 AAPCS64 reserves 32 GP registers split into roles. The
+ones that matter for hand-written asm calling helper fns:
+
+    x0–x7    — argument / return value (caller-saved)
+    x8       — indirect result location (caller-saved)
+    x9–x15   — temporaries (caller-saved)
+    x16, x17 — intra-procedure-call scratch (caller-saved)
+    x18      — platform register / TLS scratch (caller-saved)
+    x19–x28  — callee-saved (helper preserves on entry, restores on exit)
+    x29      — frame pointer
+    x30      — link register (return address)
+
+Any value held in x0–x18 across a `bl` to a helper is **assumed
+gone** unless the caller spilled it. The helper is free to
+clobber every one of those registers — and stdlib helpers
+DO clobber them, even when their visible job is "compute one
+small thing."
+
+Two rescue patterns:
+
+  (a) Cache loop state in callee-saved registers x19–x28:
+
+      stp x29, x30, [sp, #-16]!
+      stp x19, x20, [sp, #-16]!     # save callee-saveds before use
+      mov x19, x0                    # cache loop counter
+      mov x20, x1                    # cache base ptr
+    .L1:
+      mov x0, x19                    # restore from cache
+      bl  helper                     # x0–x18 clobbered, x19/x20 fine
+      add x19, x19, #1
+      cmp x19, #100
+      b.lt .L1
+      ldp x19, x20, [sp], #16
+      ldp x29, x30, [sp], #16
+      ret
+
+      The `stp/ldp` pair before/after the loop is mandatory —
+      the helper expects to find x19/x20 unchanged when *it*
+      returns to ITS caller, which is your function returning
+      to ITS caller. Forgetting the spill turns a clean local
+      bug into a callee-clobber that surfaces several frames
+      up.
+
+  (b) Recompute after each call, don't cache:
+
+      mov x0, x9                     # x9 holds idx
+      bl  helper                     # x9 may be clobbered now
+      ldr x9, [sp, #16]              # reload idx from frame
+      add x9, x9, #1
+      str x9, [sp, #16]
+      ...
+
+      Slower (one ldr/str per iteration vs free register reads)
+      but doesn't require setting up a callee-saved spill at
+      function entry. Use when the loop is shallow or the
+      cached value is only read once per call.
+
+WHERE THIS BIT US:
+
+  v2.3.3  grid_pathfinding/asm_x86_64.s — A* helper called
+          `manhattan` via bl; the outer loop's row/col indices
+          lived in caller-saved regs and got clobbered. Same
+          symptom on AArch64 sibling. Caught by the BFS-vs-A*
+          path-length agreement test.
+  v2.3.3  maze_generation/asm_x86_64.s — `idx` register
+          clobbered across the PCG `rng_next` bl. PCG output
+          sequence diverged from the reference seed=42 trace.
+  v2.3.4  btree_indexing/asm_aarch64.s — node-walk loop cached
+          parent pointer in x10 across `bl key_cmp`. Tree
+          walk corrupted on first split. 3rd surfacing.
+  v2.3.4  sql_parsing/asm_aarch64.s — token-stream loop cached
+          token index in x12. SELECT validator silently
+          accepted malformed input. 4th surfacing.
+
+═══════════════════════════════════════════════════════════════
+2. `cmp xN, #imm` is 12-bit unsigned
+═══════════════════════════════════════════════════════════════
+
+The immediate field of `cmp xN, #imm` (and `subs xzr, xN, #imm`,
+which is what `cmp` is) is 12 bits unsigned, with an optional
+LSL #12 shift. So the legal range without shift is 0–4095, and
+with the shift it's 4096–16777215 in steps of 4096 — useful for
+page boundaries, useless for arbitrary numbers.
+
+    cmp x0, #4095          # OK
+    cmp x0, #4096          # ERROR: immediate out of range
+    cmp x0, #4166          # ERROR (DT_US/4 = 4166)
+
+CORRECT SHAPE — load the immediate into a temp register, then
+compare register-to-register:
+
+    ldr x16, =4166         # literal pool (assembler emits an
+                           # ldr from a PC-relative pool slot)
+    cmp x0, x16            # OK — register form has no immediate
+
+`x16` (IP0) is the canonical scratch register for this — it's
+caller-saved AND reserved for intra-procedure-call use, so the
+linker won't repurpose it for veneer insertion.
+
+WHERE THIS BIT US:
+
+  v2.3.3  game_loop_architecture/asm_aarch64.s — fixed-timestep
+          accumulator compared against `DT_US/4 = 4166`. The
+          assembler error was clear ("immediate out of range")
+          but the fix wasn't obvious — the natural reflex is
+          "use shift," which doesn't apply here.
+
+═══════════════════════════════════════════════════════════════
+3. `mov xN, #imm` is 16-bit
+═══════════════════════════════════════════════════════════════
+
+`mov xN, #imm` is a synthetic instruction that the assembler
+expands to `movz` (move with zero) or `movn` (move with NOT).
+Both encodings carry a 16-bit immediate plus a 2-bit shift
+selector (LSL by 0 / 16 / 32 / 48). So a single `mov` covers
+any 16-bit value, plus 16-bit values shifted to any quarter of
+the 64-bit word.
+
+For a fully arbitrary 64-bit constant, the assembler chains
+`movz` + up to three `movk` (move with keep) instructions,
+each filling one 16-bit slot. Most assemblers do this expansion
+silently when you write `mov xN, #imm` — but the failure mode
+when the value can't be expressed cleanly is, again, "immediate
+out of range."
+
+    mov x0, #65535         # OK — single movz
+    mov x0, #65536         # OK — single movz, LSL #16
+    mov x0, #100000        # error or silent-wrong (depends on as)
+    mov x0, #1442695040888963407   # error — needs 4-instr chain
+
+CORRECT SHAPE — same rescue as `cmp`: literal pool + ldr.
+
+    ldr x0, =1442695040888963407   # PCG64 default-stream
+                                   # increment; one instruction,
+                                   # one 8-byte pool slot
+
+The assembler chooses between mov-chain (no pool, 4 instructions,
+no memory access) and ldr-from-pool (1 instruction, 1 memory
+load) based on the constant's shape. For PCG-style 64-bit
+multipliers and ChaCha-style state words, ldr-from-pool always
+wins.
+
+WHERE THIS BIT US:
+
+  v2.3.3  maze_generation/asm_aarch64.s — PCG multiplier
+          0x5851F42D4C957F2D loaded via mov, only the bottom
+          16 bits actually landed. Maze generation produced
+          deterministic output, but the wrong deterministic
+          output. Caught by the cross-language byte-parity
+          assertion (`cells[0]=13, cells[27]=12, cells[63]=6`)
+          when the AArch64 port disagreed with all 9 other
+          ports.
+
+═══════════════════════════════════════════════════════════════
+The pattern across all three
+═══════════════════════════════════════════════════════════════
+
+AArch64's encoding-tight ISA + the AAPCS64 split means writing
+asm for it differs from x86_64 in three predictable ways:
+
+  - You can't dump arbitrary 64-bit constants into instructions.
+    Use the literal pool (`ldr xN, =value`) by reflex when the
+    constant exceeds 16 bits.
+  - You can't park values in caller-saved regs across a `bl`.
+    Decide once per function: callee-saved (set up a spill at
+    entry, pay one stp + one ldp) OR memory (one ldr/str per
+    use, slower but no setup).
+  - The assembler error messages are mostly accurate, but they
+    don't suggest the literal-pool fix. The reflex is to add a
+    shift; the literal pool is the right answer ~90% of the
+    time.
+
+x86_64 hides all three: arbitrary 64-bit immediates fit in
+`movabs`, caller-saved registers are fewer (rax, rcx, rdx, rsi,
+rdi, r8–r11), so the surface area of "what can I keep across a
+call" is smaller and more obvious. Porting an x86_64 asm
+example to aarch64 always surfaces at least one of these three.
 
