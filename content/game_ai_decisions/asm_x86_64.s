@@ -62,11 +62,14 @@ msg_t7_len = . - msg_t7
 # --- PRNG (PCG multiply-add) ---
 
 # rng_next: returns pseudo-random value in rax
+# Note: x86 `add r64, imm` sign-extends a 32-bit immediate, so the
+# 64-bit PCG increment must be loaded into a register first.
 rng_next:
     mov     rax, [rip + rng_state]
     mov     rcx, 6364136223846793005
     imul    rcx
-    add     rax, 1442695040888963407
+    mov     rcx, 1442695040888963407
+    add     rax, rcx
     mov     [rip + rng_state], rax
     # Mix bits: use upper bits (better distribution)
     shr     rax, 33

@@ -7,7 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.3.2] — 2026-05-01
+## [2.3.2] — 2026-05-02
+
+### Added
+- **`fixed_point_arithmetic` backfilled to 11/11 languages** (P0C-1
+  kickoff). Nine new files: `rust.rs`, `python.py`, `c.c`, `go.go`,
+  `typescript.ts`, `shell.sh`, `zig.zig`, `asm_aarch64.s`,
+  `openqasm.qasm`. All mirror the test set in `cyrius.cyr`
+  (`fx_from_int`, `fx_to_int` truncate + round, `fx_mul`,
+  `fx_mul_safe`, `fx_div`, sine table peak/trough/zero, roundtrip).
+  Each leads with a short comment on the language-specific idiom
+  (Rust's `wrapping_*` / `i128`, Python's bigint, C's `__int128`,
+  TypeScript's bigint requirement, Bash's `awk`-generated sine
+  table, Zig's explicit casts, AArch64's `SMULH+MUL` pair, OpenQASM's
+  phase-encoding analog of fixed-point).
+- **`scripts/validate-content.sh` now validates Cyrius examples**.
+  New `HAS_CYRIUS` toolchain probe + per-topic `cyrius run` block
+  mirroring the skip-if-missing pattern of the other languages.
+  Toolchain banner expanded: `zig=…  aarch64=…  qasm=…  cyrius=…`.
+- **Three new field-note entries in
+  `content/cyrius/field_notes/language/parser_syntax.cyml`**
+  (5 → 8 entries; total field-note entries 131 → 134), captured
+  during the v2.3.2 backfill sweep:
+  - `multi_line_struct_enum_bodies_dont_parse` — struct/enum
+    bodies must be on one line; multi-line braces silently
+    mis-tokenise the body and surface as misleading "undefined
+    variable" or "unexpected ';'" errors far from the real cause.
+  - `return_struct_literal_dangles_or_rejected` — `return Type {
+    … }` either fails to parse or (if wrapped via `var b = …;
+    return &b`) returns a dangling stack pointer. Construct in
+    caller scope; `alloc()` for heap-resident.
+  - `bare_return_in_if_block_rejected` — bare `return;` inside an
+    `if { … }` block triggers "unexpected ';'"; must be `return
+    0;` (Cyrius has no void).
+
+### Fixed
+- **14 pre-existing example failures surfaced by the new validator
+  coverage and resolved**. Validator sweep: was 406/420 before
+  the Cyrius branch landed, now 420/420 with zero skips on a fully
+  stocked toolchain.
+  - **4 OpenQASM** files (`instruction_encoding`,
+    `linking_and_loading`, `ownership_and_borrowing`,
+    `virtual_memory`) used `swap a, b;` — qiskit's `qelib1.inc`
+    doesn't define `swap`. Expanded to the canonical 3-CNOT
+    decomposition.
+  - **2 C** files: `code_generation/c.c` missing `<stdint.h>`
+    (gcc 15 strict on `int64_t`); `syscalls_and_abi/c.c` missing
+    `_GNU_SOURCE` and `<sys/types.h>` for `pid_t` and `syscall(2)`.
+  - **2 x86_64 ASM**: `game_ai_decisions/asm_x86_64.s` had `add
+    rax, imm64` (x86 `add` only sign-extends imm32) — split into
+    `mov rcx, imm64; add rax, rcx`. `projectile_physics/asm_x86_64.s`
+    had a bounce-decay convergence test calibrated for too few
+    frames — bumped 200 → 1000 frames, threshold to `2 * GRAVITY`.
+  - **5 Cyrius**: `game_ai_decisions`, `state_machines`,
+    `sprite_rendering` — multi-line struct/enum bodies, `return
+    Struct { … }` builders returning dangling stack pointers, bare
+    `return;` inside `if { … }` blocks. `projectile_physics`
+    had the same convergence-window miscalibration as its asm
+    sibling. `strings` called `fmt_sprintf(buf, fmt, args)` with
+    the `bufsz` arg missing (correct shape: `fmt_sprintf(buf,
+    bufsz, fmt, args)`). All three cyrius parser quirks captured
+    in field notes (see Added).
+  - **1 Shell**: `quantum_computing/shell.sh` used `bc -l` for
+    floating-point math (`bc` is not POSIX-mandatory and absent
+    on default Arch installs); rewrote three helpers to use `awk`
+    (always available, same `sqrt`/`log`/`exp` semantics).
 
 ### Changed
 - **Roadmap rewrite** (`docs/development/roadmap.md`). Header refreshed
@@ -30,7 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     bring the 24 new topics to 11/11 language parity with the
     original 36. Sized as a multi-release sweep, prioritized by
     cluster maturity (P0C-1 game-engine, P0C-2 graphics, P0C-3
-    database, P0C-4 systems & misc).
+    database, P0C-4 systems & misc). `fixed_point_arithmetic`
+    is the first P0C-1 topic landed (see Added).
   - **P3 reorganized**: graphics cluster crossed off (covered by
     P0C-2); audio + AI/ML topics retained.
   - **Field-notes growth pattern** documented as Established at
@@ -40,6 +105,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     minor drives a vidya patch bump for stdlib + language-feature
     alignment, with the 6-step playbook (cyrius.cyml, field
     notes, index verification range, CHANGELOG, zugot recipe).
+- **`content/cyrius/field_notes/index.cyml`** — language section
+  count 26 → 29 entries; `parser_syntax.cyml` per-file count
+  5 → 8 entries with the three new entries listed.
 - `VERSION` 2.3.1 → 2.3.2.
 
 ## [2.3.1] — 2026-05-01

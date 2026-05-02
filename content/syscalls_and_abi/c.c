@@ -8,10 +8,14 @@
 //   - SYSCALL clobbers RCX and R11
 //   - Stack alignment requirements
 
+// _GNU_SOURCE exposes the libc `syscall(2)` wrapper under -std=c17.
+#define _GNU_SOURCE
+
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <sys/types.h>   // pid_t
 #include <unistd.h>
 
 // ── Linux x86_64 syscall numbers ──────────────────────────────────

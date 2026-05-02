@@ -12,7 +12,11 @@ qreg owner[2];
 creg owner_c[2];
 
 h owner[0];            // owner[0] has a value
-swap owner[0], owner[1]; // "move" — owner[1] now owns the state
+// swap = "move" — owner[1] now owns the state. qelib1.inc doesn't
+// define `swap`; expand as 3 CNOTs (a, b → b, a).
+cx owner[0], owner[1];
+cx owner[1], owner[0];
+cx owner[0], owner[1];
 // owner[0] is now |0⟩ (moved-from, like Rust's moved value)
 
 measure owner -> owner_c;

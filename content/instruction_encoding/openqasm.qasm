@@ -60,7 +60,10 @@ creg two_q_c[4];
 
 // CNOT: control + target (2-operand instruction)
 cx two_q[0], two_q[1];
-// SWAP: 3 CNOTs (complex instruction = microcode sequence)
-swap two_q[2], two_q[3];
+// SWAP: 3 CNOTs (complex instruction = microcode sequence).
+// qelib1.inc doesn't define `swap`; this is the canonical expansion.
+cx two_q[2], two_q[3];
+cx two_q[3], two_q[2];
+cx two_q[2], two_q[3];
 
 measure two_q -> two_q_c;

@@ -1,7 +1,7 @@
 # Cyrius Field Notes — Language Gotchas (parser & syntax)
 # Operator precedence, var/scope/bracket parser rules, and shift semantics that
 # bite at parse time or at the lexer.
-# 5 entries.
+# 8 entries.
 
 [[entries]]
 name = "the_logical_shift_trap"
@@ -214,3 +214,147 @@ fixed-size frame buffer based on a structurally-meaningful constant
 parser supports identifier-as-array-size, the constant has to be
 duplicated as a literal at the call site.
 
+[[entries]]
+name = "multi_line_struct_enum_bodies_dont_parse"
+description = "Cyrius parser expects struct and enum bodies on a single line; multi-line braced bodies trip struct-vs-block disambiguation"
+category = "cyrius"
+---
+THE TRAP:
+
+    struct Player {
+        state;
+        prev_state;
+        timer;
+    }
+
+    enum PlayerState {
+        PS_IDLE = 0;
+        PS_RUN = 1;
+        PS_SHOOT = 2;
+    }
+
+Cyrius's parser doesn't accept fields/variants on separate lines.
+The visible error is misleading — usually "undefined variable
+'TypeName'" pointing at an unrelated construct line, or
+"unexpected ';'" in the middle of unrelated code far past the
+real cause. The parser silently mis-tokenises the body and the
+cascade manifests later.
+
+CORRECT SHAPE — collapse the body onto one line:
+
+    struct Player { state; prev_state; timer; }
+    enum PlayerState { PS_IDLE = 0; PS_RUN = 1; PS_SHOOT = 2; }
+
+WORKAROUND when the body would be unwieldy — split across
+multiple struct/enum decls:
+
+    enum PSNum1 { PS_IDLE = 0; PS_RUN = 1; PS_SHOOT = 2; PS_DUNK = 3; }
+    enum PSNum2 { PS_PASS = 4; PS_STEAL = 5; PS_BLOCK = 6; PS_FALL = 7; }
+
+WHERE THIS BIT US (v2.3.2 backfill sweep):
+content/state_machines/cyrius.cyr (3 multi-line enums + 1 struct),
+content/sprite_rendering/cyrius.cyr (1 multi-line struct),
+content/game_ai_decisions/cyrius.cyr (1 multi-line enum + 1 struct).
+All three failed to compile until bodies were collapsed. The
+single-line form has been working since v3.x — see
+content/projectile_physics/cyrius.cyr's `struct Ball { x; y; vx;
+vy; }` for the canonical reference.
+
+[[entries]]
+name = "return_struct_literal_dangles_or_rejected"
+description = "Returning a struct literal from a fn either fails to parse or returns a dangling stack pointer; construct in caller scope instead"
+category = "cyrius"
+---
+THE TRAP — two failure modes, both wrong:
+
+    # Mode 1 — parser rejects the brace after `return TypeName`:
+    fn ball_new(x, y) {
+        return Ball { x, y, 0, 0 };
+    }
+    # → error: undefined variable 'Ball' (misleading; actual cause
+    #   is the parser disambiguating expression-vs-block at the brace)
+
+    # Mode 2 — parses, but returns dangling stack memory:
+    fn ball_new(x, y) {
+        var b = Ball { x, y, 0, 0 };
+        return &b;
+    }
+    # → silently corrupts: caller's frame use clobbers b's bytes,
+    #   field reads return garbage. No compile error; only test
+    #   asserts catch it (and only if the assertion is tight enough).
+
+CORRECT SHAPE — construct in caller scope, pass `&local`:
+
+    fn test_idle_to_run() {
+        var p = Player { PS_IDLE, PS_IDLE, 0 };
+        player_transition(&p, INPUT_MOVE);
+        # &p is valid for the lifetime of test_idle_to_run's frame
+    }
+
+This is the convention every working topic in vidya uses
+(content/projectile_physics/cyrius.cyr's Ball, post-v2.3.2 fix in
+content/state_machines and content/game_ai_decisions). Builder
+helpers like `ball_new` / `player_new` may stay in the file for
+documentation but should be marked dead code — nothing calls
+them.
+
+If a long-lived heap-resident struct is genuinely needed, alloc()
+the storage and write the fields explicitly:
+
+    var b = alloc(BALL_SIZE);
+    store64(b + BALL_X, x);
+    store64(b + BALL_Y, y);
+    return b;     # heap pointer, lives until process exit
+
+WHERE THIS BIT US (v2.3.2):
+content/game_ai_decisions/cyrius.cyr's `stats_new()` returned
+&local_struct, silently passed garbage through to
+ai_decide_offense, and the dunk test failed with "got 3, expected
+1" (3 = ACT_DRIVE; the AI was reading `speed` from random stack
+bytes that happened to outscore the dunk path). Fix: rewrite the
+test to construct Stats inline.
+
+[[entries]]
+name = "bare_return_in_if_block_rejected"
+description = "Cyrius's parser rejects bare `return;` inside an `if { ... }` block — must use `return 0;` (no void in Cyrius)"
+category = "cyrius"
+---
+THE TRAP:
+
+    fn fb_set(x, y, color) {
+        if (x < 0) { return; }              # ERROR: unexpected ';'
+        if (x >= SCREEN_W) { return; }
+        ...
+    }
+
+Cyrius's parser fires "unexpected ';'" on bare `return;` inside
+a braced block, even though bare `return;` at the top level of a
+fn body is accepted. The reported error line number is unreliable
+(preprocessed-line-number problem) — it points at some line dozens
+or hundreds away from the real cause.
+
+CORRECT SHAPE — return an explicit value. Cyrius has no void;
+every fn returns i64:
+
+    fn fb_set(x, y, color) {
+        if (x < 0) { return 0; }
+        if (x >= SCREEN_W) { return 0; }
+        if (y < 0) { return 0; }
+        if (y >= SCREEN_H) { return 0; }
+        store8(_fb + y * SCREEN_W + x, color);
+        return 0;
+    }
+
+WHY: the parser disambiguates `return EXPR;` vs block-statement
+forms differently at fn-body top-level vs inside nested braces.
+At top level, `return;` is accepted as a void shorthand; inside a
+nested `{ ... }` the same form is rejected. The diagnostic doesn't
+spell this out — it surfaces as a near-random "unexpected ';'"
+wherever the post-error parser rebooted.
+
+WHERE THIS BIT US (v2.3.2):
+content/sprite_rendering/cyrius.cyr's fb_set + blit_scaled used
+six `if (cond) { return; }` early-exits — all rejected. The
+preprocessed line number reported was meaningless; bisecting the
+file by truncating at function boundaries was the only way to
+locate the root cause.

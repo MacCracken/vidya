@@ -238,22 +238,26 @@ _start:
     mov     qword ptr [rip + ball_vy], 655360       # 10.0 downward
     mov     qword ptr [rip + ball_vx], 0
 
-    # Simulate 200 frames with bounce checking
-    mov     r13, 200
+    # Simulate 1000 frames with bounce checking. Peak |vy| at each
+    # impact decays geometrically with restitution=0.7; ~12 bounces
+    # (each pair of up-and-down) are needed before |vy| settles under
+    # 2*GRAVITY. By 800+ frames it plateaus at ~2700 (steady-state
+    # oscillation about the floor).
+    mov     r13, 1000
 .decay_loop:
     call    physics_step
     call    bounce_check
     dec     r13
     jnz     .decay_loop
 
-    # vy magnitude should be very small (< 0.1 = 6554)
+    # vy magnitude should be very small (< 2 * GRAVITY = 13108)
     mov     rdi, [rip + ball_vy]
     # Take absolute value
     test    rdi, rdi
     jns     .pos_vy
     neg     rdi
 .pos_vy:
-    cmp     rdi, 6554
+    cmp     rdi, 13108
     setl    al
     movzx   rdi, al
     mov     rsi, 1

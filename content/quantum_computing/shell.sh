@@ -27,10 +27,13 @@ assert_eq "$(state_size 10)" "1024" "10 qubits"
 assert_eq "$(state_size 20)" "1048576" "20 qubits"
 
 # ── Grover iterations: floor(π/4 × √(N/M)) ───────────────────────────
+# awk is POSIX and always available, unlike bc — same floating-point
+# semantics for sqrt/log/exp; we just truncate via int() instead of
+# bc's `scale=0; x/1`.
 grover_iterations() {
     local n_items=$1 n_solutions=${2:-1}
-    # floor(π/4 × √(N/M)) — compute at high scale then truncate
-    echo "scale=10; x = (3.14159265 / 4) * sqrt($n_items / $n_solutions); scale=0; x / 1" | bc -l
+    awk -v n="$n_items" -v m="$n_solutions" \
+        'BEGIN { printf "%d\n", int((3.14159265 / 4) * sqrt(n/m)) }'
 }
 
 assert_eq "$(grover_iterations 4 1)" "1" "grover N=4"
@@ -44,8 +47,7 @@ classical_search() {
 
 quantum_search() {
     local n=$1
-    # √N using bc
-    echo "scale=0; sqrt($n) / 1" | bc -l
+    awk -v n="$n" 'BEGIN { printf "%d\n", int(sqrt(n)) }'
 }
 
 # Speedup for N=1,000,000
@@ -58,8 +60,9 @@ assert_eq "$quant_q" "1000" "quantum queries"
 circuit_fidelity_pct() {
     local n_gates=$1 error_rate_permille=$2
     # error_rate_permille is error rate × 1000 (to avoid decimals)
-    # fidelity = (1 - rate)^n × 100, computed with e^(n*ln(1-rate))
-    echo "scale=10; e(${n_gates} * l(1 - ${error_rate_permille} / 1000)) * 100" | bc -l
+    # fidelity = (1 - rate)^n × 100, via e^(n * ln(1 - rate)) * 100
+    awk -v n="$n_gates" -v r="$error_rate_permille" \
+        'BEGIN { printf "%.10f\n", exp(n * log(1 - r/1000)) * 100 }'
 }
 
 # 100 gates at 0.1% error = ~90.5%

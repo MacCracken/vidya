@@ -15,6 +15,10 @@ creg c[2];
 h q[0];            // resolved from include: u2(0, pi)
 t q[0];            // resolved from include: u1(pi/4)
 cx q[0], q[1];     // resolved from include: CX primitive
-swap q[0], q[1];   // resolved from include: 3x cx
+// swap q[0], q[1] expanded — qelib1.inc doesn't define it as a gate;
+// the 3-CNOT decomposition IS the "linking" of three primitives.
+cx q[0], q[1];
+cx q[1], q[0];
+cx q[0], q[1];
 
 measure q -> c;

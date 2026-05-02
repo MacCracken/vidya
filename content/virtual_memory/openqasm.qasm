@@ -15,8 +15,11 @@ creg virt_c[4];
 x virt[0];         // logical qubit 0 = |1⟩
 h virt[2];         // logical qubit 2 in superposition
 
-// "Page swap": remap logical qubit 0 to physical position 1
-swap virt[0], virt[1];
+// "Page swap": remap logical qubit 0 to physical position 1.
+// qelib1.inc doesn't define `swap` — expand as 3 CNOTs.
+cx virt[0], virt[1];
+cx virt[1], virt[0];
+cx virt[0], virt[1];
 // Now virt[1] holds what was logically at virt[0]
 
 measure virt -> virt_c;
