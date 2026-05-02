@@ -57,17 +57,22 @@ content/
 ├── data/                  — (P2, future)
 ├── graphics/              — (P3, future)
 └── cyrius/                — Cyrius-specific (P6, future)
-    ├── language.toml
-    ├── types.toml
-    ├── dependencies.toml
-    ├── ecosystem.toml
+    ├── language.cyml
+    ├── types.cyml
+    ├── dependencies.cyml
+    ├── ecosystem.cyml
     ├── field_notes/       — practical lessons from real software
-    │   ├── language.toml
-    │   ├── compiler.toml
-    │   ├── kernel.toml
-    │   └── ...
+    │   ├── compiler/      — per-version-arc files (v3, v4, v5_0_to_5_4, v5_5, v5_6, v5_7, ...)
+    │   ├── language/      — per-surface-area files (parser_syntax, semantics_runtime, platform_abi, stdlib_format, diagnostics_caps)
+    │   ├── mabda_v3_gpu/  — per-phase files (overview, phase_a, phase_b, phase_c, phase_d, research)
+    │   ├── doom.cyml      — single-project topic; flat until it grows
+    │   ├── cyim.cyml      — single-project topic; flat until it grows
+    │   ├── encom-hits.cyml
+    │   ├── kernel.cyml
+    │   ├── meta.cyml
+    │   └── index.cyml     — file-by-file pointer to every entry
     └── archive/           — historical design log
-        └── implementation.toml   (moved here at v5.6.17)
+        └── implementation.cyml   (moved here at v5.6.17)
 ```
 
 ## Migration Rules
@@ -78,6 +83,23 @@ content/
 4. **One PR** — reorganize everything in a single atomic move
 5. **Update tests** — all hardcoded paths in tests must be updated
 6. **Backward compat** — keep old paths as symlinks for one version
+
+## Field-notes subfolder pattern (proven at v2.3.1)
+
+Field-note topics follow a different threshold from the top-level `content/` reorg:
+when a single `field_notes/<topic>.cyml` grows past ~800 lines or accumulates
+distinct sub-topics, convert it into a folder of chunked `.cyml` files.
+
+- **By version arc** when entries cluster around release timelines
+  (`compiler/v3.cyml`, `v4.cyml`, ...).
+- **By surface area** when entries cluster around language layers
+  (`language/parser_syntax.cyml`, `semantics_runtime.cyml`, ...).
+- **By phase** when entries cluster around project milestones
+  (`mabda_v3_gpu/phase_a.cyml`, `phase_b.cyml`, ...).
+
+Each chunk file gets a 3-line header (title, one-line scope, entry count) and
+the same `[[entries]]` body format. `index.cyml` lists every file with its
+entry count and per-entry one-liner.
 
 ## Current Topic Count: 36
 

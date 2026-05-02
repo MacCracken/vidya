@@ -4,12 +4,12 @@ Historical Cyrius implementation patterns and pinned-plan documents.
 Kept for design-log value but no longer the source of truth for current
 state. Live state lives in:
 
-- `../language.toml` — language usage + v5.6.x feature additions
-- `../field_notes/compiler.toml` — compiler internals + IR-pass gotchas
-- `../field_notes/language.toml` — user-facing language gotchas
-- `../ecosystem.toml` — ecosystem consumer roster
-- `../dependencies.toml` — dep registry
-- `../types.toml` — type system reference
+- `../language.cyml` — language usage + v5.6.x feature additions
+- `../field_notes/compiler/` — compiler internals + IR-pass gotchas (per-version-arc files)
+- `../field_notes/language/` — user-facing language gotchas (per-surface-area files)
+- `../ecosystem.cyml` — ecosystem consumer roster
+- `../dependencies.cyml` — dep registry
+- `../types.cyml` — type system reference
 
 …and in the cyrius repo itself:
 

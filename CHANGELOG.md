@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.1] — 2026-05-01
+
+### Changed
+- **Cyrius toolchain pin bumped 5.7.0 → 5.8.3** (`cyrius.cyml`). No
+  source changes required — the 5.8.x stdlib is API-compatible with
+  the 5.7.0 surface vidya consumes (syscalls, string, alloc, str,
+  fmt, vec, hashmap, io, fs, tagged, json, fnptr, args, toml, regex,
+  net, sandhi). `cyrius.lock` (sakshi 2.0.0 sha) unchanged.
+- **`content/cyrius/field_notes/` reorganised by topic**. The three
+  longest field-note files were converted into per-topic subfolders;
+  the other five stayed flat. All 131 entries preserved byte-exact
+  (`diff` clean against the pre-split source). Index regenerated.
+  - `compiler.cyml` (3,944 lines, 46 entries) → `compiler/` split by
+    version arc: `v3.cyml` (8), `v4.cyml` (4), `v5_0_to_5_4.cyml` (4),
+    `v5_5.cyml` (4), `v5_6.cyml` (11), `v5_7.cyml` (15).
+  - `language.cyml` (1,239 lines, 26 entries) → `language/` split by
+    surface area: `parser_syntax.cyml` (5), `semantics_runtime.cyml`
+    (8), `platform_abi.cyml` (4), `stdlib_format.cyml` (5),
+    `diagnostics_caps.cyml` (4).
+  - `mabda-v3-gpu.cyml` (1,276 lines, 23 entries) → `mabda_v3_gpu/`
+    split by phase: `overview.cyml` (3), `phase_a.cyml` (1),
+    `phase_b.cyml` (4), `phase_c.cyml` (9), `phase_d.cyml` (4),
+    `research.cyml` (2).
+  - `doom.cyml` (11), `cyim.cyml` (12), `encom-hits.cyml` (8),
+    `meta.cyml` (4), `kernel.cyml` (1) left flat.
+  - `index.cyml` refreshed: stale per-section counts corrected
+    (compiler 22→46, language 24→26, mabda 19→23, meta 3→4, encom-hits
+    7→8), file-by-file breakdown added for split topics, verification
+    range updated to "Cyrius 2.2 → 5.8.x".
+- `docs/development/content-grouping.md` field_notes diagram updated
+  to `.cyml` extensions and the new subfolder pattern; added a
+  "Field-notes subfolder pattern (proven at v2.3.1)" section
+  documenting the ~800-line / distinct-sub-topic threshold and the
+  three split axes (version arc, surface area, phase).
+- `content/cyrius/archive/README.md` path references corrected:
+  `../language.toml` → `../language.cyml`,
+  `../field_notes/{compiler,language}.toml` → `../field_notes/{compiler,language}/`,
+  `../{ecosystem,dependencies,types}.toml` → `.cyml`.
+
 ## [2.3.0] — 2026-04-25
 
 ### Added
