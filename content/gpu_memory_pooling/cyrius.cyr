@@ -1,0 +1,129 @@
+# Vidya — GPU Memory Pooling — Cyrius reference (runnable)
+#
+# Bump allocator over a 1024-byte pool — the "transient per-frame,
+# reset on frame boundary" shape from concept.toml. Bump-pointer
+# alloc returns offsets within the pool; alloc_aligned rounds up to
+# the requested alignment first; alloc_reset moves the bump pointer
+# back to zero, recycling the entire pool atomically.
+#
+# Tests:
+#   1. Initial state: bump_offset = 0.
+#   2. alloc(100) returns 0; bump_offset = 100.
+#   3. alloc(200) returns 100; bump_offset = 300.
+#   4. alloc(1000) returns -1 (exhausted); bump_offset unchanged.
+#   5. reset: bump_offset = 0; pool is fresh.
+#   6. alloc_aligned(N, 16) rounds bump up to a 16-byte boundary.
+#   7. alloc(0) is a no-op (returns current offset, no advance).
+#   8. Many small allocs: total advance == sum of sizes (no overhead).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var POOL_SIZE = 1024;
+var pool[1024];
+var bump_offset = 0;
+
+fn pool_init() {
+    memset(&pool, 0, POOL_SIZE);
+    bump_offset = 0;
+    return 0;
+}
+
+fn pool_reset() {
+    bump_offset = 0;
+    return 0;
+}
+
+fn pool_used() {
+    return bump_offset;
+}
+
+fn pool_free() {
+    return POOL_SIZE - bump_offset;
+}
+
+# Round n up to the nearest multiple of `align` (must be power of 2).
+fn align_up(n, align) {
+    var mask = align - 1;
+    return (n + mask) - ((n + mask) & mask);
+}
+
+# alloc(size) — returns offset within the pool, or -1 on exhaustion.
+# Size 0 is a no-op (returns current offset without advancing).
+fn alloc(size) {
+    if (size == 0) { return bump_offset; }
+    if (bump_offset + size > POOL_SIZE) { return 0 - 1; }
+    var off = bump_offset;
+    bump_offset = bump_offset + size;
+    return off;
+}
+
+# alloc_aligned(size, align) — rounds bump_offset up to `align` first.
+# `align` must be a power of 2.
+fn alloc_aligned(size, align) {
+    var aligned = align_up(bump_offset, align);
+    if (aligned + size > POOL_SIZE) { return 0 - 1; }
+    bump_offset = aligned + size;
+    return aligned;
+}
+
+fn main() {
+    alloc_init();
+    pool_init();
+
+    test_group("gpu_memory_pooling");
+
+    # --- Test 1: initial state ---
+    assert_eq(pool_used(), 0, "init: used = 0");
+    assert_eq(pool_free(), 1024, "init: free = POOL_SIZE");
+
+    # --- Test 2: first alloc returns 0 ---
+    var off1 = alloc(100);
+    assert_eq(off1, 0, "alloc(100) returns 0");
+    assert_eq(pool_used(), 100, "used = 100 after first alloc");
+
+    # --- Test 3: second alloc returns previous bump ---
+    var off2 = alloc(200);
+    assert_eq(off2, 100, "alloc(200) returns 100");
+    assert_eq(pool_used(), 300, "used = 300 after second alloc");
+
+    # --- Test 4: exhaustion returns -1 sentinel ---
+    var off3 = alloc(1000);
+    assert_eq(off3, 0 - 1, "alloc(1000) returns -1 (exhausted)");
+    assert_eq(pool_used(), 300, "used unchanged after failed alloc");
+
+    # --- Test 5: reset recycles the pool ---
+    pool_reset();
+    assert_eq(pool_used(), 0, "reset: used = 0");
+    assert_eq(pool_free(), 1024, "reset: free = POOL_SIZE");
+
+    var off_post_reset = alloc(50);
+    assert_eq(off_post_reset, 0, "alloc after reset returns 0");
+
+    # --- Test 6: alloc_aligned rounds up ---
+    # bump = 50; align to 16 → next 16-byte boundary is 64.
+    var off_a = alloc_aligned(32, 16);
+    assert_eq(off_a, 64, "alloc_aligned(32, 16) returns 64 (rounded from 50)");
+    assert_eq(pool_used(), 96, "used = 64 + 32");
+
+    # --- Test 7: alloc(0) no-op ---
+    var noop = alloc(0);
+    assert_eq(noop, 96, "alloc(0) returns current offset");
+    assert_eq(pool_used(), 96, "alloc(0) does not advance");
+
+    # --- Test 8: many small allocs sum exactly ---
+    pool_reset();
+    var i = 0;
+    while (i < 10) {
+        alloc(8);
+        i = i + 1;
+    }
+    assert_eq(pool_used(), 80, "10 × alloc(8) = 80 bytes, no overhead");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

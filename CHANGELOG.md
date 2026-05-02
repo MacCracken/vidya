@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.9] — 2026-05-02
+
+P0C-2b graphics batch 2 — 3 topics × 11 languages each (33 new
+source files). Largest "first-try clean" run of the v2.3.x arc:
+all 33 files passed validation on the first build, no asm or
+language-specific debugging required.
+
+### Added
+- **P0C-2b cluster — 3 topics × 11 languages each, +33 source
+  files** (validator sweep 605/605 → 638/638):
+  - **`bindless_resources`** — 11 new lang files (concept-only
+    topic; cyrius reference designed first). 64-slot global
+    descriptor table with slot 0 reserved as null sentinel
+    (matching the page_management pattern). LIFO free-list for
+    reuse, sequential bump for fresh allocations. 15 assertions
+    covering: sequential alloc returns 1/2/3, slot 0 reserved,
+    lookup roundtrip, update preserves ID, free + reuse via
+    free-list LIFO, exhaustion returns 0 (null sentinel).
+    OpenQASM uses qubits-as-handle-slots analog with
+    X/measure/reset for alloc/lookup/free.
+  - **`gpu_memory_pooling`** — 11 new lang files. Bump
+    allocator over a 1024-byte pool — the "transient per-frame,
+    reset on frame boundary" shape from concept.toml's first
+    BP. `alloc(size)` returns offsets, `-1` sentinel on
+    exhaustion. `alloc_aligned(size, align)` rounds bump up
+    to the requested boundary first. `reset()` recycles the
+    entire pool atomically. 16 assertions covering initial
+    state, sequential allocs, exhaustion, reset + reuse,
+    alignment rounding, alloc(0) no-op, monotonic-sum
+    invariant across many small allocs.
+  - **`explicit_gpu_synchronization`** — 11 new lang files.
+    Two timeline semaphores (compute + transfer queues) —
+    concept.toml's "monotonic frame counter / timeline
+    wait/signal" escape-hatch primitive. `signal(sem, value)`
+    advances iff value strictly greater than current (rejects
+    regression to enforce monotonicity); `wait_for(sem,
+    target)` returns 0/1 reachability; `wait_all(c_target,
+    t_target)` is the multi-queue render-graph integration
+    pattern — only proceeds when BOTH queues are at or past
+    their targets. 19 assertions covering init, signal
+    advance, past/current/future wait reachability, regression
+    rejection (both `<` and `==`), multi-sem wait_all matrix
+    (4 cases), monotonic invariant across 10 sequential
+    signals. OpenQASM uses CNOT entanglement chains as
+    quantum-fence analog (producer broadcasts state to
+    consumers via Bell-pair pattern).
+
+### Changed
+- **VERSION** 2.3.8 → 2.3.9.
+- **Topic coverage**: 60 topics, 55 → 58 fully covered. Per-
+  language counts (each):
+  - Rust/Python/C/Go/TypeScript/Shell/Zig/OpenQASM: 55 → 58
+  - x86_64 ASM / AArch64 ASM: 55 → 58
+  - Cyrius: 55 → 58 (all 3 topics designed cyrius.cyr first)
+  - Examples: 605 → 638 (+33 new source files; +5.5%).
+
+### Verified
+- `cyrius build src/main.cyr build/vidya` — clean.
+- `cyrius test` — 41/41 passing.
+- `cyrius lint src/main.cyr` — 3 pre-existing line-length
+  warnings (lines 821/822/1141), no new issues.
+- `scripts/validate-content.sh` — **638/638 green**, 0 failed,
+  0 skipped (full toolchain locally available).
+- All 33 new files passed first-build validation. The asm
+  ports applied the v2.3.8 lessons (callee-saved register
+  caching across `bl/call`, `shl` instead of `imul reg, sym`)
+  by reflex; no asm rework needed.
+
 ## [2.3.8] — 2026-05-02
 
 P0C-2a graphics batch 1 — 3 topics × 11 languages each (33 new

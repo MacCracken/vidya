@@ -1,0 +1,133 @@
+# Vidya — Bindless Resources — Cyrius reference (runnable)
+#
+# In-memory descriptor table — the "one global table per frame" pattern
+# from concept.toml's first BP. Each table slot stores a u64 descriptor
+# (an opaque resource handle, e.g. a GPU virtual address). Slot 0 is
+# reserved as the null sentinel (matching the page_management gotcha).
+# Free list is a stack — freed slot stores the next-freed slot ID; head
+# in a global. O(1) alloc / O(1) free with no external data structure.
+#
+# Tests:
+#   1. Sequential alloc returns increasing IDs (1, 2, 3, ...).
+#   2. Slot 0 is never returned (null-sentinel reserved).
+#   3. Lookup returns the descriptor written at allocation time.
+#   4. Update (rebind) replaces the descriptor without changing the ID.
+#   5. Free + alloc reuses the slot (free list LIFO).
+#   6. Capacity exhaustion returns 0 (the null sentinel = "no slot").
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var TABLE_CAP = 64;
+var SLOT_BYTES = 8;             # one i64 per descriptor
+
+# Descriptor table: TABLE_CAP × i64. Slot 0 reserved.
+var table[512];                 # 64 * 8 = 512 bytes
+var next_id = 1;                # bump pointer; slot 0 reserved
+var free_head = 0;              # 0 = empty free list
+var free_links[512];            # parallel array; freed slot stores next-free ID
+
+fn table_init() {
+    memset(&table, 0, TABLE_CAP * SLOT_BYTES);
+    memset(&free_links, 0, TABLE_CAP * SLOT_BYTES);
+    next_id = 1;
+    free_head = 0;
+    return 0;
+}
+
+# alloc(descriptor) — returns slot ID (1..TABLE_CAP-1), or 0 if exhausted.
+fn alloc_handle(desc) {
+    if (free_head != 0) {
+        var id = free_head;
+        free_head = load64(&free_links + id * 8);
+        store64(&table + id * 8, desc);
+        return id;
+    }
+    if (next_id >= TABLE_CAP) {
+        return 0;             # exhausted
+    }
+    var id = next_id;
+    next_id = next_id + 1;
+    store64(&table + id * 8, desc);
+    return id;
+}
+
+# update_handle(id, descriptor) — replaces descriptor at slot.
+fn update_handle(id, desc) {
+    if (id == 0) { return 0; }
+    if (id >= TABLE_CAP) { return 0; }
+    store64(&table + id * 8, desc);
+    return 1;
+}
+
+fn lookup_handle(id) {
+    if (id == 0) { return 0; }
+    if (id >= TABLE_CAP) { return 0; }
+    return load64(&table + id * 8);
+}
+
+fn free_handle(id) {
+    if (id == 0) { return 0; }
+    if (id >= TABLE_CAP) { return 0; }
+    store64(&free_links + id * 8, free_head);
+    free_head = id;
+    store64(&table + id * 8, 0);
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+    table_init();
+
+    test_group("bindless_resources");
+
+    # --- Test 1: sequential alloc returns increasing IDs starting at 1 ---
+    var id1 = alloc_handle(0x1111111111111111);
+    var id2 = alloc_handle(0x2222222222222222);
+    var id3 = alloc_handle(0x3333333333333333);
+    assert_eq(id1, 1, "first alloc = 1");
+    assert_eq(id2, 2, "second alloc = 2");
+    assert_eq(id3, 3, "third alloc = 3");
+
+    # --- Test 2: slot 0 is reserved (lookup_handle(0) returns 0) ---
+    assert_eq(lookup_handle(0), 0, "slot 0 reserved");
+
+    # --- Test 3: lookup returns the descriptor ---
+    assert_eq(lookup_handle(id1), 0x1111111111111111, "lookup id1");
+    assert_eq(lookup_handle(id2), 0x2222222222222222, "lookup id2");
+    assert_eq(lookup_handle(id3), 0x3333333333333333, "lookup id3");
+
+    # --- Test 4: update replaces descriptor without changing the ID ---
+    var ok = update_handle(id2, 0xAAAAAAAAAAAAAAAA);
+    assert_eq(ok, 1, "update_handle returns 1 on success");
+    assert_eq(lookup_handle(id2), 0xAAAAAAAAAAAAAAAA, "id2 holds new desc");
+    assert_eq(lookup_handle(id1), 0x1111111111111111, "id1 unchanged");
+    assert_eq(lookup_handle(id3), 0x3333333333333333, "id3 unchanged");
+
+    # --- Test 5: free + alloc reuses the freed slot (LIFO) ---
+    free_handle(id2);
+    assert_eq(lookup_handle(id2), 0, "freed slot reads as 0");
+    var id4 = alloc_handle(0x4444444444444444);
+    assert_eq(id4, id2, "alloc reuses freed slot id");
+    assert_eq(lookup_handle(id4), 0x4444444444444444, "reused slot has new desc");
+
+    # --- Test 6: exhaustion returns 0 ---
+    table_init();
+    var i = 1;
+    while (i < TABLE_CAP) {
+        var id = alloc_handle(i);
+        if (id == 0) {
+            i = i;            # break-like — assert_eq below will fail
+        }
+        i = i + 1;
+    }
+    var overflow = alloc_handle(0xDEADBEEF);
+    assert_eq(overflow, 0, "exhausted table returns 0");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

@@ -1,0 +1,128 @@
+# Vidya — Explicit GPU Synchronization — Cyrius reference (runnable)
+#
+# Timeline semaphores — concept.toml's "monotonic frame counter" /
+# "timeline wait/signal" escape-hatch primitive. Each semaphore is a
+# monotonic 64-bit counter; signal(N) advances the counter (rejected
+# if N < current); wait(target) returns 1 if counter >= target, 0
+# otherwise (single-thread simulation; in real hardware the wait
+# blocks until the GPU signals).
+#
+# Tests:
+#   1. init: timeline = 0; wait(0) trivially succeeds.
+#   2. signal(5): timeline advances to 5.
+#   3. wait for past, current, future values.
+#   4. signal regression rejected (monotonic invariant).
+#   5. Multi-semaphore wait_all (compute + transfer queues).
+#   6. The monotonic invariant holds across many signals.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# Two semaphores — typical "compute queue + transfer queue" shape.
+var sem_compute = 0;
+var sem_transfer = 0;
+
+fn sem_reset() {
+    sem_compute = 0;
+    sem_transfer = 0;
+    return 0;
+}
+
+# signal(sem_id, value) — advance timeline if value > current; else
+# reject. Returns 1 on success, 0 on regression rejection.
+# sem_id: 0 = compute, 1 = transfer.
+fn signal(sem_id, value) {
+    if (sem_id == 0) {
+        if (value <= sem_compute) { return 0; }
+        sem_compute = value;
+        return 1;
+    }
+    if (sem_id == 1) {
+        if (value <= sem_transfer) { return 0; }
+        sem_transfer = value;
+        return 1;
+    }
+    return 0;
+}
+
+# wait(sem_id, target) — returns 1 if current timeline >= target.
+# In real hardware this blocks; here we just return the reachability bit.
+fn wait_for(sem_id, target) {
+    if (sem_id == 0) {
+        if (sem_compute >= target) { return 1; }
+        return 0;
+    }
+    if (sem_id == 1) {
+        if (sem_transfer >= target) { return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+# wait_all(c_target, t_target) — waits on both semaphores; returns 1
+# only if BOTH are at or past their respective targets. The render-
+# graph integration pattern: a pass declares dependencies on multiple
+# upstream queues; all must be satisfied before it runs.
+fn wait_all(c_target, t_target) {
+    var c_ok = wait_for(0, c_target);
+    var t_ok = wait_for(1, t_target);
+    if (c_ok == 1) {
+        if (t_ok == 1) { return 1; }
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    sem_reset();
+
+    test_group("explicit_gpu_synchronization");
+
+    # --- Test 1: init state ---
+    assert_eq(sem_compute, 0, "init: compute = 0");
+    assert_eq(sem_transfer, 0, "init: transfer = 0");
+    assert_eq(wait_for(0, 0), 1, "wait(0) on fresh sem succeeds");
+
+    # --- Test 2: signal advances timeline ---
+    var ok = signal(0, 5);
+    assert_eq(ok, 1, "signal(0, 5) returns 1");
+    assert_eq(sem_compute, 5, "compute = 5 after signal");
+
+    # --- Test 3: wait for past, current, future ---
+    assert_eq(wait_for(0, 3), 1, "wait(0, past=3) succeeds");
+    assert_eq(wait_for(0, 5), 1, "wait(0, current=5) succeeds");
+    assert_eq(wait_for(0, 10), 0, "wait(0, future=10) fails");
+
+    # --- Test 4: signal regression rejected ---
+    var bad = signal(0, 3);
+    assert_eq(bad, 0, "signal(0, 3) rejected (3 < 5)");
+    assert_eq(sem_compute, 5, "compute still 5 after rejected signal");
+    var bad_eq = signal(0, 5);
+    assert_eq(bad_eq, 0, "signal(0, 5) rejected (5 == 5)");
+
+    # --- Test 5: multi-semaphore wait_all ---
+    signal(1, 3);
+    assert_eq(sem_transfer, 3, "transfer = 3");
+    assert_eq(wait_all(5, 3), 1, "wait_all(5, 3): both satisfied");
+    assert_eq(wait_all(5, 4), 0, "wait_all(5, 4): transfer behind");
+    assert_eq(wait_all(6, 3), 0, "wait_all(6, 3): compute behind");
+    assert_eq(wait_all(0, 0), 1, "wait_all(0, 0): trivially satisfied");
+
+    # --- Test 6: many signals stay monotonic ---
+    sem_reset();
+    var i = 1;
+    while (i <= 10) {
+        signal(0, i);
+        i = i + 1;
+    }
+    assert_eq(sem_compute, 10, "10 signals → compute = 10");
+    assert_eq(wait_for(0, 10), 1, "wait for final value succeeds");
+    assert_eq(wait_for(0, 11), 0, "wait beyond final value fails");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

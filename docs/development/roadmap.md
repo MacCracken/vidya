@@ -2,11 +2,11 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-02
 >
-> **Version**: 2.3.8 | **Cyrius**: 5.8.14
-> **Topics**: 60 (55 fully covered, 5 still partial)
+> **Version**: 2.3.9 | **Cyrius**: 5.8.14
+> **Topics**: 60 (58 fully covered, 2 still partial)
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 605 source files; concept files: 60
-> **Validator**: 605/605 green
+> **Examples**: 638 source files; concept files: 60
+> **Validator**: 638/638 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -29,14 +29,15 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.3.6 | 2026-05-02 | **P0B-4 complete — content hot-reload on `serve`** — inotify watch on every topic dir; per-request drain triggers all-or-nothing rebuild + atomic registry pointer swap; sakshi events per reload (success/failure with timing). End-to-end verified across add/remove/corrupt/restore. Reload latency 17–22ms for 60 topics. **P0B fully done (B-1 → B-4 all shipped).** |
 | 2.3.7 | 2026-05-02 | **P0C-4 complete + cyrius pin bump 5.8.3 → 5.8.14** — systems & misc cluster: `compression` (LZ77-shaped 2-byte tokens, RLE overlap, bomb guard), `concurrent_file_access` (real flock per-OPEN with 2-fd contention), `jsonl_format` (build/index/escape/unescape with 2× expansion bounds check), `page_management` (10 lang ports of the existing cyrius reference). 43 new source files; validator 529/529 → 572/572. |
 | 2.3.8 | 2026-05-02 | **P0C-2a complete — graphics batch 1 (3 topics × 11 langs)** — `framebuffer_rendering` (16×16 BGRA8888, bounds-checked fb_set/get/clear/hline/vline), `line_rasterization` (all-octant integer Bresenham, 7 line types), `bloom_and_glow` (1-pixel additive bloom + saturation clamp + threshold). Plus completed bloom_and_glow concept.toml (was TODO stub). 33 new source files; validator 572/572 → 605/605. |
+| 2.3.9 | 2026-05-02 | **P0C-2b complete — graphics batch 2 (3 topics × 11 langs)** — `bindless_resources` (64-slot descriptor table, slot-0 sentinel, LIFO free-list), `gpu_memory_pooling` (1024-byte bump allocator with alignment + reset), `explicit_gpu_synchronization` (compute + transfer timeline semaphores with signal/wait/wait_all and monotonic invariant). 33 new source files; validator 605/605 → 638/638. **All-first-try clean — no asm or language-specific debugging needed.** |
 
 ---
 
 ## Current State
 
-### 55 topics fully covered (11/11 languages)
+### 58 topics fully covered (11/11 languages)
 
-The original 36 P0 topics, plus 19 added in v2.3.2–v2.3.8:
+The original 36 P0 topics, plus 22 added in v2.3.2–v2.3.9:
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
@@ -47,20 +48,20 @@ The original 36 P0 topics, plus 19 added in v2.3.2–v2.3.8:
   jsonl_format, page_management
 - v2.3.8 P0C-2a (3): framebuffer_rendering, line_rasterization,
   bloom_and_glow
+- v2.3.9 P0C-2b (3): bindless_resources, gpu_memory_pooling,
+  explicit_gpu_synchronization
 
 (Note: the v2.3.5 reconciliation flagged a 47→48 discrepancy
 between roadmap text and the loader's count. Still unresolved
-at v2.3.8 — should chase down on the v2.3.9 graphics batch.)
+at v2.3.9 — should chase down during v2.3.10.)
 
-### 5 topics still partial
+### 2 topics still partial
 
-**P0C-2 graphics cluster — remaining batches** (5 topics, all 0/11):
-bindless_resources, direct_drm_gpu_compute,
-explicit_gpu_synchronization, gpu_memory_pooling,
-render_graph_architecture
+**P0C-2 graphics cluster — final batch** (2 topics, all 0/11):
+direct_drm_gpu_compute, render_graph_architecture
 
-Gap to full 11/11 across these 5 topics: **~55 source files**
-(5 concept-only × 11 langs each).
+Gap to full 11/11 across these 2 topics: **~22 source files**
+(2 concept-only × 11 langs each).
 
 ---
 
@@ -168,11 +169,16 @@ All 3 topics × 11 langs landed (33 new files):
   channel saturation clamp + threshold. Concept.toml
   completed (was a TODO stub).
 
-### 2.3.9 — P0C-2b graphics batch 2 (3 topics, ~33 files)
+### 2.3.9 — P0C-2b graphics batch 2 ✅ shipped 2026-05-02
 
-- `bindless_resources` (descriptor sets, texture binding)
-- `gpu_memory_pooling` (suballocation patterns)
-- `explicit_gpu_synchronization` (semaphores, fences, pipeline barriers)
+All 3 topics × 11 langs landed (33 new files), all-first-try clean:
+- **`bindless_resources`** — 64-slot descriptor table with
+  slot-0 sentinel and LIFO free-list reuse.
+- **`gpu_memory_pooling`** — 1024-byte bump allocator with
+  alignment rounding + atomic reset.
+- **`explicit_gpu_synchronization`** — compute + transfer
+  timeline semaphores with signal/wait/wait_all and
+  monotonic invariant enforcement.
 
 ### 2.3.10 — P0C-2c graphics batch 3 (2 topics + render-graph integration)
 
@@ -180,7 +186,7 @@ All 3 topics × 11 langs landed (33 new files):
 - `render_graph_architecture` (depends on most of the others —
   framebuffer, sync, bindless)
 
-After 2.3.10, **all 60 topics at 11/11**, ~660+ examples. P0 → P0C
+After 2.3.10, **all 60 topics at 11/11**, ~660 examples. P0 → P0C
 fully complete.
 
 ---
@@ -290,4 +296,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-02 (v2.3.8)*
+*Last Updated: 2026-05-02 (v2.3.9)*
