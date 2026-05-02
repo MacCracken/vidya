@@ -2,11 +2,11 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-02
 >
-> **Version**: 2.3.9 | **Cyrius**: 5.8.14
-> **Topics**: 60 (58 fully covered, 2 still partial)
+> **Version**: 2.3.10 | **Cyrius**: 5.8.14
+> **Topics**: 60 (60 fully covered) — **P0 → P0C complete**
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 638 source files; concept files: 60
-> **Validator**: 638/638 green
+> **Examples**: 660 source files; concept files: 60
+> **Validator**: 660/660 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -30,14 +30,15 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.3.7 | 2026-05-02 | **P0C-4 complete + cyrius pin bump 5.8.3 → 5.8.14** — systems & misc cluster: `compression` (LZ77-shaped 2-byte tokens, RLE overlap, bomb guard), `concurrent_file_access` (real flock per-OPEN with 2-fd contention), `jsonl_format` (build/index/escape/unescape with 2× expansion bounds check), `page_management` (10 lang ports of the existing cyrius reference). 43 new source files; validator 529/529 → 572/572. |
 | 2.3.8 | 2026-05-02 | **P0C-2a complete — graphics batch 1 (3 topics × 11 langs)** — `framebuffer_rendering` (16×16 BGRA8888, bounds-checked fb_set/get/clear/hline/vline), `line_rasterization` (all-octant integer Bresenham, 7 line types), `bloom_and_glow` (1-pixel additive bloom + saturation clamp + threshold). Plus completed bloom_and_glow concept.toml (was TODO stub). 33 new source files; validator 572/572 → 605/605. |
 | 2.3.9 | 2026-05-02 | **P0C-2b complete — graphics batch 2 (3 topics × 11 langs)** — `bindless_resources` (64-slot descriptor table, slot-0 sentinel, LIFO free-list), `gpu_memory_pooling` (1024-byte bump allocator with alignment + reset), `explicit_gpu_synchronization` (compute + transfer timeline semaphores with signal/wait/wait_all and monotonic invariant). 33 new source files; validator 605/605 → 638/638. **All-first-try clean — no asm or language-specific debugging needed.** |
+| 2.3.10 | 2026-05-02 | **P0C-2c complete — final P0C patch (2 topics × 11 langs)** — `direct_drm_gpu_compute` (GEM BO + VA-map + submit + syncobj-wait simulation), `render_graph_architecture` (DAG with topo sort + barrier derivation + dead-pass culling + cycle detection). 22 new source files; validator 638/638 → **660/660**. **🎉 P0 → P0C arc complete — all 60 topics at 11/11 languages.** |
 
 ---
 
 ## Current State
 
-### 58 topics fully covered (11/11 languages)
+### 60 topics fully covered (11/11 languages) — P0 → P0C COMPLETE 🎉
 
-The original 36 P0 topics, plus 22 added in v2.3.2–v2.3.9:
+The original 36 P0 topics, plus 24 added across v2.3.2–v2.3.10:
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
@@ -50,18 +51,17 @@ The original 36 P0 topics, plus 22 added in v2.3.2–v2.3.9:
   bloom_and_glow
 - v2.3.9 P0C-2b (3): bindless_resources, gpu_memory_pooling,
   explicit_gpu_synchronization
+- v2.3.10 P0C-2c (2): direct_drm_gpu_compute, render_graph_architecture
 
-(Note: the v2.3.5 reconciliation flagged a 47→48 discrepancy
-between roadmap text and the loader's count. Still unresolved
-at v2.3.9 — should chase down during v2.3.10.)
+The historical 47→48 discrepancy from v2.3.5 (off-by-one
+bookkeeping noise across CHANGELOG entries) is now permanently
+resolved: **vidya stats reports `Topics: 60, Complete: 60`;
+on-disk count matches; validator 660/660 green**.
 
-### 2 topics still partial
+### 0 topics partial
 
-**P0C-2 graphics cluster — final batch** (2 topics, all 0/11):
-direct_drm_gpu_compute, render_graph_architecture
-
-Gap to full 11/11 across these 2 topics: **~22 source files**
-(2 concept-only × 11 langs each).
+The patch backlog for the 2.3.x series is complete. Next
+release opens P1 — see "Next minor (2.4.0)" below.
 
 ---
 
@@ -180,20 +180,26 @@ All 3 topics × 11 langs landed (33 new files), all-first-try clean:
   timeline semaphores with signal/wait/wait_all and
   monotonic invariant enforcement.
 
-### 2.3.10 — P0C-2c graphics batch 3 (2 topics + render-graph integration)
+### 2.3.10 — P0C-2c (final P0C patch) ✅ shipped 2026-05-02 🎉
 
-- `direct_drm_gpu_compute` (the AGNOS-specific direct-ioctl path)
-- `render_graph_architecture` (depends on most of the others —
-  framebuffer, sync, bindless)
+Both topics × 11 langs landed (22 new files), all-first-try clean:
+- **`direct_drm_gpu_compute`** — in-memory simulation of the
+  GEM BO + VA-map + submit + syncobj-wait flow (no real ioctls);
+  models the kernel-side state machine that AMDGPU compute MVPs
+  drive.
+- **`render_graph_architecture`** — tiny DAG framework with
+  reads/writes bitmasks, Kahn-style topological sort with cycle
+  detection, write→read barrier derivation, and dead-pass
+  culling.
 
-After 2.3.10, **all 60 topics at 11/11**, ~660 examples. P0 → P0C
+After 2.3.10, **all 60 topics at 11/11**, 660 examples. P0 → P0C
 fully complete.
 
 ---
 
 ## Next minor (2.4.0) — Networking & Infrastructure
 
-Once all 60 existing topics are at 11/11, start P1 — the first new
+P0 → P0C is complete (v2.3.10). Time to open P1 — the first new
 thematic addition since v2.2:
 
 | Topic | Notes |
@@ -296,4 +302,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-02 (v2.3.9)*
+*Last Updated: 2026-05-02 (v2.3.10) — **P0 → P0C complete; 60/60 at 11/11***

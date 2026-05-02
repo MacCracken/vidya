@@ -1,0 +1,205 @@
+# Vidya — Direct DRM GPU Compute — Cyrius reference (runnable)
+#
+# In-memory simulation of the GEM BO → VA-map → submit → syncobj-wait
+# flow that AMDGPU compute-MVP code targets. No real ioctls; we
+# model the kernel-side state (BO table, per-process VA map,
+# submission queue, syncobj timeline) in process memory so the test
+# surface is byte-deterministic and language-portable.
+#
+# The five concept.toml best practices that map onto this:
+#   - "Use the render node" — the open() path is open_render_node().
+#   - "GEM_CREATE → GEM_MMAP → GEM_VA — all three mandatory" — modeled
+#     as gem_create + gem_va_map; lookup fails if either is missing.
+#   - "Render nodes + syncobjs" — submit returns a syncobj seq;
+#     syncobj_wait blocks until that seq is reachable.
+#   - "Bo handle 0 is invalid" — sentinel matching the kernel UAPI.
+#
+# Tests:
+#   1. open_render_node returns a non-zero fd.
+#   2. gem_create returns sequential BO handles starting at 1.
+#   3. gem_va_map binds a BO to a virtual address.
+#   4. va_lookup returns the BO handle, or 0 for unmapped VAs.
+#   5. submit returns sequence numbers 1, 2, 3 ...
+#   6. syncobj_wait succeeds for past seqs, fails for future.
+#   7. gem_destroy invalidates the BO and its VA mapping.
+#   8. Submit on a destroyed BO returns 0 (rejected).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var BO_CAP = 32;
+var VA_CAP = 32;
+
+# BO table: bo_size[i] = 0 means slot empty, otherwise the size in bytes.
+var bo_size[256];                 # 32 * 8
+var next_bo = 1;
+var device_fd = 0;
+
+# VA map: parallel arrays of (va, bo_handle).
+var va_addr[256];
+var va_bo[256];
+var va_count = 0;
+
+# Submission queue: monotonic sequence number; "completed_seq" is the
+# highest seq the GPU has finished. In a single-thread sim every
+# submitted seq completes immediately, so completed_seq == next_seq - 1.
+var next_seq = 1;
+var completed_seq = 0;
+
+fn device_init() {
+    memset(&bo_size, 0, BO_CAP * 8);
+    memset(&va_addr, 0, VA_CAP * 8);
+    memset(&va_bo, 0, VA_CAP * 8);
+    next_bo = 1;
+    device_fd = 0;
+    va_count = 0;
+    next_seq = 1;
+    completed_seq = 0;
+    return 0;
+}
+
+# open_render_node — returns a "fake fd" (any non-zero number).
+# In real code this is `open("/dev/dri/renderD128", O_RDWR)`.
+fn open_render_node() {
+    device_fd = 42;               # any non-zero placeholder
+    return device_fd;
+}
+
+# gem_create(size_bytes) — allocate a BO. Returns handle 1..BO_CAP-1,
+# or 0 on exhaustion. Handle 0 is reserved (matches kernel UAPI).
+fn gem_create(size) {
+    if (next_bo >= BO_CAP) { return 0; }
+    var h = next_bo;
+    next_bo = next_bo + 1;
+    store64(&bo_size + h * 8, size);
+    return h;
+}
+
+# gem_destroy(handle) — frees the BO and removes any VA mapping.
+fn gem_destroy(handle) {
+    if (handle == 0) { return 0; }
+    if (handle >= BO_CAP) { return 0; }
+    if (load64(&bo_size + handle * 8) == 0) { return 0; }
+    store64(&bo_size + handle * 8, 0);
+    # Remove any VA mapping for this BO (linear scan; va_count is small).
+    var i = 0;
+    while (i < va_count) {
+        if (load64(&va_bo + i * 8) == handle) {
+            store64(&va_bo + i * 8, 0);    # mark as removed
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# gem_va_map(handle, va) — bind handle to virtual address `va`.
+# Returns 1 on success, 0 if handle invalid.
+fn gem_va_map(handle, va) {
+    if (handle == 0) { return 0; }
+    if (handle >= BO_CAP) { return 0; }
+    if (load64(&bo_size + handle * 8) == 0) { return 0; }
+    if (va_count >= VA_CAP) { return 0; }
+    store64(&va_addr + va_count * 8, va);
+    store64(&va_bo + va_count * 8, handle);
+    va_count = va_count + 1;
+    return 1;
+}
+
+# va_lookup(va) — returns BO handle bound to va, or 0 if unmapped.
+fn va_lookup(va) {
+    var i = 0;
+    while (i < va_count) {
+        if (load64(&va_addr + i * 8) == va) {
+            var h = load64(&va_bo + i * 8);
+            if (h != 0) { return h; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# submit(handle, ...) — submit a compute dispatch referencing `handle`.
+# Returns the syncobj seq for the submission, or 0 if BO is invalid.
+# Real code would carry a PM4 stream; we just record the seq.
+fn submit(handle) {
+    if (handle == 0) { return 0; }
+    if (handle >= BO_CAP) { return 0; }
+    if (load64(&bo_size + handle * 8) == 0) { return 0; }
+    var seq = next_seq;
+    next_seq = next_seq + 1;
+    completed_seq = seq;          # single-thread sim: complete immediately
+    return seq;
+}
+
+# syncobj_wait(seq) — returns 1 if seq <= completed_seq, 0 otherwise.
+fn syncobj_wait(seq) {
+    if (completed_seq >= seq) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    device_init();
+
+    test_group("direct_drm_gpu_compute");
+
+    # --- 1. open returns a non-zero fd ---
+    var fd = open_render_node();
+    assert(fd != 0, "open_render_node returns non-zero fd");
+
+    # --- 2. gem_create returns sequential handles starting at 1 ---
+    var b1 = gem_create(4096);
+    var b2 = gem_create(8192);
+    var b3 = gem_create(16384);
+    assert_eq(b1, 1, "gem_create(4096) → 1");
+    assert_eq(b2, 2, "gem_create(8192) → 2");
+    assert_eq(b3, 3, "gem_create(16384) → 3");
+
+    # --- 3. gem_va_map binds handles ---
+    var ok1 = gem_va_map(b1, 0x1000);
+    var ok2 = gem_va_map(b2, 0x2000);
+    assert_eq(ok1, 1, "va_map(b1, 0x1000) → 1");
+    assert_eq(ok2, 1, "va_map(b2, 0x2000) → 1");
+
+    # --- 4. va_lookup ---
+    assert_eq(va_lookup(0x1000), b1, "va_lookup(0x1000) → b1");
+    assert_eq(va_lookup(0x2000), b2, "va_lookup(0x2000) → b2");
+    assert_eq(va_lookup(0x9000), 0, "va_lookup(unmapped) → 0");
+
+    # --- va_map on invalid BO is rejected ---
+    var bad = gem_va_map(99, 0x3000);
+    assert_eq(bad, 0, "va_map on bogus handle → 0");
+    var bad2 = gem_va_map(0, 0x3000);
+    assert_eq(bad2, 0, "va_map on handle=0 → 0");
+
+    # --- 5. submit returns increasing seq ---
+    var s1 = submit(b1);
+    var s2 = submit(b2);
+    var s3 = submit(b3);
+    assert_eq(s1, 1, "submit(b1) → seq 1");
+    assert_eq(s2, 2, "submit(b2) → seq 2");
+    assert_eq(s3, 3, "submit(b3) → seq 3");
+
+    # --- 6. syncobj_wait succeeds for past, fails for future ---
+    assert_eq(syncobj_wait(1), 1, "wait(1) → 1 (past)");
+    assert_eq(syncobj_wait(3), 1, "wait(3) → 1 (current)");
+    assert_eq(syncobj_wait(99), 0, "wait(99) → 0 (future)");
+
+    # --- 7. gem_destroy invalidates VA mapping ---
+    gem_destroy(b1);
+    assert_eq(va_lookup(0x1000), 0, "va_lookup after destroy → 0");
+
+    # --- 8. submit on destroyed BO is rejected ---
+    var dead_seq = submit(b1);
+    assert_eq(dead_seq, 0, "submit on destroyed BO → 0");
+    # And next_seq should not advance from the rejection.
+    var next_ok = submit(b2);
+    assert_eq(next_ok, 4, "next valid submit picks up at 4");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

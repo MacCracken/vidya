@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.10] — 2026-05-02
+
+**P0C-2c — final P0C patch.** All 60 topics now at 11/11
+languages. P0 → P0C arc complete: every programming concept
+in vidya's reference shelf has a working, tested implementation
+in all 11 supported languages.
+
+### Added
+- **P0C-2c cluster — 2 topics × 11 languages each, +22 source
+  files** (validator sweep 638/638 → 660/660):
+  - **`direct_drm_gpu_compute`** — 11 new lang files (concept-
+    only topic; cyrius reference designed first). In-memory
+    simulation of the GEM BO → VA-map → submit → syncobj-wait
+    flow that AMDGPU compute-MVP code targets. Models the
+    kernel-side state (BO table, per-process VA map,
+    submission queue, syncobj timeline) so the test surface
+    is byte-deterministic. 20 assertions covering: open
+    render node returns a non-zero fd, gem_create returns
+    sequential handles starting at 1, gem_va_map binds
+    handles, va_lookup hits/misses, va_map rejects invalid
+    handles, submit returns increasing seqs, syncobj_wait for
+    past/current/future, gem_destroy invalidates the VA
+    mapping, submit on a destroyed BO is rejected. OpenQASM
+    uses qubit-as-BO + CNOT sync chain analog.
+  - **`render_graph_architecture`** — 11 new lang files. Tiny
+    DAG framework where each pass declares reads/writes as
+    bitmasks; the graph derives execution order, barrier
+    count, and dead-pass culling from those declarations.
+    Mirrors the small load-bearing core that
+    Frostbite/UE5/Granite all converged on. 14 assertions
+    covering: linear A→B→C add_pass + topo sort, barrier
+    count from write→read edges, dead-pass culling (writer
+    with no readers gets zeroed), cycle detection (Kahn-style
+    sort emits 0 passes when a cycle is present). OpenQASM
+    uses qreg-as-resource + gate-as-pass analog (Qiskit's
+    DAGCircuit is exactly this pattern).
+
+### Changed
+- **VERSION** 2.3.9 → 2.3.10.
+- **Topic coverage**: 60 topics, **58 → 60 fully covered, 0
+  partial**. Per-language counts (each):
+  - All 11 languages: 58 → 60.
+  - Examples: 638 → 660 (+22 new source files; +3.4%).
+
+### Resolved
+- **The lingering 47→48 discrepancy from v2.3.5**. Various
+  CHANGELOG entries through v2.3.4–v2.3.9 carried slightly
+  off-by-one historical accounting (e.g. v2.3.4 reported
+  "44 → 47 fully covered" when the post-v2.3.3 baseline
+  per its own count was 33, not 44). The discrepancy was
+  legacy bookkeeping noise that accumulated as topics moved
+  from "concept-only" to "fully covered" in batches. Now
+  permanently moot: **all 60 topics are at 11/11; the loader
+  reports 60/60; the on-disk count matches.** No further
+  reconciliation needed.
+
+### Verified
+- `cyrius build src/main.cyr build/vidya` — clean.
+- `cyrius test` — 41/41 passing.
+- `cyrius lint src/main.cyr` — 3 pre-existing line-length
+  warnings, no new issues.
+- `scripts/validate-content.sh` — **660/660 green**, 0 failed,
+  0 skipped (full toolchain locally available).
+- `vidya stats` reports `Topics: 60, Complete: 60 (all 11
+  languages), Examples: 660`.
+
+### P0 → P0C complete
+
+The original 36 P0 topics (v2.0) plus 24 added across v2.3.2–v2.3.10:
+- v2.3.2 (1): fixed_point_arithmetic
+- v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
+  game_loop_architecture, grid_pathfinding, maze_generation,
+  projectile_physics, sprite_rendering, state_machines
+- v2.3.4 P0C-3 (3): btree_indexing, sql_parsing, write_ahead_logging
+- v2.3.7 P0C-4 (4): compression, concurrent_file_access,
+  jsonl_format, page_management
+- v2.3.8 P0C-2a (3): framebuffer_rendering, line_rasterization,
+  bloom_and_glow
+- v2.3.9 P0C-2b (3): bindless_resources, gpu_memory_pooling,
+  explicit_gpu_synchronization
+- v2.3.10 P0C-2c (2): direct_drm_gpu_compute, render_graph_architecture
+
+Total: 36 + 24 = 60 topics × 11 languages = 660 source files,
+660/660 validated. **Next minor (2.4.0) opens P1 — Networking &
+Infrastructure** (networking_fundamentals, http_and_web_protocols,
+tls_and_encryption, dns, ipc, serialization).
+
 ## [2.3.9] — 2026-05-02
 
 P0C-2b graphics batch 2 — 3 topics × 11 languages each (33 new

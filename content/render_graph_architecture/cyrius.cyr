@@ -1,0 +1,233 @@
+# Vidya — Render Graph Architecture — Cyrius reference (runnable)
+#
+# Tiny DAG framework where each pass declares the resources it reads
+# and writes; the graph derives execution order, transition barriers,
+# and dead-pass culling from those declarations. Mirrors the small,
+# load-bearing core that Frostbite/UE5/Granite all converged on (the
+# concept.toml "abstraction is small and load-bearing — most of the
+# production complexity is C++ accretion, not essential" claim).
+#
+# Each pass: { id, reads_mask, writes_mask } — resources are bit
+# positions in a 64-bit mask. Up to 16 passes, up to 64 resources.
+#
+# Tests:
+#   1. Add 3 passes A→B→C with proper write/read declarations.
+#   2. Topological sort produces an order where every read comes
+#      after its writer.
+#   3. Barrier count = number of write→read edges in the DAG.
+#   4. Dead-pass culling: a pass whose writes nothing reads is removed.
+#   5. Cycle detection: A reads R1 + writes R2; B reads R2 + writes R1
+#      → topo sort reports cycle (returns 0).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var PASS_CAP = 16;
+
+# Parallel arrays — each index is a pass slot.
+var pass_id[128];                 # 16 * 8 — opaque pass tag
+var pass_reads[128];              # u64 mask: bit i = reads resource i
+var pass_writes[128];             # u64 mask: bit i = writes resource i
+var pass_count = 0;
+
+# Topological order — `topo_order[i]` is the i-th pass index in
+# execution order. `topo_len` is the number of passes scheduled
+# (less than pass_count if a cycle aborted the sort).
+var topo_order[128];
+var topo_len = 0;
+
+fn graph_init() {
+    memset(&pass_id, 0, PASS_CAP * 8);
+    memset(&pass_reads, 0, PASS_CAP * 8);
+    memset(&pass_writes, 0, PASS_CAP * 8);
+    memset(&topo_order, 0, PASS_CAP * 8);
+    pass_count = 0;
+    topo_len = 0;
+    return 0;
+}
+
+# add_pass(id, reads_mask, writes_mask) — returns pass index, or -1
+# if PASS_CAP exhausted.
+fn add_pass(id, reads, writes) {
+    if (pass_count >= PASS_CAP) { return 0 - 1; }
+    var idx = pass_count;
+    store64(&pass_id + idx * 8, id);
+    store64(&pass_reads + idx * 8, reads);
+    store64(&pass_writes + idx * 8, writes);
+    pass_count = pass_count + 1;
+    return idx;
+}
+
+# Returns 1 if `producer` writes any resource that `consumer` reads.
+fn has_edge(producer, consumer) {
+    var p_writes = load64(&pass_writes + producer * 8);
+    var c_reads = load64(&pass_reads + consumer * 8);
+    if ((p_writes & c_reads) != 0) { return 1; }
+    return 0;
+}
+
+# Kahn-style topological sort. On cycle, topo_len < pass_count.
+fn topo_sort() {
+    # in_degree[i] = count of passes that write something pass i reads.
+    var in_degree[128];
+    memset(&in_degree, 0, PASS_CAP * 8);
+    var i = 0;
+    while (i < pass_count) {
+        var j = 0;
+        while (j < pass_count) {
+            if (i != j) {
+                if (has_edge(j, i) == 1) {
+                    var d = load64(&in_degree + i * 8);
+                    store64(&in_degree + i * 8, d + 1);
+                }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    topo_len = 0;
+    # Repeatedly pick a pass with in_degree 0; emit it; decrement
+    # in-degrees of its consumers.
+    var emitted = 0;
+    while (emitted < pass_count) {
+        var picked = 0 - 1;
+        var k = 0;
+        while (k < pass_count) {
+            if (load64(&in_degree + k * 8) == 0) {
+                picked = k;
+                k = pass_count;     # break
+            }
+            k = k + 1;
+        }
+        if (picked < 0) { return topo_len; }   # cycle
+        store64(&topo_order + topo_len * 8, picked);
+        topo_len = topo_len + 1;
+        store64(&in_degree + picked * 8, 0 - 1);   # mark as emitted
+        var c = 0;
+        while (c < pass_count) {
+            if (c != picked) {
+                if (has_edge(picked, c) == 1) {
+                    var d2 = load64(&in_degree + c * 8);
+                    if (d2 > 0) {
+                        store64(&in_degree + c * 8, d2 - 1);
+                    }
+                }
+            }
+            c = c + 1;
+        }
+        emitted = emitted + 1;
+    }
+    return topo_len;
+}
+
+# barrier_count — in the topo-sorted execution, count write→read edges
+# (one barrier per producer→consumer pair, regardless of how many
+# resources cross). Mirrors the "batch barriers at pass boundaries"
+# best practice from concept.toml.
+fn barrier_count() {
+    var count = 0;
+    var i = 0;
+    while (i < topo_len) {
+        var producer = load64(&topo_order + i * 8);
+        var j = i + 1;
+        while (j < topo_len) {
+            var consumer = load64(&topo_order + j * 8);
+            if (has_edge(producer, consumer) == 1) {
+                count = count + 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
+# cull_dead — returns count of passes whose writes are never read by
+# any other pass and are not themselves the final consumer (i.e.
+# pure leaf writers with no readers). Removes them by zeroing the
+# writes mask so subsequent topo sorts skip them as redundant work.
+fn cull_dead() {
+    var culled = 0;
+    var i = 0;
+    while (i < pass_count) {
+        var w = load64(&pass_writes + i * 8);
+        if (w != 0) {
+            # Are any of these writes read by anyone else?
+            var any_reader = 0;
+            var j = 0;
+            while (j < pass_count) {
+                if (i != j) {
+                    var r = load64(&pass_reads + j * 8);
+                    if ((w & r) != 0) { any_reader = 1; }
+                }
+                j = j + 1;
+            }
+            if (any_reader == 0) {
+                # If this pass also reads nothing (or its reads are
+                # pure scratch), it's pure dead code. We mark it dead
+                # by zeroing both masks.
+                store64(&pass_writes + i * 8, 0);
+                store64(&pass_reads + i * 8, 0);
+                culled = culled + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return culled;
+}
+
+fn main() {
+    alloc_init();
+    graph_init();
+
+    test_group("render_graph_architecture");
+
+    # --- Test 1: linear A→B→C ---
+    # R1 = bit 0, R2 = bit 1
+    var a = add_pass(100, 0, 1);          # A: writes R1
+    var b = add_pass(101, 1, 2);          # B: reads R1, writes R2
+    var c = add_pass(102, 2, 0);          # C: reads R2
+    assert_eq(a, 0, "add_pass A → 0");
+    assert_eq(b, 1, "add_pass B → 1");
+    assert_eq(c, 2, "add_pass C → 2");
+
+    # --- Test 2: topo sort produces A, B, C ---
+    var n = topo_sort();
+    assert_eq(n, 3, "topo_sort emits 3 passes");
+    assert_eq(load64(&topo_order + 0), 0, "topo[0] = A");
+    assert_eq(load64(&topo_order + 8), 1, "topo[1] = B");
+    assert_eq(load64(&topo_order + 16), 2, "topo[2] = C");
+
+    # --- Test 3: barrier count = 2 (A→B, B→C) ---
+    assert_eq(barrier_count(), 2, "linear chain: 2 barriers");
+
+    # --- Test 4: dead-pass culling ---
+    # Add D writes R3 (bit 2 = 4) — nothing reads R3. cull_dead should
+    # zero D's masks.
+    var d = add_pass(103, 0, 4);
+    assert_eq(d, 3, "add_pass D → 3");
+    var culled = cull_dead();
+    assert_eq(culled, 1, "cull_dead removes D");
+    assert_eq(load64(&pass_writes + 24), 0, "D's writes zeroed after cull");
+
+    # Re-topo: D is now a no-op; the 3 real passes still ordered.
+    n = topo_sort();
+    assert_eq(n, 4, "topo_sort still emits all 4 (D is a no-op)");
+    assert_eq(barrier_count(), 2, "barrier count unchanged after cull");
+
+    # --- Test 5: cycle detection ---
+    graph_init();
+    # P1: reads R1, writes R2
+    add_pass(200, 1, 2);
+    # P2: reads R2, writes R1 — circular dependency
+    add_pass(201, 2, 1);
+    var cycle_n = topo_sort();
+    assert_eq(cycle_n, 0, "cycle: topo_sort emits 0 passes");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);
