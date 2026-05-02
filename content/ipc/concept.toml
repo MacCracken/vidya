@@ -1,0 +1,50 @@
+id = "ipc"
+title = "Inter-Process Communication"
+topic = "Networking"
+description = "Three load-bearing kernel-mediated IPC primitives: shared memory (mmap'd region visible to multiple processes), pipes (FIFO byte stream — anonymous via pipe(2), named via mkfifo), and Unix domain sockets (the swiss-army message channel: SOCK_STREAM, SOCK_DGRAM, SOCK_SEQPACKET, with credentials passing). On Linux, D-Bus sits on top of Unix sockets as the desktop session bus; io_uring uses a shared-memory ring as its IPC primitive. Pick by lifetime + framing need: shared memory for shared mutable state, pipes for byte streams, sockets for typed messages with optional credentials."
+tags = ["ipc", "shared-memory", "mmap", "pipes", "fifo", "unix-socket", "dbus", "credentials", "scm_rights", "shm_open"]
+related_topics = ["concurrent_file_access", "concurrency", "syscalls_and_abi", "networking_fundamentals"]
+
+[[best_practices]]
+title = "Pick by data shape — shared memory for state, pipes for streams, sockets for messages"
+explanation = "Shared memory wins when the data is mutable shared state and you'd rather have CPU-cache lines than syscalls. Pipes win for byte streams (logs, stdout pipelines). Unix sockets win for typed messages and the credentials-passing use case (SCM_CREDENTIALS, SCM_RIGHTS for fd passing). Mixing patterns — using a Unix socket for shared mutable state — usually means re-implementing one of the others badly."
+
+[[best_practices]]
+title = "Use SOCK_SEQPACKET for message-oriented Unix sockets, not SOCK_DGRAM"
+explanation = "SOCK_DGRAM on Unix sockets is reliable + ordered (unlike UDP), but SEQPACKET preserves message boundaries the way DGRAM does AND supports connection state. D-Bus and systemd both standardised on SEQPACKET for typed-message IPC. SOCK_STREAM loses message boundaries and forces application-level framing (length prefix etc.)."
+
+[[best_practices]]
+title = "Bound your queues — unbounded means fork-bomb sensitivity"
+explanation = "Pipes have an OS-level capacity (Linux: 65536 bytes default, configurable with fcntl F_SETPIPE_SZ). When the pipe fills, the writer blocks; if neither side handles backpressure, a pile-up blocks the producer chain. Unix sockets have SO_SNDBUF / SO_RCVBUF; tune to the message rate, not arbitrarily large."
+
+[[best_practices]]
+title = "Pass file descriptors with SCM_RIGHTS, not by serialising paths"
+explanation = "When you need to hand a process an open file descriptor (a socket, a memfd, a connected client), use SCM_RIGHTS over a Unix socket. The kernel duplicates the fd into the receiver's table. Serialising the path and re-opening loses the pre-attached state (file position, cached metadata) and races against unlink."
+
+[[gotchas]]
+title = "Shared memory is not synchronisation"
+explanation = "mmap(MAP_SHARED) gives you a region two processes can both touch. It does NOT give you mutual exclusion — two writers race on the same byte. Pair shared memory with a futex, semaphore (sem_open), or atomic operations from <stdatomic.h>. Apps that 'just write to the shared region' will work in dev and corrupt in prod under load."
+bad_example = "// proc A and proc B both increment shm[0] without coordination — lost updates"
+good_example = "// __atomic_fetch_add(&shm[0], 1, __ATOMIC_SEQ_CST) — or take a lock first"
+
+[[gotchas]]
+title = "Pipe writes <= PIPE_BUF (4096 on Linux) are atomic; larger writes may interleave"
+explanation = "POSIX guarantees that a single write(2) of <= PIPE_BUF bytes to a pipe is atomic — no other writer can interleave bytes inside it. Above PIPE_BUF, the kernel may split the write across multiple chunks and other writers can slot in between. For safety: keep messages <= PIPE_BUF, OR add length-prefix framing so the reader can resync."
+bad_example = "write(pipe, large_buf, 8192);  // may interleave with another writer"
+good_example = "// Frame each message as length+payload; reader uses length to bound the read"
+
+[[gotchas]]
+title = "Unix socket paths are limited to ~108 bytes"
+explanation = "struct sockaddr_un has sun_path[108] (Linux). A longer path silently truncates and the bind/connect fails with ENAMETOOLONG. Abstract-namespace sockets (Linux extension: leading null byte) avoid the filesystem entirely but are non-portable. For portability: use short paths, or chdir to a stable parent and use relative names."
+bad_example = "bind(\"/tmp/very-long-name-that-exceeds-108-bytes/.../sock\")  // ENAMETOOLONG"
+good_example = "bind(\"/tmp/myapp.sock\")  // well within 108"
+
+[[performance_notes]]
+title = "Shared memory: ~10ns per cache-line touch; pipe/socket: ~500ns–1µs per syscall"
+explanation = "Shared memory's win is the absence of syscall overhead. A shared-memory ring buffer can sustain ~100M ops/sec on a single core. Pipes and sockets add a syscall per message (~500ns each); typical pipe throughput maxes around 1M msgs/sec for small messages."
+evidence = "io_uring (shared-memory ring) sustains ~1Gbps with batched ops on commodity hardware. Pipe roundtrip on Linux: ~1.5µs (perf bench sched pipe). Unix socket SEQPACKET roundtrip: ~2µs."
+
+[[performance_notes]]
+title = "Pipe/socket buffer fills are common; design for backpressure from day one"
+explanation = "Default pipe capacity (64KB) is small relative to modern message rates. A producer that writes faster than the consumer reads will block on write — or, with O_NONBLOCK, get EAGAIN. Either way the producer must handle the case. Designing for 'the pipe is always empty when I write' is a production-incident waiting to happen."
+evidence = "Linux default pipe: 16 pages × 4KB = 64KB. F_SETPIPE_SZ allows up to 1MB by default (sysctl fs.pipe-max-size); larger needs root."

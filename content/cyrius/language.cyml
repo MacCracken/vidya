@@ -19,12 +19,13 @@ f64 supported as bit patterns via 20+ f64_* builtins (SSE2/SSE4.1/x87).
 The compiler binary is `cc5` (renamed from cc3 at v5.0.0; will rename to
 `cyc` at v6.0.0 — that's the FINAL binary name forever per CLAUDE.md
 "Version lives in `VERSION` + `--version`, never in binary names" rule).
-720,928 B x86_64 at v5.8.0 (was 488,864 B at v5.7.5; +232,064 B across
-the v5.7.x cycle for TS frontend + JSX + JSON tagged-value tree + regex
-engine + advanced TS features + IR optimization scaffolding; v5.7.48 →
-v5.8.0 net unchanged through v5.7.49 deps refresh + v5.7.50 P(-1)
-unblock + v5.8.0 fmt sweep — fmt added +8 B and the 5.8.0 vs 5.7.50
-version-string shortening reclaimed exactly 8 B). 10 modules (frontend/lex +
+727,960 B x86_64 at v5.8.18 (was 720,928 B at v5.8.0; +7,032 B across
+v5.8.1-v5.8.18 — first half of the v5.8.x slices true-completion sub-arc
+plus the v5.8.0-v5.8.13 foundation slots: format/lint cleanups, vani
+distlib fold-in, polyfills, then the slices type infrastructure — slice<T>
+/ [T] parse-acceptance + 16-byte alloc + bounds-aware indexing s[i] +
+dot-syntax field access s.ptr/s.len + pointer-to-struct dot syntax for
+Str + slice-typed wrapper helpers). 10 modules (frontend/lex +
 frontend/parse + frontend/ts/* + backend/x86/* + backend/aarch64/* +
 backend/cx + backend/macho + backend/pe + common/ir + cc compatibility
 layer). Self-hosts byte-identical (two-step + three-step verify).
@@ -38,9 +39,11 @@ Linux cross-build byte-for-byte).
 Build: sh bootstrap/bootstrap.sh (40ms)
 Compile: cyrius build src/main.cyr build/myapp   (auto-resolves deps from cyrius.cyml)
 Test: cyrius test src/test.cyr
-Audit: sh scripts/check.sh (self-host + heap + 97 .tcyr (TS suite consolidated
-        24→4 at v5.7.37) + fmt + lint; 64 gates, v5.7.48)
-Version: cc5 --version → "cc5 5.8.0\n" (x86_64 Linux default).
+Audit: sh scripts/check.sh (self-host + heap + 105 .tcyr (TS suite consolidated
+        24→4 at v5.7.37; v5.8.x added 8 slice tcyrs: slices_parse / codegen /
+        str_interop / vec_interop / typing / indexing / field_access /
+        slice_byte_helpers + str_dot_syntax) + fmt + lint; 64 gates, v5.8.18)
+Version: cc5 --version → "cc5 5.8.18\n" (x86_64 Linux default).
         cc5_aarch64 (Linux aarch64 + macOS Mach-O cross). cc5_win 5.8.0 (Windows
         x86_64 PE; native self-host v5.5.10+; .reloc + DYNAMIC_BASE ASLR v5.5.35;
         Win64 ABI completion v5.5.36). cc5_cx (cyrius-x bytecode entry;
@@ -4008,3 +4011,134 @@ or misframed roadmap entry. Memory entry:
 Always reproduce the failure + inspect the failing
 artifact (`otool -tv`, `objdump`, `xxd`) BEFORE adopting
 a roadmap slot's suspect list.
+
+[[entries]]
+name = "slice_type_v58x"
+description = "v5.8.x slices true-completion sub-arc — slice<T> / [T] type, bounds-aware indexing s[i], dot-syntax field access s.ptr / s.len, slice-typed wrapper helpers."
+category = "cyrius"
+content = """
+The v5.8.x cycle landed a six-slot slices sub-arc (§6 v5.8.14
+through §10 v5.8.18, with §11 closeout pending). After this
+sub-arc, slices are a first-class type with the syntactic
+ergonomics of any other primitive — not just a 16-byte fat-
+pointer convention.
+
+== TYPE ANNOTATIONS ==
+
+Two equivalent forms accepted everywhere a type annotation
+goes (var, fn param, field):
+
+    var s: [u8] = 0;        # bracket form
+    var s: slice<u8> = 0;   # ident form
+
+Element type may be any scalar (u8/i8/u16/i16/u32/i32/u64/i64/
+u128) or pointer (*T). Element width is captured at PARSE_VAR
+time (per-local at heap offset 0x193400) and drives sized loads
+in §7 indexing.
+
+== ALLOCATION + LAYOUT ==
+
+A slice fn-local reserves TWO 8-byte slots:
+  - canonical slot (lower address) — holds the .ptr field
+  - high-half slot (higher address) — holds the .len field
+
+The §8 layout-flip put the canonical slot at the LOWER stack
+address so `&slice + 8` correctly addresses the .len field
+(rather than overflowing into saved-rbp territory like the
+pre-§8 layout did). `var s: [T] = 0;` zero-inits BOTH halves
+via address-based memory stores (the high half via &s+8 to
+avoid regalloc allocating it to a callee-saved register).
+
+== HEAP-FALLOC INTEROP ==
+
+A slice value is byte-identical to:
+  - Str (lib/str.cyr) — heap-allocated 16 bytes, data@0, len@8
+  - vec (lib/vec.cyr) first 16 bytes — same shape
+
+Consequence: a Str pointer or vec value can be passed directly
+to slice_ptr / slice_len / slice_eq / slice_is_empty /
+slice_is_null / etc. without conversion. The only difference is
+lifetime — Str/vec live in heap (until bump-allocator reset);
+fn-local slices are frame-scoped.
+
+== SUBSCRIPT (§7, v5.8.15) ==
+
+    var d[5];  store8(&d, 65);  store8(&d+1, 66);  ...
+    var s: [u8] = 0;
+    slice_set(&s, &d, 5);
+    var b = s[0];      # = 65 — bounds-checked u8 load via _slice_idx_get_1
+    var c = s[2];      # = 67
+    # OOB / negative idx → stderr "slice bounds violation\\n", exit 134
+
+`s[i]` lowers at parse time to `_slice_idx_get_W(&s, i)` where
+W is the element byte-width (1/2/4/8/16) tracked from §6.
+Width-16 returns a POINTER to the u128 slot (cyrius's ABI
+can't return u128 by value). Helpers in lib/slice.cyr.
+
+For perf hot paths inside already-bounds-checked loops, the
+unchecked variants `slice_unchecked_get_W(&s, i)` skip the
+bounds check.
+
+== DOT-SYNTAX FIELD ACCESS (§8, v5.8.16) ==
+
+    var s: [u8] = 0;
+    slice_set(&s, &d, 5);
+    var p = s.ptr;            # = &d (lower-half slot)
+    var n = s.len;            # = 5  (higher-half slot via &s + 8)
+    s.len = 3;                # truncate the view
+    s.ptr = &d + 1;           # rewrite view start
+
+Only `.ptr` and `.len` are accepted; other field names hard-
+error with "slice has only .ptr and .len fields". Both fields
+go through address-based memory I/O (EFLADDR_X1 + EADDIMM_X1 +
+ELODC/ESTOC) — direct EFLLOAD/EFLSTORE on the high-half slot
+would be patched by the regalloc post-body peephole into a
+register move, missing the memory write that slice_set issues.
+
+== POINTER-TO-STRUCT DOT SYNTAX (§9, v5.8.17) ==
+
+    var s: Str = str_from("hello");
+    var n = s.len;           # = 5  (NOW works — pointer-deref first)
+    var p = s.data;          # = pointer to "hello" bytes
+
+PARSE_FIELD_LOAD/STORE auto-detects pointer-vs-inline by
+checking the slot above the named slot for the v5.5.36 sentinel
+name `-1`:
+  - sentinel present → inline mode (lea, slot IS the struct)
+  - sentinel absent → pointer mode (mov, slot HOLDS a pointer)
+
+`fn foo(s: Str) { return s.len; }` also works — the param-decl
+path tags the slot with SLTYPE = -sid for any `: <StructName>`
+annotation.
+
+== SLICE-TYPED WRAPPER HELPERS (§10, v5.8.18) ==
+
+    fn sys_read_slice(fd, &s)     — sys_read into s.data, up to s.len bytes
+    fn slice_copy_bytes(&dst, &src) — memcpy with min(dst.len, src.len) cap
+    fn slice_eq_bytes(&a, &b)     — content equality; length-mismatch is unequal
+
+Additive — the canonical (ptr, len) primitives in
+lib/string.cyr / lib/syscalls.cyr remain the building blocks.
+Wrappers exist for code that wants the slice shape without
+manual `(s.ptr, s.len)` unpacking.
+
+== TAIL-CALL ESCAPE (§8 side-fix) ==
+
+`return helper(&local);` no longer tail-calls — the previous
+TCO implementation deallocated the current frame BEFORE the
+callee read through `&local`, leaving the callee pointing at
+dead stack. PARSE_RETURN's TCO detector now scans args for the
+`&` token and skips TCO when found. Conservative — also blocks
+TCO for `&global` (rare and only loses the optimization).
+
+== SCOPE NOTES ==
+
+- Subscript and dot-syntax fire on FN-LOCAL slices only.
+  Top-level slice vars still need helper-fn API
+  (slice_ptr / slice_len / etc.). Var-side support is a
+  follow-up slot if a downstream consumer asks.
+- Mass migration of stdlib's str_data / str_len / memcpy /
+  memeq call sites to dot-syntax / slice-helper form is opt-in
+  per file. The new helpers are additive; existing call sites
+  work unchanged.
+"""

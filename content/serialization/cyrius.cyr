@@ -1,0 +1,213 @@
+# Vidya — Serialization — Cyrius reference (runnable)
+#
+# Two load-bearing primitives:
+#   1. Varint (LEB128) encode/decode for unsigned 64-bit integers.
+#   2. Length-prefix framing: varint(length) || payload bytes.
+#
+# Plus a stream parser that walks back-to-back frames, the
+# decompression-bomb-style guard against oversized claimed lengths,
+# and a max-bytes cap on varint decoding (the DoS gotcha).
+#
+# Tests:
+#   1. varint encode 0 = 1 byte 0x00
+#   2. varint encode 127 = 1 byte 0x7F
+#   3. varint encode 128 = 2 bytes 0x80 0x01
+#   4. varint encode 16383 = 2 bytes 0xFF 0x7F
+#   5. varint encode 16384 = 3 bytes
+#   6. varint round-trip: encode + decode = same value
+#   7. varint decoder caps at 10 bytes (returns -1 sentinel on overflow)
+#   8. length-prefix frame round-trip
+#   9. stream parse — 3 frames decoded back-to-back
+#  10. truncated frame (length says 100, only 5 bytes available) → -1
+#  11. oversize frame (length > MAX_MSG) rejected before alloc
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var MAX_VARINT_BYTES = 10;
+var MAX_MSG_SIZE = 1024;
+
+# === Varint ===
+
+# encode_varint(value, out_buf) → bytes written (1..10).
+fn encode_varint(value, out_buf) {
+    var n = 0;
+    while (value >= 128) {
+        store8(out_buf + n, (value & 0x7F) | 0x80);
+        value = value / 128;
+        n = n + 1;
+    }
+    store8(out_buf + n, value & 0x7F);
+    return n + 1;
+}
+
+# decode_varint(in_buf, in_len) → packed (value << 8 | bytes_consumed),
+# or -1 on overflow / truncation.
+var DECODE_VAL = 0;
+var DECODE_BYTES = 0;
+
+fn decode_varint(in_buf, in_len) {
+    DECODE_VAL = 0;
+    DECODE_BYTES = 0;
+    var shift = 0;
+    var i = 0;
+    while (i < MAX_VARINT_BYTES) {
+        if (i >= in_len) { return 0 - 1; }
+        var b = load8(in_buf + i);
+        var low7 = b & 0x7F;
+        DECODE_VAL = DECODE_VAL + low7 * (1 << shift);
+        if ((b & 0x80) == 0) {
+            DECODE_BYTES = i + 1;
+            return DECODE_VAL;
+        }
+        shift = shift + 7;
+        i = i + 1;
+    }
+    # Hit MAX_VARINT_BYTES without seeing a terminator → overflow
+    return 0 - 1;
+}
+
+# === Length-prefix framing ===
+
+# encode_frame(payload, payload_len, out_buf) → total bytes written.
+fn encode_frame(payload, payload_len, out_buf) {
+    var n = encode_varint(payload_len, out_buf);
+    var i = 0;
+    while (i < payload_len) {
+        store8(out_buf + n + i, load8(payload + i));
+        i = i + 1;
+    }
+    return n + payload_len;
+}
+
+# decode_frame(in_buf, in_len, payload_out, max_msg) → bytes consumed,
+# or -1 on truncation / oversize / decode error.
+fn decode_frame(in_buf, in_len, payload_out, max_msg) {
+    var len = decode_varint(in_buf, in_len);
+    if (len < 0) { return 0 - 1; }
+    if (len > max_msg) { return 0 - 1; }
+    var hdr = DECODE_BYTES;
+    if (hdr + len > in_len) { return 0 - 1; }
+    var i = 0;
+    while (i < len) {
+        store8(payload_out + i, load8(in_buf + hdr + i));
+        i = i + 1;
+    }
+    return hdr + len;
+}
+
+# === Test scratch ===
+var enc_buf[64];
+var dec_buf[64];
+var stream_buf[256];
+var pl_buf[64];
+
+fn buf_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("serialization");
+
+    # === Varint encoding ===
+    var n0 = encode_varint(0, &enc_buf);
+    assert_eq(n0, 1, "encode(0) = 1 byte");
+    assert_eq(load8(&enc_buf), 0, "encode(0) byte = 0x00");
+
+    var n127 = encode_varint(127, &enc_buf);
+    assert_eq(n127, 1, "encode(127) = 1 byte");
+    assert_eq(load8(&enc_buf), 0x7F, "encode(127) byte = 0x7F");
+
+    var n128 = encode_varint(128, &enc_buf);
+    assert_eq(n128, 2, "encode(128) = 2 bytes");
+    assert_eq(load8(&enc_buf), 0x80, "encode(128) byte0 = 0x80");
+    assert_eq(load8(&enc_buf + 1), 0x01, "encode(128) byte1 = 0x01");
+
+    var n16383 = encode_varint(16383, &enc_buf);
+    assert_eq(n16383, 2, "encode(16383) = 2 bytes");
+
+    var n16384 = encode_varint(16384, &enc_buf);
+    assert_eq(n16384, 3, "encode(16384) = 3 bytes");
+
+    # === Varint round-trip ===
+    var sample = 1234567890;
+    var rn = encode_varint(sample, &enc_buf);
+    var dec = decode_varint(&enc_buf, rn);
+    assert_eq(dec, sample, "round-trip 1234567890");
+    assert_eq(DECODE_BYTES, rn, "round-trip bytes consumed match");
+
+    # === Varint overflow guard ===
+    # 11 bytes all with continuation set → must return -1 (overflow,
+    # past MAX_VARINT_BYTES = 10).
+    var bomb_buf[16];
+    var i = 0;
+    while (i < 11) {
+        store8(&bomb_buf + i, 0xFF);
+        i = i + 1;
+    }
+    var bomb = decode_varint(&bomb_buf, 11);
+    assert_eq(bomb, 0 - 1, "varint overflow guard");
+
+    # === Length-prefix frame round-trip ===
+    var payload = "hello, world";
+    var pl_len = 12;
+    var frame_n = encode_frame(payload, pl_len, &enc_buf);
+    assert_eq(frame_n, 13, "frame(hello world) = 1 + 12 bytes");
+    assert_eq(load8(&enc_buf), 12, "frame header = varint 12");
+
+    var consumed = decode_frame(&enc_buf, frame_n, &pl_buf, MAX_MSG_SIZE);
+    assert_eq(consumed, 13, "decode_frame consumed all bytes");
+    assert(buf_eq(&pl_buf, payload, pl_len), "decoded payload matches");
+
+    # === Stream parse: 3 frames concatenated ===
+    var s_off = encode_frame("AAA", 3, &stream_buf);
+    s_off = s_off + encode_frame("BBBB", 4, &stream_buf + s_off);
+    s_off = s_off + encode_frame("CCCCC", 5, &stream_buf + s_off);
+    # Parse them back
+    var pos = 0;
+    var msg_count = 0;
+    while (pos < s_off) {
+        var c = decode_frame(&stream_buf + pos, s_off - pos, &pl_buf, MAX_MSG_SIZE);
+        if (c < 0) {
+            msg_count = msg_count;
+            pos = s_off;     # break
+        } else {
+            msg_count = msg_count + 1;
+            pos = pos + c;
+        }
+    }
+    assert_eq(msg_count, 3, "stream parse: 3 frames");
+
+    # === Truncated frame ===
+    # Header says 100 bytes, only 5 bytes available → -1
+    var trunc_buf[8];
+    store8(&trunc_buf, 100);
+    var k = 1;
+    while (k < 6) {
+        store8(&trunc_buf + k, 65 + k);
+        k = k + 1;
+    }
+    var trunc_consumed = decode_frame(&trunc_buf, 6, &pl_buf, MAX_MSG_SIZE);
+    assert_eq(trunc_consumed, 0 - 1, "truncated frame → -1");
+
+    # === Oversize frame rejected before alloc ===
+    # Encode a length of 9999 (which is > MAX_MSG_SIZE=1024).
+    var oversize_buf[16];
+    var oh = encode_varint(9999, &oversize_buf);
+    var oversize = decode_frame(&oversize_buf, oh, &pl_buf, MAX_MSG_SIZE);
+    assert_eq(oversize, 0 - 1, "oversize length rejected");
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

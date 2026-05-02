@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.2] — 2026-05-02
+
+**P1 Networking & Infrastructure complete.** Final 2 topics ship
++ cyrius pin bump 5.8.14 → 5.8.18.
+
+### Added
+- **P1 batch 3 — final 2 new topics × 11 languages each, +22
+  source files** (validator sweep 704/704 → 726/726):
+  - **`ipc`** — new topic. In-memory simulation of three IPC
+    primitives: shared memory (multi-region byte buffer with
+    multi-reader visibility), bounded FIFO pipe with
+    full/empty semantics + ring-buffer wrap-around, and
+    named-endpoint message channel (Unix-socket-shaped) with
+    per-endpoint queues. 18 assertions covering shm OOB
+    rejection, pipe FIFO + full + post-drain wrap, channel
+    send-to-closed rejection, channel FIFO recv. OpenQASM
+    uses Bell-pair entanglement as the shared-memory analog
+    + CNOT chains as the pipe transfer.
+  - **`serialization`** — new topic. Varint (LEB128) encode/
+    decode + length-prefix framing + stream parser. 19
+    assertions covering: varint sizes (1 byte for <128, 2
+    for <16384, 3 for <2^21), round-trip, MAX_VARINT_BYTES=10
+    overflow guard (the DoS gotcha), frame round-trip, stream
+    parse over 3 back-to-back frames, truncated-frame
+    rejection, oversize-length rejection (the malloc-bomb
+    guard). OpenQASM uses CNOT chains as the
+    continuation-bit dependency analog.
+- **Cyrius pin 5.8.14 → 5.8.18** (`cyrius.cyml`). No source
+  changes required. Field-notes verification range bumped to
+  5.8.18.
+
+### Changed
+- **VERSION** 2.4.1 → 2.4.2.
+- **Topic coverage**: 66 topics, 64 → 66 fully covered. Per-
+  language counts (each):
+  - All 11 languages: 64 → 66.
+  - Examples: 704 → 726 (+22 new source files; +3.1%).
+
+### Notes (recurring patterns worth field-noting)
+- **Bash nameref self-cycle warning** (`local: warning: buf:
+  circular name reference`). Hit in `serialization/shell.sh`
+  when `decode_frame()` had `local -n buf=$1` and then called
+  `decode_varint buf $buf_len` — the inner function's
+  `local -n buf=$1` saw `buf` as both its declared name and
+  its target, producing a cycle. Fix: pass the original $1
+  through (`decode_varint $buf_arg $buf_len`) so the inner
+  function's nameref points at the caller's caller's variable
+  directly. Worth a `bash_nameref_self_cycle` field-note
+  entry — this is the second time it's bitten in vidya
+  content (first was in compression/shell.sh's PORT_TO_SOCK).
+- **Zig u6 shift overflow on 11-byte varint bomb** in
+  `serialization/zig.zig`. Iterating MAX_VARINT_BYTES=10
+  times with `shift += 7` reaches 63 at the end of iteration
+  9; the 10th iteration's `shift += 7` overflows u6 (max 63)
+  before the loop's bounds check returns null. Fix: widen
+  the shift counter to u32 (or usize) and `@intCast` when
+  used. Relevant for any varint decoder in Zig that uses
+  bitshift typed too narrowly.
+- **x86_64: 3-register addressing modes are illegal**. Hit
+  in `serialization/asm_x86_64.s`: `[rbx + r9 + rcx]` and
+  `[r13 + rcx + r9]` produced "not a valid base/index
+  expression". x86_64 allows `[base + index*scale + disp]`
+  (max 2 registers + scale + displacement). Fix: fold one
+  pair into a temp register first
+  (`mov r8, r9; add r8, rcx; ... [rbx + r8]`). Worth a
+  field-note entry.
+
+### Verified
+- `cyrius build src/main.cyr build/vidya` — clean (under
+  cyrius 5.8.18).
+- `cyrius test` — 41/41 passing (no regressions across the
+  pin bump).
+- `cyrius lint src/main.cyr` — 3 pre-existing line-length
+  warnings, no new issues.
+- `scripts/validate-content.sh` — **726/726 green**, 0 failed,
+  0 skipped (full toolchain locally available).
+- `vidya stats` reports `Topics: 66, Complete: 66 (all 11
+  languages), Examples: 726`.
+
+### P1 complete (6 of 6) 🎉
+
+| Topic | Status |
+|---|---|
+| networking_fundamentals | ✅ shipped 2.4.0 |
+| http_and_web_protocols | ✅ shipped 2.4.0 |
+| tls_and_encryption | ✅ shipped 2.4.1 |
+| dns | ✅ shipped 2.4.1 |
+| ipc | ✅ shipped 2.4.2 |
+| serialization | ✅ shipped 2.4.2 |
+
+P1 Networking & Infrastructure cluster fully landed. After
+v2.4.2: 66 topics × 11 languages = **726 source files**, all
+validated. P0 → P0C → P1 arc complete.
+
+**Next minor (2.5.x): P2 — Distributed Systems.**
+transactions_and_acid, consensus, distributed_systems.
+Subsumes the original `database_fundamentals` (already
+covered as `btree_indexing` + `write_ahead_logging` in
+P0C-3); builds on `concurrent_file_access` (P0C-4).
+
 ## [2.4.1] — 2026-05-02
 
 P1 Networking & Infrastructure — second batch (2 of the planned 6

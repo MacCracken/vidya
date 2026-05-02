@@ -1,0 +1,50 @@
+id = "serialization"
+title = "Serialization and Wire Formats"
+topic = "Networking"
+description = "Two load-bearing primitives behind every modern wire format: length-prefix framing (varint length + payload bytes — protobuf, gRPC, Kafka, MessagePack) and varint encoding itself (LEB128 / protobuf base-128 — 1 byte for values < 128, growing 1 byte per 7 bits of magnitude). Zero-copy parsers (Cap'n Proto, FlatBuffers) skip the encode/decode step entirely by aligning the in-memory layout to the wire layout. Pick by ratio: bytes-on-wire vs CPU-to-parse — varint+length-prefix for small messages, zero-copy for large ones with random access patterns."
+tags = ["serialization", "varint", "leb128", "length-prefix", "protobuf", "flatbuffers", "capnproto", "messagepack", "zero-copy", "framing"]
+related_topics = ["http_and_web_protocols", "compression", "binary_formats", "input_output"]
+
+[[best_practices]]
+title = "Length-prefix every message — never rely on delimiters in the body"
+explanation = "Length-prefix framing (varint length, then exactly that many bytes) lets the reader skip past unknown messages without parsing their content. Delimiter framing (look for a magic byte) breaks the moment the body legitimately contains the delimiter — and adds escape/unescape overhead. Length-prefix is what protobuf, gRPC, and Kafka all converged on."
+
+[[best_practices]]
+title = "Use varint for small unsigned integers; fixed-width for large or random values"
+explanation = "Varint (LEB128) is great when most values are small: a 1-byte encoding for values 0-127, 2 bytes for 128-16383. Bad when values are uniformly random across the i64 range — then varint averages ~9 bytes per value (worse than fixed 8). Hashes, IDs, timestamps: fixed. Counts, indices, lengths: varint."
+
+[[best_practices]]
+title = "Treat the wire format as a contract — version-tag from day one"
+explanation = "Every wire format eventually gets a v2. Reserve a magic byte (or first varint) for the version tag. Old readers see an unknown version and reject cleanly; new readers can branch on it. Skipping this is the single most common cause of 'we have to maintain two parsers forever' tech debt in network code."
+
+[[best_practices]]
+title = "Zero-copy parsers (FlatBuffers, Cap'n Proto) for large messages with random access"
+explanation = "When messages are large (>1MB) and the consumer reads only a few fields, pay the alignment + tagging cost up-front for zero parsing on the hot path. Cap'n Proto and FlatBuffers store the wire format AS the in-memory format; you mmap the bytes and dereference into them. Worth it when the message dwarfs the CPU you'd spend parsing — not for small RPC payloads."
+
+[[gotchas]]
+title = "Varint signed encoding is not the same as zig-zag"
+explanation = "Plain LEB128 sign-extends the high bit, so -1 (all-ones) encodes to 10 bytes — worst case for what should be 1 byte. ZigZag encoding maps signed to unsigned: 0→0, -1→1, 1→2, -2→3, ... so small magnitudes (positive or negative) stay 1 byte. Protobuf's `sint32`/`sint64` use ZigZag; plain `int32` uses sign-extended LEB128 (the worse choice for negative values)."
+bad_example = "// Encoding -1 as int32 (sign-extended varint): 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0x01 — 10 bytes"
+good_example = "// Encoding -1 as sint32 (zig-zag varint): 0x01 — 1 byte"
+
+[[gotchas]]
+title = "Varint decoder must enforce a max length — no upper bound is a DoS vector"
+explanation = "A malicious stream of 0xFF bytes will keep the decoder in the 'continuation' loop indefinitely (or until OOM). Real decoders cap the decode loop at the type's natural max (10 bytes for u64, 5 for u32). Decoders without the cap are an attack surface in any network parser."
+bad_example = "while (b & 0x80) { ... }  // unbounded; attacker sends infinite 0xFF bytes"
+good_example = "for (i = 0; i < 10; i++) { ... } if i == 10 && cont: return ERR;"
+
+[[gotchas]]
+title = "Length prefix must be validated before allocating"
+explanation = "If the wire says 'next message is 4 GB,' don't `malloc(4 GB)` to receive it. Cap the maximum message size at parser config (e.g. gRPC defaults to 4 MB receive limit). Without the cap, a single malformed message OOMs the receiver. Standard pattern: reject any length > MAX_MESSAGE_SIZE before allocating."
+bad_example = "var buf = alloc(claimed_length);  // attacker controls claimed_length"
+good_example = "if (claimed_length > MAX_MESSAGE_SIZE) { return ERR; }  // then alloc"
+
+[[performance_notes]]
+title = "Varint encode/decode: ~1-2ns per byte; length-prefix framing is essentially free"
+explanation = "Modern CPUs decode a varint byte in 1-2 cycles (load + test high bit + shift + or). For typical small messages (<10 bytes), serialization is dominated by the syscall cost (~500ns), not the encode/decode (~10ns). Don't optimise serialization until you've measured it as a bottleneck — it almost never is for RPC-shaped workloads."
+evidence = "protobuf-c benchmarks: ~50-100M varints/sec single-thread on Xeon. Length-prefix framing adds <5% overhead vs fixed-size."
+
+[[performance_notes]]
+title = "Zero-copy: 0ns parsing, but ~10-20% wire overhead vs varint"
+explanation = "Cap'n Proto / FlatBuffers store every field at a fixed offset, so the parser is a single load. The cost: pointers and padding bloat the wire format ~10-20% vs varint+length-prefix. For messages parsed many times (e.g. a config loaded once and queried often) zero-copy wins; for write-once-read-once RPC payloads, varint is smaller and the parse cost is negligible anyway."
+evidence = "Cap'n Proto README: 0 cycles per field access (vs ~100 cycles for protobuf decode). Wire size: typically 1.1-1.2× protobuf for the same data."

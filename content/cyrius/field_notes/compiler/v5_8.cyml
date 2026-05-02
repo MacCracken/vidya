@@ -1,0 +1,251 @@
+# Cyrius Field Notes — Compiler & Toolchain (v5.8 arc, halfway)
+# Slices true-completion sub-arc, regalloc/tail-call interactions,
+# pointer-to-struct dot-syntax disambiguation. Halfway-mark snapshot
+# at v5.8.18; cycle continues through v5.8.41 with effects, tagged
+# unions, Result, allocators, Phase 3 closeout.
+# 5 entries (v5.8.x first-half).
+
+[[entries]]
+name = "slice_fn_local_layout_flip_v5816"
+description = "Pre-§8 16-byte fn-local slices put the canonical slot at the higher stack address; `&slice + 8` overflowed past the local frame into saved-rbp territory. §8 layout-flip allocates the high-half slot FIRST (higher address) and the canonical slot SECOND (lower address) so `&slice + 8` correctly addresses the .len field."
+category = "cyrius"
+tags = ["slices", "layout", "stack", "v5.8.16"]
+content = """
+Filed: v5.8.16 §8 (slices true-completion sub-arc).
+
+Pre-fix, `var s: [u8] = 0;` allocated a single canonical slot
+(the named slot, where `&s` resolves) and a sentinel-cleared
+high-half slot. The canonical slot was the LOWER-numbered slot
+(higher stack address per cyrius's slot-N-at-rbp-(N+1)*8
+convention). `slice_set(&s, ptr, len)` did `store64(s+8, len)`,
+which on the stack means `store64(rbp - canon_disp + 8, len)` —
+overflowing past the local frame into saved-rbp territory.
+
+This corrupted the caller's saved rbp. Worked anyway:
+  1. Round-tripped within the fn — slice_set wrote and slice_len
+     read the same (corrupted) location.
+  2. `slices_typing.tcyr`'s `return slice_len(&x);` form passed
+     because main's rbp = 0 from the C runtime — the read
+     returned 0 by coincidence.
+  3. §7 indexing tests passed because each test exited via
+     `syscall(60, ...)` before any code referenced the corrupted
+     rbp.
+
+§8 surfaced the bug because `s.len` reads via &s+8 (memory I/O
+through the canonical-slot address) — same arithmetic as
+slice_set, but the test reading expected a deterministic value,
+not "whatever happened to be at saved rbp."
+
+Fix: for `scalar_type==16`, allocate the HIGH-HALF slot FIRST
+(slot li, higher address) and the CANONICAL slot SECOND (slot
+li+1, lower address). The name + meta live on slot li+1 so
+FINDLOCAL returns it; EFLADDR(li+1) yields the lower address;
+EFLADDR(li+1) + 8 lands on slot li (higher address) — matching
+the slice convention's "second 8 bytes."
+
+Init both halves: zero the canonical slot via EFLSTORE(li+1) and
+zero the high half via address-based memory store (EFLADDR_X1 +
+EADDIMM_X1(8) + ESTOC). Address-based init for the high half is
+required because the regalloc post-body peephole would patch
+EFLSTORE(li) to `mov rbx, rax` (writing to a register, not the
+stack slot). See `slice_high_half_regalloc_pin_v5818`.
+
+Pre-existing — the bug had been silent since v5.5 because no
+tcyr exercised adjacent fn-local 16-byte vars and no fn read
+the slice's high half via memory load (slice_len helpers
+rounded-trip the corruption).
+"""
+
+[[entries]]
+name = "slice_high_half_regalloc_pin_v5816"
+description = "The slice's high-half slot has no user-visible name; the regalloc post-body peephole would allocate a callee-saved register for it, leaving the actual stack slot uninitialized. §8 routes high-half I/O through address-based memory access to keep the slot in memory."
+category = "cyrius"
+tags = ["slices", "regalloc", "v5.8.16"]
+content = """
+Filed: v5.8.16 §8.
+
+The regalloc post-body peephole (parse_fn.cyr v5.6.20 picker)
+counts `mov [rbp+disp], rax` / `mov rax, [rbp+disp]` patterns
+per slot to decide which user-locals to pin to callee-saved
+registers (rbx, r12-r15). Time-sliced sharing assumes every
+local interval starts with a STORE — the register holds the
+right value from the start of each interval, no LOAD-from-stack
+needed.
+
+The slice's high-half slot has no user-visible name (sentinel-
+cleared by the §8 layout-flip), so nothing else takes its
+address via `&<ident>`. The picker's safety scan bars
+`lea rax, [rbp+disp]` (treats `&local` as not-safe). Without
+intervention, the high-half slot looks mov-only — picker
+allocates rbx for it.
+
+Then `var s: [T] = 0;`'s init `EFLSTORE(li, rax=0)` patches to
+`mov rbx, rax` — writes 0 to rbx, leaves the stack slot
+uninitialized. Subsequent slice_set memory-writes to the slot
+are invisible to the register; `s.len` reads (which go through
+the memory access path) see uninit stack data.
+
+Fix: init the high half via address-based memory store
+(EFLADDR_X1 + EADDIMM_X1(8) + ESTOC) rather than EFLSTORE. The
+picker doesn't count memory-via-rcx writes, so the high slot
+stays in memory. §8 dot-syntax (.len read/write) and slice_len
+helper-fn calls all see the right value.
+
+Same reasoning for §8 dot-syntax `s.len`: lower to address-
+based load (EFLADDR_X1 + EADDIMM_X1(8) + ELODC), not direct
+EFLLOAD against the slot. `s.ptr` could safely use EFLLOAD
+(canonical slot is naturally barred from regalloc by slice_set
+taking `&s`), but uses address-based for symmetry.
+"""
+
+[[entries]]
+name = "tail_call_escape_addr_local_v5816"
+description = "PARSE_RETURN's tail-call detector now skips TCO if any arg in `return helper(args);` uses the `&` token. The TCO epilogue deallocates the current frame BEFORE the callee reads through `&local`, leaving the callee pointing at dead stack."
+category = "cyrius"
+tags = ["tco", "tail-call", "stack", "v5.8.16"]
+content = """
+Filed: v5.8.16 §8 side-fix.
+
+The pre-existing TCO implementation matched
+`return IDENT(args);` and emitted a normal call-arg setup,
+then the fn epilogue (restoring callee-saved regs, popping
+rbp, restoring rsp), then `jmp <callee>`. Inside the callee,
+the previous frame is gone — anything the callee reads
+through a pointer to that frame sees dead stack memory.
+
+For most call patterns this never mattered — fn args are
+passed by value (in registers). The exception: `&local` args.
+`return helper(&local);` would compile to:
+  push &local (== rbp - local_disp)
+  pop rdi
+  ...epilogue...
+  jmp helper
+Inside helper, rdi = old caller's rbp - local_disp, but
+old caller's frame is gone; reads through that address see
+arbitrary stack memory.
+
+Pre-§8 was masked for slice fn-locals because the slice's
+high half coincidentally landed on saved rbp (= 0 from the
+C runtime when called from main). The §8 layout-flip moved
+the high half into a real stack slot, exposing the dead-
+stack-read deterministically.
+
+Fix: PARSE_RETURN scans the tail-call arg list for `&`
+(token type 27); if present, skip TCO and emit a normal
+call. Conservative — also blocks TCO for `&global` (rare
+and only loses the optimization, not correctness).
+
+Why "skip" rather than "patch": the right fix would be
+escape analysis on `&local` to bar TCO only when the local's
+address actually escapes the call's lifetime. Cyrius doesn't
+have escape analysis; the conservative skip is the right
+trade-off given the rarity of `return helper(&local);`
+patterns and the catastrophic cost of false-positives
+(silently corrupted reads).
+"""
+
+[[entries]]
+name = "pointer_vs_inline_struct_dispatch_v5817"
+description = "PARSE_FIELD_LOAD/STORE auto-detects pointer-to-struct vs inline-struct fn-locals by checking if slot lli-1 has the v5.5.36 sentinel name -1. Inline mode uses lea (slot IS the struct's bytes); pointer mode uses mov (slot HOLDS a pointer)."
+category = "cyrius"
+tags = ["struct", "field-access", "v5.8.17"]
+content = """
+Filed: v5.8.17 §9.
+
+Premise-check at slot entry flipped the §9 scope. The pin
+assumed `s.data` / `s.len` already worked on `var s: Str =
+str_from(...)` and §9 was just a stdlib migration. Empirically
+`s.len` returned 0.
+
+Root cause: PARSE_FIELD_LOAD's local-struct branch treated
+EVERY struct-typed local as an INLINE struct (the v5.5.36
+no-init `var p: StructName;` path that allocates ceil(STRUCTSZ/8)
+slots, named slot at the deepest stack position). For inline
+structs, `&s` (EFLADDR(named_slot)) yields field 0's address
+because the struct's bytes ARE the slot's bytes — `lea + offset
++ load` is correct.
+
+But `var s: Str = str_from(...)` allocates ONE slot whose value
+IS the heap pointer. `&s` in this case is the slot's address
+(rbp - N), NOT the struct's address. `lea + offset + load`
+reads the wrong location.
+
+Fix: distinguish at PARSE_FIELD_LOAD time by checking slot
+lli-1. The v5.5.36 inline path tags filler slots with sentinel
+name -1; if slot lli-1 carries that sentinel (or lli == 0,
+since inline structs always reserve a filler before the named
+slot when STRUCTSZ > 8), the slot is the named tail of an
+inline allocation. Otherwise it's a single-slot pointer.
+
+Pointer mode emits `EFLLOAD + EMOVCA` (load slot value into
+rax, move into rcx) to set rcx to the struct's base. Inline
+mode emits `EFLADDR_X1` (lea — slot address IS the struct
+base) as before.
+
+Param-decl path also extended: PARSE_FN_DEF's param loop now
+calls FINDSTRUCT on every `: Type` annotation; if the type
+resolves to a struct, sets SLTYPE(li, -sid) on the param's
+slot. Without this tag, `param.field` on a `: Str` parameter
+would compile-error with "unexpected ',' / ';'" because the
+struct-typed-local branch would never fire.
+
+Disambiguation works for STRUCTSZ > 8 (Str at 16, Vec at 24,
+etc.). For STRUCTSZ <= 8 (single-slot inline), the heuristic
+falls through to inline mode (no sentinel above) — these
+should be rare and the disambiguation can be revisited if a
+consumer surfaces pain.
+"""
+
+[[entries]]
+name = "premise_check_at_slot_entry_v58x"
+description = "The v5.8.x slices true-completion sub-arc had multiple slots where the original pin's assumption (dot-syntax already worked, mass migration was wanted, etc.) was empirically wrong. Premise-check at slot entry — read the actual code, run a 5-line probe — caught each one before scope-cutting silently."
+category = "cyrius"
+tags = ["process", "premise-check", "v5.8.x"]
+content = """
+Filed: v5.8.18 (cycle halfway-mark retrospective).
+
+Five sub-arc slots, three premise-check flips:
+
+§7 v5.8.15: Pin assumed slice subscript `s[i]` lowering was
+  straightforward. Premise-check found that fn-local slices
+  had a pre-existing layout bug (canonical slot at higher
+  address, `&s + 8` overflowed past frame). §7 scope expanded
+  to fix layout-flip + add bounds-aware indexing in one slot.
+
+§8 v5.8.16: Pin assumed dot-syntax was straightforward.
+  Premise-check found that the regalloc post-body peephole
+  would patch direct EFLSTORE to register moves on the high-
+  half slot, missing the memory write. Plus a tail-call escape
+  bug exposed by the layout-flip. §8 scope expanded to
+  address-based field I/O + tail-call escape skip.
+
+§9 v5.8.17: Pin assumed `s.data` / `s.len` already worked on
+  Str-typed locals and §9 was just a stdlib migration.
+  Premise-check found dot-syntax returned 0 — the struct-typed-
+  local branch always used inline-mode addressing, but heap-
+  alloc'd Str pointers stored a pointer in a single slot.
+  §9 scope flipped to "ship the capability"; mass migration
+  moved to §10.
+
+§10 v5.8.18: Pin called for ~454-site mass migration of
+  memcpy/memeq/sys_read + the §9-deferred ~80 str sites.
+  Empirical scope was ~295 sites, AND a pilot migration of
+  lib/fs.cyr was reverted twice in-flight by the user — clear
+  signal that mass call-site churn wasn't wanted this slot.
+  §10 scope shrank to 3 additive slice-typed wrapper helpers
+  + tcyr regression.
+
+The PATTERN: every "trivial" sub-arc slot revealed a
+non-trivial precondition. Premise-checking with a 5-line probe
+(write the code the pin assumed worked, run it, observe what
+breaks) caught each one in time to either expand scope
+honestly or shrink it without silently dropping work.
+
+The opposite anti-pattern (commit to the pin's premise, hit a
+wall mid-implementation, defer half the work to "next slot")
+would have ballooned the cycle's deferment rate the way v5.6.x
+did. The v5.7.x discipline ("premise-check at slot entry
+before scoping") earned its keep across this sub-arc.
+
+See feedback_premise_check_at_slot_entry memory entry.
+"""

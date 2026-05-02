@@ -2,11 +2,11 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-02
 >
-> **Version**: 2.4.1 | **Cyrius**: 5.8.14
-> **Topics**: 64 (64 fully covered) — **P1 in flight (4/6)**
+> **Version**: 2.4.2 | **Cyrius**: 5.8.18
+> **Topics**: 66 (66 fully covered) — **P0 → P1 complete** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 704 source files; concept files: 64
-> **Validator**: 704/704 green
+> **Examples**: 726 source files; concept files: 66
+> **Validator**: 726/726 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -33,15 +33,16 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.3.10 | 2026-05-02 | **P0C-2c complete — final P0C patch (2 topics × 11 langs)** — `direct_drm_gpu_compute` (GEM BO + VA-map + submit + syncobj-wait simulation), `render_graph_architecture` (DAG with topo sort + barrier derivation + dead-pass culling + cycle detection). 22 new source files; validator 638/638 → **660/660**. **🎉 P0 → P0C arc complete — all 60 topics at 11/11 languages.** |
 | 2.4.0 | 2026-05-02 | **P1 kickoff — Networking & Infrastructure (minor bump)** — 2 new topics × 11 langs: `networking_fundamentals` (TCP socket state machine + bind/listen/connect/send/recv/close lifecycle, port-reuse + half-closed semantics), `http_and_web_protocols` (HTTP/1.1 request parser — sequential parse, case-insensitive header lookup, Content-Length body framing, malformed-request rejection). 24 new source files; validator 660/660 → **682/682**. P1 is 2/6 topics in flight; tls_and_encryption + dns slated for 2.4.1, ipc + serialization for 2.4.2. |
 | 2.4.1 | 2026-05-02 | **P1 batch 2 — 2 new topics × 11 langs** — `tls_and_encryption` (TLS 1.3 handshake state machine, cipher-suite negotiation rejecting legacy 1.2 suites, certificate chain validation with issuer/subject linkage to trust root, AEAD seal/open with tag verification + hostname check), `dns` (in-memory resolver: zone with A/AAAA/CNAME/MX/TXT, recursive lookup with depth-bounded CNAME chase, TTL cache with monotonic clock, negative caching). 22 new source files; validator 682/682 → **704/704**. P1 is 4/6 topics in flight; ipc + serialization slated for 2.4.2. |
+| 2.4.2 | 2026-05-02 | **P1 complete + cyrius pin bump 5.8.14 → 5.8.18** — `ipc` (shared memory + bounded FIFO pipe + named-endpoint message channel), `serialization` (LEB128 varint + length-prefix framing + stream parser + DoS guards: varint overflow cap, oversize-length rejection). 22 new source files; validator 704/704 → **726/726**. **🎉 P1 Networking & Infrastructure complete — 6/6 topics × 11 langs landed.** |
 
 ---
 
 ## Current State
 
-### 64 topics fully covered (11/11 languages) — P0 → P0C complete + P1 in flight (4/6) 🚀
+### 66 topics fully covered (11/11 languages) — P0 → P1 complete 🎉
 
 The original 36 P0 topics, plus 24 P0C additions (v2.3.2–v2.3.10),
-plus 4 P1 additions (v2.4.0–v2.4.1):
+plus 6 P1 additions (v2.4.0–v2.4.2):
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
@@ -56,16 +57,18 @@ plus 4 P1 additions (v2.4.0–v2.4.1):
   explicit_gpu_synchronization
 - v2.3.10 P0C-2c (2): direct_drm_gpu_compute, render_graph_architecture
 - v2.4.0 P1 (2): networking_fundamentals, http_and_web_protocols
-- **v2.4.1 P1 (2): tls_and_encryption, dns**
+- v2.4.1 P1 (2): tls_and_encryption, dns
+- **v2.4.2 P1 (2): ipc, serialization**
 
-`vidya stats` reports `Topics: 64, Complete: 64 (all 11 languages),
-Examples: 704`; validator 704/704 green.
+`vidya stats` reports `Topics: 66, Complete: 66 (all 11 languages),
+Examples: 726`; validator 726/726 green.
 
-### 0 topics partial; 2 P1 topics still planned
+### 0 topics partial; P1 fully done
 
-The 2.3.x patch backlog is complete. P1 (Networking & Infrastructure)
-is 4/6 shipped (v2.4.0 + v2.4.1). The final batch — ipc + serialization
-— ships in v2.4.2.
+P0 → P0C → P1 arc complete. Next minor (2.5.x) opens **P2 —
+Distributed Systems** (transactions_and_acid, consensus,
+distributed_systems). 3 topics × 11 langs ≈ 33 new files,
+sized as ~2 patch sub-releases.
 
 ---
 
@@ -201,9 +204,9 @@ fully complete.
 
 ---
 
-## Current minor (2.4.x) — Networking & Infrastructure (P1)
+## Completed minor (2.4.x) — Networking & Infrastructure (P1) ✅
 
-P1 opened with v2.4.0; runs across 3 patch releases (2.4.0/1/2):
+Shipped across 3 patch releases (2.4.0/1/2):
 
 | Topic | Status | Notes |
 |---|---|---|
@@ -211,12 +214,12 @@ P1 opened with v2.4.0; runs across 3 patch releases (2.4.0/1/2):
 | **http_and_web_protocols** | ✅ shipped 2.4.0 | HTTP/1.1 request parser — sequential parse, case-insensitive headers, Content-Length body framing |
 | **tls_and_encryption** | ✅ shipped 2.4.1 | TLS 1.3 handshake state machine, certificate chain validation, cipher suite negotiation (TLS 1.3 only), AEAD seal/open with tag check |
 | **dns** | ✅ shipped 2.4.1 | Resolver state machine, record types (A, AAAA, CNAME, MX, TXT), TTL cache with monotonic clock, negative caching, depth-bounded CNAME chase |
-| **ipc** | planned 2.4.2 | Shared memory regions, named pipes, Unix sockets, message-passing primitives |
-| **serialization** | planned 2.4.2 | Length-prefix framing, varint encoding, zero-copy parsing patterns |
+| **ipc** | ✅ shipped 2.4.2 | Shared memory + bounded FIFO pipe + named-endpoint message channel |
+| **serialization** | ✅ shipped 2.4.2 | LEB128 varint + length-prefix framing + stream parser + DoS guards |
 
-6 topics × 11 langs = 66 new examples + 6 concept files. Sized as
-3 patch sub-releases of 2 topics each, mirroring the 2.3.x cadence.
-4/6 shipped (2.4.0 + 2.4.1).
+6 topics × 11 langs = 66 new examples + 6 concept files. **All 6
+shipped.** Plus cyrius pin progression: 5.8.14 (entered 2.4.x) →
+5.8.18 (exited 2.4.x).
 
 ---
 
@@ -305,4 +308,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-02 (v2.4.1) — **P1 in flight; 64/64 at 11/11; 2 P1 topics planned***
+*Last Updated: 2026-05-02 (v2.4.2) — **P0 → P1 complete; 66/66 at 11/11; next: P2 distributed systems***
