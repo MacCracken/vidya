@@ -1,0 +1,440 @@
+# Cyrius Field Notes — Language Gotchas (semantics & runtime)
+# Var lifetime + scope, struct locals, init order, fn main, static `var buf[N]`
+# inside library fns, and the bump allocator's process-lifetime persistence.
+# 8 entries.
+
+[[entries]]
+name = "heap_allocation_patterns"
+description = "How to structure heap-allocated data in a language without structs-on-heap"
+category = "cyrius"
+---
+Cyrius has structs, but for heap data you typically use raw alloc + store64/load64.
+The pattern that emerged across both projects:
+
+1. POINTER + ACCESSOR FUNCTIONS:
+
+   var map_nodes = 0;
+   fn map_alloc() { map_nodes = alloc(1024 * 112); }
+   fn map_node_x(idx) { return load64(map_nodes + idx * 112); }
+   fn map_node_y(idx) { return load64(map_nodes + idx * 112 + 8); }
+
+   This is essentially manual vtable-free OOP. The accessor functions ARE
+   your type safety. Name them consistently: module_field(index).
+
+2. ENUM FOR LAYOUT CONSTANTS:
+
+   enum BspNode {
+       BSP_NODE_SIZE = 112;
+       BSP_NODE_X = 0;
+       BSP_NODE_Y = 8;
+       BSP_NODE_DX = 16;
+   }
+
+   Enums cost zero gvar_toks. Use them for every struct layout.
+
+3. LAZY INIT GUARD:
+
+   fn framebuf_set_palette(data) {
+       if (palette == 0) { palette = alloc(768); }
+       memcpy(palette, data, 768);
+   }
+
+   We found a real segfault from this: framebuf_set_palette() was called
+   before framebuf_init() allocated the buffer. The lazy guard fixed it.
+   Always guard heap pointers that might be called before init.
+
+4. PACK SMALL STATE:
+
+   # Instead of 3 globals:
+   var player_start = 0;
+   fn map_find_player_start() {
+       if (player_start == 0) { player_start = alloc(24); }
+       store64(player_start, x);
+       store64(player_start + 8, y);
+       store64(player_start + 16, angle);
+   }
+   fn player_start_x() { return load64(player_start); }
+
+[[entries]]
+name = "enum_as_namespace"
+description = "Using enums as zero-cost namespaced constants"
+category = "cyrius"
+---
+Enums in Cyrius are compile-time integer constants. They don't consume
+gvar_toks slots. They have a separate initialization path in cc2.
+
+This makes them perfect for constants that would otherwise eat your
+global variable budget:
+
+  # BAD: 8 gvar_toks slots
+  var MAP_MAX_VERTEXES = 2048;
+  var MAP_MAX_LINEDEFS = 2048;
+  var MAP_MAX_SIDEDEFS = 2048;
+  ...
+
+  # GOOD: 0 gvar_toks slots
+  enum MapMax {
+      MAP_MAX_VERTEXES = 2048;
+      MAP_MAX_LINEDEFS = 2048;
+      MAP_MAX_SIDEDEFS = 2048;
+      ...
+  }
+
+Both produce identical code — the values are inlined at use sites.
+
+WARNING: Enum values must be non-negative integers. For negative constants
+like FIXED_NEG_ONE, you still need `var FIXED_NEG_ONE = 0 - 65536;`
+(Cyrius has no negative literals — use `0 - N`).
+
+In cyrius-doom, converting constants to enums saved 30+ gvar_toks slots,
+which made the difference between compiling and not compiling.
+
+[[entries]]
+name = "var_name_bracket_is_bytes_not_elements"
+description = "`var name[N]` allocates N bytes, not N elements"
+category = "cyrius"
+---
+The `var name[N]` syntax allocates N BYTES of stack-local
+storage, not N elements of any type. This is C-shaped (char
+array) rather than many modern languages' typed-array notation.
+
+    var buf[16];       # 16 bytes — OK for a 2-u64 pair
+    var state[25];     # 25 BYTES — NOT 25 u64 lanes!
+    var lanes[200];    # 200 bytes = 25 × u64 lanes
+
+When you need an array of u64 (or any multi-byte type), size the
+declaration with `count × sizeof(type)`:
+
+    var state[200];    # 25 u64 lanes for Keccak
+    var rc[192];       # 24 u64 round constants
+    var tmp[64];       # 8 u64 temp limbs for bigint
+
+Surfaced v5.4.15 writing `lib/keccak.cyr` — `var state[25]` gave
+25 bytes (should have been 200). First `memset(state, 0, 200)`
+overwrote 175 bytes of adjacent stack locals including the
+caller's return-address region. SIGSEGV on the first absorb.
+
+RULE OF THUMB: any time a declaration looks like it should hold
+N "things", size it as `N * 8` (or `N * sizeof(thing)` if the
+element type is known).
+
+[[entries]]
+name = "stack_var_keyword_for_struct_locals"
+description = "v5.5.36 `stack var p: Point;` forces a named struct onto the frame; `var p: Point;` also now parses"
+category = "cyrius"
+---
+v5.5.36 added the `stack` storage-class keyword for named struct
+locals, plus `var p: Point;` (no RHS) as a parse-level way to
+declare a struct-typed local. Both allocate on the frame:
+
+    fn demo() {
+        stack var p: Point;       // explicit (preferred when
+                                  // you want readers to notice)
+        p.x = 1;
+        p.y = 2;
+    }
+
+    fn demo2() {
+        var q: Point;             // same effect, shorter form
+        q.x = 3;
+    }
+
+`stack` is reserved (TOK=111). Variable and field names can't
+use `stack` any more — rename to `stk`/`sp` if you collide.
+
+Struct locals that previously needed anonymous filler `var`
+slots to land at a known rbp disp can now just declare at the
+struct type directly.
+
+[[entries]]
+name = "fn_main_is_not_the_entry_point"
+description = "`fn main() { ... }` is just a function definition — cyrius has no auto-call for it; top-level statements are the program entry"
+category = "cyrius"
+---
+THE TRAP:
+
+    fn main() {
+        syscall(60, 42);
+        return 0;
+    }
+
+Compiles clean. Runs. Exits with 0, or 1, or whatever argc was
+— but never 42.
+
+WHY:
+
+Cyrius does not have a C-style `int main(void)` convention.
+There is no implicit `bl _main` / `call main` emitted by the
+compiler. The entry point is the top-level statements in the
+compilation unit, emitted in order after all function bodies.
+See `src/main.cyr` / `src/main_aarch64.cyr`:
+
+    (pass 2) parse + emit every `fn` body into codebuf
+    EPATCH(jmp_patch)            ← branch-over-fn-bodies lands here
+    PARSE_ENUM_DEF(init pass)    ← enum init code
+    EMIT_GVAR_INITS(S)           ← gvar init code
+    PARSE_PROG(S)                ← YOUR top-level stmts run here
+    EVLOAD(last_var); EEXIT(S)   ← exit with last-assigned var, or x0
+
+A source consisting of only `fn main() { … }` has no top-level
+code. After the parser finishes emitting `main`'s body as a
+function (never called from anywhere), `PARSE_PROG` sees EOF
+and emits nothing. The initial `b jmp_patch` that the entry
+prologue emitted (to skip past the fn bodies) is then patched
+to land directly on `EEXIT`, which exits with whatever was in
+x0 / rax.
+
+On Mach-O arm64 this is dramatic: the argv prologue pushes
+x0 (argc) before the branch, so the `EEXIT` tail's
+`movz x16,#1; svc #0x80` (= BSD `_exit(x0)`) exits with argc,
+which is 1 when invoked from the shell.
+
+CORRECT SHAPE:
+
+    syscall(60, 42);
+
+At top level. If you want helpers, define them as `fn`s and
+call them from top level:
+
+    fn add3(a, b, c) { return a + b + c; }
+    syscall(60, add3(10, 20, 12));
+
+WHERE THIS BIT US:
+
+v5.6.33 was pinned as "macOS arm64 runtime regression" on
+`ssh ecb` based on a `fn main()` fixture exiting 1 not 42.
+There was no compiler regression; the fixture never exercised
+what it thought it did. `otool -tv` showed `fn main`'s body
+correctly emitting `adrp x16, 4; ldr x16, [x16]; br x16`
+through `__got[0] = _exit` — it just never executed.
+
+Linux has the same trap but argc is often 0 at process entry,
+so the symptom looks like "exit 0" instead of "exit argc." Same
+root cause; different flavor of wrong answer.
+
+[[entries]]
+name = "var_buf_in_library_functions"
+description = "`var buf[N]` inside a library function is static data — every call shares the SAME buffer, and any Str borrowing from it dangles after the next call"
+category = "cyrius"
+---
+THE TRAP:
+
+    fn parse_file(path) {
+        var buf[262144];                       # NOT stack — static data
+        var n = file_read_all(path, &buf, 262144);
+        return parse(str_new(&buf, n));        # Str's data ptr → static buf
+    }
+
+This is the compounded form of "var buf[N] is BYTES not ELEMENTS,
+and lives in the binary." Sized properly, the first call works
+fine. The second call overwrites the buffer in-place; every Str
+the first call returned now points at the second file's bytes.
+
+You see this as parsed values bleeding across calls — IDs become
+suffixes/prefixes of later IDs, descriptions become fragments of
+the most-recently-read file. Nothing crashes; everything is just
+wrong.
+
+The build emits a hint:
+
+    warning: large static data (262144 bytes) — consider alloc()
+    for buffers >4K
+
+Heed it. Library helpers that hand out heap pointers must heap-
+allocate the backing memory:
+
+    fn parse_file(path) {
+        var buf = alloc(262144);               # fresh per call
+        var n = file_read_all(path, buf, 262144);
+        return parse(str_new(buf, n));
+    }
+
+Now the Str's data ptr aliases an alloc that lives until process
+exit; consecutive calls keep their backing memory.
+
+WHERE THIS BIT US:
+
+vidya 2.3.0 — `lib/toml.cyr::toml_parse_file` shipped with
+`var buf[262144]`. `vidya stats` segfaulted on the first
+content-loading command after the cyrius 4.5.0 → 5.7.0 upgrade
+because every concept's parsed Str pointed into the *last*
+concept.toml's bytes; `concept_id` returned 0/garbage and
+`path_join(0, fname)` faulted at NULL+offset. Workaround: read
+the file into `alloc(N)` in the caller and call `toml_parse(...)`
+directly, bypassing the leaky helper. Permanent fix belongs
+upstream in cyrius stdlib.
+
+This trap is invisible at single-call test scope. Every stdlib
+helper that returns Str/buf-borrowing values must be exercised
+with at least two consecutive calls in tests, otherwise the bug
+sleeps until the second consumer arrives.
+
+[[entries]]
+name = "global_init_order_silent_zero"
+description = "Top-level `var X = expr` initializers run in source order; forward references silently resolve to 0 (no warning)"
+category = "cyrius"
+---
+THE BUG:
+
+Cyrius initializes top-level `var X = expr;` declarations in source
+declaration order. If `expr` references a constant declared LATER in
+the same file, that reference resolves to `0` (the default
+zero-initialized value) at the time `X` is evaluated. No warning,
+no error — `X` ends up holding the wrong value, and downstream
+consumers silently see the wrong value too.
+
+    # In src/foo.cyr (single file, declaration order matters):
+
+    var COMPUTED = FLAG_A | FLAG_B | FLAG_C;   # → 0, NOT 7
+
+    # ... 200 lines later ...
+
+    var FLAG_A = 0x1;
+    var FLAG_B = 0x2;
+    var FLAG_C = 0x4;
+
+    # COMPUTED reads as 0 throughout the program.
+
+A trivial assertion surfaces it instantly:
+
+    fn test() {
+        assert_eq(COMPUTED, FLAG_A | FLAG_B | FLAG_C, "computed = OR");
+        # → fails with "got 0, expected 7"
+    }
+
+WHERE THIS BIT US:
+
+mabda v3 Step 4f.ii (BO page-perms tightening). Added named
+perm-bitmask constants near the top of `src/backend_native.cyr`:
+
+    var _NATIVE_PERM_FULL = AMDGPU_VM_PAGE_READABLE
+                          | AMDGPU_VM_PAGE_WRITEABLE
+                          | AMDGPU_VM_PAGE_EXECUTABLE;
+
+at line 117. The `AMDGPU_VM_PAGE_*` constants lived at line 391+ in
+the same file. Result: `_NATIVE_PERM_FULL` evaluated to `0` at load
+time. Every BO got mapped with `perms = 0` — no read, no write, no
+execute. Every dispatch TDR'd at the 10-second AMDGPU timeout with
+"post-dispatch marker stale" + "output unchanged."
+
+Visible failure mode looked like a wedged GPU — ~30 minutes spent
+on hardware-iteration hypotheses (firmware near-permanent-wedge
+rule, ring corruption, bad VAs) before a CPU regression test
+`assert_eq(_NATIVE_PERM_FULL, R|W|X)` returned `got 0, expected 14`
+and pinned the actual cause.
+
+Fix: one-line move. `_NATIVE_PERM_*` block relocated below the
+`AMDGPU_VM_PAGE_*` defs. Code that was "wrong since the moment I
+typed it" started working immediately on hardware.
+
+WORKAROUND PATTERN until the lint lands:
+
+  1. For computed-from-other-constants globals, place the
+     definition AFTER its dependencies (forced reordering).
+  2. Add CPU regression tests that assert the *value* of every
+     computed perm/flag/size constant. These are 5-line tests
+     that catch this class of bug before any hardware
+     iteration.
+  3. When refactoring top-level declarations, re-run the value
+     assertions. Reordering is a top-level change with non-local
+     consequences in Cyrius.
+
+UPSTREAM STATUS:
+
+**✅ Shipped at v5.7.32 + v5.7.36** — picked option (a):
+`cyrlint` rule `lint_globals_init_order` walks the file
+twice. Pass 1 collects every top-level `var IDENT = ...;`
+and records `(name, line)`. Pass 2 walks every initializer
+expression, scans IDENT tokens, and emits a warning if any
+IDENT was declared at a line LATER than the current decl:
+
+    warn line N: global var init refs 'NAME' declared at line M
+                 (silent zero at init)
+
+v5.7.36 extended the Pass-2 scanner with **string-literal
+awareness** — IDENTs nested inside `"..."` strings or `'...'`
+chars (with `\\` / `\"` / `\'` escapes) no longer trigger
+spurious warnings. So `var MSG = "FLAG_LATER not yet
+defined"; var FLAG_LATER = 1;` is clean.
+
+The compile-time error path (option b) was rejected because
+existing stdlib shapes rely on declaration order in benign
+ways; promoting to error would break green builds across
+the ecosystem. Lint warning is the right level — surfaces
+the foot-gun without forcing churn.
+
+Affects ANY computed-from-other-constants global: size
+calculations, page perms, bit-packed enum compositions,
+refactors that reorder top-level declarations, the common
+"define module constants near the top of the file for grep-
+ability" pattern.
+
+[[entries]]
+name = "bump_allocator_exhaustion_in_tests"
+description = "Cyrius bump allocator persists allocations for the process lifetime; large test files exhaust the heap → silent alloc(N) returning 0 → segfault on store"
+category = "cyrius"
+---
+The Cyrius stdlib `alloc` is a bump allocator: each `alloc(N)`
+moves a global pointer forward by N bytes; allocations are
+NEVER freed during process lifetime. This is fine for short-
+running programs (test suites, benchmarks, smoke programs) but
+breaks down when a single process accumulates enough
+allocations to exhaust the underlying heap segment.
+
+**Symptom.** `alloc(N)` silently returns 0. Subsequent `store*`
+to the returned pointer dereferences null → segfault. The
+crash looks like an unrelated bug in test code that seemed to
+work before.
+
+**Where it bites.** Test files that grow over time and run all
+their tests in one `main()` invocation. Each test that calls
+`alloc(N)` permanently consumes that N. After enough tests,
+the cumulative consumption exceeds the heap segment.
+
+**Diagnostic.** If a test fails with exit 139 (SIGSEGV) and
+inserting `assert(ctx != 0, "alloc returned non-null")`
+catches it, the bump allocator is exhausted. mabda hit this
+during Step 7.7 — adding the 9th `alloc(112)` ctx in
+`tests/tcyr/mabda_v3_phase_d.tcyr` made `alloc` start
+returning 0.
+
+**The fix.** Stack-local arrays for test-scoped buffers:
+
+```cyrius
+# Before — heap-allocated, accumulates:
+fn test_thing() {
+    var ctx = alloc(112);
+    memset(ctx, 0, 112);
+    # ...
+}
+
+# After — stack-allocated, freed at fn return:
+fn test_thing() {
+    var ctx[112];
+    memset(&ctx, 0, 112);
+    # ...
+}
+```
+
+The `var name[N]` form allocates on the stack, gets reclaimed
+at fn exit. Identical observable behavior for test code; zero
+heap pressure.
+
+**When you MUST use alloc.** When a value needs to outlive the
+fn (heap-allocated structs returned from constructors,
+caller-owned buffers passed across abstraction boundaries).
+Production code generally needs alloc; test code generally
+doesn't.
+
+**Why not fix the bump allocator.** The bump-allocator design
+is intentional — its simplicity is the load-bearing property
+for AGNOS's "no GC, no malloc" stance. Adding a heap-replacing
+allocator would change the contract for every consumer.
+Better to teach the test-write idiom: stack-local for
+test-scoped buffers.
+
+**Cross-pollination.** Every AGNOS test suite hits this
+eventually. Teach the pattern at the start; don't wait for
+the segfault. samvada's `tests/samvada.tcyr` already uses
+stack-local idiom; mabda's older test files retrofitted as
+they grew.

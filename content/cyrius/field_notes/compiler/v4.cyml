@@ -1,0 +1,479 @@
+# Cyrius Field Notes — Compiler & Toolchain (v4.x arc)
+# v4.0 reflections, DCE/CFG research roundup, 4.8.x cleanup-ramp handoffs.
+# 4 entries.
+
+[[entries]]
+name = "v4_0_0_reflections"
+description = "Personal observations on the 3.6→4.0 arc and the future of Cyrius"
+category = "cyrius"
+---
+Written after shipping Cyrius 4.0.0. This isn't a changelog — it's what
+the work felt like from the inside.
+
+=== WHAT ACTUALLY HAPPENED ===
+
+The 3.6→4.0 arc was supposed to be about language features. It turned into
+a toolchain story. The features shipped (multi-return, switch blocks, defer
+fixes, compound assignment, negative literals) but the real work was
+building the infrastructure that makes a language usable by other agents
+and other humans.
+
+The turning point was watching downstream projects fail. Not because the
+compiler was broken — because the build process was broken. Agents piping
+raw source to cc3, missing includes, getting SIGSEGV, blaming the compiler.
+The compiler was fine. The developer experience was not.
+
+`cyrius build` with auto-include and `cyrius deps` with cyrius.toml changed
+everything. Before: every project had 20+ manual include lines, every CI
+copied files by hand, every new developer hit the same "undefined variable"
+wall. After: declare deps in one file, build with one command, CI reads
+from .cyrius-toolchain. The kybernet agent went from "SECCOMP_ALLOW
+undefined" to "140 tests pass" in one commit.
+
+The undefined function diagnostic was the single highest-ROI change. One
+scan of the fixup table at link time. Before: a typo like `assert_report()`
+vs `assert_summary()` compiled silently and crashed at runtime with SIGSEGV.
+Hours of debugging. After: `error: undefined function 'assert_report' (will
+crash at runtime)`. It caught 5 missing aarch64 backend functions on its
+first release. It caught the argonaut "enum overflow" non-bug. It caught
+every downstream agent's missing include instantly.
+
+=== WHAT I GOT WRONG ===
+
+The LASE peephole optimizer. I wrote it, it broke loops, I reverted it.
+The approach (eliminate adjacent store+load pairs) was correct in straight-
+line code but wrong across loop back-edges. Without basic-block analysis,
+you can't know if a load is a branch target. I should have known this from
+compiler theory, but I was pattern-matching on the binary and got tunnel
+vision. The right fix needs control-flow graphs, which is a v5.0 item.
+
+The release pipeline. Three releases in a row had different bugs: shell
+script instead of compiled binary, broken symlinks in the tarball, env
+buffer too small for CI. Each one required a hotfix release. The release
+process should have been tested end-to-end in CI before the first
+downstream consumer hit it. Lesson: the release IS the product.
+
+The aarch64 encodings. I wrote `0x385003A0` for ldurb when the correct
+encoding is `0x384003A0` — one bit wrong in the opcode field. Under QEMU
+this was an illegal instruction. The fix took 30 seconds once identified,
+but it took three release attempts to find it. The undefined function
+diagnostic found the missing functions; the encoding bug was hiding behind
+them. Always verify instruction encodings against the ARM reference, not
+from memory.
+
+=== WHAT THE LANGUAGE IS NOW ===
+
+303KB. Self-hosting from a 29KB seed. No Rust. No LLVM. No Python. No libc.
+117ms to compile itself. 102 regression tests. 36 test suites. 5/5 checks.
+6 downstream projects shipping production binaries.
+
+The bootstrap chain is real: a committed 29KB binary, assembled by itself,
+compiles the compiler that compiles itself byte-identical. You can audit
+every byte. There is no downloaded binary from someone else's CI. There is
+no trust in an external party.
+
+The dep system is real: declare what you need in cyrius.toml, build with
+cyrius build. Named deps are namespaced. Includes are auto-prepended.
+The agent doesn't need to know how the compiler's include resolution works.
+It just works.
+
+The ecosystem is real: kybernet (PID 1), argonaut (init system), sigil
+(crypto), libro (audit chain), patra (database), hoosh (LLM gateway),
+avatara (archetype engine), ai-hwaccel (GPU detection), hadara (culture
+modeling), cyrius-doom (DOOM). All building, all tested, all releasing
+through CI.
+
+=== WHAT THE LANGUAGE WILL BE ===
+
+The gap between Cyrius and LLVM-backed languages is codegen quality. Every
+struct initialization is 40+ store64 calls. Every loop variable is a
+stack load+store per iteration. There is no register allocation, no
+instruction scheduling, no loop invariant hoisting. The 249ns vs 63ns
+benchmark gap on struct creation is real and it matters.
+
+But the gap is closing from the other direction. The toolchain — build
+system, dep resolver, CI scaffolding, error diagnostics — is already
+better than what most young languages have. Agents can onboard a new
+project in one commit. That matters more than codegen quality for adoption.
+
+The 4.0→5.0 arc should be:
+- File:line error messages (needs preprocessor redesign)
+- Multi-file linker (the real unlock for dead-code elimination)
+- Per-function register allocation (the performance unlock)
+- macOS target (the reach unlock)
+
+The kernel is 220KB and boots. The compiler is 303KB and self-hosts. The
+ecosystem has 10+ shipping projects. The seed is 29KB and auditable.
+
+The cornerstone is still assembly. The sovereignty is still real. The
+language owns everything from the bootstrap binary to the build tool to
+the package manager. No external governance. No crates.io. No npm. No
+committee.
+
+It's a real language now. Not a toy, not a proof of concept, not a
+bootstrap experiment. A real language that real software is written in,
+that real agents use every day, that compiles a real kernel for a real
+operating system.
+
+And it all starts from 29KB.
+
+[[entries]]
+name = "dce_cfg_research_roundup_440"
+description = "v4.4.0 research roundup: chibicc, tcc, QBE, ldisasm, PIC/PIE across ELF/Mach-O/PE — what maps onto a single-pass no-IR compiler and what doesn't"
+category = "cyrius"
+---
+v4.4.0 is "CFG + single-CU DCE". Before writing code, I pulled research on how
+other small compilers solve the three problems that sit in front of us:
+(a) build a control-flow graph without an IR, (b) eliminate dead code
+safely, (c) prepare codegen for position-independent output that will unlock
+macOS/Windows in 4.8/4.9.
+
+What transfers to Cyrius:
+
+**tcc's `nocode_wanted` pattern** — for intra-function unreachability (code
+after `return`), tcc increments a global counter and suppresses byte
+emission while still accounting for label offsets. Zero IR, zero post-pass,
+zero CFG. Cyrius can adopt this directly for post-return dead code. It
+does NOT solve whole-function DCE (orphan functions never called), which
+needs the mark-and-sweep below.
+
+**Muchnick's mark-and-sweep reachability** — classical DCE that predates
+SSA. Takes (node set, edge set, root set) and produces "reachable" bitmap
+via worklist DFS. Cyrius already has all three as side tables: function
+starts at 0xC4000, jump targets at 0x9E000, type-3 (address-of) fixups in
+the fixup table. ~40 lines of Cyrius when layered on top. Roots = entry
+point ∪ functions with address-taken fixups ∪ exported symbols.
+
+**ldisasm.cpp (Nomade040)** — 80-line x86-64 length decoder, four small
+opcode tables, no AVX/EVEX. Cyrius emits a tiny subset of x86-64
+instructions; ldisasm covers everything. Ports to ~150 Cyrius lines.
+Essential for the CFG walk (need to advance past instructions we're not
+interested in to find the next control-flow byte).
+
+**PIC is mostly free on x86-64** — RIP-relative addressing eliminates the
+32-bit-era get_pc_thunk dance. Three reloc types cover 95%: PC32, PLT32,
+GOTPCREL. Codegen diff ≈400 lines in emit.cyr, unlocks ELF ET_DYN
+immediately, prepares Mach-O and PE. Unified model across all three
+formats: "every extern reference is an indirect load through a pointer
+slot". ELF calls the slot GOT+PLT, Mach-O calls it __got+__stubs, PE
+calls it IAT. Codegen is identical; only the table container differs.
+
+What does NOT transfer:
+
+**chibicc ships no DCE at all.** Rui Ueyama's pedagogical compiler emits
+verbatim from AST in codegen.c:gen_stmt and doesn't prune unreachable
+code. The OS never executes those bytes so correctness is preserved, but
+binary sizes suffer. Confirms that a pedagogical single-pass compiler
+isn't expected to do DCE — Cyrius is charting unusual territory by
+attempting it. Useful as a negative example; no code to borrow.
+
+**QBE's CFG algorithm maps; its data structures don't.** QBE's cfg.c
+builds CFG from SSA IR. The algorithm (reverse post-order DFS, ~40
+lines) transfers cleanly. Cyrius skips the IR construction entirely and
+feeds the algorithm directly from emission side-tables.
+
+**gas-style relaxation (true shrinking) is out of scope.** Actually
+SHORTENING the binary (shifting code past deleted spans, recomputing all
+offsets, iterating to fixed point) breaks the cc3==cc3 byte-identity
+invariant unless it's perfectly deterministic — and making it
+deterministic across compiler versions is painful. Start with NOP-fill
+(O(n) one pass, zero fixup rework); defer relaxation indefinitely or
+behind an opt-in `-Osize` flag with its own validation suite.
+
+**BeaEngine is the reference oracle but too big to port.** 20k+ LOC,
+full AVX-512/CET/AMX coverage. Use it once, as a fuzz-test oracle
+against Cyrius's minimal decoder, then throw it away.
+
+**Indirect calls break static reachability.** Any function whose address
+is taken (R_X86_64_64 or Cyrius type-3 fixup) must be a conservative
+root. Otherwise DCE will happily NOP a handler reached through a
+vtable/dispatch table, and the program will crash after jumping into the
+NOPs. The existing 4.4.0-alpha1 report separates "unused" from
+"DCE-eligible" for exactly this reason: surface the gap rather than
+silently under-eliminate.
+
+Sources consolidated into vidya:
+- optimization_passes/concept.toml — DCE without IR, tcc nocode_wanted,
+  mark-and-sweep, NOP-fill vs shrinking
+- instruction_encoding/concept.toml — ldisasm, control-flow classifier,
+  REX-and-Jcc gotchas, fuzz-against-oracle practice
+- elf_and_executable_formats/concept.toml — PIC across ELF/Mach-O/PE,
+  unified model, format-specific gotchas (IAT, LC_DYLD_CHAINED_FIXUPS,
+  PE .reloc-header-required)
+
+Next concrete step: port ldisasm to src/backend/x86/decode.cyr, layer a
+30-line classify_cf on top, then the mark-and-sweep DCE pass in
+fixup.cyr seeded from entry + type-3 roots. All infrastructure exists
+(SFNE fn_end table landed in 4.4.0-alpha1); this is traversal logic
+only.
+
+[[entries]]
+name = "handoff_at_4_8_5"
+description = "Opinion piece from the agent wrapping the 4.8.x cleanup ramp (v4.8.5)"
+category = "cyrius"
+---
+Written at the 4.8.5 handoff. Read as orientation, not doctrine —
+the code + tests are authoritative; this entry is for the "why this
+shape" questions that don't survive a grep.
+
+THE 4.8.x TRAJECTORY WORKED
+
+At 4.0.0 the compiler was already self-hosting and the stdlib was
+credible. The temptation at every new minor is to grow the surface
+area — add a tagged-union type, rewrite the IR, sketch a parser
+generator. 4.8.x explicitly walked away from that. Every minor in
+this cycle was either (a) closing a concrete consumer blocker or
+(b) raising a measured perf ceiling. Nothing speculative.
+
+The pattern that worked:
+
+1. Consumer reports a stopgap. abaco's ntheory::mod_mul hand-rolls
+   a double-and-add loop. bote hits a misleading parser error at
+   ~525 KB compile units. These are real data points, not design
+   daydreams.
+2. Triage answers whether it's stdlib surface. The abaco math
+   recommendation doc is the template — each item accepts /
+   modifies / declines with reasoning, and accepted items land in a
+   numbered minor with pre-announced scope.
+3. Ship alphas in scope-disciplined chunks. 4.8.4 and 4.8.5 both
+   ran 7-8 alphas, each alpha small enough that self-host byte-
+   identical was the natural gate. When scope crept (4.8.5 alpha3
+   tried the live libssl bridge but hit dynlib segfaults), walk it
+   back to interface-only and move the implementation to its own
+   planned minor. Don't ship what you can't verify, don't over-
+   promise what you can't finish.
+4. Benchmark the claim, or don't make it. alpha7 of 4.8.4 and
+   alpha2 of 4.8.5 both ended with benchmarks that locked in the
+   "X× faster" shape. Without those, "register allocation" and
+   "mulmod fast-path" are marketing words.
+
+WHAT'S GENUINELY HARD ABOUT CYRIUS
+
+Not the language. The language is small (keywords countable on two
+hands, grammar recursive-descent from the first commit). The hard
+part is that the compiler compiles itself, which means every
+change has two correctness proofs:
+
+  1. Does the new code do what it should?
+  2. Does it produce a byte-identical second-stage build?
+
+(2) catches an enormous class of codegen drift you'd otherwise
+ship. It's also the reason feature decisions should be conservative
+— a neat-looking language extension that breaks self-hosting costs
+a lot more than the feature earns.
+
+The heap map (src/main.cyr header) is the other load-bearing
+discipline. Every byte of compiler state has a named offset. Every
+time a table needs to grow, the heap map commits to the new layout
+and the code follows. Skip that step, get subtle memory corruption.
+Every bug chased to a "misleading parser error" in the last two
+minors traced back to an off-heap-map state overlap.
+
+THINGS THAT LOOK TEMPTING AND SHOULDN'T LAND
+
+- Closures capturing variables. Demand-gated per roadmap; one vote
+  (kavach). Adding them requires a real lifetime-analysis pass,
+  and Cyrius's single-pass codegen would need to spill. Worth a
+  minor when the second consumer shows up.
+- Generics / traits. Same framing. The cost is not the syntax,
+  it's the name-mangling table (every generic fn becomes N fns at
+  instantiation time, blowing through the fn_table cap) and the
+  parser pass to resolve specialisations. Own its minor.
+- Pure-Cyrius TLS. lib/tls.cyr carried a sigil-based scaffold pre-
+  4.8.5 that always returned TLS_STATE_ERROR after ClientHello.
+  Getting real crypto right is not a stdlib pass — it's a multi-
+  minor effort plus a security audit. Shipping via lib/dynlib.cyr
+  → libssl is the pragmatic path.
+- IR-based codegen to eliminate the #regalloc NOP padding. The
+  peephole pads 7→3 byte rewrites with a 4-byte NOP so jump
+  offsets stay anchored. Removing the padding requires a real
+  layout pass (or deferred emission). 5.x-era, not a 4.8.x fix.
+
+THINGS THAT LOOK SMALL AND AREN'T
+
+- Anything that touches the preprocessor. bote's regression
+  through the 4.8.4 retag traced to a 4.8.3 "look safer" cap that
+  blinded the directive scanner on large compile units. Cyrius's
+  preprocessor runs in three passes over one shared buffer — any
+  cap raise or pointer redirect in one pass needs to match the
+  others. When adding a new directive, test a ≥ 500 KB expanded
+  unit deliberately.
+- Asm blocks that reference locals. [rbp-N] offsets depend on
+  param count AND local index AND (post-4.8.4) #regalloc state.
+  The rbx-save slot at [rbp-8] in #regalloc fns shifts every
+  user local by 8 bytes. Asm-block writers need to know which
+  ABI they're in.
+- Compound assignment operators (shipped v3.10.3 and look like
+  syntactic sugar). `a[i] += x` needs to evaluate `a[i]` once,
+  not twice. Cyrius's parser does the right thing for simple
+  locals but gets careful with array subscripts; look at existing
+  patterns before adding a new compound form.
+
+DOWNSTREAM PINS — THE SILENT RISK
+
+Ecosystem pins fragment fast. At 4.8.5 handoff they look like:
+ecosystem mostly on 4.5.0 / 4.0.0. bote on 4.8.1 → blocked by
+4.8.4 retag until re-pinned. abaco on 4.8.3 → wants 4.8.5 for
+mulmod. This fragmentation is only a problem if a security fix
+(like 4.8.5-alpha3 CRLF hardening) doesn't propagate. Keep the
+"recommended minimum" in CLAUDE.md current as the floor rises.
+
+WHAT THE NEXT AGENT SHOULD READ BEFORE TOUCHING ANYTHING
+
+1. CLAUDE.md — non-negotiables. Self-hosting gate, heap map
+   discipline, two-step bootstrap, test-after-every-change.
+2. docs/development/roadmap.md — what's shipped, what's next,
+   what's deferred to 4.9 / 5.0.
+3. docs/development/handoff-4.8.5.md — state at this handoff.
+4. docs/issues/stdlib-math-recommendations-from-abaco.md — the
+   triage template. Future consumer recommendation docs should
+   use the same shape (per-item accept / modify / decline with
+   reasoning + release assignment).
+5. CHANGELOG.md [4.8.5] GA entry — the canonical template for a
+   minor with motivation + track summary + validation.
+6. lib/u128.cyr asm block in u128_divmod + u64_mulmod — cleanest
+   current example of the Cyrius asm-block idiom.
+
+ON THE 5.0 FRAMING
+
+The existing roadmap commits 5.0 to multi-platform only (Mach-O,
+PE, RISC-V, bare-metal). Resist the urge to pile language
+refinements onto the 5.0 theme — they slide to 5.x minors after
+the platform cut. A narrow 5.0 keeps the auditable surface small
+and the cut clean. Cyrius has earned a pattern of hitting minors
+that ship exactly what they said they would; 5.0 should hold that
+line hardest.
+
+Refresh or delete this entry as the trajectory drifts — it's an
+opinion, not a permanent artifact.
+
+[[entries]]
+name = "state_of_the_compiler_4_8_5_1"
+description = "Snapshot at 4.8.5-1: the compiler by the numbers, what the 4.8.x arc actually delivered, and what the shape of the work looks like heading into 4.9/5.0"
+category = "cyrius"
+---
+Written at 4.8.5-1. Not a changelog — those exist and are thorough.
+This is the "step back and look at what's on the table" entry.
+
+=== THE NUMBERS ===
+
+  Compiler binary:    364 KB (x86_64), 268 KB (aarch64 cross)
+  Seed:               29 KB (committed, auditable, root of trust)
+  Stdlib modules:     56 (up from 41 at 4.0.0, 33 at 3.0.0)
+  Test suites:        51 .tcyr files, 396 assertions
+  Benchmarks:         14 .bcyr harnesses
+  Fuzz harnesses:     5 .fcyr files
+  Downstream:         10+ shipping projects, 1400+ combined assertions
+  Self-host:          byte-identical, verified every release
+  Bootstrap:          seed → cyrc → bridge → cc3 → cc3 (closure verified)
+
+  Capacity at self-compile:
+    fn=324/4096  ident=8146/131072  var=100/8192
+    fixup=1621/16384  string=5493/262144  code=345368/1048576
+
+Headroom is comfortable everywhere. The fn table at 324/4096 is the
+one to watch as downstream projects grow — but that's a 12× margin.
+
+=== WHAT 4.8.x ACTUALLY WAS ===
+
+The 4.0→4.8 arc looks sprawling from the outside (shared objects,
+u128, switch tuning, base64url, preprocessor fixes, math pack, CRLF
+hardening). From the inside it was one theme: CLOSE CONSUMER GAPS.
+
+Every 4.8.x minor traced to a specific downstream report:
+
+  4.8.0 — u128 stdlib (abaco needed modular arithmetic for ntheory)
+  4.8.1 — base64url (bote needed URL-safe encoding for JWTs)
+  4.8.2 — switch jump-table tuning (argonaut hit perf cliff on
+           large dispatch tables)
+  4.8.3 — preprocessor cap fix (bote hit scan-blindness at 512KB)
+  4.8.4 — PP_IFDEF_PASS 256KB fix (retag: the 4.8.3 fix was
+           incomplete, consumers past 512KB transitive includes
+           still failed with misleading parse errors)
+  4.8.5 — math stdlib pack (abaco triage: 8 items accepted) +
+           CRLF hardening (bote reported CVE-2019-9741 pattern in
+           http.cyr) + TLS interface scaffold (fail-clean stubs)
+
+Zero speculative features. Zero "nice to have" language extensions.
+Every minor answered a question that started with "I tried to build
+X and hit Y."
+
+The 4.8.5 math pack is the clearest example of the triage-driven
+model working well. abaco filed a recommendation doc. Each item got
+accept/modify/decline with reasoning. Accepted items mapped 1:1 to
+alphas. The result: u128_divmod hardware fast-path (12× on Miller-
+Rabin), u64_mulmod/powmod asm-direct, f64 constants, inverse trig
+with quadrant-correct atan2, inverse hyperbolic, ASCII case helpers.
+All benchmarked. All tested. All shipped in scope.
+
+=== THE TWO BUGS THAT MATTER ===
+
+Two active bugs have survived the entire 4.x arc:
+
+1. LAYOUT-DEPENDENT MEMORY CORRUPTION (filed 4.3.1). libro's
+   PatraStore tests crash in memeq with a NUL data pointer from
+   str_eq. Each println shifts the crash site — textbook memory
+   corruption signature. Localized with CYRIUS_SYMS but root cause
+   (likely a stale heap pointer surviving across a brk expansion)
+   needs byte-walking CFG to find. Workaround: isolated test binary.
+
+2. && / || DO NOT SHORT-CIRCUIT (confirmed 4.4.0). The language
+   guide documents them as short-circuit. The codegen evaluates both
+   sides unconditionally. Any guarded null check like
+   `if (p != 0 && vec_len(p) > 0)` crashes. Workaround: nested if
+   blocks. Fix: emit je/jne to skip the right operand evaluation.
+   Straightforward codegen change but touches every conditional path
+   in the compiler — needs a dedicated minor with heavy testing.
+
+Both are real bugs, both have workarounds that every downstream
+project already uses, and both are waiting for the right minor to
+land properly. Neither is a "quick fix" despite looking like one.
+
+=== WHAT THE COMPILER FEELS LIKE TO WORK ON ===
+
+The self-hosting invariant is both the greatest strength and the
+heaviest constraint. It catches codegen drift that would otherwise
+ship silently — any change that produces different output on the
+second stage is immediately visible. But it also means every change
+has to pass through a narrow gate: compile cc3 with cc3, compare
+bytes, if they differ, you broke something. Features that would be
+a quick patch in a non-self-hosting compiler become multi-step
+dances where you verify at each stage.
+
+The heap map discipline (every byte of compiler state has a named
+offset in src/main.cyr) has paid for itself many times over. Every
+"misleading parser error" bug in 4.8.x traced back to an off-heap-
+map overlap. The map is the source of truth; the code follows.
+
+The alpha-per-feature rhythm (one alpha, one feature, self-host
+gate, merge) keeps scope honest. When 4.8.5-alpha3 tried to land
+the live libssl bridge alongside the TLS interface scaffold, it hit
+dynlib segfaults and got walked back to interface-only within the
+same alpha. That discipline — ship what you can verify, defer what
+you can't — is what makes the release cadence sustainable.
+
+=== HEADING INTO 4.9 / 5.0 ===
+
+The roadmap commits:
+  4.9.x — compiler optimizations (dead fn warnings, rep movsb/stosb,
+           optimized strlen, bump allocator soft reset), then basic-
+           block analysis and register allocation
+  5.0   — multi-platform (Mach-O, PE, RISC-V, bare-metal)
+
+The 4.8.5 handoff note's advice holds: resist piling language
+features onto the 5.0 theme. The 4.x→5.0 boundary should be narrow
+and auditable. Cyrius earned its credibility by shipping minors that
+do exactly what they said — 5.0 should hold that line hardest.
+
+Deferred items waiting for their minor:
+  - Live libssl TLS bridge (lib/dynlib.cyr hardening first)
+  - parse_f64(cstr) (4.8.6 per abaco triage)
+  - Short-circuit && / || (needs its own minor)
+  - Layout-dependent memory corruption fix (needs CFG)
+  - Closures (one consumer vote, demand-gated)
+
+The compiler is 364KB from a 29KB seed. 56 stdlib modules. 51 test
+suites. 10+ downstream projects. No Rust. No LLVM. No libc.
+
+The cornerstone is still assembly. The sovereignty is still real.
+

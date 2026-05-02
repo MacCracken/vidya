@@ -1,0 +1,216 @@
+# Cyrius Field Notes — Language Gotchas (parser & syntax)
+# Operator precedence, var/scope/bracket parser rules, and shift semantics that
+# bite at parse time or at the lexer.
+# 5 entries.
+
+[[entries]]
+name = "the_logical_shift_trap"
+description = "Cyrius >> is LOGICAL not arithmetic — the bug that made every wall invisible"
+category = "cyrius"
+---
+THE BUG THAT BLOCKED RENDERING FOR HOURS:
+
+After building the entire DOOM engine — WAD parser, BSP traversal, column
+renderer, 320x200 framebuffer — the output was a black screen. 0 pixels
+drawn. 0 columns clipped. The renderer was running but producing nothing.
+
+THE ROOT CAUSE: Cyrius >> is a LOGICAL right shift (zero-fills upper bits).
+Not ARITHMETIC (sign-extends). This is different from C's >> on signed types.
+
+Every fixed-point operation that produced a negative intermediate was broken:
+
+  fixed_mul(a, b) = (a * b) >> 16
+
+  If a=100 and b=-50 (both in 16.16): a*b = negative.
+  Logical >> 16 zero-fills the top, producing a HUGE POSITIVE number.
+  The projection math then puts every wall at screen Y = +billions.
+
+This affected:
+  - fixed_mul: every negative product
+  - fixed_to_int: every negative coordinate
+  - fixed_round: every negative value
+  - point_on_side: every point with negative dx or dy
+  - Every projection calculation involving negative coordinates
+
+DOOM E1M1 player start is at (1056, -3616). The negative Y meant that
+EVERY calculation involving the player position was garbage.
+
+THE FIX: An arithmetic-shift-right helper:
+
+  fn asr(val, bits) {
+      if (val >= 0) { return val >> bits; }
+      var pos = 0 - val;
+      return 0 - (pos >> bits);
+  }
+
+Replace every >> with asr() for signed values:
+  fn fixed_mul(a, b) { return asr(a * b, 16); }
+  fn fixed_to_int(f) { return asr(f, 16); }
+
+RESULT: 46,110 pixels drawn. 320/320 columns clipped. Walls visible.
+The screenshot shows E1M1 from the player start position with correct
+BSP-ordered walls, floor, and ceiling.
+
+LESSON: In any language, check whether >> is arithmetic or logical
+BEFORE writing fixed-point math. In C, >> on signed types is
+implementation-defined (but usually arithmetic on x86). In Cyrius,
+it is definitively logical. In Java, >>> is logical and >> is
+arithmetic. In Rust, >> is arithmetic for signed types.
+
+This one operator difference was the difference between a working
+DOOM renderer and a black screen.
+
+DETECTION: The fuzz harness did NOT catch this because it only checked
+for crashes (SIGFPE, segfault), not for incorrect values. A property-
+based test like "fixed_to_int(fixed_from_int(n)) == n for negative n"
+would have caught it instantly. Add algebraic property tests to your
+fuzz harnesses, not just crash tests.
+
+[[entries]]
+name = "no_var_redecl_same_scope"
+description = "Cyrius rejects `var x` re-declaration in the same scope, even across if/elif/else branches"
+category = "cyrius"
+---
+Cyrius treats all branches of an if / elif / else chain as ONE
+scope for `var` purposes. Declaring the same name in two branches
+is a compile error ("duplicate variable"), even though the two
+bodies never execute together.
+
+    if (x) {
+        var buf[8];
+        # ...
+    } elif (y) {
+        var buf[16];    # ERROR: duplicate variable 'buf'
+        # ...
+    }
+
+Same rule applies to do-something-then-do-something-similar idioms
+where both arms declare a local named the same thing.
+
+WORKAROUNDS:
+1. Rename one: `buf_a` + `buf_b`.
+2. Hoist the declaration above the if:
+       var buf[16];
+       if (x) { # use first 8 bytes }
+       elif (y) { # use all 16 bytes }
+3. Wrap each body in a bare `{ }` scope:
+       if (x) { { var buf[8]; ... } }
+       elif (y) { { var buf[16]; ... } }
+   Bare braces open a fresh scope that the branch's `var` lives
+   in, separate from the sibling branch.
+
+WHY IT HAPPENS: cyrius's local-variable table is flat per
+function, keyed by name. The scope-depth counter tracks lexical
+depth for `#ifdef`-style gating but doesn't reset across sibling
+branches. `var x` appends a new entry + asserts name uniqueness
+over the whole function frame.
+
+Surfaced v5.4.17 writing `lib/toml.cyr`'s multi-line array fix —
+the array-scan branch and the unquoted-value fallback both
+wanted a `var vstart`. Fixed by renaming the new branch's
+local to `astart`.
+
+[[entries]]
+name = "no_comparisons_in_fn_args"
+description = "Parser rejects == != < > <= >= inside function call arguments"
+category = "cyrius"
+---
+Comparison operators return 0/1 and can live anywhere an integer
+expression does — EXCEPT inside a function call's argument list.
+The parser rejects them there because of an ambiguity with the
+generic-bracket syntax reserved for future use.
+
+    # REJECTED:
+    foo(x == y, z);
+    assert_eq(n > 0, 1, "non-negative");
+
+    # OK — assign to a temp first:
+    var eq = (x == y);
+    foo(eq, z);
+    var nn = (n > 0);
+    assert_eq(nn, 1, "non-negative");
+
+Applies to all six comparison forms (`==`, `!=`, `<`, `>`, `<=`,
+`>=`). Short-circuit `&&` / `||` and arithmetic operators are
+fine in call args; just the pure comparisons get rejected.
+
+Error message today: the parser's generic hard-error for
+unexpected-token-in-arg-list. No special diagnostic. Future
+work: emit a specific "comparisons in fn call args — assign to
+a temp" hint.
+
+[[entries]]
+name = "caret_binds_tighter_than_binary_minus"
+description = "Cyrius's `^` (XOR) binds tighter than binary `-`, so `a ^ 0 - 1` is `(a ^ 0) - 1`, NOT `a ^ -1`"
+category = "cyrius"
+---
+Cyrius's operator precedence puts bitwise `^` (XOR) tighter than
+binary `-` (subtraction). This bites when writing the bitwise-NOT
+idiom as `value ^ 0 - 1` hoping to get `value ^ -1`:
+
+    var not_x = x ^ 0 - 1;       # parses as (x ^ 0) - 1 = x - 1  ← WRONG
+    var not_x = x ^ (0 - 1);     # OK via parens
+    var not_x = x ^ -1;          # OK — cyrius supports negative literals
+
+Cyrius has no unary `~` operator. The canonical way to express
+bitwise NOT is `value ^ -1` (use the negative literal directly).
+
+Surfaced v5.4.15 writing `lib/keccak.cyr`'s chi step. First
+impl had `T1 ^ 0 - 1` and produced `2be83b...` for SHAKE128('')
+instead of the NIST-canonical `7f9c2b...`. Changed to `T1 ^ -1`
+and bytes matched FIPS 202 immediately.
+
+GENERAL RULE when porting bitwise algorithms from C to cyrius:
+- No `~x` → use `x ^ -1`.
+- `>>` on 64-bit ints is LOGICAL (verified via probe:
+  `0x8000000000000001 >> 63 == 1`, not `-1`), so the naive
+  left-rotate `(x << n) | (x >> (64 - n))` works without an
+  explicit mask — as long as `n` is in `(0, 64)`.
+
+[[entries]]
+name = "var_bracket_size_must_be_literal"
+description = "`var name[N]` requires N to be an integer literal; `var name[CONST_IDENT]` is rejected at parse"
+category = "cyrius"
+---
+The `var name[N]` stack-local syntax requires N to be an integer
+literal at parse time. Even if `CONST_IDENT` is a `var` initialized
+to a constant integer expression, the parser rejects it.
+
+    var TEX_STRUCT_SIZE = 32;
+
+    fn build_texture() {
+        var tex[TEX_STRUCT_SIZE];  # REJECTED at parse
+        var tex[32];               # OK — literal
+    }
+
+This is consistent with the existing rule that `var name[N]` is
+"N bytes of frame storage" (see `var_name_bracket_is_bytes_not_elements`).
+The bytes are computed at parse, not at runtime, so the parser
+needs the value before any name resolution runs.
+
+WORKAROUNDS:
+
+  1. Use a literal directly. If the value is shared between several
+     declarations, write the literal in each spot and add a comment
+     pointing to the documented size.
+  2. Heap-allocate instead. `alloc(TEX_STRUCT_SIZE)` works fine —
+     `alloc` takes a runtime expression, no parser constraint.
+  3. Use an enum constant. Enums are compile-time-resolved before
+     `var` declarations parse, but in practice the compiler still
+     wants a literal here, so test before you bet on it.
+
+WHERE THIS BIT US:
+
+mabda v3 Step 5.6 (native texture slot wrappers). Wanted
+
+    var tex[NATIVE_TEX_STRUCT_SIZE];
+
+with `NATIVE_TEX_STRUCT_SIZE = 32` defined elsewhere. Parser rejected
+it. Used `var tex[32]` with a `# 32 = NATIVE_TEX_STRUCT_SIZE` comment.
+
+The class of programs this affects: any helper that declares a
+fixed-size frame buffer based on a structurally-meaningful constant
+(struct size, packed-descriptor size, fixed-array stride). Until the
+parser supports identifier-as-array-size, the constant has to be
+duplicated as a literal at the call site.
+

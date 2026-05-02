@@ -1,0 +1,160 @@
+# Cyrius Field Notes — Language Gotchas (platform & ABI)
+# Per-OS preprocessor target flags, struct return by value, variadic fns,
+# and the fncall6-into-extern-C arg-count ceiling.
+# 4 entries.
+
+[[entries]]
+name = "per_os_target_flags_win_vs_linux"
+description = "v5.5.0 introduced CYRIUS_TARGET_WIN vs CYRIUS_TARGET_LINUX preprocessor flags for per-OS stdlib selection"
+category = "cyrius"
+---
+v5.5.0 ships `cc5_win` (the Windows cross-compiler) alongside
+`cc5` and `cc5_aarch64`. The three cross-entries now predefine
+a target-OS flag so stdlib selectors can include the right peer:
+
+    cc5            predefines  CYRIUS_ARCH_X86     + CYRIUS_TARGET_LINUX
+    cc5_aarch64    predefines  CYRIUS_ARCH_AARCH64 + CYRIUS_TARGET_LINUX
+    cc5_win        predefines  CYRIUS_ARCH_X86     + CYRIUS_TARGET_WIN
+
+The two target-OS flags are mutually exclusive. Selectors use
+paired `#ifdef` guards rather than `#ifdef` + `#else` (cyrius's
+preprocessor has no `#else` / `#ifndef` yet):
+
+    #ifdef CYRIUS_TARGET_WIN
+    include "lib/syscalls_windows.cyr"
+    #endif
+    #ifdef CYRIUS_TARGET_LINUX
+    #ifdef CYRIUS_ARCH_X86
+    include "lib/syscalls_x86_64_linux.cyr"
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    include "lib/syscalls_aarch64_linux.cyr"
+    #endif
+    #endif
+
+Only one of the three inner blocks runs per compile. Adding a
+new target OS (e.g. BSD) is another predefined flag + another
+top-level block in the selector.
+
+When writing stdlib modules that have OS-specific behaviour, use
+the same pattern:
+    lib/foo.cyr          public dispatch (selector)
+    lib/foo_linux.cyr    Linux peer
+    lib/foo_windows.cyr  Windows peer
+
+[[entries]]
+name = "struct_return_by_value_5_5_36"
+description = "`fn make(): Point { ... return p; }` compiles — struct return is native on both SysV and Win64"
+category = "cyrius"
+---
+Pre-v5.5.36 callers had to pass `&Point` out-params; the
+compiler didn't wire struct-by-value return for >8B types.
+v5.5.36 closed it:
+
+    fn make_point(x: int, y: int): Point {
+        stack var p: Point;
+        p.x = x;
+        p.y = y;
+        return p;
+    }
+
+    fn caller() {
+        var got: Point = make_point(3, 4);  // deep copy
+    }
+
+ABI plumbing (automatic):
+ - SysV: hidden retptr in RDI (first arg).
+ - Win64: hidden retptr in RCX (first arg).
+ - Callee memcpys the local into *retptr before RET.
+
+The `var got: Point = make_point(...)` form on the LHS is also
+new in v5.5.36 — parser recognises struct-returning call on the
+RHS and emits the retptr setup.
+
+Use return-by-value for small packed values (Point, Range,
+Result). Long-lived structs should still live on the heap.
+
+[[entries]]
+name = "variadic_fn_5_5_36"
+description = "`fn printf(fmt: str, ...)` syntax lands in v5.5.36 (Phase 3-min); use lib/varargs.cyr inside the body"
+category = "cyrius"
+---
+v5.5.36 added `...` as the variadic-parameter token:
+
+    fn printf(fmt: str, ...) {
+        // use lib/varargs.cyr va_start / va_arg / va_end
+    }
+
+`...` is TOK=112, only valid as the last parameter. The compiler
+sets a GFVA flag on the callee so call sites know to handle
+variadic ABI quirks:
+ - Win64 MSDN rule: float args to a variadic callee go into
+   BOTH the XMM register file AND the RCX/RDX/R8/R9 GPR slots.
+   The compiler emits the duplication at the call site; you
+   don't write it.
+ - SysV passes float args in XMM0-7 as usual; RAX on the call
+   holds the number of XMM regs used, per SysV §3.5.7.
+
+Phase 3-min (shipped v5.5.36) covers primitives-through-varargs.
+Phase 3-full (future) expands va_arg to structs-by-value and
+nested varargs — for now, if you need those shapes, pass a
+pointer or a single `u64` and unpack.
+
+[[entries]]
+name = "fncall6_ceiling_into_extern_c"
+description = "Cyrius fns that internally fncall* into wgpu-native (or any extern-C) segfault at 7+ params; pure Cyrius is fine to 12+"
+category = "cyrius"
+---
+A Cyrius fn signature CAN take 7+ args without issue when the
+body is pure Cyrius. The moment the body contains a `fncall*`
+into wgpu-native (or any extern-C function table), the whole
+signature must stay at ≤ 6 args or the call segfaults at
+runtime.
+
+Example shape that crashes:
+
+```cyrius
+fn _backend_wgpu_some_op(ctx, a, b, c, d, e, f) {  # 7 args
+    fncall6(slot, a, b, c, d, e, f);                # crash
+}
+```
+
+Same fn at 6 args works. Same fn at 7 args without the inner
+fncall* works (pure Cyrius all the way down).
+
+**Why.** The Cyrius calling convention for fns that internally
+make C-ABI calls passes args through registers in a way that
+doesn't fully line up with the System V x86_64 ABI when the
+caller has 7+ args of its own. The first 6 params land in
+rdi/rsi/rdx/rcx/r8/r9 cleanly; the 7th would go on the stack,
+and the stack alignment / spill protocol differs from how
+wgpu-native expects to be called. Result: register clobber that
+manifests as a segfault inside the wgpu fn, not at the call
+site.
+
+**The fix.** Pack 7+ args into a struct pointer:
+
+```cyrius
+fn _backend_wgpu_some_op(ctx, args_ptr) {
+    var a = load64(args_ptr + 0);
+    var b = load64(args_ptr + 8);
+    # ... unpack rest ...
+    fncall6(slot, a, b, c, d, e, f);
+}
+```
+
+Caller side allocates a struct, fills the fields, passes the
+ptr. This is the pattern mabda uses for `wgpu_*` ops with 7+
+inputs (e.g., `wgpu_command_encoder_copy_buffer_to_buffer`).
+
+**When it doesn't apply.** Pure Cyrius fns with no inner
+fncall* into extern-C — those take 12+ args fine. mabda's
+internal helpers like `native_pm4_build_render_clear_triangle`
+take 6 args and would work at 12 if needed.
+
+**Cross-pollination.** Same constraint will apply to any
+Cyrius project that builds a function-table-of-extern-C-fns
+abstraction: `samvada` (sd_bus C shim), future
+`vidya_logind`-style packages, anything wrapping libc beyond
+the stdlib. Document at the boundary; don't trial-and-error.
+

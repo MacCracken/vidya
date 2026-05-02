@@ -1,0 +1,132 @@
+# Cyrius Field Notes — Mabda v3 Native GPU Backend (research-pending)
+# Open-research framings — entries kept here until they're resolved and migrated into a phase file.
+# 2 entries.
+
+[[entries]]
+name = "gfx9_graphics_shader_abi_research"
+description = "Research-pending — what a minimal vertex + fragment shader looks like in raw GFX9 bytes for the native render path"
+category = "cyrius"
+---
+RESEARCH-PENDING (planned Phase C, Step 6.2). Captured here so a
+future agent can pick this up without re-deriving the framing.
+
+Goal: produce raw GFX9 (gfx90c) ISA bytes for the simplest possible
+vertex + fragment shader pair that can render a single full-screen
+triangle into a native RT, callable from the PM4 packet sequence
+defined in Step 6.4 (`docs/proposals/v3-native-render-design.md`).
+
+What we know:
+  - The compute shader bytes for `out[0] = 0xDEADBEEF` were derived
+    from radv's output and verified byte-exact (Phase B.4 close).
+    Same methodology applies here: AMD_DEBUG=ib dump radv rendering
+    a single colored triangle, extract the VS+FS binaries from the
+    dump, port to our PM4 + USER_DATA conventions.
+  - SH_REG block layout for gfx90c VS/FS: PGM_LO/HI (canonical-high
+    VA, two registers), PGM_RSRC1/2 (control fields — float mode,
+    SGPR/VGPR counts, USER_SGPR count, etc.), and a USER_DATA[0..15]
+    window for shader-visible immediates.
+  - Vertex pulling for a "no input buffer, vertex-id-driven" triangle
+    works without binding any vertex buffer — the VS uses
+    `v0 = vertex_id` and computes positions from it. radv does this
+    for clear-shader fast paths.
+
+What's unknown / open research:
+  - Exact USER_DATA layout for our path. radv's USER_DATA[0..3]
+    typically holds the descriptor-set base; we don't need that, so
+    bytes 0..15 are free for whatever immediates we want (e.g. a
+    color constant).
+  - PS_INPUT_CNTL block layout — how many input components come from
+    VS, what interpolation mode, what swizzle.
+  - The exact set of CONTEXT_REG values needed BEFORE the PM4 stream
+    works. Step 6.1 enumerated the set; 6.2 will need to assign
+    actual values for "minimal triangle to a single RGBA8 RT."
+
+Suggested research-agent prompt (reuses the B.3 pattern):
+  - Frame: "I have working compute dispatch. I have the SH_REG and
+    CONTEXT_REG slots populated for compute. I need a graphics
+    pipeline that draws one triangle into a single RGBA8 RT on
+    gfx90c, no vertex buffer, no descriptor sets."
+  - Ask for: exact ISA bytes, exact CONTEXT_REG values, exact PM4
+    packet ordering.
+  - Ground-truth source: radv `si_emit_graphics`, `radv_meta_clear`'s
+    fast-clear path, and an `AMD_DEBUG=ib` dump of `vkCmdClearColorImage`
+    on a render-target image (NOT a transfer image).
+
+Acceptance: the IB sequence renders a known color into a 4×4 RGBA8
+RT, the RT reads back byte-exact (CPU-mappable RT VA), no GPU reset.
+
+Once this lands, Phase 8 (WGSL → GFX9 lowering) becomes the open
+problem; before this lands, Phase 8 has no codegen target.
+
+[[entries]]
+name = "wgsl_to_gfx9_lowering_research"
+description = "Research-pending — the 10-step WGSL→GFX9 lowering pipeline that lets consumer shaders run on the native backend"
+category = "cyrius"
+---
+RESEARCH-PENDING (planned Phase 8). The big multi-session bite.
+Captured here so the framing survives between sessions.
+
+Today: consumer shaders are WGSL strings. The wgpu backend hands
+them to wgpu-native, which hands them to naga, which hands them to
+the platform driver. The native backend has nothing to translate
+WGSL with — every dispatch in `programs/native_compute_store.cyr`
+uses a hand-encoded, byte-exact ISA blob.
+
+Phase 8 closes this gap: a Cyrius-native WGSL → GFX9 ISA compiler
+that lives inside mabda. Without it, the native backend is a
+demo that only runs the shaders we hard-code; with it, every
+existing wgpu consumer's WGSL runs on either backend.
+
+Sub-steps from the punch list (each a session-sized chunk):
+
+  8.1  WGSL lexer + parser → AST. Tokens, expression grammar, struct
+       and entrypoint declarations. Validate against the WGSL spec's
+       reference grammar.
+  8.2  AST → typed IR (SSA-form, type-checked). Resolve names, infer
+       types, lower implicit conversions.
+  8.3  IR → naga-shaped intermediate. Match the shape of naga's IR
+       module so tools that target naga can also target ours.
+  8.4  IR → GFX9 LLIR. Strip down LLVM-IR-shaped passes; keep only
+       what GFX9 needs.
+  8.5  Register allocation. Greedy linear-scan over SGPR + VGPR
+       pools; spills go to scratch (need a scratch BO in the
+       Backend interface).
+  8.6  Instruction selection. WGSL ops → GFX9 ISA. Handle vector
+       ops, texture sampling intrinsics, atomic ops.
+  8.7  Encoding. IR → raw GFX9 bytes. The encode tables are large
+       (~1500 instructions) but mechanical.
+  8.8  Validation harness. Compile the same WGSL through ours and
+       through naga; diff the resulting ISA after a normalization
+       pass. Where diffs are legitimate (different reg-alloc,
+       different scheduling), record them; where they aren't, fix.
+  8.9  Wire into Backend interface. `_SHADER_MODULE_CREATE` for the
+       native backend now compiles WGSL → ISA → BO instead of
+       error-out.
+  8.10 Performance pass. Run mabda's existing GPU benches on both
+       backends; iterate codegen until the gap closes.
+
+Why this is "research-budget" not "chugging-cadence": the WGSL
+spec is ~200 pages; the GFX9 ISA reference is ~700 pages; naga's
+codegen is ~30K lines of Rust. Even with research-agent help,
+8.1-8.4 are each multi-session, and 8.5-8.7 are each multi-week.
+
+Pragmatic milestone targets:
+  - 8.1-8.3 sufficient: parse WGSL, type-check, produce a typed
+    IR. Compute-only path. Validates against naga's IR for the
+    benchmark shaders mabda already has.
+  - 8.4-8.7 sufficient: emit ISA byte-exact against radv for a
+    handful of canonical kernels (saxpy, reduction, prefix-sum,
+    convolution).
+  - 8.8-8.10 sufficient: every existing mabda GPU bench runs on
+    the native backend with measurable performance.
+
+Don't start 8.x until 6.2 + 6.3 + 6.4 + 6.5 + 6.6 (the graphics
+pipeline) lands — Phase 8 needs both compute and graphics codegen
+targets in place.
+
+Reference points:
+  - naga's IR shape (Rust): match this for tooling compatibility.
+  - radv's ACO compiler (the "new" radv codegen): the closest
+    open-source point of comparison for what we'd be writing.
+  - Mesa's GFX9 ISA tables: ground-truth encoding tables.
+

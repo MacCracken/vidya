@@ -1,0 +1,102 @@
+# Cyrius Field Notes — Mabda v3 Native GPU Backend (overview)
+# What v3 is, the design principles that bind it, and the research-agent loop
+# that unblocked Phase B.3.
+# 3 entries.
+
+[[entries]]
+name = "mabda_v3_overview"
+description = "What v3 is and why direct-ioctl AMDGPU matters for AGNOS sovereignty"
+category = "cyrius"
+---
+Mabda is AGNOS's GPU foundation library, written in Cyrius. Today (v2.x)
+it ships over wgpu-native through a C launcher — transitional
+scaffolding that gets consumers onto a stable GPU surface while the
+sovereign path is built.
+
+v3's goal: pure-Cyrius GPU backend via direct DRM/KMS ioctls.
+No libdrm, no libvulkan, no Mesa, no C launcher. `open("/dev/dri/renderD128")`,
+then `syscall(SYS_IOCTL, fd, ...)` against the AMDGPU kernel UAPI.
+
+Why this matters: AGNOS treats 2026 as a clean slate. 20+ years of
+GPU API baggage (OpenGL extension churn, Vulkan's verbosity, wgpu's
+web-safety compromises) exists because each era was constrained by
+what came before. AGNOS isn't. The native backend should extract the
+LESSONS from that history (render-graph-first, bindless-only,
+graph-derived sync, pooled memory) without inheriting the ceremony.
+
+v3 ships as a dual backend: the wgpu+C path stays (measurement baseline,
+migration runway), and a native Cyrius backend is added alongside.
+Retirement of the C path is v4.0, consumer-driven.
+
+[[entries]]
+name = "research_pattern_that_worked"
+description = "The specific research loop that unblocked Phase B.3"
+category = "cyrius"
+---
+The mabda v3 GPU work has been almost-entirely research-driven. Every
+major unblock came from a focused research agent, not from local
+debugging. Pattern that worked:
+
+1. Ship broken code that produces a SPECIFIC error message (not just
+   "doesn't work" — a kernel error code or dmesg line).
+
+2. Dispatch a research agent with the exact symptom. Frame the prompt:
+   - What has been tried and ruled out
+   - The specific error message / errno
+   - The candidate hypotheses to investigate
+   - Ask for Mesa radv / kernel source line-level citations
+   - "What 1-3 line diff fixes this?"
+
+3. When the agent comes back with a concrete "program register X to
+   value Y", apply it and rerun.
+
+4. Capture the finding in vidya as a gotcha with bad/good examples.
+   This is what makes the research compound — every solved issue is
+   searchable for the next AGNOS project doing similar work.
+
+The direct-ioctl AMDGPU path is essentially undocumented outside
+Mesa radv source and ROCT-Thunk kfdtest. No "tutorial" exists.
+The only path is: read radv, try, fail, read more radv, try, fail,
+eventually read the right radv function. Research agents accelerate
+this 10-20x by reading radv on your behalf with a targeted question.
+
+Also worth noting — agents are fallible. The second research agent
+claimed moving the output VA above the 32-bit aperture would fix
+the store issue. Empirical test: didn't. The aperture theory was
+plausible but wasn't the bug. Agents should be trusted for line-level
+source citations, not necessarily for causal theories.
+
+[[entries]]
+name = "mabda_v3_design_principles_recap"
+description = "What mabda v3's native API commits to"
+category = "cyrius"
+---
+From docs/proposals/v3-native-api-principles.md, three non-negotiables
+determine the API shape. Everything else flexes around them.
+
+1. Graph-first submission. render_graph_run(g) is the canonical entry
+   point. Leaf ops (gpu_dispatch, gpu_draw, gpu_copy) exist as
+   convenience but internally build a one-node graph. No raw command
+   buffers in the @public API. The backend optimizes aggressively
+   against graph structure — barriers derived from declared reads
+   and writes, transient memory aliased across disjoint lifetimes.
+
+2. Bindless-only. One typed u32 handle per resource. Shaders index
+   into per-frame resources[] and samplers[] tables. No bind groups,
+   no descriptor sets, no layouts, no update templates. The
+   pool/set/layout trinity exists entirely for backwards compatibility
+   with pre-bindless hardware; AGNOS picks a modern floor.
+
+3. Graph-derived sync. No hand-placed barriers in @public. For the
+   ~5% the graph can't cover, exactly one escape hatch: a timeline
+   primitive (monotonic frame counter for single-queue; timeline
+   semaphores when multi-queue enters).
+
+The native backend's @public surface target: ≤35 functions (vs ~100
+on the wgpu path). Dist size target: ≤6000 lines for
+dist/mabda_native.cyr (vs VMA alone at 20K lines).
+
+The v3.x era keeps both backends. v4.0 retires the wgpu path
+consumer-driven — once every consumer has been running native in
+production across a full release cycle.
+

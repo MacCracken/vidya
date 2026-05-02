@@ -1,0 +1,222 @@
+# Cyrius Field Notes — Mabda v3 Native GPU Backend (Phase B — compute dispatch)
+# First pure-Cyrius AMDGPU compute dispatch (B.3), B.4 store-blocker resolution,
+# B.5 fnptr-table backend abstraction, and per-context cached IB+fence BO caching.
+# 4 entries.
+
+[[entries]]
+name = "phase_b3_first_dispatch"
+description = "Phase B.3 — first live pure-Cyrius compute dispatch"
+category = "cyrius"
+---
+The milestone: `make test-native-compute-spike` outputs
+"dispatch completed (sync-obj signaled)" on real AMD hardware.
+Pure Cyrius → Linux kernel → AMDGPU driver → hardware → back.
+
+Full link-time dependency graph of the binary:
+  programs/native_compute_spike.cyr
+  → src/lib.cyr (stdlib + mabda modules)
+  → syscall() (direct Linux SYS_IOCTL/SYS_OPEN/etc)
+  → Linux kernel AMDGPU driver
+
+No wgpu-native. No libdrm. No libvulkan. No C launcher. Not even gcc
+in the toolchain for this binary — Cyrius emits the ELF directly.
+
+Subdivision of Phase B.3:
+  B.3.a — ctx + BO list + VA map. Setup ioctls all green.
+  B.3.b — PM4 packet builder (PKT3 header, SET_SH_REG,
+          DISPATCH_DIRECT, IT_NOP, IT_ACQUIRE_MEM). Pure math,
+          fuzzed with 4 seeds × 500 samples.
+  B.3.c — hand-encoded s_endpgm shader (single 4-byte instruction).
+  B.3.d — CS ioctl + sync-obj wait. Full dispatch.
+
+Three non-obvious gotchas that ate the most time:
+
+1. SYNCOBJ_OUT chunk uses `drm_amdgpu_cs_chunk_sem` (4 bytes, handle
+   only), NOT the 16-byte `drm_amdgpu_cs_chunk_syncobj`. The latter
+   is timeline-chunk-only. Wrong layout → -EINVAL from the kernel.
+
+2. COMPUTE_STATIC_THREAD_MGMT_SE0/SE1 default to zero. Zero means
+   "no CUs enabled for this context" — dispatch queues forever,
+   syncobj never signals, dmesg silent. Set to 0xFFFFFFFF.
+
+3. COMPUTE_PGM_RSRC1 with FLOAT_MODE=0 may be rejected by firmware.
+   Minimum safe value: 0x00AC0000 (FLOAT_MODE=0xC0 | DX10_CLAMP | IEEE_MODE).
+
+All three live as gotchas in vidya/content/direct_drm_gpu_compute.
+
+[[entries]]
+name = "phase_b4_store_blocker_resolved"
+description = "Phase B.4 — RESOLVED 2026-04-27: native compute store landed 0xDEADBEEF on Cezanne"
+category = "cyrius"
+---
+RESOLVED 2026-04-27. Pure-Cyrius compute dispatch writes a
+deterministic value (`out[0] = 0xDEADBEEF`) to a host-visible BO,
+fence signals in 0 ms, output reads back byte-exact. First end-to-end
+Cyrius → AMDGPU → memory round-trip on Cezanne (gfx90c).
+
+The 12-session block was three independent bugs stacking, none of
+which were the queue-preamble theory the prior entry was chasing:
+
+1. Mesa-VAs in `AMD_DEBUG=ib` are pointers into Mesa's address
+   space. When you copy packets out of a working IB dump, every VA
+   in there belongs to a Mesa BO that does not exist in your
+   process. Three of our IB BOs were unmapped Mesa-VAs (shader,
+   USER_DATA pointer target, and a CP-internal fence pad). The CP
+   walked into unmapped pages mid-dispatch. Fix: allocate our own
+   BOs at HIGH VAs and substitute every VA ourselves; never let a
+   Mesa VA leak into a packet we submit.
+   See: feedback_mesa_va_not_magic.md.
+
+2. Cyrius signed division on canonical-high VAs is off by 1.
+   `va / (1 << 32)` rounds toward zero, which bites on any high-half
+   address. Replaced every `va / 2^N` extraction with `>> N` shifts.
+   See: feedback_cyrius_signed_div_high_va.md.
+
+3. The shader binary we were submitting was the wrong ABI.
+   AMDPAL clang emits PAL-shaped prologues that expect different
+   USER_DATA register conventions than what our PM4 set up. Built a
+   minimal s_mov_b32 + global_store_dword + s_endpgm shader from
+   scratch, byte-exact against radv's output for the same operation,
+   and the dispatch immediately worked.
+
+What was NOT the bug (despite each being plausible):
+  - CPC pre-dispatch state — irrelevant on Cezanne
+  - MEC scheduler initialization — kernel handles it
+  - SH_MEM_CONFIG / RLC-gated registers — context init was fine
+  - Queue preamble missing — our IB on its own works
+  - VA aperture (32-bit vs 64-bit) — the issue was unmapped VAs,
+    not high VAs; HIGH VAs work great once your BOs actually exist
+    at them
+  - WRITE_DATA-only IBs as a diagnostic — these wedge Cezanne so
+    badly only MODE2 reset recovers; never use NOP-only or
+    WRITE_DATA-only IBs for triage. See:
+    feedback_write_data_on_cezanne.md.
+
+Phase B.4 protocol that actually unblocked it:
+
+  a) AMD_DEBUG=ib dump radv's working compute (the simplest possible
+     "store one dword" workload).
+  b) Diff our PM4 against the dump byte-for-byte. PACKET3 count fields
+     are `count_minus_1` — one off-by-one in the count desyncs the
+     entire CP stream and presents as "GPU hangs at dispatch." See:
+     feedback_pm4_count_minus_1_naming.md.
+  c) Replace every Mesa-VA in the diff with our own BO's VA, allocated
+     fresh at HIGH addresses.
+  d) Add WRITE_DATA progress markers to OUR fence BO (not Mesa's). When
+     the dispatch hangs, the marker shows you which packet didn't
+     execute — pinpoints which VA was unmapped.
+  e) Verify the GPU actually ran — sync-obj signal + RC=0 looks
+     identical between real completion and TDR recovery. The CPU-readable
+     marker is the proof. See: feedback_verify_gpu_actually_ran.md.
+
+Steady follow-up: B.5 (backend abstraction) immediately after this
+landed; B.4-style debugging now lives in `programs/native_compute_store.cyr`
+as a regression keep-alive.
+
+[[entries]]
+name = "phase_b5_backend_abstraction"
+description = "Phase B.5 — fnptr-table dispatch so wgpu and native share the same @public API"
+category = "cyrius"
+---
+After B.4 landed, the next problem was structural: the wgpu+C path
+and the native path had to coexist behind the same @public surface
+without per-call branching. Solved with a fnptr table struct (the
+`Backend`) per backend, selected at compile time via
+`MABDA_BACKEND_KIND`.
+
+Layout (120 bytes, v1):
+  [+0]   ctx_create_from_preinit  (i64 fnptr)
+  [+8]   ctx_release
+  [+16]  buffer_create
+  [+24]  buffer_write
+  [+32]  buffer_read
+  [+40]  buffer_release
+  [+48]  shader_module_create
+  [+56]  shader_module_release
+  [+64]  compute_dispatch
+  [+72]  device_wait_idle
+  [+80]  kind   (BACKEND_KIND_NULL/WGPU/AMD/NVIDIA/INTEL = 0/1/2/3/4)
+  [+88]  texture_create_2d_rgba8       ← v1 expansion (textures)
+  [+96]  texture_write
+  [+104] texture_read
+  [+112] texture_release
+
+Append-after-kind invariant: every future v(N+1) slot lands at offset
+`120 + 8*K`. `kind` stays at 80 forever so that scanning a Backend
+struct from a v0 caller never misreads a fnptr as the kind word.
+
+Public dispatch site is six lines (e.g. `gpu_buffer_create`):
+    if (ctx == 0) { return Err(gpu_err(ERR_INVALID, ...)); }
+    var b = gpu_context_backend(ctx);
+    if (b == 0) { return Err(...); }
+    var slot = backend_get_slot(b, BACKEND_SLOT_BUFFER_CREATE);
+    if (slot == 0) { return Err(...); }
+    return fncall3(slot, ctx, size, usage_flags);
+
+Both backends register identical-shape wrappers in their `*_new()`:
+  - `backend_wgpu_new()` — 14 wrappers around the existing wgpu
+    helpers; Test 11 + 12 in phase0.cyr exercise the buffer + texture
+    paths byte-exact.
+  - `backend_native_new()` — 14 wrappers around direct DRM ioctls;
+    `programs/native_compute_store.cyr` exercises the compute path
+    end-to-end.
+
+GpuContext grew 32 → 96 bytes to dual-interpret for both backends:
+  wgpu  view: instance / adapter / device / queue
+  native view: fd / ctx_id / stub_handle / stub_va  +  per-context
+               cached IB and fence BOs (see native_dispatch_caching).
+The struct header documents both interpretations explicitly so a
+reader doesn't have to grep both backends to understand what offset
++24 means.
+
+Test scaffolding: `tests/tcyr/mabda_v3.tcyr` now has 403 CPU
+assertions covering all dispatch paths via mock-backend stubs (slot
+fnptrs that count calls + capture args). No GPU needed; runs in CI.
+
+The mock-backend pattern was unexpectedly load-bearing. Every public
+dispatcher gets a CPU test that registers a counter+capture stub,
+calls the @public API, and asserts the right slot fired with the
+right args. This pinned a misrouted slot-id constant (`_BUFFER_READ`
+was reading `_BUFFER_WRITE`) before any GPU code ran.
+
+[[entries]]
+name = "native_dispatch_caching"
+description = "Per-context cached IB + fence BOs eliminate ~7 syscalls per dispatch"
+category = "cyrius"
+---
+First-pass native dispatch (`native_compute_dispatch_simple`)
+allocated + VA-mapped + freed an IB BO and a fence BO around every
+single dispatch. That's seven ioctls per dispatch (create, mmap-info,
+gem-mmap, va-map for IB; same trio for fence; minus a couple
+duplicates). Acceptable for "first dispatch ever," not acceptable
+for any benchmark that submits >1 dispatch per second.
+
+Step 4f.iv replaced this with `native_compute_dispatch_cached`. The
+GpuContext now carries:
+  ib_handle / ib_va / ib_addr           (cached IB BO + mmap)
+  fence_handle / fence_va / fence_addr  (cached fence BO + mmap)
+
+Allocated once in `gpu_context_new_native`, freed once in
+`gpu_context_release`. Steady-state dispatch reuses the same BOs:
+overwrite the IB bytes (never grow past the initial cap), reset
+the fence to a sentinel before submit, wait for it to flip after.
+
+Wins: ~7 syscalls/dispatch saved → roughly 0 extra syscalls beyond
+the actual `cs` submit + `wait` pair. Falls out of "obviously
+correct" once you realize each dispatch's IB is the same shape
+(SET_SH_REG + ACQUIRE_MEM + DISPATCH_DIRECT) just with different
+VAs/sizes baked into the registers.
+
+Validation: `programs/native_compute_store.cyr` runs two
+back-to-back dispatches with different output values; both land
+correctly with no allocation churn between them.
+
+Caveat: the cached IB has a fixed size cap (currently a few
+hundred dwords). Larger workloads (real graphs, indirect dispatch)
+will need a grow-on-demand path. Tracked in the punch list.
+
+This pattern should generalize: cache anything the consumer reuses
+per frame. Render-target descriptor tables, bind groups (when
+bindless lands), USER_DATA staging buffers — all candidates for
+per-context cached BOs.
+
