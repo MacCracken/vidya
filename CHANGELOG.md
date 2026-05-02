@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.4] — 2026-05-02
+
+### Added
+- **P0B-1: HTTP `/compare` and `/gaps` endpoints wired** in
+  `src/main.cyr`. Two new JSON builders:
+  - `json_compare_response(topic_id, lang1_str, lang2_str)` — returns
+    `{topic, title, left:{language, present, path}, right:{...}}`.
+    Returns 0 (→ HTTP 404) when topic missing; -1 sentinel (→ HTTP
+    400) when either language is unknown; otherwise the JSON object.
+  - `json_gaps_response()` — returns
+    `{topics, languages, gaps:[{id, covered, of, missing:[...]}, ...],
+    total_missing}`.
+  Smoke-tested via `curl`: `GET /compare?topic=algorithms&left=rust&right=python`
+  returns the comparison object; `GET /gaps` returns 60-topic
+  coverage breakdown; bad lang → 400, bad topic → 404, missing
+  params → 400. P0B is now 7-of-7 endpoints live.
+- **P0C-3 database cluster — all 3 topics backfilled to 11/11**
+  (31 new source files; validator sweep 498/498 → 529/529):
+  - **`btree_indexing`** — 10 new lang files implementing a
+    simplified B+ tree (order 8). Tests: insert/lookup, sorted
+    iteration, split-on-overflow, descending-input handling.
+    OpenQASM uses Grover-search-on-tree as the analog.
+  - **`sql_parsing`** — 10 new lang files; tokenizer for
+    `SELECT * FROM users WHERE id = 1`, case-insensitive keywords,
+    integer literals, parens, validator that rejects malformed
+    SELECTs. OpenQASM models the parse as a 4-qubit token stream
+    walking the production tree.
+  - **`write_ahead_logging`** — 11 new lang files (concept-only
+    topic; cyrius reference designed first as part of this
+    release). Tests: append + replay, log-before-data invariant,
+    uncommitted-writes-lost-on-crash, delete replay, last-write-wins
+    on overwrite, monotonic offsets, capacity bound.
+
+### Fixed
+- **`tests/vidya.tcyr` — pre-existing failures from the cyrius 5.x
+  cstr-key migration**. The toml_loader/toml_sections/gotcha_fields
+  groups were silently failing because `toml_get(pairs,
+  str_from("id"))` returns 0 under cyrius 5.x stdlib (which expects
+  cstr keys, not Str — captured in field-note
+  `stdlib_str_to_cstr_key_migration` in v2.3.0). Replaced 6
+  `str_from("...")` call sites with bare cstr literals; replaced
+  `str_eq(a, str_from("..."))` with `str_eq_cstr(a, "...")`. The
+  test file now reports **41/41 passing** (was failing on test 6
+  before P0B-1 work began).
+
+### Changed
+- **VERSION** 2.3.3 → 2.3.4.
+- **Topic coverage**: 60 topics, 44 → 47 fully covered. Per-language
+  counts (each):
+  - Rust/Python/C/Go/TypeScript/Shell/Zig/OpenQASM: 44 → 47
+  - x86_64 ASM / AArch64 ASM: 44 → 47
+  - Cyrius: 44 → 47 (`write_ahead_logging` cyrius.cyr designed in
+    this release; `btree_indexing` and `sql_parsing` already had it)
+  - Examples: 498 → 529 (+31 new source files; +6%)
+
+### Notes (recurring patterns worth field-noting)
+- **Bash `(( i++ )) + set -e` interaction**: `(( i++ ))` evaluates
+  to the OLD value of `i`; when `i=0`, that's a 0 exit code, which
+  `set -e` treats as failure and aborts the script. Fix:
+  `i=$((i+1))`. Surfaced in sql_parsing/shell.sh.
+- **AArch64 cross-`bl` register clobber (3rd time this release
+  arc)**: caller-saved x0–x18 not preserved across `bl`. Cache
+  loop state in callee-saved x19–x28 OR recompute after each call.
+  Caught independently in btree_indexing/asm_aarch64.s and
+  sql_parsing/asm_aarch64.s by their respective backfill agents.
+- **Bash subshell + stateful PRNG (4th time)**: `$(fn)` runs in a
+  subshell so global mutations don't propagate. Use side-effect
+  global (`OUT=...`) for stateful helpers. Hit btree_indexing's
+  `node_new_leaf` and write_ahead_logging's full WAL state.
+
+These three patterns + the v2.3.3 AArch64 12-bit `cmp` immediate
+limit are now repeated enough to warrant a dedicated
+`content/cyrius/field_notes/language/shell_runtime.cyml` (bash
+gotchas) and a follow-up entry in
+`content/cyrius/field_notes/language/platform_abi.cyml` covering
+the AArch64 callee-saved-register convention. Deferred to v2.3.5
+or a follow-up doc release.
+
 ## [2.3.3] — 2026-05-02
 
 ### Added

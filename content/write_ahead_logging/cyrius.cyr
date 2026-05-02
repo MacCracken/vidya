@@ -1,0 +1,248 @@
+# Write-Ahead Logging — Cyrius reference (runnable)
+# In-memory WAL: append log records before mutating the data store,
+# replay them on recovery to restore committed state. No real fsync —
+# tests use a deterministic in-memory log to validate the algorithm.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# --- Log record format (16 bytes per record, packed) ---
+# Each record:
+#   +0  op   (i64; 1 = SET, 2 = DEL, 0 = INVALID)
+#   +8  key  (i64)
+#   +16 val  (i64; ignored for DEL)
+# Records are 24 bytes; we use OP+KEY+VAL i64 each for simplicity.
+
+var REC_SZ = 24;
+var OP_INVALID = 0;
+var OP_SET = 1;
+var OP_DEL = 2;
+
+# --- Storage buffers ---
+# WAL log: 256 records max (24 * 256 = 6144 bytes)
+var log_buf[6144];
+var log_offset = 0;        # bytes written
+var log_committed = 0;     # bytes persisted (post-fsync); WAL durability boundary
+
+# Data store: 16 keys × i64 values + presence map
+var STORE_KEYS = 16;
+var data_vals[128];        # 16 × i64
+var data_present[16];      # 1 = key has a value, 0 = absent
+
+# --- Log primitives ---
+
+fn log_reset() {
+    log_offset = 0;
+    log_committed = 0;
+}
+
+fn log_append(op, key, val) {
+    # Caller has already mutated the data store IF this returns 1.
+    # Per the WAL rule, callers must call log_append BEFORE the
+    # data-store mutation — we enforce this in the public helpers below.
+    if (log_offset + REC_SZ > 6144) { return 0; }
+    store64(&log_buf + log_offset + 0, op);
+    store64(&log_buf + log_offset + 8, key);
+    store64(&log_buf + log_offset + 16, val);
+    log_offset = log_offset + REC_SZ;
+    return 1;
+}
+
+fn log_commit() {
+    # Real implementations call fsync(wal_fd) here. The contract is:
+    # after log_commit returns, every record up to log_offset is durable
+    # and survives a crash. We model that by snapshotting the offset.
+    log_committed = log_offset;
+    return log_committed;
+}
+
+# --- Public store API: log-then-mutate ---
+
+fn store_set(key, val) {
+    if (key < 0) { return 0; }
+    if (key >= STORE_KEYS) { return 0; }
+    # WAL rule: log BEFORE data
+    if (log_append(OP_SET, key, val) == 0) { return 0; }
+    store64(&data_vals + key * 8, val);
+    store8(&data_present + key, 1);
+    return 1;
+}
+
+fn store_del(key) {
+    if (key < 0) { return 0; }
+    if (key >= STORE_KEYS) { return 0; }
+    if (log_append(OP_DEL, key, 0) == 0) { return 0; }
+    store64(&data_vals + key * 8, 0);
+    store8(&data_present + key, 0);
+    return 1;
+}
+
+fn store_get(key) {
+    # Returns -1 if absent — keys are 0..15, values can be any i64
+    # so we use a sentinel that the tests don't otherwise produce.
+    if (key < 0) { return 0 - 1; }
+    if (key >= STORE_KEYS) { return 0 - 1; }
+    if (load8(&data_present + key) == 0) { return 0 - 1; }
+    return load64(&data_vals + key * 8);
+}
+
+fn store_clear() {
+    var i = 0;
+    while (i < STORE_KEYS) {
+        store64(&data_vals + i * 8, 0);
+        store8(&data_present + i, 0);
+        i = i + 1;
+    }
+}
+
+# --- Recovery: replay durable log against an empty store ---
+
+fn replay() {
+    store_clear();
+    var pos = 0;
+    var applied = 0;
+    while (pos < log_committed) {
+        var op = load64(&log_buf + pos + 0);
+        var key = load64(&log_buf + pos + 8);
+        var val = load64(&log_buf + pos + 16);
+        if (op == OP_SET) {
+            store64(&data_vals + key * 8, val);
+            store8(&data_present + key, 1);
+            applied = applied + 1;
+        }
+        if (op == OP_DEL) {
+            store64(&data_vals + key * 8, 0);
+            store8(&data_present + key, 0);
+            applied = applied + 1;
+        }
+        pos = pos + REC_SZ;
+    }
+    return applied;
+}
+
+# --- Tests ---
+
+fn reset_all() {
+    log_reset();
+    store_clear();
+}
+
+fn test_append_and_replay() {
+    reset_all();
+    store_set(0, 100);
+    store_set(1, 200);
+    store_set(2, 300);
+    log_commit();
+
+    # Wipe in-memory store; replay log; verify state restored.
+    store_clear();
+    var n = replay();
+    assert_eq(n, 3, "replayed 3 records");
+    assert_eq(store_get(0), 100, "key 0 = 100");
+    assert_eq(store_get(1), 200, "key 1 = 200");
+    assert_eq(store_get(2), 300, "key 2 = 300");
+    return 0;
+}
+
+fn test_log_before_data_invariant() {
+    reset_all();
+    var ok = store_set(5, 42);
+    assert_eq(ok, 1, "first set succeeds");
+    # Log must hold the op record at offset 0.
+    assert_eq(load64(&log_buf + 0), OP_SET, "log[0].op = SET");
+    assert_eq(load64(&log_buf + 8), 5, "log[0].key = 5");
+    assert_eq(load64(&log_buf + 16), 42, "log[0].val = 42");
+    # Data store also reflects the change.
+    assert_eq(store_get(5), 42, "data has key 5 = 42");
+    return 0;
+}
+
+fn test_uncommitted_writes_lost_on_crash() {
+    reset_all();
+    store_set(0, 1);
+    store_set(1, 2);
+    log_commit();             # commit point
+    store_set(2, 3);          # written to log buffer but NOT committed
+    store_set(3, 4);          # ditto
+
+    # Simulate crash: replay only the committed prefix.
+    store_clear();
+    var n = replay();
+    assert_eq(n, 2, "only 2 committed records replayed");
+    assert_eq(store_get(0), 1, "committed key 0 survived");
+    assert_eq(store_get(1), 2, "committed key 1 survived");
+    assert_eq(store_get(2), 0 - 1, "uncommitted key 2 lost");
+    assert_eq(store_get(3), 0 - 1, "uncommitted key 3 lost");
+    return 0;
+}
+
+fn test_delete_replays_correctly() {
+    reset_all();
+    store_set(0, 100);
+    store_set(1, 200);
+    store_del(0);
+    log_commit();
+
+    store_clear();
+    replay();
+    assert_eq(store_get(0), 0 - 1, "key 0 deleted");
+    assert_eq(store_get(1), 200, "key 1 = 200");
+    return 0;
+}
+
+fn test_overwrite_uses_last_record() {
+    reset_all();
+    store_set(7, 100);
+    store_set(7, 200);
+    store_set(7, 300);
+    log_commit();
+
+    store_clear();
+    replay();
+    assert_eq(store_get(7), 300, "last write wins on replay");
+    return 0;
+}
+
+fn test_sequential_offsets_monotonic() {
+    reset_all();
+    var prev = log_offset;
+    var i = 0;
+    while (i < 5) {
+        store_set(i, i * 10);
+        var now = log_offset;
+        assert(now > prev, "log offset advances monotonically");
+        prev = now;
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_log_capacity_limit() {
+    reset_all();
+    var i = 0;
+    var failures = 0;
+    while (i < 300) {       # buffer holds 256 records
+        var ok = store_set(0, i);
+        if (ok == 0) { failures = failures + 1; }
+        i = i + 1;
+    }
+    assert(failures > 0, "log capacity is bounded");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_append_and_replay();
+    test_log_before_data_invariant();
+    test_uncommitted_writes_lost_on_crash();
+    test_delete_replays_correctly();
+    test_overwrite_uses_last_record();
+    test_sequential_offsets_monotonic();
+    test_log_capacity_limit();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

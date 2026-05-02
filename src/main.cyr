@@ -1204,6 +1204,120 @@ fn json_languages_response() {
     return str_builder_build(sb);
 }
 
+fn json_compare_response(topic_id, lang1_str, lang2_str) {
+    # Returns 0 if topic not found; sentinel -1 if either language is unknown.
+    # Caller distinguishes these to emit 404 vs 400.
+    var concept = reg_get(topic_id);
+    if (concept == 0) { return 0; }
+    var l1 = lang_parse(lang1_str);
+    var l2 = lang_parse(lang2_str);
+    if (l1 < 0) { return 0 - 1; }
+    if (l2 < 0) { return 0 - 1; }
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"topic\":\"");
+    var id = concept_id(concept);
+    if (id != 0) { str_builder_add(sb, id); }
+    str_builder_add_cstr(sb, "\",\"title\":\"");
+    var title = concept_title(concept);
+    if (title != 0) { str_builder_add(sb, title); }
+    str_builder_add_cstr(sb, "\",");
+
+    # left
+    str_builder_add_cstr(sb, "\"left\":{\"language\":\"");
+    str_builder_add_cstr(sb, lang_name(l1));
+    str_builder_add_cstr(sb, "\",");
+    var ex1 = get_example(concept, l1);
+    if (ex1 != 0) {
+        str_builder_add_cstr(sb, "\"present\":true,\"path\":\"");
+        var path1 = example_path(ex1);
+        if (path1 != 0) { str_builder_add(sb, path1); }
+        str_builder_add_cstr(sb, "\"");
+    } else {
+        str_builder_add_cstr(sb, "\"present\":false");
+    }
+    str_builder_add_cstr(sb, "},");
+
+    # right
+    str_builder_add_cstr(sb, "\"right\":{\"language\":\"");
+    str_builder_add_cstr(sb, lang_name(l2));
+    str_builder_add_cstr(sb, "\",");
+    var ex2 = get_example(concept, l2);
+    if (ex2 != 0) {
+        str_builder_add_cstr(sb, "\"present\":true,\"path\":\"");
+        var path2 = example_path(ex2);
+        if (path2 != 0) { str_builder_add(sb, path2); }
+        str_builder_add_cstr(sb, "\"");
+    } else {
+        str_builder_add_cstr(sb, "\"present\":false");
+    }
+    str_builder_add_cstr(sb, "}}");
+
+    return str_builder_build(sb);
+}
+
+fn json_gaps_response() {
+    var entries = reg_list();
+    var total = vec_len(entries);
+    var total_missing = 0;
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"topics\":");
+    str_builder_add_int(sb, total);
+    str_builder_add_cstr(sb, ",\"languages\":");
+    str_builder_add_int(sb, LANG_COUNT);
+    str_builder_add_cstr(sb, ",\"gaps\":[");
+
+    var first_gap = 1;
+    var i = 0;
+    while (i < total) {
+        var c = vec_get(entries, i);
+        var examples = concept_examples(c);
+        var nex = 0;
+        if (examples != 0) { nex = vec_len(examples); }
+
+        if (nex < LANG_COUNT) {
+            if (first_gap == 0) { str_builder_add_cstr(sb, ","); }
+            first_gap = 0;
+            str_builder_add_cstr(sb, "{\"id\":\"");
+            var id = concept_id(c);
+            if (id != 0) { str_builder_add(sb, id); }
+            str_builder_add_cstr(sb, "\",\"covered\":");
+            str_builder_add_int(sb, nex);
+            str_builder_add_cstr(sb, ",\"of\":");
+            str_builder_add_int(sb, LANG_COUNT);
+            str_builder_add_cstr(sb, ",\"missing\":[");
+
+            var first_lang = 1;
+            var li = 0;
+            while (li < LANG_COUNT) {
+                var found = 0;
+                if (examples != 0) {
+                    var ei = 0;
+                    while (ei < vec_len(examples)) {
+                        if (example_lang(vec_get(examples, ei)) == li) { found = 1; }
+                        ei = ei + 1;
+                    }
+                }
+                if (found == 0) {
+                    if (first_lang == 0) { str_builder_add_cstr(sb, ","); }
+                    first_lang = 0;
+                    str_builder_add_cstr(sb, "\"");
+                    str_builder_add_cstr(sb, lang_name(li));
+                    str_builder_add_cstr(sb, "\"");
+                    total_missing = total_missing + 1;
+                }
+                li = li + 1;
+            }
+            str_builder_add_cstr(sb, "]}");
+        }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "],\"total_missing\":");
+    str_builder_add_int(sb, total_missing);
+    str_builder_add_cstr(sb, "}");
+    return str_builder_build(sb);
+}
+
 # Route a parsed path to a JSON response
 fn http_route(cfd, path) {
     # GET /stats — and root alias
@@ -1234,6 +1348,24 @@ fn http_route(cfd, path) {
         if (topic_id == 0) { return send_400(cfd); }
         var body = json_info_response(topic_id);
         if (body == 0) { return send_404(cfd); }
+        return send_json(cfd, str_data(body), str_len(body));
+    }
+    # GET /compare?topic=...&left=...&right=...
+    if (memeq(path, "/compare", 8) == 1) {
+        var topic_id = sandhi_server_get_param(path, "topic");
+        var left = sandhi_server_get_param(path, "left");
+        var right = sandhi_server_get_param(path, "right");
+        if (topic_id == 0) { return send_400(cfd); }
+        if (left == 0) { return send_400(cfd); }
+        if (right == 0) { return send_400(cfd); }
+        var body = json_compare_response(topic_id, left, right);
+        if (body == 0) { return send_404(cfd); }
+        if (body == 0 - 1) { return send_400(cfd); }
+        return send_json(cfd, str_data(body), str_len(body));
+    }
+    # GET /gaps
+    if (streq(path, "/gaps") == 1) {
+        var body = json_gaps_response();
         return send_json(cfd, str_data(body), str_len(body));
     }
     return send_404(cfd);

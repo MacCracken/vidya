@@ -2,10 +2,10 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-02
 >
-> **Version**: 2.3.3 | **Cyrius**: 5.8.3
-> **Topics**: 60 (44 fully covered, 16 still partial — P0C-1 complete, P0C-2/3/4 remaining)
+> **Version**: 2.3.4 | **Cyrius**: 5.8.3
+> **Topics**: 60 (47 fully covered, 13 still partial — P0C-1+P0C-3 complete, P0C-2/4 remaining)
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 498 source files; concept files: 60
+> **Examples**: 529 source files; concept files: 60
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -14,7 +14,7 @@
 
 ## Current State
 
-### 44 topics — fully covered (11/11 languages each)
+### 47 topics — fully covered (11/11 languages each)
 
 **Original 36** — algorithms, allocators, binary_formats, boot_and_startup,
 code_generation, compiler_bootstrapping, concurrency, design_patterns,
@@ -32,19 +32,19 @@ testing, tracing, trait_and_typeclass_systems, type_systems, virtual_memory
 game_ai_decisions, game_loop_architecture, grid_pathfinding, maze_generation,
 projectile_physics, sprite_rendering, state_machines
 
-498 source files across these 44 topics + concept-only stubs. All available
+**Added in v2.3.4 — P0C-3 database cluster (3 topics)** — btree_indexing,
+sql_parsing, write_ahead_logging
+
+529 source files across these 47 topics + concept-only stubs. All available
 languages green for fully-covered topics.
 
-### 16 topics — still partial coverage
+### 13 topics — still partial coverage
 
 **Graphics cluster (mabda v3 + cyrius-doom) — 9 topics, 0 of 99 non-Cyrius slots filled**
 - bindless_resources, bloom_and_glow, direct_drm_gpu_compute,
   explicit_gpu_synchronization, framebuffer_rendering, gpu_memory_pooling,
   line_rasterization, render_graph_architecture, *(sprite_rendering moved
   to fully-covered above)*
-
-**Database cluster — 3 topics, Cyrius-only**
-- btree_indexing (Y), sql_parsing (Y), write_ahead_logging (none)
 
 **Systems & misc — 4 topics, mixed**
 - compression (none), concurrent_file_access (none),
@@ -53,9 +53,9 @@ languages green for fully-covered topics.
 Coverage legend: R/P/C/G/T/S/Z = Rust/Python/C/Go/TS/Shell/Zig,
 X/A = x86_64/AArch64 ASM, Q = OpenQASM, Y = Cyrius.
 
-498 examples across 60 topics. Gap to full 11/11 across the remaining 16
-topics: **~166 source files** (P0C-2: 99, P0C-3: 30, P0C-4: 37 — see
-remaining backfill plan below).
+529 examples across 60 topics. Gap to full 11/11 across the remaining 13
+topics: **~136 source files** (P0C-2: 99, P0C-4: 37 — see remaining
+backfill plan below).
 
 ---
 
@@ -101,12 +101,17 @@ subfolder pattern (proven at v2.3.1)".
 
 ## P0B — Service Layer Remaining
 
-### P0B-1 — Wire `/compare` and `/gaps` HTTP endpoints
+### P0B-1 — Wire `/compare` and `/gaps` HTTP endpoints — **Done** (v2.3.4)
 
-The CLI handlers (`cmd_compare`, `cmd_gaps`) already produce JSON-shaped
-output. Add route matchers in `cmd_serve`'s connection handler analogous
-to the existing `/search` and `/info/` blocks. Smoke-test from `curl` and
-add to `tests/vidya.tcyr`.
+`json_compare_response(topic_id, lang1_str, lang2_str)` and
+`json_gaps_response()` added to `src/main.cyr`; route matchers
+in `http_route` for `/compare?topic=&left=&right=` and `/gaps`.
+Smoke-tested via curl: 200 + JSON for happy path, 400 for bad
+language or missing params, 404 for missing topic. Path-prefix
+matchers added to `tests/vidya.tcyr` (41/41 green).
+
+P0B is now **7-of-7 endpoints live**: `/stats`, `/list`,
+`/languages`, `/search`, `/info/{topic}`, `/compare`, `/gaps`.
 
 ### P0B-2 — Verify or implement memory-resident mode
 
@@ -132,9 +137,10 @@ Useful for the dev workflow — edit a `.cyr` file, query immediately.
 ## P0C — Backfill non-Cyrius coverage on the new topics
 
 The original P0C estimate was ~249 source files across 24 topics. P0C-1
-landed in v2.3.2 (`fixed_point_arithmetic`, 9 files) and v2.3.3
-(remaining 8 game-engine topics, 78 files). Remaining: **~166 source
-files across 16 topics** in clusters P0C-2, P0C-3, P0C-4.
+landed in v2.3.2 (`fixed_point_arithmetic`, 9 files) and v2.3.3 (remaining
+8 game-engine topics, 78 files). P0C-3 landed in v2.3.4 (3 database topics,
+31 files). Remaining: **~136 source files across 13 topics** in clusters
+P0C-2 and P0C-4.
 
 ### P0C-1 — Game-engine cluster — **Done** (v2.3.2 + v2.3.3)
 
@@ -158,11 +164,15 @@ bindless_resources, bloom_and_glow, direct_drm_gpu_compute,
 explicit_gpu_synchronization, framebuffer_rendering, gpu_memory_pooling,
 line_rasterization, render_graph_architecture, sprite_rendering
 
-### P0C-3 — Database cluster (3 topics, ~30 source files)
+### P0C-3 — Database cluster — **Done** (v2.3.4)
 
-btree_indexing (Y), sql_parsing (Y), write_ahead_logging (none).
-Cyrius implementations for two of three; expand to all 11 languages.
-Subsumes P2's `database_fundamentals`.
+All 3 database topics now 11/11:
+- btree_indexing — 10 new lang ports of the simplified B+ tree (order 8)
+- sql_parsing — 10 new lang ports of the SELECT tokenizer + validator
+- write_ahead_logging — 11 new lang files (concept-only; cyrius reference
+  designed in v2.3.4 alongside the ports)
+
+31 source files added. Subsumed P2's planned `database_fundamentals`.
 
 ### P0C-4 — Systems & misc (4 topics, ~40 source files)
 
@@ -306,4 +316,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-02 (v2.3.3)*
+*Last Updated: 2026-05-02 (v2.3.4)*
