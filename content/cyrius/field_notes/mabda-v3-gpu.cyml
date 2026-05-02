@@ -1048,3 +1048,229 @@ problem. The headless-render pattern is the universal answer.
 Mesa's own `piglit` and `dEQP-VK` test suites use this shape — when
 building the headless capture program, crib from those projects'
 fixture scaffolding. Don't reinvent.
+
+[[entries]]
+name = "phase_d_kms_sequencing"
+description = "DRM/KMS surface bring-up: discovery → mode-pick → modeset → page-flip → present, the canonical ordering"
+category = "cyrius"
+---
+Phase D in mabda established the canonical bring-up sequence for a
+DRM/KMS surface from raw `/dev/dri/cardN` open to an animated
+double-buffered scanout. The sequence has six load-bearing steps;
+re-ordering or skipping any one of them produces an opaque kernel
+EINVAL or EACCES that's hard to diagnose without this map.
+
+The sequence:
+
+1. **Open the master fd.** `/dev/dri/cardN` (primary node), not
+   `/dev/dri/renderDN` (render node). The render node has no
+   modesetting capability — `MODE_GETRESOURCES` returns EOPNOTSUPP.
+   Card-node minor numbers vary by system; scan `card0..card9` and
+   take the first that opens cleanly.
+
+2. **Take DRM master.** `DRM_IOCTL_SET_MASTER` (0x641E, no
+   payload). Modern systemd-logind retains master in the running
+   compositor's session even across vt-switch + sudo, so this
+   step is the master-acquisition gate. See
+   `phase_d_logind_master_retention` for the architectural answer.
+
+3. **Discovery.** `DRM_IOCTL_MODE_GETRESOURCES` (0xC04064A0).
+   Two-pass protocol: count-only first (NULL ptrs, count=0), then
+   alloc + fill-pass with caller-allocated arrays sized by the
+   kernel-reported counts. Returns FB / CRTC / connector /
+   encoder ID arrays + framebuffer extent limits.
+
+4. **Per-connector enumeration.** For each connector ID:
+   `MODE_GETCONNECTOR` (0xC05064A7), again two-pass. Returns
+   the connector's modes array (each entry is 68-byte
+   `drm_mode_modeinfo`), encoders array, properties. Filter on
+   `connection == DRM_MODE_CONNECTED` (1) to find a real screen.
+
+5. **Mode pick.** Walk the modes array; pick the entry with
+   `DRM_MODE_TYPE_PREFERRED` (0x08) bit set. Falls back to
+   index 0. Refresh rate computed as
+   `clock * 1000 / (htotal * vtotal)` — the kernel's `vrefresh`
+   field is unreliable on modern kernels.
+
+6. **CRTC pick.** Get the encoder via `MODE_GETENCODER`
+   (0xC01464A6). The encoder's `possible_crtcs` is a bitmask
+   indexing into the CRTC ID array from step 3. Take the lowest
+   set bit; that's the CRTC.
+
+7. **Framebuffer + modeset.** Allocate a GTT BO sized to mode
+   dimensions on the **render fd** (AMDGPU_GEM_CREATE works on
+   render nodes), bridge to master fd via PRIME (see
+   `phase_d_prime_cross_fd_handle_bridge`), `ADDFB2`
+   (0xC06464B8) to register as a kernel framebuffer, then
+   `SETCRTC` (0xC06864A2) to bind connector + CRTC + FB + mode
+   in one ioctl.
+
+8. **Present.** `MODE_PAGE_FLIP` (0xC01864B0) with
+   `DRM_MODE_PAGE_FLIP_EVENT` (0x01) flag swaps which FB the
+   CRTC scans. Kernel queues a `drm_event_vblank` (32 bytes) on
+   the fd; drain via `read(2)`. Per-frame loop: render to back
+   FB while front scans, page-flip, repeat.
+
+**Why this ordering is fragile.** Skipping discovery and
+hardcoding IDs from a previous run breaks across reboots (kernel
+re-numbers connectors). Picking a CRTC outside `possible_crtcs`
+returns -EINVAL with no useful error text. SETCRTC without a
+preceding ADDFB2-on-the-same-fd returns -EACCES because the FB
+ID is in a different namespace.
+
+**Cross-pollination.** Same shape applies to any AGNOS tool that
+needs direct scanout — kiosk apps, embedded display drivers, the
+aethersafta compositor. The pattern is "discovery as a first-
+class step" rather than "open and assume."
+
+[[entries]]
+name = "phase_d_prime_cross_fd_handle_bridge"
+description = "DRM PRIME — bridging a GEM BO from render-fd handle namespace to master-fd via dmabuf transit"
+category = "cyrius"
+---
+A GEM BO handle is fd-local — handle 5 on the render fd and
+handle 5 on the master fd are unrelated objects. KMS ioctls
+(AddFB2, SetCRTC) require BO handles in the master fd's
+namespace, but AMDGPU's GEM allocator typically runs on the
+render fd. Bridging the two requires DRM PRIME.
+
+The protocol:
+
+```
+render_fd → DRM_IOCTL_PRIME_HANDLE_TO_FD → dmabuf_fd → DRM_IOCTL_PRIME_FD_TO_HANDLE → card_fd
+```
+
+The transient `dmabuf_fd` is a regular Linux file descriptor
+(opened with `O_CLOEXEC | O_RDWR`); close it after the second
+ioctl. Both fd handles end up referencing the same underlying
+GPU memory but with independent kernel refcounts — closing one
+does NOT affect the other. Each fd must run `GEM_CLOSE` on its
+handle when done.
+
+**The ioctls.** Both use the same 12-byte struct
+(`drm_prime_handle`):
+- `+0`: handle (u32) — IN for HANDLE_TO_FD, OUT for FD_TO_HANDLE
+- `+4`: flags (u32) — IN: DRM_CLOEXEC (0x80000) | DRM_RDWR (0x2)
+- `+8`: fd (s32) — OUT for HANDLE_TO_FD, IN for FD_TO_HANDLE
+
+`HANDLE_TO_FD` = `0xC00C642D`, `FD_TO_HANDLE` = `0xC00C642E`.
+Same struct, different fields populated.
+
+**Why CLOEXEC is mandatory.** Without it, fork+exec leaks the
+dmabuf fd into the child process, which gets an unintended
+reference to the BO. CLOEXEC closes-on-exec, which is what every
+real consumer wants.
+
+**Why this matters for AGNOS.** Any tool that splits BO
+ownership across fds — compositor↔renderer, hardware video
+codec→display, multi-process GPU pools — needs PRIME. mabda's
+case (render-fd allocates, card-fd scans out) is the simplest
+2-fd version. Multi-process versions add unix-socket fd-passing
+(`SCM_RIGHTS`) but the PRIME side is identical.
+
+**Pitfall.** A common mistake: HANDLE_TO_FD on the wrong side.
+The exporter is the fd that ALREADY has the BO; the importer is
+the fd that needs to gain access. If you HANDLE_TO_FD on the
+master fd to give the render fd access, the master fd must
+already have a handle — chicken-and-egg. Always: alloc on the
+fd that has an allocator, then bridge.
+
+[[entries]]
+name = "phase_d_logind_master_retention"
+description = "Modern systemd-logind retains DRM master in the compositor's session — vt-switch + sudo doesn't override; need TakeDevice via dbus"
+category = "cyrius"
+---
+Pre-systemd Linux: `/dev/dri/cardN` was a master-able fd, the
+first opener became master, vt-switch handed master off
+cleanly. Modern systemd Linux (~2018+): logind retains DRM
+master in the running compositor's session ABOVE the kernel's
+master concept. vt-switching to a tty + opening cardN +
+SET_MASTER returns -EACCES regardless of root capability.
+Confirmed live on Cezanne + Hyprland: the entire mabda Phase D
+pipeline runs cleanly through AddFB2 and only fails at SETCRTC
+with EACCES, even from a tty as root.
+
+**Why.** logind delegates DRM access through the dbus
+`org.freedesktop.login1.Session.TakeDevice(major, minor)`
+method — which returns a fd that already has master delegated.
+Compositors (Hyprland / GNOME / KDE / wlroots) ALL use this; it's
+the only path that works inside a session. The "open +
+SET_MASTER" path only works if no compositor is running anywhere.
+
+**Three workarounds for HW testing without dbus integration:**
+
+1. **vkms** — `sudo modprobe vkms` adds a virtual KMS device.
+   Master is freely available on it. Mechanical-only; no real
+   screen output.
+2. **Stop the compositor** — log out of the desktop session
+   entirely, run from a tty before re-logging in. Brutal but
+   works.
+3. **`systemctl stop display-manager`** — most disruptive, but
+   definitive.
+
+**The real fix: dbus integration.** `samvada` (sister AGNOS
+package, sibling of mabda/sakshi/patra/sigil) implements the
+TakeDevice handshake. v0.2.0 ships a libsystemd C-shim wrapping
+`sd_bus_*` (`open_system_bus`, `get_session_path`,
+`take_device`, `release_device`, `pump_signals`); v1.0
+coordinates with mabda v4.0 to retire the C shim — either
+pure-Cyrius dbus marshaller or removal if the kernel evolves a
+delegate-without-dbus path.
+
+**Cross-pollination.** Any AGNOS tool that needs to take master
+in a desktop session needs samvada (or the same dbus
+choreography). aethersafta, future kiosk apps, video-capture
+tools — all face the same gate. The pattern documented here is
+the canonical answer; don't roll your own.
+
+[[entries]]
+name = "phase_d_cache_flush_and_inv_post_draw"
+description = "ACQUIRE_MEM is invalidate-only — ALSO need a flush before CPU readback or page-flip can see GPU writes"
+category = "cyrius"
+---
+A common bug shape on GFX9 (likely repeats on RDNA): emit
+`ACQUIRE_MEM` at the start of an IB to invalidate caches, run
+the dispatch, read the result back from CPU — and read stale
+zeros. Or page-flip to a freshly-rendered FB and see the
+previous frame.
+
+**Why.** ACQUIRE_MEM on GFX9 INVALIDATES caches (CB / DB / TC /
+I-cache). It does NOT flush dirty CB writes back to the memory
+the CPU sees. Without an explicit flush, the FB on screen (or
+the BO the CPU reads) shows stale data because the GPU's last
+writes are still sitting in the CB cache.
+
+**The fix.** Append `EVENT_WRITE(CACHE_FLUSH_AND_INV)` after the
+draw, before the IB ends. Packet shape:
+
+- PKT3 header: `0xC0004600` (opcode 0x46 EVENT_WRITE, count=0)
+- Body dword: `event_type | (event_index << 8)` =
+  `0x16 | (0 << 8) = 0x00000016` for
+  `CACHE_FLUSH_AND_INV_EVENT` with `EVENT_INDEX_OTHER`
+
+The CP processes this event before the IB completes; by the
+time the kernel writes the user-fence completion seqno, all
+CB/DB caches have flushed to memory. Subsequent CPU reads see
+post-draw state.
+
+**Why ACQUIRE_MEM at IB start is still required.** Distinct
+purpose: it ensures the SHADER FETCH stage doesn't see stale
+I-cache or texture caches from a previous dispatch. ACQUIRE_MEM
+prevents read-of-stale; CACHE_FLUSH_AND_INV prevents
+read-of-yet-unflushed.
+
+**radv reference.** Mesa radv emits this pattern at every
+command-buffer end (`radv_emit_cache_flush_and_inv`). Their code
+is the canonical cross-check. mabda's
+`native_pm4_event_write_cache_flush_and_inv` (Step 6.10 prep)
+is the standalone primitive — wires into the composer when
+HW data confirms it (the existing 6.5(b) clear-triangle composer
+omits it, which is exactly the failure mode this lesson predicts
+on first run).
+
+**Cross-pollination.** Same lesson applies to RDNA — the event
+type is renamed (CACHE_FLUSH_AND_INV_TS_EVENT for ones that
+also write a timestamp) but the semantics are identical. ACO,
+RadeonSI, and amdvlk all have this pattern; if writing a new
+ISA backend or PM4 composer, look for the cache-flush emission
+in their command-buffer-end paths.

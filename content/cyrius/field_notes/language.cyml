@@ -1109,3 +1109,131 @@ vendored include, swap the `http_*` callers to `sandhi_server_*`
 (the constants `HTTP_OK` / `HTTP_NOT_FOUND` / etc. are re-exposed
 by sandhi for source-compat), and add `"sandhi"` to the stdlib
 list.
+
+[[entries]]
+name = "fncall6_ceiling_into_extern_c"
+description = "Cyrius fns that internally fncall* into wgpu-native (or any extern-C) segfault at 7+ params; pure Cyrius is fine to 12+"
+category = "cyrius"
+---
+A Cyrius fn signature CAN take 7+ args without issue when the
+body is pure Cyrius. The moment the body contains a `fncall*`
+into wgpu-native (or any extern-C function table), the whole
+signature must stay at ≤ 6 args or the call segfaults at
+runtime.
+
+Example shape that crashes:
+
+```cyrius
+fn _backend_wgpu_some_op(ctx, a, b, c, d, e, f) {  # 7 args
+    fncall6(slot, a, b, c, d, e, f);                # crash
+}
+```
+
+Same fn at 6 args works. Same fn at 7 args without the inner
+fncall* works (pure Cyrius all the way down).
+
+**Why.** The Cyrius calling convention for fns that internally
+make C-ABI calls passes args through registers in a way that
+doesn't fully line up with the System V x86_64 ABI when the
+caller has 7+ args of its own. The first 6 params land in
+rdi/rsi/rdx/rcx/r8/r9 cleanly; the 7th would go on the stack,
+and the stack alignment / spill protocol differs from how
+wgpu-native expects to be called. Result: register clobber that
+manifests as a segfault inside the wgpu fn, not at the call
+site.
+
+**The fix.** Pack 7+ args into a struct pointer:
+
+```cyrius
+fn _backend_wgpu_some_op(ctx, args_ptr) {
+    var a = load64(args_ptr + 0);
+    var b = load64(args_ptr + 8);
+    # ... unpack rest ...
+    fncall6(slot, a, b, c, d, e, f);
+}
+```
+
+Caller side allocates a struct, fills the fields, passes the
+ptr. This is the pattern mabda uses for `wgpu_*` ops with 7+
+inputs (e.g., `wgpu_command_encoder_copy_buffer_to_buffer`).
+
+**When it doesn't apply.** Pure Cyrius fns with no inner
+fncall* into extern-C — those take 12+ args fine. mabda's
+internal helpers like `native_pm4_build_render_clear_triangle`
+take 6 args and would work at 12 if needed.
+
+**Cross-pollination.** Same constraint will apply to any
+Cyrius project that builds a function-table-of-extern-C-fns
+abstraction: `samvada` (sd_bus C shim), future
+`vidya_logind`-style packages, anything wrapping libc beyond
+the stdlib. Document at the boundary; don't trial-and-error.
+
+[[entries]]
+name = "bump_allocator_exhaustion_in_tests"
+description = "Cyrius bump allocator persists allocations for the process lifetime; large test files exhaust the heap → silent alloc(N) returning 0 → segfault on store"
+category = "cyrius"
+---
+The Cyrius stdlib `alloc` is a bump allocator: each `alloc(N)`
+moves a global pointer forward by N bytes; allocations are
+NEVER freed during process lifetime. This is fine for short-
+running programs (test suites, benchmarks, smoke programs) but
+breaks down when a single process accumulates enough
+allocations to exhaust the underlying heap segment.
+
+**Symptom.** `alloc(N)` silently returns 0. Subsequent `store*`
+to the returned pointer dereferences null → segfault. The
+crash looks like an unrelated bug in test code that seemed to
+work before.
+
+**Where it bites.** Test files that grow over time and run all
+their tests in one `main()` invocation. Each test that calls
+`alloc(N)` permanently consumes that N. After enough tests,
+the cumulative consumption exceeds the heap segment.
+
+**Diagnostic.** If a test fails with exit 139 (SIGSEGV) and
+inserting `assert(ctx != 0, "alloc returned non-null")`
+catches it, the bump allocator is exhausted. mabda hit this
+during Step 7.7 — adding the 9th `alloc(112)` ctx in
+`tests/tcyr/mabda_v3_phase_d.tcyr` made `alloc` start
+returning 0.
+
+**The fix.** Stack-local arrays for test-scoped buffers:
+
+```cyrius
+# Before — heap-allocated, accumulates:
+fn test_thing() {
+    var ctx = alloc(112);
+    memset(ctx, 0, 112);
+    # ...
+}
+
+# After — stack-allocated, freed at fn return:
+fn test_thing() {
+    var ctx[112];
+    memset(&ctx, 0, 112);
+    # ...
+}
+```
+
+The `var name[N]` form allocates on the stack, gets reclaimed
+at fn exit. Identical observable behavior for test code; zero
+heap pressure.
+
+**When you MUST use alloc.** When a value needs to outlive the
+fn (heap-allocated structs returned from constructors,
+caller-owned buffers passed across abstraction boundaries).
+Production code generally needs alloc; test code generally
+doesn't.
+
+**Why not fix the bump allocator.** The bump-allocator design
+is intentional — its simplicity is the load-bearing property
+for AGNOS's "no GC, no malloc" stance. Adding a heap-replacing
+allocator would change the contract for every consumer.
+Better to teach the test-write idiom: stack-local for
+test-scoped buffers.
+
+**Cross-pollination.** Every AGNOS test suite hits this
+eventually. Teach the pattern at the start; don't wait for
+the segfault. samvada's `tests/samvada.tcyr` already uses
+stack-local idiom; mabda's older test files retrofitted as
+they grew.
