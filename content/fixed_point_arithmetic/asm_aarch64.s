@@ -123,33 +123,38 @@ sin_lookup:
     ret
 
 // ── _start: run all tests ────────────────────────────────────────────
+// Note on `ldr xN, =imm` form: AArch64 `mov` accepts only 16-bit
+// immediate fields with optional 16-bit shifts. Constants like 163840
+// (0x28000) span bit positions that don't align to a single movz, so
+// we use the assembler's literal-pool load form `ldr x10, =N` which
+// handles any 64-bit constant uniformly.
 _start:
     // Test 1: fx_mul(FX_ONE, FX_ONE) == FX_ONE
-    mov     x0, #65536
-    mov     x1, #65536
+    ldr     x0, =65536
+    ldr     x1, =65536
     bl      fx_mul
-    mov     x10, #65536
+    ldr     x10, =65536
     cmp     x0, x10
     b.ne    fail
 
     // Test 2: fx_mul(0.5, 0.5) == 0.25  (16384)
-    mov     x0, #32768
-    mov     x1, #32768
+    ldr     x0, =32768
+    ldr     x1, =32768
     bl      fx_mul
-    mov     x10, #16384
+    ldr     x10, =16384
     cmp     x0, x10
     b.ne    fail
 
     // Test 3: fx_div(FX_ONE * 10, FX_ONE * 4) == 163840  (2.5)
-    mov     x0, #655360
-    mov     x1, #262144
+    ldr     x0, =655360
+    ldr     x1, =262144
     bl      fx_div
-    mov     x10, #163840
+    ldr     x10, =163840
     cmp     x0, x10
     b.ne    fail
 
     // Test 4: fx_div(FX_ONE, 0) == 0
-    mov     x0, #65536
+    ldr     x0, =65536
     mov     x1, #0
     bl      fx_div
     cbnz    x0, fail
@@ -170,19 +175,19 @@ _start:
     // Test 7: sin_lookup(256) ≈ 1.0  (table[255] = 65451 — within tolerance)
     mov     x0, #256
     bl      sin_lookup
-    mov     x10, #60000
+    ldr     x10, =60000
     cmp     x0, x10
     b.le    fail
 
     // Test 8: sin_lookup(512) == 0
-    mov     x0, #512
+    ldr     x0, =512
     bl      sin_lookup
     cbnz    x0, fail
 
     // Test 9: sin_lookup(768) ≈ -1.0
-    mov     x0, #768
+    ldr     x0, =768
     bl      sin_lookup
-    mov     x10, #-60000
+    ldr     x10, =-60000
     cmp     x0, x10
     b.ge    fail
 

@@ -16,6 +16,7 @@ has_cmd() { command -v "$1" &>/dev/null; }
 HAS_ZIG=false;         has_cmd zig && HAS_ZIG=true
 HAS_AARCH64_AS=false;  has_cmd aarch64-linux-gnu-as && HAS_AARCH64_AS=true
 HAS_QEMU_AA64=false;   has_cmd qemu-aarch64 && HAS_QEMU_AA64=true
+HAS_CYRIUS=false;      has_cmd cyrius && HAS_CYRIUS=true
 
 # OpenQASM: prefer native Rust validator, fall back to qiskit
 QASM_VALIDATOR=""
@@ -30,7 +31,7 @@ else
 fi
 
 echo "=== Vidya Content Validation ==="
-echo "  Toolchain: zig=$HAS_ZIG aarch64=$HAS_AARCH64_AS qasm=$QASM_VALIDATOR"
+echo "  Toolchain: zig=$HAS_ZIG aarch64=$HAS_AARCH64_AS qasm=$QASM_VALIDATOR cyrius=$HAS_CYRIUS"
 echo ""
 
 for topic_dir in "$CONTENT_DIR"/*/; do
@@ -185,6 +186,28 @@ for topic_dir in "$CONTENT_DIR"/*/; do
             rm -f /tmp/vidya_test_$$ /tmp/vidya_test_$$.o /tmp/vidya_err
         else
             echo "  ⊘ AArch64 Assembly (skipped — cross-tools not installed)"
+            SKIP=$((SKIP + 1))
+        fi
+    fi
+
+    # Cyrius
+    if [[ -f "$topic_dir/cyrius.cyr" ]]; then
+        if [[ "$HAS_CYRIUS" == "true" ]]; then
+            # `cyrius run` resolves stdlib includes, compiles, runs.
+            # Cyrius output is verbose (dead-fn / large-static-data warnings on
+            # stdout); the assertion summary is on the last line. Capture both
+            # streams; trust the exit code for pass/fail.
+            if cyrius run "$topic_dir/cyrius.cyr" >/tmp/vidya_err 2>&1; then
+                echo "  ✓ Cyrius"
+                PASS=$((PASS + 1))
+            else
+                echo "  ✗ Cyrius: $(tail -3 /tmp/vidya_err | tr '\n' ' | ')"
+                ERRORS+=("$topic/cyrius.cyr")
+                FAIL=$((FAIL + 1))
+            fi
+            rm -f /tmp/vidya_err
+        else
+            echo "  ⊘ Cyrius (skipped — cyrius not installed)"
             SKIP=$((SKIP + 1))
         fi
     fi

@@ -72,8 +72,12 @@ creg rd_c[3];
 h rd[0]; h rd[1]; h rd[2];
 rz(pi/2) rd[0];               // fractional offset to make readout interesting
 
-// Inverse QFT (3 qubits, manual decomposition for OpenQASM 2.0)
-swap rd[0], rd[2];
+// Inverse QFT (3 qubits, manual decomposition for OpenQASM 2.0).
+// qelib1.inc doesn't define `swap`; expand as 3 CNOTs (the standard
+// SWAP decomposition: cx a,b ; cx b,a ; cx a,b).
+cx rd[0], rd[2];
+cx rd[2], rd[0];
+cx rd[0], rd[2];
 h rd[0];
 cu1(-pi/2) rd[0], rd[1];
 h rd[1];
