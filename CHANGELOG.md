@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.2] — 2026-05-01
+
+### Changed
+- **Roadmap rewrite** (`docs/development/roadmap.md`). Header refreshed
+  (v2.2.0 → v2.3.2, last-updated 2026-04-08 → 2026-05-01, topics
+  36 → 60, examples 396 → 411, Cyrius 5.8.3 noted). Substantive
+  updates:
+  - **P0B Service Layer marked partially shipped** — HTTP server,
+    JSON responses, and 5 of 7 endpoints (`/stats`, `/list`,
+    `/languages`, `/search`, `/info/{topic}`) confirmed live in
+    `src/main.cyr`'s `cmd_serve`, running on `lib/sandhi.cyr`.
+  - **P0B remaining items (P0B-1 … P0B-4)** carved out: wire
+    `/compare` and `/gaps` HTTP routes (CLI handlers exist;
+    HTTP routing doesn't), verify or implement memory-resident
+    mode, sakshi request tracing, content hot-reload.
+  - **Completed-since-v2.2 section** added listing the 24 new
+    topics that landed alongside cyrius-doom, mabda v3 GPU, and
+    ENCOM's Hits, grouped into clusters: graphics (9),
+    game-engine (8), database (3), systems & misc (4).
+  - **P0C Backfill section** added: ~249 source files needed to
+    bring the 24 new topics to 11/11 language parity with the
+    original 36. Sized as a multi-release sweep, prioritized by
+    cluster maturity (P0C-1 game-engine, P0C-2 graphics, P0C-3
+    database, P0C-4 systems & misc).
+  - **P3 reorganized**: graphics cluster crossed off (covered by
+    P0C-2); audio + AI/ML topics retained.
+  - **Field-notes growth pattern** documented as Established at
+    v2.3.1 with the three split axes (version arc, surface area,
+    phase).
+  - **Cyrius pin maintenance** cadence note added: every Cyrius
+    minor drives a vidya patch bump for stdlib + language-feature
+    alignment, with the 6-step playbook (cyrius.cyml, field
+    notes, index verification range, CHANGELOG, zugot recipe).
+- `VERSION` 2.3.1 → 2.3.2.
+
 ## [2.3.1] — 2026-05-01
 
 ### Changed
