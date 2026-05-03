@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.2] — 2026-05-03
+
+**P3 batch 3 — `neural_networks` shipped at 11/11 languages.**
+Tiny 2 → 3 → 2 MLP forward pass in Q15 fixed-point. Three
+primitives (dense layer, ReLU, argmax) composed into a binary
+classifier on hand-designed weights — predicts which input
+feature is larger.
+
+Skips softmax intentionally: argmax preserves order, and
+production inference does the same (softmax is a training-time
+construct for cross-entropy loss). This keeps the example pure
+integer arithmetic across all 11 ports — no exp() approximation
+needed.
+
+11 new source files; validator 781/781 → **792/792**. P3 is 3/5
+topics in flight; `inference` + `embeddings` slated for
+2.6.3–2.6.4.
+
+### Added
+
+- `content/neural_networks/` — Q15 MLP forward pass across 11
+  languages: cyrius (12 tests / 21 asserts), HLLs (12 tests / 16
+  asserts each — HLLs collapse the per-element ReLU checks into
+  array-equality), asm pair (8 tests / 8 asserts focused on full
+  forward pass through dense + ReLU + argmax with hardcoded layer
+  sizes), OpenQASM (rotation-as-weighted-sum: ry encodes inputs as
+  amplitudes, cu3 applies controlled rotations as weights, reset
+  models ReLU, measurement models argmax). One AArch64 gotcha
+  surfaced: `mov w0, #-N` zero-extends to a large positive i64
+  before mul; use `mov x0, #-N` for negative immediates.
+
 ## [2.6.1] — 2026-05-03
 
 **P3 batch 2 — `audio_synthesis` shipped at 11/11 languages.**

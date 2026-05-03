@@ -1,0 +1,315 @@
+# Vidya — Neural Network Forward Pass — Cyrius reference (runnable)
+#
+# Tiny 2 → 3 → 2 MLP, all Q15 fixed-point. Three primitives:
+#
+#   1. Dense layer:    y[j] = sum_i(W[j][i] * x[i]) + b[j]
+#   2. ReLU activation: y[i] = max(0, y[i])
+#   3. Argmax:         pick the index of the largest output logit
+#                      (skips softmax — order is preserved, and
+#                      inference doesn't need probabilities)
+#
+# Hand-designed weights classify by which input is larger:
+#   input[0] > input[1] → class 0
+#   input[1] > input[0] → class 1
+#
+# Q15 convention: 32768 = 1.0; weights, biases, activations all
+# in [-32767, 32767]. Multiply via q_mul (sign-handled because
+# Cyrius `>>` is logical, not arithmetic).
+#
+# Weight matrix convention: W[j][i] = weight from input feature i
+# to output neuron j. Row-major: W stored as flat array of n_out
+# rows × n_in cols.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var SCALE = 15;
+var ONE   = 32768;
+
+# Q15 multiplication with sign handling.
+fn q_mul(a, b) {
+    var p = a * b;
+    if (p < 0) {
+        var pneg = 0 - p;
+        var r = pneg >> SCALE;
+        return 0 - r;
+    }
+    return p >> SCALE;
+}
+
+# === Network architecture: 2 → 3 → 2 ===
+var N_IN     = 2;
+var N_HIDDEN = 3;
+var N_OUT    = 2;
+
+# Hidden layer: 3 neurons × 2 inputs = 6 weights + 3 biases
+# h[0] = relu( 0.5 * x[0] - 0.5 * x[1])  → fires when x[0] > x[1]
+# h[1] = relu(-0.5 * x[0] + 0.5 * x[1])  → fires when x[1] > x[0]
+# h[2] = relu( 0.5 * x[0] + 0.5 * x[1])  → magnitude (always >= 0)
+var W_hidden[48];   # 6 × i64
+var b_hidden[24];   # 3 × i64
+
+# Output layer: 2 neurons × 3 inputs = 6 weights + 2 biases
+# logit[0] = 0.5 * h[0] + 0 * h[1] + 0 * h[2]   → "input[0] dominant"
+# logit[1] = 0 * h[0] + 0.5 * h[1] + 0 * h[2]   → "input[1] dominant"
+var W_output[48];   # 6 × i64
+var b_output[16];   # 2 × i64
+
+# Activation buffers
+var hidden_buf[24];
+var output_buf[16];
+
+fn init_weights() {
+    # Hidden layer weights (row-major: row j × cols i):
+    # row 0: [16384, -16384]
+    # row 1: [-16384, 16384]
+    # row 2: [16384, 16384]
+    store64(&W_hidden + 0,  16384);
+    store64(&W_hidden + 8,  0 - 16384);
+    store64(&W_hidden + 16, 0 - 16384);
+    store64(&W_hidden + 24, 16384);
+    store64(&W_hidden + 32, 16384);
+    store64(&W_hidden + 40, 16384);
+    # Hidden biases: all 0
+    store64(&b_hidden + 0,  0);
+    store64(&b_hidden + 8,  0);
+    store64(&b_hidden + 16, 0);
+
+    # Output layer weights (row-major):
+    # row 0: [16384, 0, 0]
+    # row 1: [0, 16384, 0]
+    store64(&W_output + 0,  16384);
+    store64(&W_output + 8,  0);
+    store64(&W_output + 16, 0);
+    store64(&W_output + 24, 0);
+    store64(&W_output + 32, 16384);
+    store64(&W_output + 40, 0);
+    # Output biases: all 0
+    store64(&b_output + 0, 0);
+    store64(&b_output + 8, 0);
+}
+
+# === Dense layer: y[j] = sum_i(W[j][i] * x[i]) + b[j] ===
+# W is row-major (n_out rows × n_in cols), n_out * n_in elements.
+fn dense(W, b, x_in, x_out, n_in, n_out) {
+    var j = 0;
+    while (j < n_out) {
+        var acc = load64(b + j * 8);
+        var i = 0;
+        while (i < n_in) {
+            var w = load64(W + (j * n_in + i) * 8);
+            var v = load64(x_in + i * 8);
+            var prod = q_mul(w, v);
+            acc = acc + prod;
+            i = i + 1;
+        }
+        store64(x_out + j * 8, acc);
+        j = j + 1;
+    }
+    return n_out;
+}
+
+# === ReLU: in-place max(0, x) ===
+fn relu(x, n) {
+    var i = 0;
+    while (i < n) {
+        var v = load64(x + i * 8);
+        if (v < 0) {
+            store64(x + i * 8, 0);
+        }
+        i = i + 1;
+    }
+}
+
+# === Argmax: returns index of largest element (first-found wins on ties) ===
+fn argmax(x, n) {
+    var best_idx = 0;
+    var best_val = load64(x);
+    var i = 1;
+    while (i < n) {
+        var v = load64(x + i * 8);
+        if (v > best_val) {
+            best_val = v;
+            best_idx = i;
+        }
+        i = i + 1;
+    }
+    return best_idx;
+}
+
+# === Forward pass: input → hidden (dense + ReLU) → output (dense) → argmax ===
+fn forward(input_buf) {
+    dense(&W_hidden, &b_hidden, input_buf, &hidden_buf, N_IN, N_HIDDEN);
+    relu(&hidden_buf, N_HIDDEN);
+    dense(&W_output, &b_output, &hidden_buf, &output_buf, N_HIDDEN, N_OUT);
+    return argmax(&output_buf, N_OUT);
+}
+
+# === Test scratch ===
+var input_buf[16];
+var test_w[48];
+var test_b[24];
+var test_x[16];
+var test_y[24];
+
+# === Tests ===
+
+fn test_q_mul_sanity() {
+    assert_eq(q_mul(ONE, 100), 100, "ONE * 100 = 100");
+    assert_eq(q_mul(16384, 16384), 8192, "0.5 * 0.5 = 0.25");
+    assert_eq(q_mul(0 - 16384, 16384), 0 - 8192, "-0.5 * 0.5 = -0.25");
+    return 0;
+}
+
+fn test_dense_layer() {
+    # 2-input, 2-output dense:
+    # W = [[0.5, 0.5], [0.25, 0.75]], b = [0, 0]
+    # x = [1.0, 1.0]
+    # y[0] = 0.5*1 + 0.5*1 = 1.0
+    # y[1] = 0.25*1 + 0.75*1 = 1.0
+    store64(&test_w + 0,  16384);     # 0.5
+    store64(&test_w + 8,  16384);     # 0.5
+    store64(&test_w + 16, 8192);      # 0.25
+    store64(&test_w + 24, 24576);     # 0.75
+    store64(&test_b + 0, 0);
+    store64(&test_b + 8, 0);
+    store64(&test_x + 0, 32767);      # ~1.0
+    store64(&test_x + 8, 32767);
+    dense(&test_w, &test_b, &test_x, &test_y, 2, 2);
+    var y0 = load64(&test_y + 0);
+    var y1 = load64(&test_y + 8);
+    # ~32767 expected, allow ±2 for Q15 rounding.
+    assert(y0 >= 32765, "dense y[0] ~= 1.0 (lower)");
+    assert(y0 <= 32769, "dense y[0] ~= 1.0 (upper)");
+    assert(y1 >= 32765, "dense y[1] ~= 1.0 (lower)");
+    assert(y1 <= 32769, "dense y[1] ~= 1.0 (upper)");
+    return 0;
+}
+
+fn test_dense_with_bias() {
+    # y[0] = 0*1 + 0*1 + b[0]; bias should pass through.
+    store64(&test_w + 0, 0);
+    store64(&test_w + 8, 0);
+    store64(&test_b + 0, 12345);
+    store64(&test_x + 0, 32767);
+    store64(&test_x + 8, 32767);
+    dense(&test_w, &test_b, &test_x, &test_y, 2, 1);
+    assert_eq(load64(&test_y + 0), 12345, "bias passes through with zero weights");
+    return 0;
+}
+
+fn test_relu_clips_negatives() {
+    store64(&test_y + 0, 0 - 100);
+    store64(&test_y + 8, 200);
+    store64(&test_y + 16, 0 - 300);
+    store64(&test_y + 24, 400);
+    relu(&test_y, 4);
+    assert_eq(load64(&test_y + 0), 0, "relu(-100) = 0");
+    assert_eq(load64(&test_y + 8), 200, "relu(200) = 200");
+    assert_eq(load64(&test_y + 16), 0, "relu(-300) = 0");
+    assert_eq(load64(&test_y + 24), 400, "relu(400) = 400");
+    return 0;
+}
+
+fn test_relu_zero_passes() {
+    store64(&test_y + 0, 0);
+    relu(&test_y, 1);
+    assert_eq(load64(&test_y + 0), 0, "relu(0) = 0");
+    return 0;
+}
+
+fn test_argmax_picks_max() {
+    store64(&test_y + 0, 100);
+    store64(&test_y + 8, 500);
+    store64(&test_y + 16, 200);
+    store64(&test_y + 24, 300);
+    assert_eq(argmax(&test_y, 4), 1, "argmax picks index 1 (value 500)");
+    return 0;
+}
+
+fn test_argmax_first_found_on_ties() {
+    store64(&test_y + 0, 100);
+    store64(&test_y + 8, 500);
+    store64(&test_y + 16, 500);
+    assert_eq(argmax(&test_y, 3), 1, "first-found wins on ties");
+    return 0;
+}
+
+fn test_forward_input0_dominant() {
+    init_weights();
+    # x = [0.8, 0.2] in Q15
+    store64(&input_buf + 0, 26214);
+    store64(&input_buf + 8, 6553);
+    var cls = forward(&input_buf);
+    assert_eq(cls, 0, "x=[0.8, 0.2] → class 0 (input[0] dominant)");
+    return 0;
+}
+
+fn test_forward_input1_dominant() {
+    init_weights();
+    # x = [0.2, 0.8] in Q15
+    store64(&input_buf + 0, 6553);
+    store64(&input_buf + 8, 26214);
+    var cls = forward(&input_buf);
+    assert_eq(cls, 1, "x=[0.2, 0.8] → class 1 (input[1] dominant)");
+    return 0;
+}
+
+fn test_forward_strong_input0() {
+    init_weights();
+    # x = [1.0, 0.0]
+    store64(&input_buf + 0, 32767);
+    store64(&input_buf + 8, 0);
+    var cls = forward(&input_buf);
+    assert_eq(cls, 0, "x=[1.0, 0.0] → class 0");
+    return 0;
+}
+
+fn test_forward_strong_input1() {
+    init_weights();
+    # x = [0.0, 1.0]
+    store64(&input_buf + 0, 0);
+    store64(&input_buf + 8, 32767);
+    var cls = forward(&input_buf);
+    assert_eq(cls, 1, "x=[0.0, 1.0] → class 1");
+    return 0;
+}
+
+fn test_forward_relu_actually_fires() {
+    # Verify ReLU clipped at least one hidden unit:
+    # x=[1.0, 0.0] → h[0] pre-relu > 0, h[1] pre-relu < 0
+    # After forward, hidden_buf[1] should be exactly 0.
+    init_weights();
+    store64(&input_buf + 0, 32767);
+    store64(&input_buf + 8, 0);
+    forward(&input_buf);
+    assert_eq(load64(&hidden_buf + 8), 0, "relu zeroed hidden[1]");
+    var h0 = load64(&hidden_buf + 0);
+    assert(h0 > 0, "hidden[0] passed through ReLU as positive");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("neural_networks");
+
+    test_q_mul_sanity();
+    test_dense_layer();
+    test_dense_with_bias();
+    test_relu_clips_negatives();
+    test_relu_zero_passes();
+    test_argmax_picks_max();
+    test_argmax_first_found_on_ties();
+    test_forward_input0_dominant();
+    test_forward_input1_dominant();
+    test_forward_strong_input0();
+    test_forward_strong_input1();
+    test_forward_relu_actually_fires();
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

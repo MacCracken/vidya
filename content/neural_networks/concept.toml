@@ -1,0 +1,56 @@
+id = "neural_networks"
+title = "Neural Network Forward Pass"
+topic = "AI"
+description = "Three primitives behind every neural network's inference path. (1) Dense (fully-connected) layer: y = Wx + b — a matrix-vector multiply and bias add. The basic computational unit; every other layer (conv, attention, normalization) reduces to dense at some level. (2) ReLU activation: max(0, x) per element. The cheapest, most numerically stable nonlinearity in production use; introduces the nonlinear capacity that lets a stack of dense layers approximate any function. (3) Argmax (the inference-time alternative to softmax): pick the index of the largest output logit. Production classifiers skip softmax at inference because the normalization doesn't change which class wins — softmax is a training-time construct (for cross-entropy loss); inference only needs the argmax. This corpus example uses Q15 fixed-point throughout: weights, biases, activations all in [-32767, 32767] with 32768 = 1.0. Bit-exact across all 11 ports, no float-precision drift, runs everywhere from MCUs to GPUs. Production AI uses float (or bfloat16) for training; many edge inference engines quantize back to int8 or int16 for deployment — exactly what this example demonstrates at minimum scale."
+tags = ["neural-network", "mlp", "forward-pass", "dense-layer", "relu", "argmax", "inference", "fixed-point", "q15", "quantization"]
+related_topics = ["fixed_point_arithmetic", "audio_dsp", "embeddings", "inference"]
+
+[[best_practices]]
+title = "Skip softmax at inference — use argmax directly"
+explanation = "Softmax computes exp(xi) / sum(exp(xj)) to turn logits into probabilities. The order is preserved: argmax(softmax(x)) == argmax(x). For inference (where you just want the predicted class), softmax is pure overhead — exp() per element + sum + divide. Skip it. Save softmax for training (where you need the probabilities for cross-entropy loss) and for cases where you need to threshold confidence. This is exactly what TensorFlow Lite, ONNX Runtime, llama.cpp, and CoreML all do internally."
+
+[[best_practices]]
+title = "Quantize to Q15 (or int8) for deployment — match the hardware's native operation"
+explanation = "Training is float (often f32 or bfloat16) for gradient stability. Inference doesn't need that range — int8 or int16 (Q15) is enough for ~99% of classification accuracy at 4× the throughput on CPU and NPU. Modern edge runtimes (TFLite, OpenVINO, NCNN) ship int8 quantization toolchains. Q15 is the educational entry point: integer multiply-accumulate, no float at all, runs identically on every CPU/MCU. Production starts here and scales up to int8 with calibration."
+
+[[best_practices]]
+title = "ReLU as the default activation — unless you have a specific reason to use something else"
+explanation = "ReLU(x) = max(0, x). One comparison + one conditional move per element, zero multiplications. Stable gradients (no vanishing-gradient problem in the positive regime), no transcendental math at inference, zero memory beyond the input/output. Sigmoid and tanh are smoother but vanish at the tails (gradient becomes ~0 for large inputs, training stalls). GELU and Swish are smoother still but cost an exp() each. ReLU is the right starting point; switch only when you have measurements showing improvement."
+
+[[best_practices]]
+title = "Dense layer dimensions stored separately from data — n_in × n_out is the layer's identity"
+explanation = "A dense layer is fully described by (n_in, n_out, W flat[n_out × n_in], b[n_out]). Store W in row-major order (one full row of weights per output neuron). The matrix-vector multiply walks output rows in the outer loop, input features in the inner — cache-friendly because W's row is contiguous in memory. Storing layer dims separately lets the same code handle any layer size; storing them mixed with data is the path to bugs when layer shapes change."
+
+[[gotchas]]
+title = "Q15 multiply-accumulate overflow — use int32 (or int64) accumulator, not Q15"
+explanation = "A single Q15 × Q15 fits in i32 after the >> 15 shift. But summing N such products for a dense layer with N inputs can exceed i32 range if N is large. The fix: use i64 for the accumulator inside the inner loop, narrow back to Q15 only at the end. For a 768-input layer (BERT-base width) at Q15 max, the accumulator easily exceeds i32. Production int8 inference has the same issue and uses int32 accumulators with explicit saturation."
+bad_example = "// i16 acc = 0; for (i = 0; i < n_in; i++) acc += q_mul(W[i], x[i]); // overflows for large n_in"
+good_example = "// i64 acc = 0; for (i = 0; i < n_in; i++) acc += q_mul(W[i], x[i]); // i64 headroom"
+
+[[gotchas]]
+title = "ReLU applied AFTER bias add, not before — easy to swap by accident"
+explanation = "Dense output is y = W*x + b, then ReLU(y). If you apply ReLU before adding bias, a negative bias can never push the output negative — the activation collapses. The mathematical contract is `relu(Wx + b)`, not `relu(Wx) + b`. Visible in code as one line of difference, invisible in test loss until accuracy collapses. Always check: bias add THEN activation."
+bad_example = "// for j: out[j] = bias[j] + relu(matmul[j]); // ReLU before bias"
+good_example = "// for j: out[j] = relu(matmul[j] + bias[j]); // ReLU after bias"
+
+[[gotchas]]
+title = "Argmax breaks on ties — define tiebreaking explicitly"
+explanation = "If two output logits are exactly equal, argmax could return either. Most implementations return the LOWER index (first-found in scan order). This is fine for fp32 (exact ties are rare due to float-precision differences). For fixed-point with limited resolution, ties happen often. If your code path is sensitive to which class wins on a tie (e.g., you have a default class), make the tiebreak explicit. Don't assume the language standard library matches your expectations — Python's max() returns first-found, NumPy's argmax returns first-found, but C qsort/qsearch are undefined."
+bad_example = "// best_idx = argmax(logits); // tie: undefined which one wins"
+good_example = "// for i: if (logits[i] > best_logit) { best_logit = logits[i]; best_idx = i; } // first-found wins"
+
+[[gotchas]]
+title = "Weight matrix indexed [output][input] vs [input][output] — get it wrong and the entire network is transposed"
+explanation = "Convention: W[j][i] = the weight connecting input feature i to output neuron j. Row-major layout puts output rows contiguous. The matrix-vector multiply is `y[j] = sum_i W[j][i] * x[i]`. Many tutorials use W[i][j] indexing, transposing the multiply. The arithmetic still works, but loading pre-trained weights from a different convention will produce garbage. Document the convention at the top of the file and stick to it."
+bad_example = "// y[j] = sum(W[i][j] * x[i] for i); // weights transposed vs production-engine convention"
+good_example = "// y[j] = sum(W[j][i] * x[i] for i); // matches PyTorch nn.Linear, TF Dense"
+
+[[performance_notes]]
+title = "Dense layer is O(n_in × n_out) multiplies — dominant cost in MLP inference"
+explanation = "A dense layer with 768 inputs and 768 outputs (BERT-base hidden dim) is 590K multiplies per forward pass. ReLU on the output is 768 comparisons. The dense layer is 768× more expensive than the activation. At ~1 GFLOP/s scalar throughput, that single layer is ~600μs; a 12-layer transformer is ~10ms. Modern inference runtimes (ggml, llama.cpp) use SIMD + cache blocking + matrix tiling to hit 50-200 GFLOP/s on CPU — pushing the same model to 50-200μs per layer."
+evidence = "llama.cpp benchmarks: ~150 GFLOP/s on Apple M1 (single thread, NEON SIMD). PyTorch CPU backend ~30 GFLOP/s without MKL, ~120 GFLOP/s with. Activation cost is consistently <5% of dense layer cost in profiles."
+
+[[performance_notes]]
+title = "Q15 inference: 1 multiply + 1 shift per weight; 2× faster than f32 on most CPUs"
+explanation = "Q15 multiply: imul + sar = 2 ops, 1 cycle each on modern out-of-order CPUs. Float multiply: fmul = 1 op, 4-5 cycles latency, 1 cycle throughput. Q15 wins on integer-heavy CPUs (older x86, RISC-V, MCUs without FPU) and ties or loses on modern desktop. The real Q15 win is on hardware that lacks an FPU: ARM Cortex-M0/M3 microcontrollers, FPGAs, simple custom NPUs. On a Cortex-M4 (no fast FPU), Q15 inference is 5-10× faster than software-emulated f32."
+evidence = "CMSIS-NN benchmarks on Cortex-M4: Q15 dense layer ~3-5× faster than f32 emulated. Same model on Cortex-M7 (with FPU): Q15 ~1.5× faster. Crossover happens when hardware FP throughput exceeds memory bandwidth — around mid-range desktop CPUs."
