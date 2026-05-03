@@ -626,3 +626,68 @@ globals.
 
 Full backstory: v5_7.cyml's `lsp_globals_before_fn_definitions_v5_7_39`.
 """
+
+[[entries]]
+name = "snapshot_ping_pong_lib_corruption"
+description = "lib/*.cyr edits silently revert via install-snapshot copy-back during cyrius deps"
+category = "cyrius"
+---
+Surfaced 2026-05-03 mid-v5.8.23 bite #2 when `lib/tagged.cyr`
+edits reverted between Edit calls during the sum-type migration.
+
+== ROOT CAUSE ==
+
+Two-step ping-pong loop:
+
+  1. `version-bump.sh` runs `install.sh --refresh-only` which
+     copies `lib/*.cyr` from the repo INTO
+     `~/.cyrius/versions/<v>/lib/` and `~/.cyrius/lib`.
+  2. Subsequent `cyrius deps` resolution (e.g., during
+     `check.sh`) copies the snapshot version BACK into the
+     repo.
+
+If you edit a `lib/*.cyr` file AFTER a `version-bump.sh` ran
+(snapshot is now stale), the next `check.sh` invocation will
+overwrite your edit with the prior snapshot.
+
+== SYMPTOM ==
+
+You make an Edit. You verify the change. You run `check.sh`.
+Tests pass. But the next time you read the file, your edit is
+GONE. cc5 is also gone — the snapshot's version was pulled back
+in along with the lib file, AND the snapshot's lib is what's
+actually in `~/.cyrius/lib`.
+
+== MITIGATION ==
+
+Documented in CLAUDE.md "Snapshot-ping-pong protection
+(cyrius-side `lib/*.cyr` edits)" subsection (added v5.8.26).
+3-step recipe:
+
+  1. Edit `lib/<file>.cyr`.
+  2. Manually refresh the install snapshot:
+     ```sh
+     cp lib/<file>.cyr ~/.cyrius/versions/$(cat VERSION)/lib/<file>.cyr
+     cp lib/<file>.cyr ~/.cyrius/lib/<file>.cyr
+     ```
+     OR run `sh scripts/version-bump.sh "$(cat VERSION)"` (same-
+     version regenerate path).
+  3. Run `sh scripts/check.sh` — file should now stick.
+
+== RELATED ECOSYSTEM RULE ==
+
+CLAUDE.md "Downstream repo setup (ecosystem rule)" forbids
+downstream repos (mabda, sigil, sakshi, yukti, etc.) from
+symlinking their `lib/` to `~/.cyrius/lib` because writes
+through the symlink propagate up the chain into this repo.
+
+Sakshi was found violating this at v5.8.23 (its `lib/` was a
+directory-level symlink to `~/.cyrius/lib`); fixed via
+`rm sakshi/lib && (cd sakshi && cyrius deps)`.
+
+Audit script (also added to CLAUDE.md v5.8.26):
+    find ~/Repos -maxdepth 2 -type l -name lib
+
+Returns nothing now; sakshi was the only directory-level
+violation. Other repos have only single-file `lib/<dep>.cyr`
+symlinks (legitimate `cyrius deps` artifacts).

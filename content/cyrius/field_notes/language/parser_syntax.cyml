@@ -358,3 +358,114 @@ six `if (cond) { return; }` early-exits — all rejected. The
 preprocessed line number reported was meaningless; bisecting the
 file by truncating at function boundaries was the only way to
 locate the root cause.
+
+[[entries]]
+name = "tagged_union_paren_consistency"
+description = "in mixed enums, bare names stay int-typed and paren'd names heap-allocate — pick one shape per decl"
+category = "cyrius"
+---
+v5.8.21–v5.8.27 sum-type sub-suite shipped two distinct
+variant shapes inside the SAME `enum` decl:
+
+    enum Maybe {
+        Nothing;       # bare name → int (auto-incremented from 0)
+        Just(v);       # paren'd name → heap pointer (16-byte tagged)
+    }
+
+These two shapes do NOT compose at the value level:
+
+    var n = Nothing;       # n = 0 (int)
+    var j = Just(42);      # j = heap pointer
+    if (n == j) { ... }    # comparing 0 to a heap address — never true
+
+== CONVENTION ==
+
+Pick one shape per enum decl. For sum types you'll
+match against, use paren-consistent naming:
+
+    enum Option { None(); Some(v); }      # both heap-allocated
+    enum Result { Ok(v); Err(e); }
+    enum Either { Left(v); Right(v); }
+
+For pure int constants (mode flags, syscall numbers, errno),
+use bare names:
+
+    enum Color { RED; GREEN; BLUE; }
+    enum SysNr { SYS_READ = 0; SYS_WRITE = 1; ... }
+    enum KeyType { KeyTypeCstr; KeyTypeStr; KeyTypeU64; }
+
+== WHY NOT AUTO-UNIFY ==
+
+The v5.8.21 pin called for "bare-variant payload-shape
+consistency" — making `Nothing` in a mixed-enum decl produce a
+heap-allocated `tagged(N, 0)` automatically. v5.8.23 honest-
+scope-shrunk this: empirical migration of `lib/tagged.cyr` used
+paren-consistent shapes (`None()` / `Some(v)`) which work
+cleanly without auto-tagging. Bare names stay int-typed; users
+who want full tagged consistency add empty parens.
+
+== EMPTY PAREN NULLARY (v5.8.23) ==
+
+`Foo()` is a true arity-0 nullary tagged variant: 8-byte alloc,
+tag at +0, no payload. Distinct from bare `Foo` (int constant)
+and from `Foo(v)` (16-byte alloc, single payload).
+
+== EXHAUSTIVE-MATCH CHECK SEMANTICS ==
+
+The v5.8.22 + v5.8.25 coverage check fires only on enums that
+have at least one PARSE_MATCH arm referencing a variant. Mixed
+enums work — match on the int-named subset gets coverage'd
+against the int values; match on the tagged subset against the
+tagged values. But matching across both at once tends to confuse
+intent — convention is to keep the modes separate.
+
+[[entries]]
+name = "match_on_tagged_value_needs_load64"
+description = "match opt { Some => ... } compares heap pointers, not tags — use match load64(opt) for tag matching"
+category = "cyrius"
+---
+v5.8.22 exhaustive-match coverage check fires correctly when
+arms reference variants of an enum. But the runtime CMP at each
+arm compares against the matchee VALUE — for tagged-union values
+(heap pointers), that means comparing two heap pointers, never
+equal at runtime.
+
+== BROKEN ==
+
+    var opt = Some(42);
+    match opt {
+        Some => { ... }     # Some folds to int 1 (tag)
+                            # opt is a heap pointer
+                            # cmp heap_ptr, 1 — never matches
+        None => { ... }     # likewise
+    }
+
+== CORRECT ==
+
+    var opt = Some(42);
+    match load64(opt) {     # extract tag at +0 first
+        Some => { ... }     # cmp 1, 1 — matches when opt is Some
+        None => { ... }
+    }
+
+Or use the helper API from `lib/tagged.cyr` which encapsulates
+the load64 pattern:
+
+    if (is_some(opt) == 1) { var v = unwrap(opt); ... }
+    var v = unwrap_or(opt, 0);
+
+== WHY NOT AUTO-DEREF ==
+
+Auto-deref on `match` would need:
+  1. Type tracking — does the matchee evaluate to a tagged-union
+     heap pointer or a plain int?
+  2. Matchee cast — emit `mov rax, [rax]` to load tag before cmp.
+
+Type tracking infrastructure isn't in the v5.8.x compiler yet
+(monomorphization is post-v5.8.x). The exhaustive-match check
+ships the metadata ergonomics; runtime match semantics use
+the existing cmp/jcc-skip cascade unchanged.
+
+Pattern destructuring (`match opt { Some(v) => use(v) }` binding
+the payload) is also a future slot — needs both auto-deref AND
+slot-binding from pattern offsets.

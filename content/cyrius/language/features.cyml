@@ -584,3 +584,208 @@ IMPLEMENTATION:
     3. Patching the jmp to land after the function body
 
     Same jmp-over pattern used for if/else blocks.
+
+[[entries]]
+name = "tagged_unions_v58x"
+description = "enum sum types — `enum Result<T, E> { Ok(T), Err(E) }` with multi-arg constructors + nullary tagged variants"
+category = "cyrius"
+---
+Tagged unions / sum types — first-class language feature shipped
+across v5.8.21–v5.8.23 + v5.8.26. Replaces the hand-rolled
+lib/tagged.cyr `tagged_new(tag, value)` pattern with
+compiler-generated constructor fns.
+
+== SYNTAX ==
+
+The pinned canonical shape from the v5.8.21 sum-type slot:
+
+    enum Result<T, E> {
+        Ok(T),
+        Err(E)
+    }
+
+All four pieces of this shape are independently optional:
+
+    enum Maybe { Nothing; Just(v); }            # no generics, ;-sep
+    enum Pair<T> { P(a, b); }                   # 1 type-param, multi-arg
+    enum Tri<T, U, V> {
+        Triple(a, b, c),                        # multi-arg
+        Pair(x, y),                             # different arity OK
+        Single(s),                              # single-arg
+        Bare                                    # auto-incremented int
+    }
+
+Generic params (`<T, E>`) are syntactically accepted but not yet
+bound semantically (mono-only, erasure semantics — full binding
+arrives when monomorphization lands post-v5.8.x). Variant
+separators are `;` OR `,` — mixed in same decl tolerated.
+
+== CONSTRUCTOR CODEGEN ==
+
+    var ok = Ok(42);
+    # → alloc(8 + 8*1 = 16); store64(ptr, 0); store64(ptr+8, 42); return ptr
+
+    var t = Triple(11, 22, 33);
+    # → alloc(8 + 8*3 = 32); store64(ptr, 0); store64(ptr+8, 11);
+    #   store64(ptr+16, 22); store64(ptr+24, 33); return ptr
+
+Layout: tag at +0, payload[i] at +8 + 8*i. Frame size scales with
+arity: `(arity + 1) * 16` bytes. Arity-1 produces byte-identical
+output to the pre-v5.8.21 single-arg path (preserves the v5.5.2
+single-arg corpus exactly).
+
+== EMPTY-PAREN NULLARY TAGGED VARIANTS (v5.8.23) ==
+
+    enum Option { None(); Some(v); }
+    var n = None();
+    # → alloc(8); store64(ptr, 0); return ptr — TAG ONLY, no payload
+
+Empty parens `Foo()` produces a true arity-0 nullary tagged
+variant (8-byte alloc, tag at +0, no payload, no params consumed).
+Pre-v5.8.23 it collapsed to arity-1 (16-byte alloc with garbage
+payload) — a no-real-consumer landmine, fixed at v5.8.23.
+
+== BARE-NAME VS PAREN'D ==
+
+    enum Color { RED; GREEN; BLUE; }    # all bare
+    var c = RED;                         # = 0 (auto-incremented int)
+
+    enum Option { None(); Some(v); }    # all paren'd
+    var n = None();                     # = 16-byte heap pointer, tag 0
+
+In MIXED enums, bare variants stay int-typed and paren'd variants
+heap-allocate — convention is paren-consistent. Bare-name
+auto-tagging in mixed-enum decls (the v5.8.21 pin's
+`enum Option { None; Some(v); }` prescriptive shape) was deferred;
+the paren-consistent form works cleanly without it.
+
+== STDLIB MIGRATION (v5.8.23, v5.8.26) ==
+
+`lib/tagged.cyr` shipped 3 compiler-generated sum types
+replacing 6 hand-rolled constructor fns:
+
+    enum Option { None(); Some(v); }
+    enum Result { Ok(v); Err(e); }
+    enum Either { Left(v); Right(v); }
+
+Helpers (`is_none`, `is_some`, `unwrap`, `unwrap_or`,
+`result_unwrap`, `err_code_of`, `is_left`, `is_right`) reference
+the lowercase variant names which fold via `enum_const_val` to
+identical tag values. `tagged_new` / `tag` / `payload` /
+`is_tag` primitives + `option_print` / `result_print` unchanged.
+
+`lib/hashmap.cyr` got a 6-site migration at v5.8.26:
+`enum KeyType { KeyTypeCstr; KeyTypeStr; KeyTypeU64; }` replaces
+raw 0/1/2 stored at map header offset 24.
+
+== INTERNAL BOOKKEEPING ==
+
+PARSE_ENUM_DEF in pass 1 writes 4 heap regions (added v5.8.22):
+  - var_enum_id[8192] @ 0x204000 — per-variant parent eid
+  - enum_count[8] @ 0x214000 — total enum decls (cap 1024)
+  - enum_variant_count[1024] @ 0x214008 — variants per enum
+  - enum_name[1024] @ 0x216008 — name offset for diagnostics
+
+Enum cap: 1024 (bumped from 256 at v5.8.24 — stdlib alone has
+299 enum decls, downstream multi-dep programs were 1-2 releases
+from tripping). 8192 var-table cap is the variant-side cap;
+no realistic consumer is anywhere near it.
+
+[[entries]]
+name = "exhaustive_match_v58x"
+description = "exhaustive `match` coverage check — warns on missing variants + duplicate arms; opt out via `_ =>`"
+category = "cyrius"
+---
+PARSE_MATCH coverage check shipped across v5.8.22 (coverage
+diagnostic) + v5.8.25 (arm-tag dedup). **Warning**, not error,
+per v5.8.x's incremental-adoption policy (same shape as
+#must_use / #deprecated / #pure→#io). `cyrius lint --strict`
+escalation reserved for a future slot.
+
+== EXHAUSTIVE MATCH ==
+
+    enum Status { PENDING; ACTIVE; DONE; }
+
+    match s {
+        PENDING => { ... }
+        ACTIVE  => { ... }
+        DONE    => { ... }
+    }
+    # → no warning (all 3 variants covered)
+
+== NON-EXHAUSTIVE WITHOUT `_ =>` ==
+
+    match s {
+        PENDING => { ... }
+        ACTIVE  => { ... }
+    }
+    # → warning:<file>:<line>: non-exhaustive match over enum
+    #   'Status' — covers 2 of 3 variants; add `_ =>` to opt out
+
+== `_ =>` OPT-OUT ==
+
+    match s {
+        PENDING => { ... }
+        _       => { ... }
+    }
+    # → no warning (default arm present)
+
+== MIXED-ENUM ARMS ==
+
+    enum A { A1; A2; }
+    enum B { B1; B2; }
+
+    match A1 {
+        A1 => { ... }
+        B2 => { ... }   # arm references DIFFERENT enum
+        _  => { ... }
+    }
+    # → warning:<file>:<line>: match arms span multiple enums
+    #   (exhaustive-coverage check skipped)
+
+== DUPLICATE ARM (v5.8.25) ==
+
+    match s {
+        PENDING => { ... }
+        PENDING => { ... }
+    }
+    # → warning:<file>:<line>: duplicate match arm 'PENDING'
+    # → warning:<file>:<line>: non-exhaustive match over enum
+    #   'Status' — covers 1 of 3 variants; ...
+
+Pre-v5.8.25, duplicate arms counted as 2-of-3 covered (false-
+clean — adding a third arm made it 3-of-3 even though PENDING was
+duplicated and the others were missing). v5.8.25's `seen_vcnt[256]`
+stack-allocated dedup array fixes the math.
+
+== CODEGEN UNCHANGED ==
+
+The coverage check is metadata-only. Runtime cmp/jcc-skip cascade
+still picks the FIRST matching arm — duplicate arms are dead code
+at runtime (first wins). Tested in `tests/tcyr/match_dedup.tcyr`.
+
+== WHAT FIRES THE CHECK ==
+
+The check fires only when at least one arm references a variant
+of an enum (PARSE_MATCH peeks the arm's first ident pre-PCMPE,
+looks up `var_enum_id[arm_vi]`). Literal-int matches
+(`match n { 0 => ..., 1 => ... }`) skip the check entirely —
+treated as non-enum match. Non-variant idents (regular const
+vars, complex expressions) also skip.
+
+== INTEGRATION WITH PATTERN-PAYLOAD MATCHING ==
+
+This slot ships the COVERAGE check only. Pattern destructuring
+(`match opt { Some(v) => use(v) }` extracting the payload into
+`v`) is NOT shipped — it would need:
+  1. Auto-deref of the matchee from heap pointer to tag
+  2. Variable binding from pattern slot offsets
+That's a future slot. Today's idiom for tagged values:
+
+    match load64(opt) {
+        None => { ... }
+        Some => { var v = load64(opt + 8); ... }
+    }
+
+Or use the `lib/tagged.cyr` helper API (`is_some`, `unwrap_or`,
+etc.) which encapsulates the load64 pattern.

@@ -105,9 +105,13 @@ USAGE: var c: Color = Color.Red;
 TYPE SAFETY: When assigning to a Color variable, check that RHS is
 either a Color variant or untyped. Warn on `var c: Color = 42;`
 
-WHY NOT TAGGED UNIONS YET: Plain enums (no payload) are sufficient for
-switch/match, error codes, state machines. Tagged unions (enum + data)
-require knowing the payload size per variant — add in a later phase.
+UPDATE — TAGGED UNIONS SHIPPED v5.8.21–v5.8.27: this entry's
+"plain enums only" guidance is historical. Tagged unions are now
+first-class — see `language/features.cyml::tagged_unions_v58x`
+for syntax and `language/features.cyml::exhaustive_match_v58x`
+for the coverage check. The compiler-internal infrastructure
+spans 4 new heap regions and 8 accessor fns
+(see exhaustive_match_infrastructure entry below).
 
 ZIG COMPARISON: Zig enums are also integers underneath. Tagged unions
 add a payload but the tag is still an integer discriminant stored
@@ -778,3 +782,84 @@ SELF-HOSTING CONSTRAINT:
 AARCH64:
   Same pattern. aarch64/emit.cyr already has width-correct load/store opcodes.
   Need aarch64 variants of EVLOAD_W, EFLLOAD_W, EVSTORE_W, EFLSTORE_W.
+
+[[entries]]
+name = "exhaustive_match_infrastructure_v58x"
+description = "Heap regions + accessor fns supporting v5.8.21–v5.8.27 sum types and exhaustive-match coverage check"
+category = "cyrius"
+---
+v5.8.22 added 3 heap regions, v5.8.22 bite #2 added 1 more,
+v5.8.24 grew 2 of them. All in the metadata band, extending
+past `fn_flags` (0x1FC000+0x8000 = 0x204000).
+
+== HEAP LAYOUT ==
+
+  0x204000  var_enum_id[8192]            64 KB
+            per-variant → parent enum-id mapping. 1-based;
+            0 = not a variant. Indexed by global-var index
+            (vcnt). Written by PARSE_ENUM_DEF in pass 1.
+
+  0x214000  enum_count[8]                8 B
+            total enum decls seen at parse time. Cap 1024
+            (bumped from 256 at v5.8.24). Bumped by
+            PARSE_ENUM_DEF on entry.
+
+  0x214008  enum_variant_count[1024]     8 KB
+            per-enum variant count, indexed
+            0..enum_count-1. Bumped per variant in pass 1.
+            Read at PARSE_MATCH coverage check time.
+
+  0x216008  enum_name[1024]              8 KB
+            per-enum name offset (into S+0x60000 ident
+            pool) for diagnostic messages. Written by
+            PARSE_ENUM_DEF in pass 1.
+
+Total +84 KB metadata-band growth across v5.8.22–v5.8.24
+(64 + 8B + 8 KB + 8 KB ≈ 80 KB usable; pool size 84 KB).
+
+== ACCESSOR FNS (src/common/util.cyr) ==
+
+8 fns added v5.8.22:
+
+  GVENUMID(S, vi)   / SVENUMID(S, vi, v)   — var_enum_id[vi]
+  GENUMC(S)         / SENUMC(S, v)          — enum_count
+                                              (cap-check on set)
+  GENUMVCNT(S, eid) / SENUMVCNT(S, eid, v)  — enum_variant_count[eid]
+  GENUMNM(S, eid)   / SENUMNM(S, eid, v)    — enum_name[eid]
+
+== USE PATTERN ==
+
+PARSE_ENUM_DEF pass 1 (emit_code == 0):
+  1. ee_eid = GENUMC(S) + 1
+  2. SENUMC(S, ee_eid)              — bump count
+  3. SENUMNM(S, ee_eid - 1, enoff)  — store name
+  4. For each variant:
+       SVENUMID(S, vcnt, ee_eid)    — tag variant with eid
+       SENUMVCNT(S, ee_eid - 1,     — bump variant count
+                 GENUMVCNT(...) + 1)
+
+PARSE_MATCH (parse.cyr):
+  1. Per arm: peek first ident, FINDVAR → arm_vi
+  2. arm_eid = GVENUMID(S, arm_vi)
+  3. If arm_eid > 0: dedup-check + bump match_covered
+  4. After arms close: if match_eid != 0 + !had_default,
+     compare match_covered to GENUMVCNT(S, match_eid - 1)
+
+== CONSTRUCTOR CODEGEN (parse_types.cyr) ==
+
+PARSE_ENUM_DEF pass 2 (emit_code == 2) emits the constructor
+fn body for each payloaded variant:
+
+  EFNPRO + ESUBRSP                          — prologue + frame
+  ESTOREPARM(0..arity-1, 0..arity-1, 0)     — params → slots
+  EMOVI(8 + arity * 8) + ECALLPOPS(1)       — alloc(N)
+  EFLSTORE(arity)                           — alloc-ptr → slot
+  EFLLOAD(arity) + EMOVI(val) + ESTORE64    — tag at +0
+  Loop i = 0..arity-1:
+    EFLLOAD(arity) + EADDIMM(8 + 8*i)       — ptr + offset
+    + EFLLOAD(i) + ESTORE64                 — payload[i]
+  EPATCHFRAME(ctor_frame, (arity + 1) * 16)
+  EFLLOAD(arity)                            — return ptr
+  EFNEPI
+
+Empty parens `Foo()` (v5.8.23): arity = 0, alloc(8), tag-only.
