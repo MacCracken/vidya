@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.1] — 2026-05-03
+
+**P3 batch 2 — `audio_synthesis` shipped at 11/11 languages.**
+Q15 fixed-point synth primitives (oscillators, ADSR envelope,
+voice). API surface mirrors the production AGNOS synth crate
+`naad` (Waveform, Adsr, EnvelopeState, gate_on/off, Voice) so
+the corpus example reads as a portable educational version of
+the same algorithms — naad uses f32 + PolyBLEP for production;
+this corpus uses Q15 + naive waveforms for clarity and bit-exact
+cross-port portability.
+
+Three primitives:
+- **Oscillator** — 16-bit phase accumulator + 16-entry Q15 sine
+  LUT, naive saw (linear ramp), naive square (sign-of-phase).
+- **ADSR envelope** — 5-state machine (Idle → Attack → Decay →
+  Sustain → Release → Idle). Linear segments, sample-counted
+  phases. Captures `release_start` at gate_off so Release
+  ramps from current level (the click-on-early-release fix).
+- **Voice** — oscillator × envelope, sample by sample.
+
+11 new source files; validator 770/770 → **781/781**. P3 is 2/5
+topics in flight; `neural_networks`, `inference`, `embeddings`
+slated for 2.6.2–2.6.4.
+
+### Added
+
+- `content/audio_synthesis/` — Q15 synth primitives across 11
+  languages: cyrius (11 tests / 25 asserts), HLLs (11 tests / 25
+  asserts each — naad-style API names), asm pair (8 tests / 13
+  asserts focused on phase + sine LUT + square + ADSR full state
+  machine; saw + Voice dispatch in cyrius.cyr — too verbose for
+  asm), OpenQASM (rotation-as-oscillation: `ry` advances phase,
+  H+Z prepares square, `ccx` gates voice on env × osc).
+
 ## [2.6.0] — 2026-05-03
 
 **P3 kickoff — Audio + AI/ML (minor bump)** — `audio_dsp`

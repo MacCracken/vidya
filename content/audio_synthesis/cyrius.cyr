@@ -1,0 +1,391 @@
+# Vidya — Audio Synthesis — Cyrius reference (runnable)
+#
+# Three primitives in Q15 fixed-point:
+#
+#   1. Oscillator: 16-bit phase accumulator + 16-entry sine LUT,
+#      saw (linear ramp), square (sign of phase). Phase advances
+#      by an integer increment per sample, wraps via mask.
+#   2. ADSR envelope: 5-state machine (IDLE → ATTACK → DECAY →
+#      SUSTAIN → RELEASE → IDLE). Linear segments with sample-
+#      counted phases. Capture release_start_value at gate_off
+#      to avoid the click-on-early-release gotcha.
+#   3. Voice: oscillator × envelope, sample by sample.
+#
+# Q15 convention: ONE = 32768 = 1.0; samples and amplitudes in
+# [-32767, 32767]. Multiply via q_mul (sign-handled because
+# Cyrius `>>` is logical, not arithmetic — field note).
+#
+# Naming mirrors the production AGNOS synth crate `naad` (Adsr,
+# EnvelopeState, gate_on/gate_off). naad uses f32 + PolyBLEP for
+# anti-aliasing; vidya uses Q15 + naive waveforms for clarity
+# and cross-port portability.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var SCALE = 15;
+var ONE   = 32768;
+
+# Q15 multiplication with sign handling.
+fn q_mul(a, b) {
+    var p = a * b;
+    if (p < 0) {
+        var pneg = 0 - p;
+        var r = pneg >> SCALE;
+        return 0 - r;
+    }
+    return p >> SCALE;
+}
+
+# === Phase accumulator ===
+# Phase: 0..65535 represents 0..2π (16-bit counter).
+var PHASE_MASK = 65535;
+var PHASE_HALF = 32768;
+
+fn phase_advance(current, inc) {
+    var next = current + inc;
+    return next & PHASE_MASK;
+}
+
+# === Sine LUT (16 entries, Q15) ===
+# Values precomputed as round(32767 * sin(i * 2π / 16)) for i=0..15.
+var sine_table[128];   # 16 × i64
+
+fn init_sine_table() {
+    store64(&sine_table + 0,   0);
+    store64(&sine_table + 8,   12540);
+    store64(&sine_table + 16,  23170);
+    store64(&sine_table + 24,  30274);
+    store64(&sine_table + 32,  32767);
+    store64(&sine_table + 40,  30274);
+    store64(&sine_table + 48,  23170);
+    store64(&sine_table + 56,  12540);
+    store64(&sine_table + 64,  0);
+    store64(&sine_table + 72,  0 - 12540);
+    store64(&sine_table + 80,  0 - 23170);
+    store64(&sine_table + 88,  0 - 30274);
+    store64(&sine_table + 96,  0 - 32767);
+    store64(&sine_table + 104, 0 - 30274);
+    store64(&sine_table + 112, 0 - 23170);
+    store64(&sine_table + 120, 0 - 12540);
+}
+
+# osc_sine(phase) — table lookup by high 4 bits of phase.
+fn osc_sine(phase) {
+    var idx = phase >> 12;
+    return load64(&sine_table + idx * 8);
+}
+
+# osc_saw(phase) — linear ramp from -ONE..ONE-1 over 0..PHASE_MAX.
+fn osc_saw(phase) {
+    return phase - PHASE_HALF;
+}
+
+# osc_square(phase) — +ONE for first half-cycle, -ONE for second.
+fn osc_square(phase) {
+    if (phase < PHASE_HALF) { return 32767; }
+    return 0 - 32767;
+}
+
+# === ADSR envelope ===
+# State machine: IDLE → ATTACK → DECAY → SUSTAIN → RELEASE → IDLE.
+# Linear segments with sample-counted phases. release_start_value
+# captured at gate_off so Release ramps from current level (no click).
+
+var ENV_IDLE    = 0;
+var ENV_ATTACK  = 1;
+var ENV_DECAY   = 2;
+var ENV_SUSTAIN = 3;
+var ENV_RELEASE = 4;
+
+# Per-envelope state (single envelope instance for the corpus).
+var env_state                = 0;
+var env_level                = 0;
+var env_stage_samples        = 0;
+var env_release_start        = 0;
+var env_attack_samples       = 0;
+var env_decay_samples        = 0;
+var env_sustain_level        = 0;
+var env_release_samples      = 0;
+
+fn env_set_params(attack, decay, sustain, release) {
+    env_attack_samples = attack;
+    env_decay_samples = decay;
+    env_sustain_level = sustain;
+    env_release_samples = release;
+}
+
+fn env_reset() {
+    env_state = ENV_IDLE;
+    env_level = 0;
+    env_stage_samples = 0;
+    env_release_start = 0;
+}
+
+fn env_gate_on() {
+    env_state = ENV_ATTACK;
+    env_stage_samples = 0;
+}
+
+# Capture current level so Release ramps from where we actually are.
+fn env_gate_off() {
+    if (env_state == ENV_IDLE) { return 0; }
+    env_release_start = env_level;
+    env_state = ENV_RELEASE;
+    env_stage_samples = 0;
+    return 1;
+}
+
+# Advance one sample. Returns the new envelope level (Q15).
+fn env_step() {
+    if (env_state == ENV_IDLE) {
+        env_level = 0;
+        return 0;
+    }
+
+    if (env_state == ENV_ATTACK) {
+        # level = stage_samples / attack_samples, in Q15 terms.
+        var inc = ONE / env_attack_samples;
+        env_level = env_level + inc;
+        env_stage_samples = env_stage_samples + 1;
+        if (env_stage_samples >= env_attack_samples) {
+            env_level = ONE;
+            env_state = ENV_DECAY;
+            env_stage_samples = 0;
+        }
+        return env_level;
+    }
+
+    if (env_state == ENV_DECAY) {
+        # ramp from ONE to sustain_level over decay_samples.
+        var diff = ONE - env_sustain_level;
+        var dec = diff / env_decay_samples;
+        env_level = env_level - dec;
+        env_stage_samples = env_stage_samples + 1;
+        if (env_stage_samples >= env_decay_samples) {
+            env_level = env_sustain_level;
+            env_state = ENV_SUSTAIN;
+            env_stage_samples = 0;
+        }
+        return env_level;
+    }
+
+    if (env_state == ENV_SUSTAIN) {
+        env_level = env_sustain_level;
+        return env_level;
+    }
+
+    if (env_state == ENV_RELEASE) {
+        # ramp from release_start to 0 over release_samples.
+        var dec = env_release_start / env_release_samples;
+        env_level = env_level - dec;
+        env_stage_samples = env_stage_samples + 1;
+        if (env_stage_samples >= env_release_samples) {
+            env_level = 0;
+            env_state = ENV_IDLE;
+            env_stage_samples = 0;
+        }
+        return env_level;
+    }
+
+    return 0;
+}
+
+# === Voice = oscillator × envelope ===
+# WAVE_SINE/SAW/SQUARE selects the oscillator function.
+var WAVE_SINE   = 0;
+var WAVE_SAW    = 1;
+var WAVE_SQUARE = 2;
+
+var voice_waveform  = 0;
+var voice_phase     = 0;
+var voice_phase_inc = 0;
+
+fn voice_init(waveform, phase_inc) {
+    voice_waveform = waveform;
+    voice_phase = 0;
+    voice_phase_inc = phase_inc;
+}
+
+fn voice_oscillator(phase) {
+    if (voice_waveform == WAVE_SINE)   { return osc_sine(phase); }
+    if (voice_waveform == WAVE_SAW)    { return osc_saw(phase); }
+    if (voice_waveform == WAVE_SQUARE) { return osc_square(phase); }
+    return 0;
+}
+
+# Step one sample: oscillator × envelope.
+fn voice_step() {
+    var osc = voice_oscillator(voice_phase);
+    voice_phase = phase_advance(voice_phase, voice_phase_inc);
+    var env = env_step();
+    return q_mul(osc, env);
+}
+
+# === Tests ===
+
+fn test_phase_wrap() {
+    var p = phase_advance(60000, 10000);     # 70000 & 0xFFFF = 4464
+    assert_eq(p, 4464, "phase wraps past PHASE_MAX");
+    var q = phase_advance(0, 1000);
+    assert_eq(q, 1000, "phase advances within range");
+    return 0;
+}
+
+fn test_sine_lut() {
+    init_sine_table();
+    assert_eq(osc_sine(0), 0, "sin(0) = 0");
+    assert_eq(osc_sine(16384), 32767, "sin(π/2) = ONE");      # idx 4
+    assert_eq(osc_sine(32768), 0, "sin(π) = 0");              # idx 8
+    assert_eq(osc_sine(49152), 0 - 32767, "sin(3π/2) = -ONE");# idx 12
+    return 0;
+}
+
+fn test_saw() {
+    assert_eq(osc_saw(0), 0 - PHASE_HALF, "saw(0) = -ONE");
+    assert_eq(osc_saw(PHASE_HALF), 0, "saw(π) = 0");
+    assert_eq(osc_saw(65535), 32767, "saw(near max) = ONE-1");
+    return 0;
+}
+
+fn test_square() {
+    assert_eq(osc_square(0), 32767, "square first half = +ONE");
+    assert_eq(osc_square(PHASE_HALF), 0 - 32767, "square second half = -ONE");
+    assert_eq(osc_square(32767), 32767, "square just before half = +ONE");
+    assert_eq(osc_square(65535), 0 - 32767, "square at end = -ONE");
+    return 0;
+}
+
+fn test_env_attack() {
+    env_set_params(4, 4, 16384, 4);
+    env_reset();
+    env_gate_on();
+    env_step();          # 1
+    env_step();          # 2
+    env_step();          # 3
+    env_step();          # 4 — transitions to DECAY
+    assert_eq(env_state, ENV_DECAY, "attack → decay after attack_samples");
+    assert_eq(env_level, ONE, "level reaches ONE at end of attack");
+    return 0;
+}
+
+fn test_env_decay_to_sustain() {
+    env_set_params(4, 4, 16384, 4);
+    env_reset();
+    env_gate_on();
+    # Drive through attack (4 steps) + decay (4 steps).
+    var i = 0;
+    while (i < 8) {
+        env_step();
+        i = i + 1;
+    }
+    assert_eq(env_state, ENV_SUSTAIN, "decay → sustain");
+    assert_eq(env_level, 16384, "level = sustain_level after decay");
+    return 0;
+}
+
+fn test_env_sustain_holds() {
+    env_set_params(4, 4, 16384, 4);
+    env_reset();
+    env_gate_on();
+    var i = 0;
+    while (i < 8) {
+        env_step();
+        i = i + 1;
+    }
+    # 100 sustain steps — should hold.
+    var j = 0;
+    while (j < 100) {
+        env_step();
+        j = j + 1;
+    }
+    assert_eq(env_state, ENV_SUSTAIN, "sustain holds");
+    assert_eq(env_level, 16384, "level held at sustain_level");
+    return 0;
+}
+
+fn test_env_release_to_idle() {
+    env_set_params(4, 4, 16384, 4);
+    env_reset();
+    env_gate_on();
+    var i = 0;
+    while (i < 8) {                  # through attack + decay
+        env_step();
+        i = i + 1;
+    }
+    env_gate_off();                  # → RELEASE, captures level=16384
+    assert_eq(env_release_start, 16384, "release_start captured at gate_off");
+    var j = 0;
+    while (j < 4) {
+        env_step();
+        j = j + 1;
+    }
+    assert_eq(env_state, ENV_IDLE, "release → idle after release_samples");
+    assert_eq(env_level, 0, "level = 0 after release");
+    return 0;
+}
+
+fn test_env_gate_off_during_attack_no_click() {
+    # gate_off during ATTACK (level only partway up). release_start
+    # should capture the partial level, not jump to sustain_level.
+    env_set_params(8, 4, 16384, 4);
+    env_reset();
+    env_gate_on();
+    env_step();            # ATTACK step 1: level = ONE/8 = 4096
+    env_step();            # ATTACK step 2: level = 8192
+    env_gate_off();
+    assert_eq(env_release_start, 8192, "release captures partial-attack level");
+    return 0;
+}
+
+fn test_voice_silent_when_idle() {
+    init_sine_table();
+    voice_init(WAVE_SINE, 8192);
+    env_set_params(4, 4, 16384, 4);
+    env_reset();
+    var s = voice_step();
+    assert_eq(s, 0, "voice silent when env idle");
+    return 0;
+}
+
+fn test_voice_audible_when_gated_on() {
+    init_sine_table();
+    voice_init(WAVE_SINE, 8192);     # advances 1/8 cycle per sample
+    env_set_params(4, 4, 16384, 4);
+    env_reset();
+    env_gate_on();
+    # First sample: osc_sine(0)=0, env=0, then advances. Level grows.
+    var i = 0;
+    var any_nonzero = 0;
+    while (i < 16) {
+        var s = voice_step();
+        if (s != 0) { any_nonzero = 1; }
+        i = i + 1;
+    }
+    assert_eq(any_nonzero, 1, "voice produces non-zero output when gated");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("audio_synthesis");
+
+    test_phase_wrap();
+    test_sine_lut();
+    test_saw();
+    test_square();
+    test_env_attack();
+    test_env_decay_to_sustain();
+    test_env_sustain_holds();
+    test_env_release_to_idle();
+    test_env_gate_off_during_attack_no_click();
+    test_voice_silent_when_idle();
+    test_voice_audible_when_gated_on();
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

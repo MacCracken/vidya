@@ -1,0 +1,56 @@
+id = "audio_synthesis"
+title = "Audio Synthesis — Oscillators, Envelope, Voice"
+topic = "Audio"
+description = "Three primitives every subtractive synth needs. (1) Oscillator: a phase accumulator (counter wrapping mod 2π) feeding a waveform function — sine via small Q15 lookup table, saw as a linear phase ramp, square as the sign of phase. The accumulator is the entire 'frequency' mechanism: phase += 2π·f/sr per sample, wrap on overflow. (2) ADSR envelope: a 5-state machine (Idle → Attack → Decay → Sustain → Release → Idle) producing a 0..1 amplitude curve. gate_on triggers Attack; gate_off triggers Release from wherever the envelope was. Linear segments are the simplest and most CPU-cheap; exponential segments sound more natural but are not what this teaches. (3) Voice: oscillator × envelope, sample by sample. Polyphony is N voices played simultaneously and summed; this corpus example covers a single voice. Q15 fixed-point throughout: sample and amplitude in [-32767, 32767] with 32768 = 1.0; matches what audio hardware actually produces (16-bit PCM) and stays bit-exact across all 11 language ports without float-precision drift. The production reference for AGNOS is `naad` (f32, PolyBLEP-anti-aliased waveforms, MIDI voice manager); vidya's version is the portable educational version of the same algorithms."
+tags = ["audio", "synthesis", "oscillator", "phase-accumulator", "adsr", "envelope", "sine-lut", "saw", "square", "voice", "fixed-point", "q15"]
+related_topics = ["audio_dsp", "fixed_point_arithmetic", "state_machines", "framebuffer_rendering"]
+
+[[best_practices]]
+title = "Phase as an integer accumulator with implicit modulo via overflow"
+explanation = "A 16-bit phase counter (0..65535 representing 0..2π) advances by an integer increment per sample and wraps via bitwise AND with 0xFFFF. No floating-point modulo, no comparisons against 2π — just integer add and mask. This is what every embedded synth, NES sound chip, and DSP kernel does. The frequency-to-increment formula is `inc = (frequency * PHASE_MAX) / sample_rate`, computed once when the note starts."
+
+[[best_practices]]
+title = "Sine via small lookup table — 16-256 entries is plenty for synthesis"
+explanation = "A 16-entry sine LUT covers a full cycle with ~22.5° resolution. Indexed via the high bits of the phase counter, it produces a stepwise approximation that's audibly indistinguishable from true sine for most synthesis tasks (the harmonic distortion is at -50 dBFS or lower). For higher quality, interpolate linearly between adjacent entries using the low bits of the phase. CPU floats sin() are fine on a desktop but absurd on an MCU; the LUT is the universal answer."
+
+[[best_practices]]
+title = "ADSR as a 5-state machine — Idle, Attack, Decay, Sustain, Release"
+explanation = "Every analog synth from the 1970s onward used this exact topology because it maps cleanly to the keyboard: gate_on triggers Attack→Decay→Sustain; gate_off triggers Release→Idle. The state machine is the real artifact, not the segment shapes. Linear segments are 1 add per sample and sound 'plain'; exponential segments are 2 multiplies per sample and sound 'natural'. Pick linear for educational clarity (this corpus), exponential for production (naad)."
+
+[[best_practices]]
+title = "Voice = oscillator × envelope at the sample level"
+explanation = "A voice multiplies the oscillator output (the timbre) by the envelope output (the amplitude shape) every sample. Polyphony is N voices summed and possibly limited (peak-normalized or hard-clipped at the master). This separation — pitched signal × amplitude curve × N — is THE architecture of subtractive synthesis. Filters and effects insert between voice and master; modulation matrices route envelope outputs to filter cutoffs etc. But the core is just multiply."
+
+[[gotchas]]
+title = "Frequency-to-phase-increment integer overflow at high pitches"
+explanation = "If sample_rate=48000 and frequency=20000Hz, the per-sample phase advance is nearly half a cycle — fine if you compute `inc = (freq * PHASE_MAX) / sr` in i32 (1.31×10⁹ fits). But naive `freq * PHASE_MAX` for sample_rate=44100 and PHASE_MAX=2³² overflows i32. Use i64 intermediates for the multiplication, then narrow. This is the same gotcha as biquad's `Q15 * Q15 in i16` — operand promotion before multiply, narrow after."
+bad_example = "// i32 inc = (freq_hz * PHASE_MAX) / sample_rate;  // overflow at PHASE_MAX = 2^32 - 1"
+good_example = "// i32 inc = (i32)(((i64)freq_hz * (i64)PHASE_MAX) / (i64)sample_rate);  // i64 intermediate"
+
+[[gotchas]]
+title = "Naive saw and square produce audible aliasing — band-limiting needed for production"
+explanation = "A pure linear saw ramp generates ALL harmonics, including those above the Nyquist frequency (sr/2). Those harmonics fold back into audible range as alias frequencies — a saw at 4kHz on a 48kHz cluster has audible aliases at 7-8kHz that don't belong. The fix is band-limited synthesis: PolyBLEP (cheap polynomial correction at discontinuities), BLIT (band-limited impulse train + integration), or wavetable synthesis with per-octave tables. The corpus example uses naive waveforms for clarity; naad uses PolyBLEP for production."
+bad_example = "// saw[n] = (phase / PHASE_MAX) * 2.0 - 1.0;  // sounds buzzy at high pitches due to aliases"
+good_example = "// saw[n] = naive_saw - polyblep(phase, dt);  // PolyBLEP correction kills aliases"
+
+[[gotchas]]
+title = "Click on note-off because release starts from sustain_level, ignoring current_value"
+explanation = "If gate_off arrives during the Attack phase (key released before envelope reached 1.0), and the Release segment ramps from sustain_level downward, there's a sudden jump from current_value to sustain_level. Audible as a click. The fix: capture release_start_value = current_value at gate_off, and Release ramps from THAT, not from sustain_level. Naad's ADSR does this; many tutorials skip it and explain the click as 'natural'. It is not."
+bad_example = "// gate_off: state = Release; // Release segment uses sustain_level → jump if current_value < sustain"
+good_example = "// gate_off: release_start_value = current_value; state = Release; // ramps from where you actually were"
+
+[[gotchas]]
+title = "Voice never goes back to Idle because Release segment never quite reaches 0"
+explanation = "Linear release: current_value -= release_inc per sample. Due to integer truncation (Q15), the value bottoms out at some small positive number rather than exactly 0, and the state machine never transitions to Idle. The voice stays 'active', leaks CPU, and prevents reuse for the next note. Fix: explicit `if (current_value <= EPSILON) { current_value = 0; state = Idle; }` test, or count samples instead of comparing to 0. Both work."
+bad_example = "// while (current_value > 0) current_value -= dec;  // never reaches 0 with truncation"
+good_example = "// after dec subtraction: if (current_value <= 0 || stage_samples >= release_samples) { current_value = 0; state = Idle; }"
+
+[[performance_notes]]
+title = "Sine LUT: 1 array load + 1 mask per sample — ~3 cycles total on modern CPU"
+explanation = "Phase advance: 1 add + 1 AND. LUT lookup: 1 right-shift + 1 indexed load. Voice multiply: 1 multiply + 1 shift. Total: ~5 ops per sample per voice, no branches. At 48kHz mono, a single voice is 240K ops/sec — well under 0.1% of a modern CPU. Polyphony of 64 voices: 15M ops/sec, still <1%. Synth CPU is dominated by the FILTER (biquad) and EFFECTS (delay, reverb), not the oscillator + envelope."
+evidence = "JUCE benchmarks: oscillator + ADSR per voice ~10ns on M1 (one core, scalar). 64-voice synth at 48kHz uses ~3% CPU before filters. SuperCollider similar."
+
+[[performance_notes]]
+title = "Polyphony cost is linear, not quadratic — 64 voices is 64× one voice"
+explanation = "Each voice is independent: own oscillator state, own envelope state, own gate. Summing N voices is one add per voice per sample. There is no inter-voice coupling at the synthesis layer (effects can introduce coupling but those are downstream). For N voices the cost is exactly N×(per-voice cost) + N adds for the mix. Modern synths run 128-256 voices comfortably; the limit is usually filter CPU (one biquad per voice = N×5 multiplies) not oscillator/envelope."
+evidence = "Vital, Serum, u-he Diva: all run 128+ voices on a single CPU thread with linear scaling. Mix-down is a sum, not an N² operation."
