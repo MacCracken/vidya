@@ -1,0 +1,56 @@
+id = "audio_dsp"
+title = "Audio DSP — Filters and Levels"
+topic = "Audio"
+description = "Three building blocks every audio system rests on. (1) The biquad filter — a 2nd-order IIR with five coefficients (b0, b1, b2, a1, a2) and four state variables (x[n-1], x[n-2], y[n-1], y[n-2]). One biquad implements every common filter shape — lowpass, highpass, bandpass, notch, peaking EQ, shelving — by varying coefficients only; the topology is constant. Cascade biquads for higher orders. (2) FIR convolution — multiply each input sample by N kernel taps, sum, output. Linear-phase by construction (no phase distortion across frequency), unconditionally stable, but expensive: an N-tap FIR is N multiplies per output sample, vs 5 for a biquad. Use FIR for short, sharp impulse responses (reverb early reflections, brick-wall lowpass for sample-rate conversion); use biquads for everything else. (3) Level metering — peak (max absolute sample) and mean-absolute (average of |x|). Peak catches clipping; mean-absolute approximates loudness without the sqrt cost of true RMS. Both are O(N) over the analysis window. Real DAWs maintain both per-channel and update at ~30Hz. The whole topic uses Q15 fixed-point: samples and coefficients in [-32767, 32767], with 32768 representing 1.0. This matches what audio hardware actually produces (16-bit PCM) and avoids float-precision drift across language ports."
+tags = ["audio", "dsp", "biquad", "iir", "fir", "convolution", "lowpass", "highpass", "level-metering", "fixed-point", "q15"]
+related_topics = ["fixed_point_arithmetic", "audio_synthesis", "compression", "framebuffer_rendering"]
+
+[[best_practices]]
+title = "Use biquads for parametric EQ — not raw FIR"
+explanation = "A biquad is 5 multiplies per sample for any filter shape. The equivalent FIR for a sharp lowpass needs hundreds of taps — 50-100x more compute. The biquad's IIR feedback gives the sharpness for free. The cost: phase distortion (FIR is linear-phase, biquad is not) and conditional stability (poles must be inside the unit circle). For audio EQ where slight phase shift is inaudible, biquad wins overwhelmingly. Save FIR for cases where linear phase actually matters (mastering convolution reverb, sample-rate converters, audio measurement)."
+
+[[best_practices]]
+title = "Cascade biquads in series for higher-order filters — never write a single Nth-order direct form"
+explanation = "A direct-form 8th-order IIR has 17 coefficients with extreme sensitivity to coefficient quantization — round one bit and the filter goes unstable. Cascading four 2nd-order biquads gives the same response with 5 coefficients each, each pair of poles isolated, and far better numerical behavior. This is why every audio DSP library — Steinberg's, Apple AU, JUCE — implements only biquads and cascades them. The 'bigger filter design' is the cascade graph, not the coefficients."
+
+[[best_practices]]
+title = "Q15 fixed-point everywhere unless you specifically need floats"
+explanation = "Audio hardware produces 16-bit PCM. CPU floats are 32 or 64 bit. Converting hardware → float → DSP → float → hardware adds 1-2 conversion steps per sample with float-precision drift across implementations. Native Q15 fixed-point: sample is i16-equivalent stored in i32/i64 with headroom, multiply is `(a*b) >> 15`. Bit-exact across languages, fast on every CPU, and matches hardware. Float DSP is for the cases that genuinely need it (large dynamic range, complex math); start with Q15 and only escalate if you see precision problems."
+
+[[best_practices]]
+title = "Update level meters at ~30Hz, not per-sample — match the human visual frame rate"
+explanation = "A meter that updates 48000 times per second is computing 47970 updates per second nobody can see. Maintain a peak-hold + decay state across many samples, output an updated meter value at ~30Hz (every ~1600 samples at 48kHz). The peak-hold preserves the max from the current display interval; the decay smooths the visual response. This is what every DAW meter does — instant peaks would be visually jarring even if you could see them."
+
+[[gotchas]]
+title = "Biquad multiplication overflow — Q15 × Q15 in i16 storage wraps silently"
+explanation = "Q15 sample (max 32767) × Q15 coefficient (max 32767) = up to ~1e9, which doesn't fit in i32 even before the >> 15 shift. The correct path: cast both operands to i32 (or i64), multiply, shift, then narrow back to sample range. Skipping the cast gives bit-exact wrong audio: every loud peak wraps to noise. This is the single most common bug in homegrown fixed-point DSP."
+bad_example = "// i16 result = (sample * coef) >> 15;  // multiplication overflows i16 silently"
+good_example = "// i16 result = (i16)(((i32)sample * (i32)coef) >> 15);  // 32-bit intermediate, then narrow"
+
+[[gotchas]]
+title = "FIR kernel applied without zero-padding the head — clicks and pops at buffer boundaries"
+explanation = "A 32-tap FIR needs 31 samples of history before its first output is correct. Naive implementations apply the kernel from sample 0 with zeros in those 31 history slots — this produces transient artifacts (clicks) on every buffer that doesn't sit on a recently-cleared filter state. The fix: maintain a circular history buffer across calls; the filter is only 'cold' the very first time. DAW plugins that crackle when started/stopped almost always have this bug."
+bad_example = "// New buffer: history = [0; 31]; output[0] = sum(input[0..32] * kernel);  // click — assumes sample 0 was preceded by silence"
+good_example = "// Persistent ring buffer of last 31 input samples; kernel sees real signal across boundaries"
+
+[[gotchas]]
+title = "Peak meter that misses inter-sample peaks (ISP) — true peak can exceed sample peak by 3+ dB"
+explanation = "A waveform sampled at 48kHz can have its actual analog peak between two sample points — invisible to a sample-by-sample max. This is 'inter-sample peak'. Modern broadcast standards (EBU R128 + true peak) require oversampling 4x and measuring the reconstructed waveform's peak. A track that meters at -1dBFS sample-peak can produce +2dBFS true peak after the analog reconstruction filter on the listener's DAC, audibly clipping. Master with a true-peak meter, not a sample meter."
+bad_example = "// peak = max(abs(sample) for sample in buffer);  // misses analog peaks between samples"
+good_example = "// 4x-oversample first, then measure peak: peak_true = max(abs(s) for s in upsample_4x(buffer))"
+
+[[gotchas]]
+title = "RMS over a too-short window vs too-long — neither matches perceived loudness"
+explanation = "RMS over 10ms responds to every transient and twitches; RMS over 1s averages out the transients and reads conservative. Neither equals what a listener perceives. Modern loudness standards (EBU R128 LUFS, ITU BS.1770) use specific gating windows (400ms momentary, 3s short-term, full-program integrated) plus K-weighting (a perceptual frequency curve). A naive RMS meter will disagree with EBU LUFS by 3-10 dB on the same material. If the meter feeds a delivery spec, use the standard's exact algorithm — don't roll your own."
+bad_example = "// loudness = rms(last_10ms_of_samples);  // bounces wildly, doesn't match perception"
+good_example = "// Use a BS.1770 LUFS meter library — K-weight + 400ms momentary window + gating"
+
+[[performance_notes]]
+title = "Biquad: ~5 multiplies + 4 adds per sample — 240K ops/sec for stereo at 48kHz"
+explanation = "A biquad is the cheapest universal audio building block. Stereo at 48kHz means 96K samples/sec × 5 multiplies = 480K multiplies/sec for one biquad on both channels. A 4-band EQ (4 cascaded biquads per channel) is ~2M multiplies/sec — well under 1% of any modern CPU's throughput. The lesson: biquad CPU cost is essentially free at audio rates. Spend the engineering effort on getting the coefficients right, not on optimizing the inner loop."
+evidence = "JUCE library benchmarks: ~10M biquad samples/sec single-thread on M1 (one core, scalar). SIMD versions hit 40-80M sps. CPU is never the bottleneck for biquad EQ in modern audio software."
+
+[[performance_notes]]
+title = "FIR scales O(N) per sample — 100-tap FIR is 10M multiplies/sec stereo at 48kHz"
+explanation = "100-tap FIR × 96K samples/sec stereo = 9.6M multiplies. Still under 1% of a modern CPU but ~20x a biquad. For 1024-tap convolution reverb, you're at 100M+ multiplies/sec — measurable. The optimization: FFT-based convolution flips the cost from O(N²) to O(N log N) when N is large. Crossover point on modern CPUs is around 64 taps; below that, time-domain FIR is faster than FFT setup. Audio convolution reverb almost always uses partitioned FFT convolution for the long impulse response, time-domain for short early reflections."
+evidence = "Convolution reverb measurements: time-domain ~20M sps for 64-tap; FFT-based ~5M sps for 8192-tap (after partition overhead). FFT crosses over time-domain around 32-64 taps depending on cache behavior."

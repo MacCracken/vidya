@@ -1,0 +1,292 @@
+# Vidya — Audio DSP — Cyrius reference (runnable)
+#
+# Three building blocks, all in Q15 fixed-point:
+#
+#   1. Biquad filter — 2nd-order IIR with 5 coefs (b0,b1,b2,a1,a2)
+#                      and 4 state slots (x[n-1], x[n-2], y[n-1],
+#                      y[n-2]). One topology, every filter shape.
+#   2. FIR convolution — N-tap taps, multiply-and-accumulate.
+#                        Linear-phase, unconditionally stable.
+#   3. Level metering — peak (max |sample|) and mean-absolute
+#                       (average of |sample|).
+#
+# Q15 convention: ONE = 32768 represents 1.0; samples and coefs
+# in [-32767, 32767]. Multiply: (a * b) >> 15 (i64 storage gives
+# headroom; no overflow for the operand range we use).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var SCALE = 15;
+var ONE   = 32768;
+var SMAX  = 32767;
+var SMIN  = 0 - 32767;
+
+# Q15 multiplication with explicit sign handling — Cyrius's `>>`
+# is LOGICAL (field-note: the_logical_shift_trap), so we cannot
+# right-shift a negative product directly. Instead, work on the
+# absolute product, shift, then re-apply the sign.
+fn q_mul(a, b) {
+    var p = a * b;
+    if (p < 0) {
+        var pneg = 0 - p;
+        var r = pneg >> SCALE;
+        return 0 - r;
+    }
+    return p >> SCALE;
+}
+
+fn abs_i(x) {
+    if (x < 0) { return 0 - x; }
+    return x;
+}
+
+fn clip(s) {
+    if (s > SMAX) { return SMAX; }
+    if (s < SMIN) { return SMIN; }
+    return s;
+}
+
+# === Biquad (Direct Form I) ===
+
+var bq_b0 = 0;
+var bq_b1 = 0;
+var bq_b2 = 0;
+var bq_a1 = 0;
+var bq_a2 = 0;
+var bq_x1 = 0;
+var bq_x2 = 0;
+var bq_y1 = 0;
+var bq_y2 = 0;
+
+fn biquad_set(b0, b1, b2, a1, a2) {
+    bq_b0 = b0;
+    bq_b1 = b1;
+    bq_b2 = b2;
+    bq_a1 = a1;
+    bq_a2 = a2;
+    bq_x1 = 0;
+    bq_x2 = 0;
+    bq_y1 = 0;
+    bq_y2 = 0;
+}
+
+# biquad_step reads/writes globals directly; the arithmetic is
+# decomposed into named locals to avoid Cyrius's parser quirk on
+# stacked self-reassignments inside one function.
+fn biquad_step(x) {
+    var p0 = q_mul(bq_b0, x);
+    var p1 = q_mul(bq_b1, bq_x1);
+    var p2 = q_mul(bq_b2, bq_x2);
+    var p3 = q_mul(bq_a1, bq_y1);
+    var p4 = q_mul(bq_a2, bq_y2);
+    var s = p0 + p1;
+    s = s + p2;
+    s = s - p3;
+    s = s - p4;
+    bq_x2 = bq_x1;
+    bq_x1 = x;
+    bq_y2 = bq_y1;
+    bq_y1 = s;
+    return s;
+}
+
+# 1-pole lowpass with cutoff coefficient `a` in Q15:
+# y[n] = a*x[n] + (1-a)*y[n-1]
+# Direct-Form I biquad: b0=a, b1=b2=0, a1=a-ONE, a2=0
+# (Cyrius rejects arithmetic expressions in fn args; hoist first.)
+fn biquad_lowpass_1pole(a_q15) {
+    var a1 = a_q15 - ONE;
+    biquad_set(a_q15, 0, 0, a1, 0);
+}
+
+# === FIR convolution ===
+# Caller-supplied taps + history buffers (n_taps elements each).
+
+fn fir_step(taps, history, n_taps, x_new) {
+    # Shift history right (oldest out, x_new in at index 0).
+    var i = n_taps - 1;
+    while (i > 0) {
+        var prev = load64(history + (i - 1) * 8);
+        store64(history + i * 8, prev);
+        i = i - 1;
+    }
+    store64(history + 0, x_new);
+    # Multiply-accumulate over taps.
+    var acc = 0;
+    var j = 0;
+    while (j < n_taps) {
+        var k = load64(taps + j * 8);
+        var h = load64(history + j * 8);
+        var prod = q_mul(k, h);
+        acc = acc + prod;
+        j = j + 1;
+    }
+    return acc;
+}
+
+# === Level metering ===
+
+fn peak(buffer, n) {
+    var p = 0;
+    var i = 0;
+    while (i < n) {
+        var s = load64(buffer + i * 8);
+        var a = abs_i(s);
+        if (a > p) { p = a; }
+        i = i + 1;
+    }
+    return p;
+}
+
+fn mean_absolute(buffer, n) {
+    var sum = 0;
+    var i = 0;
+    while (i < n) {
+        var s = load64(buffer + i * 8);
+        sum = sum + abs_i(s);
+        i = i + 1;
+    }
+    return sum / n;
+}
+
+# === Test scratch ===
+var fir_taps[64];
+var fir_history[64];
+var sample_buf[256];
+
+# === Tests ===
+
+fn test_q_mul() {
+    assert_eq(q_mul(ONE, 100), 100, "ONE * 100 = 100");
+    assert_eq(q_mul(ONE / 2, ONE / 2), ONE / 4, "0.5 * 0.5 = 0.25");
+    var r = q_mul(ONE / 2, SMAX);
+    assert(r >= 16383, "0.5 * SMAX >= 16383");
+    assert(r <= 16384, "0.5 * SMAX <= 16384");
+    return 0;
+}
+
+fn test_clip() {
+    assert_eq(clip(50000), SMAX, "clip(50000) = SMAX");
+    assert_eq(clip(0 - 50000), SMIN, "clip(-50000) = SMIN");
+    assert_eq(clip(1234), 1234, "clip(1234) unchanged");
+    return 0;
+}
+
+fn test_biquad_lowpass_passes_dc() {
+    biquad_lowpass_1pole(3277);          # a ≈ 0.1
+    var i = 0;
+    while (i < 200) {
+        biquad_step(30000);
+        i = i + 1;
+    }
+    var y = bq_y1;
+    assert(y >= 29900, "DC settled near 30000 (lower)");
+    assert(y <= 30100, "DC settled near 30000 (upper)");
+    return 0;
+}
+
+fn test_biquad_lowpass_attenuates_nyquist() {
+    biquad_lowpass_1pole(3277);
+    var i = 0;
+    while (i < 200) {
+        var x = 20000;
+        if ((i & 1) == 1) { x = 0 - 20000; }
+        biquad_step(x);
+        i = i + 1;
+    }
+    var amp = abs_i(bq_y1);
+    assert(amp < 2000, "Nyquist heavily attenuated");
+    return 0;
+}
+
+fn test_fir_identity_taps() {
+    store64(&fir_taps + 0, ONE);
+    store64(&fir_taps + 8, 0);
+    store64(&fir_taps + 16, 0);
+    var i = 0;
+    while (i < 3) {
+        store64(&fir_history + i * 8, 0);
+        i = i + 1;
+    }
+    var y0 = fir_step(&fir_taps, &fir_history, 3, 1234);
+    var y1 = fir_step(&fir_taps, &fir_history, 3, 5678);
+    assert_eq(y0, 1234, "identity taps passes 1234");
+    assert_eq(y1, 5678, "identity taps passes 5678");
+    return 0;
+}
+
+fn test_fir_moving_average() {
+    var third = ONE / 3;
+    store64(&fir_taps + 0, third);
+    store64(&fir_taps + 8, third);
+    store64(&fir_taps + 16, third);
+    var i = 0;
+    while (i < 3) {
+        store64(&fir_history + i * 8, 0);
+        i = i + 1;
+    }
+    fir_step(&fir_taps, &fir_history, 3, 9000);
+    fir_step(&fir_taps, &fir_history, 3, 9000);
+    var y = fir_step(&fir_taps, &fir_history, 3, 9000);
+    assert(y >= 8990, "moving avg converges (lower)");
+    assert(y <= 9010, "moving avg converges (upper)");
+    return 0;
+}
+
+fn test_peak_finds_max_abs() {
+    store64(&sample_buf + 0,  100);
+    store64(&sample_buf + 8,  0 - 5000);
+    store64(&sample_buf + 16, 200);
+    store64(&sample_buf + 24, 3000);
+    store64(&sample_buf + 32, 0 - 1500);
+    var p = peak(&sample_buf, 5);
+    assert_eq(p, 5000, "peak = 5000");
+    return 0;
+}
+
+fn test_mean_absolute_constant() {
+    var i = 0;
+    while (i < 8) {
+        store64(&sample_buf + i * 8, 4000);
+        i = i + 1;
+    }
+    var m = mean_absolute(&sample_buf, 8);
+    assert_eq(m, 4000, "mean-abs constant = constant");
+    return 0;
+}
+
+fn test_mean_absolute_alternating() {
+    var i = 0;
+    while (i < 8) {
+        var s = 4000;
+        if ((i & 1) == 1) { s = 0 - 4000; }
+        store64(&sample_buf + i * 8, s);
+        i = i + 1;
+    }
+    var m = mean_absolute(&sample_buf, 8);
+    assert_eq(m, 4000, "mean-abs alternating ±4000 = 4000");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("audio_dsp");
+
+    test_q_mul();
+    test_clip();
+    test_biquad_lowpass_passes_dc();
+    test_biquad_lowpass_attenuates_nyquist();
+    test_fir_identity_taps();
+    test_fir_moving_average();
+    test_peak_finds_max_abs();
+    test_mean_absolute_constant();
+    test_mean_absolute_alternating();
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

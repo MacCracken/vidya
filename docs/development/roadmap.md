@@ -2,11 +2,11 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-03
 >
-> **Version**: 2.5.2 | **Cyrius**: 5.8.34
-> **Topics**: 69 (69 fully covered) — **P0 → P2 complete** 🎉
+> **Version**: 2.6.0 | **Cyrius**: 5.8.34
+> **Topics**: 70 (70 fully covered) — **P0 → P2 complete; P3 1/5** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 759 source files; concept files: 69
-> **Validator**: 759/759 green
+> **Examples**: 770 source files; concept files: 70
+> **Validator**: 770/770 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -39,15 +39,17 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.5.0 | 2026-05-03 | **P2 kickoff — Distributed Systems (minor bump)** — 1 new topic × 11 langs: `transactions_and_acid` (OCC store with explicit read-set/write-set tracking; A/C/I/D demonstrated under tests in HLLs; asm ports cover the single-tx OCC core). 11 new source files; validator 726/726 → **737/737**. P2 is 1/3 topics in flight; `consensus` + `distributed_systems` slated for 2.5.1 / 2.5.2. |
 | 2.5.1 | 2026-05-03 | **P2 batch 2 — `consensus` (Raft)** — 1 new topic × 11 langs: 3-node Raft cluster, election state machine + log replication + commit-on-majority + log up-to-date check + Figure-8 rule (only commit current-term entries directly). HLLs do full Raft (10 tests / 41 asserts); asm ports do the focused election subset (6 tests / 12 asserts). 11 new source files; validator 737/737 → **748/748**. P2 is 2/3; `distributed_systems` slated for 2.5.2. |
 | 2.5.2 | 2026-05-03 | **P2 complete — `distributed_systems`** — 1 new topic × 11 langs: vector clocks (with the four-outcome compare — LESS / EQUAL / GREATER / **CONCURRENT**), Dynamo-style quorum reads/writes (R+W>N intersection), partition handling. HLLs do all three (12 tests / 17 asserts); asm ports focus on quorum-replication (5 tests / 11 asserts); OpenQASM uses entanglement-as-replication. 11 new source files; validator 748/748 → **759/759**. **🎉 P2 Distributed Systems complete — 3/3 topics × 11 langs landed.** |
+| 2.6.0 | 2026-05-03 | **P3 kickoff — Audio + AI/ML (minor bump)** — 1 new topic × 11 langs: `audio_dsp` (Q15 fixed-point biquad lowpass + FIR convolution + peak/mean-absolute level metering). HLLs do all three (9 tests / 14 asserts); asm ports focus on biquad + level metering (8 tests / 10 asserts); OpenQASM uses interference-as-filtering. 11 new source files; validator 759/759 → **770/770**. P3 is 1/5; `audio_synthesis`, `neural_networks`, `inference`, `embeddings` slated for 2.6.1–2.6.4. Two cyrius parser issues filed during port: `kernel` reserved-word + arithmetic-in-fn-args rejection (see `cyrius/docs/development/issues/2026-05-03-*`). |
 
 ---
 
 ## Current State
 
-### 69 topics fully covered (11/11 languages) — P0 → P2 complete 🎉
+### 70 topics fully covered (11/11 languages) — P0 → P2 complete; P3 1/5 🎉
 
 The original 36 P0 topics, plus 24 P0C additions (v2.3.2–v2.3.10),
-plus 6 P1 additions (v2.4.0–v2.4.2), plus 3 P2 (v2.5.0–v2.5.2):
+plus 6 P1 additions (v2.4.0–v2.4.2), plus 3 P2 (v2.5.0–v2.5.2),
+plus 1 P3 (v2.6.0):
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
@@ -66,16 +68,19 @@ plus 6 P1 additions (v2.4.0–v2.4.2), plus 3 P2 (v2.5.0–v2.5.2):
 - v2.4.2 P1 (2): ipc, serialization
 - v2.5.0 P2 (1): transactions_and_acid
 - v2.5.1 P2 (1): consensus
-- **v2.5.2 P2 (1): distributed_systems**
+- v2.5.2 P2 (1): distributed_systems
+- **v2.6.0 P3 (1): audio_dsp**
 
-`vidya stats` reports `Topics: 69, Complete: 69 (all 11 languages),
-Examples: 759`; validator 759/759 green.
+`vidya stats` reports `Topics: 70, Complete: 70 (all 11 languages),
+Examples: 770`; validator 770/770 green.
 
-### 0 topics partial; P0 → P2 fully done
+### 0 topics partial; P3 1/5 in flight
 
-P0 → P0C → P1 → P2 arc complete. Next minor (2.6.x) opens
-**P3 audio + AI/ML** (audio_dsp, audio_synthesis, neural_networks,
-inference, embeddings — 5 topics × 11 langs ≈ 55 new files).
+P0 → P2 complete. P3 (Audio + AI/ML) is in flight: 1 of 5 topics
+shipped (`audio_dsp`). Remaining: `audio_synthesis` (2.6.1),
+`neural_networks` (2.6.2), `inference` (2.6.3), `embeddings`
+(2.6.4). After 2.6.4, P3 closes and the next minor (2.7.x)
+opens **P4 build systems**.
 
 ---
 
@@ -242,6 +247,18 @@ Shipped across 3 patch releases (2.5.0/1/2):
 
 3 topics × 11 langs = 33 new examples + 3 concept files. **All 3 shipped.**
 
+## In-flight minor (2.6.x) — Audio + AI/ML (P3)
+
+| Topic | Status | Notes |
+|---|---|---|
+| **audio_dsp** | ✅ shipped 2.6.0 | Q15 fixed-point biquad lowpass + FIR convolution + peak/mean-absolute |
+| **audio_synthesis** | planned 2.6.1 | Oscillators (sine/saw/square), envelope (ADSR), simple voice |
+| **neural_networks** | planned 2.6.2 | Forward pass: dense layer + ReLU + softmax (Q15 or float — TBD) |
+| **inference** | planned 2.6.3 | Tokenization + greedy decoding + temperature sampling |
+| **embeddings** | planned 2.6.4 | Cosine similarity + nearest-neighbour search over a small fixed corpus |
+
+5 topics × 11 langs total; 1 done, 4 to go.
+
 ## Future minor versions
 
 Each minor is one thematic cluster, sized similarly to P1 (3–6 topics).
@@ -250,7 +267,7 @@ need vidya support next.
 
 | Minor | Theme | Topics | Notes |
 |---|---|---|---|
-| 2.6.x | **P3 audio + AI/ML** | audio_dsp, audio_synthesis, neural_networks, inference, embeddings | The AI/ML topics align with hoosh's RAG needs. Opens after P2 closes (2.5.2). |
+| 2.6.x | **P3 audio + AI/ML** (in flight 1/5) | audio_dsp ✅, audio_synthesis, neural_networks, inference, embeddings | The AI/ML topics align with hoosh's RAG needs. |
 | 2.7.x | **P4 build systems** | build_systems, package_resolution, reproducible_builds | Aligns with cyrius/zugot tooling. |
 | 2.8.x | **P5 functional / type theory** | functional_patterns, effect_systems, dependent_types | More research-flavored; lowest priority. |
 | 2.9.x | **P6 Cyrius-specific** | cyrius_basics, cyrius_bootstrap, cyrius_agents, cyrius_capabilities, cyrius_ipc | Programming-concept slots that document Cyrius patterns the way other topics document general patterns. Distinct from `content/cyrius/` (the language reference + field notes). |
@@ -329,4 +346,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-03 (v2.5.2) — **🎉 P2 Distributed Systems complete: distributed_systems 11/11; 69/69 at 11/11; 759/759 validator; next: 2.6.x opens P3 audio + AI/ML***
+*Last Updated: 2026-05-03 (v2.6.0) — **P3 kickoff: audio_dsp 11/11; 70/70 at 11/11; 770/770 validator; next: audio_synthesis (2.6.1)***

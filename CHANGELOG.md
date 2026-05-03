@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] — 2026-05-03
+
+**P3 kickoff — Audio + AI/ML (minor bump)** — `audio_dsp`
+shipped at 11/11 languages. Q15 fixed-point throughout (matches
+hardware PCM, bit-exact across language ports).
+
+Three building blocks:
+- **Biquad filter** — Direct Form I IIR with 5 coefs (b0,b1,b2,a1,a2)
+  + 4 state slots; one topology, every filter shape. 1-pole lowpass
+  helper demonstrated under tests (passes DC, attenuates Nyquist).
+- **FIR convolution** — N-tap kernel with shifting history; identity
+  + moving-average kernels under test.
+- **Level metering** — peak (max abs) and mean-absolute over a
+  sample buffer.
+
+11 new source files; validator 759/759 → **770/770**. P3 is 1/5
+topics in flight; `audio_synthesis`, `neural_networks`,
+`inference`, `embeddings` slated for 2.6.1–2.6.4.
+
+### Added
+
+- `content/audio_dsp/` — Q15 fixed-point DSP across 11 languages:
+  cyrius (9 tests / 17 asserts), HLLs (9 tests / 14 asserts each
+  — collapse the q_mul-bounds-check pair into a single range),
+  asm pair (8 tests / 10 asserts focused on biquad lowpass + peak
+  + mean-absolute; FIR omitted — variable-size kernels too verbose
+  for asm), OpenQASM (interference-as-filtering: ry rotation as
+  filter coefficient, Hadamard interference as 2-tap moving-avg,
+  Toffoli OR as peak-detection).
+
 ## [2.5.2] — 2026-05-03
 
 **P2 complete — `distributed_systems` shipped at 11/11 languages.**
