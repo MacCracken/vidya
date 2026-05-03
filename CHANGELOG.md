@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.1] — 2026-05-03
+
+**P2 batch 2 — `consensus` (Raft) shipped at 11/11 languages.**
+3-node Raft cluster modelled as in-memory state machines.
+Demonstrates the five Raft safety properties under tests:
+
+- **Term monotonicity** — terms only increase; stale RPCs rejected
+- **Election safety** — vote uniqueness (one vote per node per term)
+- **Log matching** — replicate copies leader's log entry-by-entry
+  with term-mismatch truncation
+- **Leader completeness** — log up-to-date check on RequestVote
+  denies candidates with shorter or stale logs
+- **State machine safety** — `advance_commit` only commits entries
+  from the leader's CURRENT term; prior-term entries are committed
+  indirectly when a current-term entry above them commits
+  (the Figure-8 rule)
+
+11 new source files; validator 737/737 → **748/748**. P2 is 2/3
+topics in flight; `distributed_systems` slated for 2.5.2.
+
+### Added
+
+- `content/consensus/` — 3-node Raft across 11 languages: cyrius
+  (10 tests, 42 asserts), HLLs (10 tests, 41 asserts each — Cyrius's
+  extra assert is a redundant log-match split that the HLLs do via
+  tuple equality), asm pair (6 tests, 12 asserts focused on the
+  election state machine — no log replication; see cyrius.cyr for
+  that), OpenQASM (vote-as-measurement: voter qubits measured for
+  uniqueness, Toffoli for majority detection, gate-depth for term
+  monotonicity).
+
 ## [2.5.0] — 2026-05-03
 
 **P2 kickoff — Distributed Systems (minor bump)** —

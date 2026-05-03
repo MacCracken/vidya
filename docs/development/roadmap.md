@@ -2,11 +2,11 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-03
 >
-> **Version**: 2.5.0 | **Cyrius**: 5.8.34
-> **Topics**: 67 (67 fully covered) — **P0 → P1 complete; P2 1/3** 🎉
+> **Version**: 2.5.1 | **Cyrius**: 5.8.34
+> **Topics**: 68 (68 fully covered) — **P0 → P1 complete; P2 2/3** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 737 source files; concept files: 67
-> **Validator**: 737/737 green
+> **Examples**: 748 source files; concept files: 68
+> **Validator**: 748/748 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -37,15 +37,16 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.4.3 | 2026-05-02 | **Cyrius reference closeout + cyrius pin 5.8.18 → 5.8.19** — both `content/cyrius/` surfaces reorganized in one release. Retired the 4144-line `language.cyml` (73 entries) into `language/` subfolder organized by surface area: core / features / stdlib_modules / tooling / agents (52 entries across 6 files). Recast the chronological per-version `field_notes/compiler/` (8 files, 60 entries) as topical (gotchas / methodology / patterns) plus `retros/` subfolder for chronological narrative (9 files, 46 entries). End state: humans + agents get current-state docs organized by lookup workflow, not historical accretion. Loader unaffected (`content/cyrius/` is skipped). Topics/examples/validator counts unchanged (66/66/726). |
 | 2.4.4 | 2026-05-03 | **Cyrius pin bump 5.8.19 → 5.8.34** — patch-level alignment, no source changes (CLI surface identical, build clean, 41/41 tests, 726/726 validator). Field-notes verification range extended. |
 | 2.5.0 | 2026-05-03 | **P2 kickoff — Distributed Systems (minor bump)** — 1 new topic × 11 langs: `transactions_and_acid` (OCC store with explicit read-set/write-set tracking; A/C/I/D demonstrated under tests in HLLs; asm ports cover the single-tx OCC core). 11 new source files; validator 726/726 → **737/737**. P2 is 1/3 topics in flight; `consensus` + `distributed_systems` slated for 2.5.1 / 2.5.2. |
+| 2.5.1 | 2026-05-03 | **P2 batch 2 — `consensus` (Raft)** — 1 new topic × 11 langs: 3-node Raft cluster, election state machine + log replication + commit-on-majority + log up-to-date check + Figure-8 rule (only commit current-term entries directly). HLLs do full Raft (10 tests / 41 asserts); asm ports do the focused election subset (6 tests / 12 asserts). 11 new source files; validator 737/737 → **748/748**. P2 is 2/3; `distributed_systems` slated for 2.5.2. |
 
 ---
 
 ## Current State
 
-### 67 topics fully covered (11/11 languages) — P0 → P1 complete; P2 1/3 🎉
+### 68 topics fully covered (11/11 languages) — P0 → P1 complete; P2 2/3 🎉
 
 The original 36 P0 topics, plus 24 P0C additions (v2.3.2–v2.3.10),
-plus 6 P1 additions (v2.4.0–v2.4.2), plus 1 P2 (v2.5.0):
+plus 6 P1 additions (v2.4.0–v2.4.2), plus 2 P2 (v2.5.0–v2.5.1):
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
@@ -62,17 +63,18 @@ plus 6 P1 additions (v2.4.0–v2.4.2), plus 1 P2 (v2.5.0):
 - v2.4.0 P1 (2): networking_fundamentals, http_and_web_protocols
 - v2.4.1 P1 (2): tls_and_encryption, dns
 - v2.4.2 P1 (2): ipc, serialization
-- **v2.5.0 P2 (1): transactions_and_acid**
+- v2.5.0 P2 (1): transactions_and_acid
+- **v2.5.1 P2 (1): consensus**
 
-`vidya stats` reports `Topics: 67, Complete: 67 (all 11 languages),
-Examples: 737`; validator 737/737 green.
+`vidya stats` reports `Topics: 68, Complete: 68 (all 11 languages),
+Examples: 748`; validator 748/748 green.
 
-### 0 topics partial; P2 1/3 in flight
+### 0 topics partial; P2 2/3 in flight
 
-P0 → P0C → P1 complete. P2 (Distributed Systems) is in flight: 1 of
-3 topics shipped (`transactions_and_acid`). Remaining: `consensus`
-(2.5.1) + `distributed_systems` (2.5.2). After 2.5.2, P2 closes and
-the next minor (2.6.x) opens **P3 audio + AI/ML**.
+P0 → P0C → P1 complete. P2 (Distributed Systems) is 2/3: 
+`transactions_and_acid` + `consensus` shipped. Remaining:
+`distributed_systems` (2.5.2). After 2.5.2, P2 closes and the next
+minor (2.6.x) opens **P3 audio + AI/ML**.
 
 ---
 
@@ -232,10 +234,10 @@ shipped.** Plus cyrius pin progression: 5.8.14 (entered 2.4.x) →
 | Topic | Status | Notes |
 |---|---|---|
 | **transactions_and_acid** | ✅ shipped 2.5.0 | OCC store with read-set version snapshots; A/C/I/D under test |
-| **consensus** | planned 2.5.1 | Raft-style log replication or Paxos — TBD on which fits the corpus better |
+| **consensus** | ✅ shipped 2.5.1 | 3-node Raft: election + log replication + Figure-8 commit rule |
 | **distributed_systems** | planned 2.5.2 | Vector clocks / quorum reads / failure modes |
 
-3 topics × 11 langs total; 1 done, 2 to go.
+3 topics × 11 langs total; 2 done, 1 to go.
 
 ## Future minor versions
 
@@ -324,4 +326,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-03 (v2.5.0) — **P2 kickoff: transactions_and_acid 11/11; 67/67 at 11/11; 737/737 validator; next: consensus (2.5.1)***
+*Last Updated: 2026-05-03 (v2.5.1) — **P2 batch 2: consensus (Raft) 11/11; 68/68 at 11/11; 748/748 validator; next: distributed_systems (2.5.2) closes P2***

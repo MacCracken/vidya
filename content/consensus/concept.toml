@@ -1,0 +1,56 @@
+id = "consensus"
+title = "Consensus and Raft"
+topic = "DistributedSystems"
+description = "Consensus is the problem of getting a cluster of nodes to agree on a sequence of values despite crashes, partitions, and message loss. Raft is the canonical leader-based protocol: nodes elect a leader by voting (one vote per node per term, majority wins), the leader appends client commands to its log and replicates them to followers via AppendEntries RPCs, and an entry is committed once it has been replicated to a majority. Five safety properties hold: term monotonicity (terms never decrease), election safety (at most one leader per term), log matching (if two logs agree at index N, they agree on all prior entries), leader completeness (a committed entry is present in every future leader's log), and state machine safety (committed entries are never overwritten or reordered). Raft sacrifices throughput for understandability — Paxos and its derivatives can do more with weaker leadership, but Raft is the protocol you actually implement."
+tags = ["raft", "consensus", "distributed", "leader-election", "log-replication", "quorum", "majority", "term", "vote", "state-machine"]
+related_topics = ["distributed_systems", "transactions_and_acid", "write_ahead_logging", "concurrent_file_access"]
+
+[[best_practices]]
+title = "Increment term BEFORE voting for self — both atomically"
+explanation = "When a candidate starts an election, it must bump its currentTerm AND record voted_for=self in a single durable step. If the term is bumped first and the node crashes before recording the vote, restart leaves the term advanced but the vote slot empty — a different candidate could now claim the vote in the same term, violating election safety. Real Raft persists (term, voted_for) together via fsync. The order matters: bump then vote, but commit them atomically."
+
+[[best_practices]]
+title = "Reject any RPC with stale term, but accept and update term from any RPC with higher term"
+explanation = "Raft's term is the cluster's logical clock. Every RPC carries the sender's term. If sender's term < receiver's: reject the RPC, return receiver's higher term. If sender's term > receiver's: receiver updates its own term, steps down to follower, then processes the RPC. This bidirectional rule is what guarantees the term monotonicity property — every node converges to the highest term it has seen, regardless of who first sent it. Skipping the second half (updating from higher) freezes the cluster at the smallest term."
+
+[[best_practices]]
+title = "Commit only entries from the current term — not prior-term entries via majority alone"
+explanation = "The Raft paper's most subtle rule: a leader cannot commit an entry from a previous term just because it has been replicated to a majority. It must replicate at least one entry from its OWN term to a majority first. Without this, a previously-committed entry can be overwritten if a node with a stale log wins a later election. The fix: a no-op entry is appended on leader transition, replicated, and committed — that drags forward all prior-term entries. The entry-from-current-term check is what makes Figure 8 of the paper not a counter-example to leader completeness."
+
+[[best_practices]]
+title = "Use the log up-to-date check to reject candidates with shorter or stale logs"
+explanation = "When a follower receives RequestVote, it grants the vote only if (a) its term lock allows (haven't voted for someone else this term), AND (b) the candidate's log is at least as up-to-date as the follower's. Up-to-date means: candidate's last_log_term > follower's, OR (terms equal AND candidate's last_log_index >= follower's). This is what prevents a node missing committed entries from winning an election — it cannot, because the up-to-date check fails."
+
+[[gotchas]]
+title = "Two leaders in the same term — election safety violated by missing vote-uniqueness"
+explanation = "If a node votes for candidate A in term T, then crashes before persisting that vote, it could on restart vote for candidate B in the same term T — both A and B see a majority and become leader. Two leaders accepting client writes in the same term means two divergent logs that the cluster cannot reconcile. The fix is durable persistence of (currentTerm, voted_for) via fsync: a vote is not granted until it's on disk."
+bad_example = "// Vote in memory only: send_vote_response(grant=true); voted_for = candidate; // crash here, vote forgotten, can vote again on restart in same term"
+good_example = "// Vote durably first: voted_for = candidate; fsync(); send_vote_response(grant=true); // restart preserves the vote, can't double-vote"
+
+[[gotchas]]
+title = "Log inconsistency — leader replicates without prev_log check"
+explanation = "AppendEntries carries prev_log_index and prev_log_term: the entry IMMEDIATELY before the new ones. The follower must verify it has prev_log_term at prev_log_index — if not, it rejects, and the leader decrements its nextIndex pointer for that follower and retries with an earlier prev. Skipping this check lets the leader silently overwrite divergent entries on followers, which then disagree with the committed log — a classic correctness violation in homegrown 'simplified Raft' implementations."
+bad_example = "// follower.log.append(entries); // no prev check, just trust the leader"
+good_example = "// if follower.log[prev_idx].term != prev_term { return REJECT } else { follower.log[prev_idx+1..] = entries }"
+
+[[gotchas]]
+title = "Commit index advances past entries the leader cannot have replicated"
+explanation = "It's tempting to advance commit_index every time you see a majority of match_indices reach some value N. But you must ALSO check that log[N].term == currentTerm — a previous-term entry that happens to be replicated to a majority is NOT yet committed. This is the Figure 8 scenario: a stale leader briefly comes back and replicates its old entries; the new leader sees them and would over-commit if it didn't check the term."
+bad_example = "// for each N in commit..last { if (count(match >= N) >= quorum) commit = N; } // Wrong: ignores the term-check"
+good_example = "// for each N in commit..last { if (count(match >= N) >= quorum && log[N].term == currentTerm) commit = N; }"
+
+[[gotchas]]
+title = "RequestVote granted to a candidate with a log that's missing a committed entry"
+explanation = "If you only check 'haven't voted yet this term' and skip the up-to-date log comparison, a follower can vote for a candidate with a shorter log. If that candidate wins, the cluster has a leader that doesn't have committed entries — leader completeness violated, the next AppendEntries from that leader truncates the missing entries from the followers, and committed data is lost. The up-to-date check is what makes the protocol safe."
+bad_example = "// if voted_for == NONE { vote_yes(); voted_for = candidate; } // misses log freshness check"
+good_example = "// if voted_for == NONE && candidate_log_at_least_as_up_to_date(...) { vote_yes(); voted_for = candidate; }"
+
+[[performance_notes]]
+title = "Raft commit latency = 1 RTT to majority + 1 fsync — typically 1-10ms"
+explanation = "After client sends a write, leader appends locally + fsyncs (~1ms on SSD) + sends AppendEntries to all followers in parallel + waits for majority to ack their fsync. With a 3-node cluster and 1ms one-way latency, the path is: leader fsync (1ms) || follower fsync (1ms) + RTT (2ms) = ~3ms total. With 5 nodes the math is the same — only the third-fastest follower's ack matters for majority. Etcd's published p99 is 5-10ms in well-provisioned clusters."
+evidence = "etcd benchmarks: ~3-5ms p50 commit latency on local cluster, 10-20ms across availability zones. CockroachDB Raft commit: ~5ms steady state. Both fsync+RTT-bound, not CPU-bound."
+
+[[performance_notes]]
+title = "Batching AppendEntries amortizes the RTT — 100x throughput for batched commits"
+explanation = "Sending AppendEntries per-write requires one RTT per commit — caps throughput at ~200 writes/sec on a 5ms RTT. Real Raft implementations batch: the leader collects pending entries while waiting for the previous AppendEntries to ack, then sends a batch of N entries in one RPC. Throughput becomes (writes/RTT) × N — easily 10K writes/sec at batch=50. Latency for an individual write rises slightly (waits for batch), but throughput dominates."
+evidence = "etcd: 30K-50K writes/sec sustained with batching, vs ~200/sec without. The Raft thesis (Ongaro 2014, §10.2) reports similar gains: batched 50× throughput across cluster sizes."
