@@ -1,0 +1,323 @@
+# Vidya — Distributed Systems Foundations — Cyrius reference (runnable)
+#
+# Three foundations, in order:
+#
+#   1. Vector clocks for causal ordering
+#      - vc_init: zero a 3-element clock
+#      - vc_tick(vc, node): own component += 1 (local event)
+#      - vc_merge(into, from): element-wise max (on receive)
+#      - vc_compare(a, b): returns LESS / EQUAL / GREATER / CONCURRENT
+#        (Note the FOURTH outcome — concurrent — that integer compare
+#        does not have. Forgetting it is the canonical gotcha.)
+#
+#   2. Quorum reads/writes (Dynamo-style, N=3, W=R=2)
+#      - qwrite(value): write to all reachable replicas; succeed if
+#                       reachable count >= W
+#      - qread():       read from all reachable replicas; return
+#                       value with highest seq if reachable >= R
+#      - R + W > N (4 > 3) means any read quorum intersects any
+#        write quorum — the basis of strong consistency.
+#
+#   3. Partition handling
+#      - qpartition(node) / qheal(node): mark a node unreachable / up
+#      - Demonstrates: write across partition succeeds if majority
+#        side reachable, fails if minority. After heal, the
+#        intersection guarantee continues to hold.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var N_NODES = 3;
+var W = 2;                         # write quorum
+var R = 2;                         # read quorum (R + W > N → strong)
+
+# Vector-clock comparison results (positive ints to avoid -1 literal)
+var VC_LESS       = 1;
+var VC_EQUAL      = 2;
+var VC_GREATER    = 3;
+var VC_CONCURRENT = 4;
+
+# === Vector clocks ===
+# Caller-supplied 24-byte buffers (3 × i64).
+
+fn vc_init(vc) {
+    var i = 0;
+    while (i < N_NODES) {
+        store64(vc + i * 8, 0);
+        i = i + 1;
+    }
+}
+
+fn vc_tick(vc, node) {
+    var v = load64(vc + node * 8);
+    store64(vc + node * 8, v + 1);
+}
+
+# Merge from-clock into into-clock: element-wise max.
+fn vc_merge(into, from) {
+    var i = 0;
+    while (i < N_NODES) {
+        var a = load64(into + i * 8);
+        var b = load64(from + i * 8);
+        if (b > a) { store64(into + i * 8, b); }
+        i = i + 1;
+    }
+}
+
+fn vc_compare(a, b) {
+    var any_a_lt = 0;
+    var any_a_gt = 0;
+    var i = 0;
+    while (i < N_NODES) {
+        var av = load64(a + i * 8);
+        var bv = load64(b + i * 8);
+        if (av < bv) { any_a_lt = 1; }
+        if (av > bv) { any_a_gt = 1; }
+        i = i + 1;
+    }
+    if (any_a_lt == 0) {
+        if (any_a_gt == 0) { return VC_EQUAL; }
+        return VC_GREATER;
+    }
+    if (any_a_gt == 0) { return VC_LESS; }
+    return VC_CONCURRENT;
+}
+
+# === Quorum cluster (Dynamo-style) ===
+
+var accounts[24];                  # 3 × i64 stored values
+var write_seq[24];                 # 3 × i64 per-replica seq
+var node_alive[24];                # 3 × i64 (1 = up, 0 = partitioned)
+var global_seq = 0;                # next seq to assign on qwrite
+
+fn qcluster_init() {
+    var i = 0;
+    while (i < N_NODES) {
+        store64(&accounts + i * 8, 0);
+        store64(&write_seq + i * 8, 0);
+        store64(&node_alive + i * 8, 1);
+        i = i + 1;
+    }
+    global_seq = 0;
+}
+
+fn qpartition(node) { store64(&node_alive + node * 8, 0); }
+fn qheal(node)      { store64(&node_alive + node * 8, 1); }
+
+fn alive_count() {
+    var c = 0;
+    var i = 0;
+    while (i < N_NODES) {
+        c = c + load64(&node_alive + i * 8);
+        i = i + 1;
+    }
+    return c;
+}
+
+# qwrite: succeeds if alive_count >= W; writes to ALL reachable
+# replicas with a fresh seq. Returns 1 on success, 0 on quorum-fail.
+fn qwrite(value) {
+    if (alive_count() < W) { return 0; }
+    global_seq = global_seq + 1;
+    var i = 0;
+    while (i < N_NODES) {
+        if (load64(&node_alive + i * 8) == 1) {
+            store64(&accounts + i * 8, value);
+            store64(&write_seq + i * 8, global_seq);
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# qread: succeeds if alive_count >= R; returns value with highest
+# seq among reachable replicas. Returns 0 - 1 on quorum-fail.
+fn qread() {
+    if (alive_count() < R) { return 0 - 1; }
+    var best_seq = 0;
+    var best_value = 0;
+    var i = 0;
+    while (i < N_NODES) {
+        if (load64(&node_alive + i * 8) == 1) {
+            var s = load64(&write_seq + i * 8);
+            if (s > best_seq) {
+                best_seq = s;
+                best_value = load64(&accounts + i * 8);
+            }
+        }
+        i = i + 1;
+    }
+    return best_value;
+}
+
+# Direct accessors for tests (non-quorum reads of a specific replica).
+fn replica_value(node) { return load64(&accounts + node * 8); }
+fn replica_seq(node)   { return load64(&write_seq + node * 8); }
+
+# === Test scratch buffers (3-element vector clocks) ===
+var vc_a[24];
+var vc_b[24];
+var vc_c[24];
+var vc_d[24];
+
+# === Tests ===
+
+fn test_vc_init() {
+    vc_init(&vc_a);
+    assert_eq(load64(&vc_a + 0), 0, "vc[0] = 0");
+    assert_eq(load64(&vc_a + 8), 0, "vc[1] = 0");
+    assert_eq(load64(&vc_a + 16), 0, "vc[2] = 0");
+    return 0;
+}
+
+fn test_vc_tick() {
+    vc_init(&vc_a);
+    vc_tick(&vc_a, 1);
+    vc_tick(&vc_a, 1);
+    vc_tick(&vc_a, 2);
+    assert_eq(load64(&vc_a + 0), 0, "vc[0] unchanged");
+    assert_eq(load64(&vc_a + 8), 2, "vc[1] = 2 after 2 ticks");
+    assert_eq(load64(&vc_a + 16), 1, "vc[2] = 1");
+    return 0;
+}
+
+fn test_vc_merge() {
+    vc_init(&vc_a);
+    vc_init(&vc_b);
+    vc_tick(&vc_a, 0);                # a = [1,0,0]
+    vc_tick(&vc_a, 0);                # a = [2,0,0]
+    vc_tick(&vc_b, 1);                # b = [0,1,0]
+    vc_tick(&vc_b, 2);                # b = [0,1,1]
+    vc_merge(&vc_a, &vc_b);           # a should become [2,1,1]
+    assert_eq(load64(&vc_a + 0), 2, "merge: vc[0] = max(2,0) = 2");
+    assert_eq(load64(&vc_a + 8), 1, "merge: vc[1] = max(0,1) = 1");
+    assert_eq(load64(&vc_a + 16), 1, "merge: vc[2] = max(0,1) = 1");
+    return 0;
+}
+
+fn test_vc_compare_less() {
+    vc_init(&vc_a);                   # [0,0,0]
+    vc_init(&vc_b);
+    vc_tick(&vc_b, 0);                # [1,0,0]
+    var r = vc_compare(&vc_a, &vc_b);
+    assert_eq(r, VC_LESS, "[0,0,0] < [1,0,0]");
+    return 0;
+}
+
+fn test_vc_compare_greater() {
+    vc_init(&vc_a);
+    vc_init(&vc_b);
+    vc_tick(&vc_a, 0);
+    vc_tick(&vc_a, 0);                # [2,0,0]
+    vc_tick(&vc_b, 0);                # [1,0,0]
+    var r = vc_compare(&vc_a, &vc_b);
+    assert_eq(r, VC_GREATER, "[2,0,0] > [1,0,0]");
+    return 0;
+}
+
+fn test_vc_compare_equal() {
+    vc_init(&vc_a);
+    vc_init(&vc_b);
+    vc_tick(&vc_a, 1);
+    vc_tick(&vc_b, 1);
+    var r = vc_compare(&vc_a, &vc_b);
+    assert_eq(r, VC_EQUAL, "[0,1,0] == [0,1,0]");
+    return 0;
+}
+
+fn test_vc_compare_concurrent() {
+    vc_init(&vc_a);
+    vc_init(&vc_b);
+    vc_tick(&vc_a, 0);                # a = [1,0,0]
+    vc_tick(&vc_b, 1);                # b = [0,1,0]
+    # Each has a strictly-greater component → concurrent.
+    var r = vc_compare(&vc_a, &vc_b);
+    assert_eq(r, VC_CONCURRENT, "[1,0,0] || [0,1,0] (concurrent)");
+    # Concurrent is symmetric.
+    var r2 = vc_compare(&vc_b, &vc_a);
+    assert_eq(r2, VC_CONCURRENT, "concurrent symmetric");
+    return 0;
+}
+
+fn test_quorum_write_succeeds_full_cluster() {
+    qcluster_init();
+    var ok = qwrite(100);
+    assert_eq(ok, 1, "qwrite ok with 3 alive (≥ W=2)");
+    assert_eq(replica_value(0), 100, "replica 0 has value");
+    assert_eq(replica_value(1), 100, "replica 1 has value");
+    assert_eq(replica_value(2), 100, "replica 2 has value");
+    return 0;
+}
+
+fn test_quorum_write_succeeds_with_one_partitioned() {
+    qcluster_init();
+    qpartition(2);                    # alive = {0, 1}, count = 2 = W
+    var ok = qwrite(200);
+    assert_eq(ok, 1, "qwrite ok with 2 alive");
+    assert_eq(replica_value(0), 200, "replica 0 wrote");
+    assert_eq(replica_value(1), 200, "replica 1 wrote");
+    assert_eq(replica_value(2), 0, "replica 2 (partitioned) untouched");
+    return 0;
+}
+
+fn test_quorum_write_fails_with_two_partitioned() {
+    qcluster_init();
+    qpartition(1);
+    qpartition(2);                    # alive = {0}, count = 1 < W
+    var ok = qwrite(300);
+    assert_eq(ok, 0, "qwrite fails with only 1 alive (< W=2)");
+    assert_eq(replica_value(0), 0, "no replica wrote");
+    return 0;
+}
+
+fn test_intersection_guarantees_latest_read() {
+    qcluster_init();
+    # Phase 1: partition node 2, write to {0, 1}.
+    qpartition(2);
+    qwrite(500);
+    qheal(2);                         # node 2 still has stale (seq=0)
+    # Phase 2: partition node 0, leaving {1, 2}. R=2 quorum is met.
+    qpartition(0);
+    var v = qread();
+    # By R+W > N intersection: any 2 reachable replicas include at
+    # least one that participated in the last write quorum {0, 1}.
+    # Here {1, 2} ∩ {0, 1} = {1}. Replica 1 has seq=1, value=500;
+    # replica 2 has seq=0, value=0. qread picks max-seq = 500.
+    assert_eq(v, 500, "intersection: read sees latest committed write");
+    return 0;
+}
+
+fn test_quorum_read_fails_when_below_R() {
+    qcluster_init();
+    qwrite(700);
+    qpartition(0);
+    qpartition(1);                    # alive = {2}, count = 1 < R
+    var v = qread();
+    assert_eq(v, 0 - 1, "qread returns sentinel when alive < R");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("distributed_systems");
+
+    test_vc_init();
+    test_vc_tick();
+    test_vc_merge();
+    test_vc_compare_less();
+    test_vc_compare_greater();
+    test_vc_compare_equal();
+    test_vc_compare_concurrent();
+    test_quorum_write_succeeds_full_cluster();
+    test_quorum_write_succeeds_with_one_partitioned();
+    test_quorum_write_fails_with_two_partitioned();
+    test_intersection_guarantees_latest_read();
+    test_quorum_read_fails_when_below_R();
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

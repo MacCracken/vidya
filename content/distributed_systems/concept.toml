@@ -1,0 +1,56 @@
+id = "distributed_systems"
+title = "Distributed Systems Foundations"
+topic = "DistributedSystems"
+description = "Three foundational patterns every distributed system rests on. (1) Vector clocks: per-node logical counters compared element-wise to detect causal order — A happens-before B (every component A[i] ≤ B[i] with at least one strict), B happens-before A (same in reverse), equal, or concurrent (each clock has a strictly-greater component). Wall-clock timestamps cannot do this; only vector clocks (or HLCs) capture causality across unsynchronized clocks. (2) Quorum reads and writes (Dynamo-style): N replicas, write to W of them and read from R; R + W > N guarantees at least one read replica overlaps the last write. Strong consistency falls out of the intersection. (3) Partition handling: when a network split makes some replicas unreachable, the cluster degrades — writes succeed if a write-quorum is still reachable, fail otherwise. Heal the partition, and the side that didn't see writes catches up via read-repair or anti-entropy. Skip vector clocks and you cannot tell concurrent updates from sequential ones; skip quorum intersection and you serve stale reads after a healed partition; skip partition awareness and your cluster either becomes unavailable too aggressively (over-cautious) or accepts conflicting writes on both sides (split-brain)."
+tags = ["distributed", "vector-clock", "quorum", "dynamo", "partition", "split-brain", "causal-order", "happens-before", "read-repair", "cap-theorem"]
+related_topics = ["consensus", "transactions_and_acid", "concurrent_file_access", "write_ahead_logging"]
+
+[[best_practices]]
+title = "Use vector clocks (or HLCs) — not wall-clock timestamps — for causal order"
+explanation = "Wall clocks drift, jump on NTP sync, and are not monotonic across nodes. A wall-clock timestamp says nothing about causal order: event A with timestamp 100 and event B with timestamp 99 might still have A happens-before B if A's node's clock was just behind. Vector clocks track causality directly: each node's component increments on local events, merges (element-wise max) on receive. Hybrid logical clocks (HLCs) combine both: physical clock floor + logical counter, giving causality + bounded skew from real time. Pick HLC when you need both; pick vector clocks when causality is all that matters."
+
+[[best_practices]]
+title = "Pick R + W > N for strong consistency, R + W ≤ N for low-latency eventual consistency"
+explanation = "The R + W > N inequality is the entire point of quorum-replicated stores. With N=3 replicas, R=2 writes + W=2 reads guarantees that any read quorum intersects the latest write quorum (4 > 3, by pigeonhole). Lower R or W: faster, less consistent. Cassandra defaults R=W=1 for max throughput (eventually consistent); Riak defaults R=W=N/2+1 for strong consistency. The choice is per-operation, not per-cluster — read-your-writes can use R=W=N/2+1 even on an otherwise-eventual store."
+
+[[best_practices]]
+title = "Always include the version (clock) in writes; never just the value"
+explanation = "When two clients write concurrently to the same key, the database must distinguish 'the second write supersedes the first' from 'these are concurrent and need merging'. A wall-clock or sequence number alone cannot answer this; it always picks one. Vector clocks (one per write) let the database detect concurrent writes and surface them to the application — Riak returns siblings, Dynamo returns siblings, modern CRDTs auto-merge. Without the clock, you silently lose data on every concurrent-write race."
+
+[[best_practices]]
+title = "On partition heal, run read-repair or anti-entropy — don't trust quiet replicas"
+explanation = "After a network partition, the side that received writes diverges from the side that didn't. Healing the partition restores connectivity, but the data is still divergent. Two recovery patterns: read-repair (every read compares replicas, repairs the stale ones inline) or anti-entropy (background process diffs replicas via Merkle trees, repairs in bulk). Skipping both means stale data persists indefinitely on the formerly-isolated nodes — a slow-burning correctness bug."
+
+[[gotchas]]
+title = "Last-writer-wins by wall-clock timestamp — silent data loss on clock skew"
+explanation = "If node A's clock is 100ms ahead of node B's, every write from B 'loses' to a write from A even when B's write happened later in real time. The data simply disappears with no error. The fix: use vector clocks to detect concurrent writes (then either pick deterministically or surface the conflict), or use HLCs to bound the timestamp drift. Pure wall-clock LWW is one of the most common silent-bug sources in homegrown distributed key-value stores."
+bad_example = "// db.put(key, value, time.Now()) // node B's clock 100ms behind, B's write always loses to A's"
+good_example = "// db.put(key, value, vclock.tick()) // vector clock detects concurrency; merge or pick deterministically"
+
+[[gotchas]]
+title = "Quorum write claims success but commits to fewer than W after partition"
+explanation = "If the quorum-write logic checks 'can I reach W replicas?' BEFORE sending, then sends and waits, a partition that drops one of those W mid-flight leaves the write committed on fewer than W. The next read may not see it. The fix: the write must verify W successful acks BEFORE returning success. Some implementations relax this to 'sloppy quorum' — use any reachable replicas, hand off to the original W when they recover — at the cost of stale reads in the interim."
+bad_example = "// if reachable_count() >= W { send_to_all(); return SUCCESS } // network drops a node mid-send"
+good_example = "// acks = send_and_wait(W); if acks >= W { return SUCCESS } else { return FAIL }"
+
+[[gotchas]]
+title = "Split-brain: both sides of a partition accept writes, no consensus on the truth after heal"
+explanation = "Without a leader or quorum check, both sides of a network partition keep accepting writes — each side believes the other has failed. When the partition heals, both sides have divergent committed state and no rule for which wins. Fix: require a quorum (majority) for every accepted write; the minority side rejects writes (CAP's 'consistency over availability' choice). Or use CRDTs (state-based) so divergent writes can be deterministically merged after heal."
+bad_example = "// Both partition halves accept writes, neither knows the other has been writing too"
+good_example = "// Quorum write requires N/2+1 replicas; minority side returns 'partition error', client retries when healed"
+
+[[gotchas]]
+title = "Vector clock comparison forgets that 'concurrent' is a fourth outcome"
+explanation = "Naive `compare()` returns -1 / 0 / 1 by analogy with integer comparison — but vector clocks have FOUR outcomes: less, equal, greater, AND concurrent. Concurrent means each clock has a strictly-greater component than the other; neither happened-before the other. Treating concurrent as 'equal' silently merges divergent writes; treating it as 'arbitrary order' picks one and loses the other. Always handle concurrent explicitly: surface as a conflict for application-level merge."
+bad_example = "// fn compare(a, b) -> i32 { if a < b -1 else if a > b 1 else 0 } // concurrent treated as equal — wrong"
+good_example = "// fn compare(a, b) -> Order { Less | Equal | Greater | Concurrent } // four outcomes, callers handle each"
+
+[[performance_notes]]
+title = "Vector clock size grows with cluster — O(N) per write; HLCs are O(1)"
+explanation = "A vector clock for an N-node cluster is N integers. Every write carries the full clock; every read parses it. For a 100-node cluster with 8-byte components, each write carries 800 bytes of clock metadata — non-trivial overhead for small values. HLCs (hybrid logical clocks) compress this to a single 64-bit integer (48 bits physical time + 16 bits logical counter), trading exact concurrency detection for bounded-skew causality. Production systems past ~50 nodes almost always use HLCs."
+evidence = "Dynamo paper (2007): vector clocks were a 'pragmatic' choice for ~10s of nodes. CockroachDB (~100s of nodes) explicitly uses HLCs. Spanner uses TrueTime (real synchronized clocks via GPS+atomic). Each generation of distributed DBs has moved to a more compact causality scheme as cluster sizes grew."
+
+[[performance_notes]]
+title = "Read-repair adds 1-2ms per read; anti-entropy is bulk and amortizes"
+explanation = "Read-repair compares the R replicas' versions inline on every read, sending repair writes to stale replicas. Adds ~1-2ms p50 per read, but keeps replicas tightly converged. Anti-entropy walks the keyspace periodically (Merkle-tree diff between replicas) — zero per-read cost, but stale replicas stay stale until the next walk (Cassandra default: every 7 days). Production systems usually run BOTH: read-repair for hot keys, anti-entropy for cold keys. The interaction tunes the staleness/cost trade-off."
+evidence = "Cassandra docs: read-repair adds ~10% to p99 read latency, reduces inconsistency window from minutes to milliseconds. Anti-entropy via repair: hours to days for full sweep on TB-scale clusters; CPU-bound on Merkle-tree comparison."

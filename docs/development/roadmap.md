@@ -2,11 +2,11 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-03
 >
-> **Version**: 2.5.1 | **Cyrius**: 5.8.34
-> **Topics**: 68 (68 fully covered) — **P0 → P1 complete; P2 2/3** 🎉
+> **Version**: 2.5.2 | **Cyrius**: 5.8.34
+> **Topics**: 69 (69 fully covered) — **P0 → P2 complete** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 748 source files; concept files: 68
-> **Validator**: 748/748 green
+> **Examples**: 759 source files; concept files: 69
+> **Validator**: 759/759 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -38,15 +38,16 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.4.4 | 2026-05-03 | **Cyrius pin bump 5.8.19 → 5.8.34** — patch-level alignment, no source changes (CLI surface identical, build clean, 41/41 tests, 726/726 validator). Field-notes verification range extended. |
 | 2.5.0 | 2026-05-03 | **P2 kickoff — Distributed Systems (minor bump)** — 1 new topic × 11 langs: `transactions_and_acid` (OCC store with explicit read-set/write-set tracking; A/C/I/D demonstrated under tests in HLLs; asm ports cover the single-tx OCC core). 11 new source files; validator 726/726 → **737/737**. P2 is 1/3 topics in flight; `consensus` + `distributed_systems` slated for 2.5.1 / 2.5.2. |
 | 2.5.1 | 2026-05-03 | **P2 batch 2 — `consensus` (Raft)** — 1 new topic × 11 langs: 3-node Raft cluster, election state machine + log replication + commit-on-majority + log up-to-date check + Figure-8 rule (only commit current-term entries directly). HLLs do full Raft (10 tests / 41 asserts); asm ports do the focused election subset (6 tests / 12 asserts). 11 new source files; validator 737/737 → **748/748**. P2 is 2/3; `distributed_systems` slated for 2.5.2. |
+| 2.5.2 | 2026-05-03 | **P2 complete — `distributed_systems`** — 1 new topic × 11 langs: vector clocks (with the four-outcome compare — LESS / EQUAL / GREATER / **CONCURRENT**), Dynamo-style quorum reads/writes (R+W>N intersection), partition handling. HLLs do all three (12 tests / 17 asserts); asm ports focus on quorum-replication (5 tests / 11 asserts); OpenQASM uses entanglement-as-replication. 11 new source files; validator 748/748 → **759/759**. **🎉 P2 Distributed Systems complete — 3/3 topics × 11 langs landed.** |
 
 ---
 
 ## Current State
 
-### 68 topics fully covered (11/11 languages) — P0 → P1 complete; P2 2/3 🎉
+### 69 topics fully covered (11/11 languages) — P0 → P2 complete 🎉
 
 The original 36 P0 topics, plus 24 P0C additions (v2.3.2–v2.3.10),
-plus 6 P1 additions (v2.4.0–v2.4.2), plus 2 P2 (v2.5.0–v2.5.1):
+plus 6 P1 additions (v2.4.0–v2.4.2), plus 3 P2 (v2.5.0–v2.5.2):
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
@@ -64,17 +65,17 @@ plus 6 P1 additions (v2.4.0–v2.4.2), plus 2 P2 (v2.5.0–v2.5.1):
 - v2.4.1 P1 (2): tls_and_encryption, dns
 - v2.4.2 P1 (2): ipc, serialization
 - v2.5.0 P2 (1): transactions_and_acid
-- **v2.5.1 P2 (1): consensus**
+- v2.5.1 P2 (1): consensus
+- **v2.5.2 P2 (1): distributed_systems**
 
-`vidya stats` reports `Topics: 68, Complete: 68 (all 11 languages),
-Examples: 748`; validator 748/748 green.
+`vidya stats` reports `Topics: 69, Complete: 69 (all 11 languages),
+Examples: 759`; validator 759/759 green.
 
-### 0 topics partial; P2 2/3 in flight
+### 0 topics partial; P0 → P2 fully done
 
-P0 → P0C → P1 complete. P2 (Distributed Systems) is 2/3: 
-`transactions_and_acid` + `consensus` shipped. Remaining:
-`distributed_systems` (2.5.2). After 2.5.2, P2 closes and the next
-minor (2.6.x) opens **P3 audio + AI/ML**.
+P0 → P0C → P1 → P2 arc complete. Next minor (2.6.x) opens
+**P3 audio + AI/ML** (audio_dsp, audio_synthesis, neural_networks,
+inference, embeddings — 5 topics × 11 langs ≈ 55 new files).
 
 ---
 
@@ -229,15 +230,17 @@ shipped.** Plus cyrius pin progression: 5.8.14 (entered 2.4.x) →
 
 ---
 
-## In-flight minor (2.5.x) — Distributed Systems (P2)
+## Completed minor (2.5.x) — Distributed Systems (P2) ✅
+
+Shipped across 3 patch releases (2.5.0/1/2):
 
 | Topic | Status | Notes |
 |---|---|---|
 | **transactions_and_acid** | ✅ shipped 2.5.0 | OCC store with read-set version snapshots; A/C/I/D under test |
 | **consensus** | ✅ shipped 2.5.1 | 3-node Raft: election + log replication + Figure-8 commit rule |
-| **distributed_systems** | planned 2.5.2 | Vector clocks / quorum reads / failure modes |
+| **distributed_systems** | ✅ shipped 2.5.2 | Vector clocks (4-outcome compare) + Dynamo quorum (R+W>N) + partition handling |
 
-3 topics × 11 langs total; 2 done, 1 to go.
+3 topics × 11 langs = 33 new examples + 3 concept files. **All 3 shipped.**
 
 ## Future minor versions
 
@@ -326,4 +329,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-03 (v2.5.1) — **P2 batch 2: consensus (Raft) 11/11; 68/68 at 11/11; 748/748 validator; next: distributed_systems (2.5.2) closes P2***
+*Last Updated: 2026-05-03 (v2.5.2) — **🎉 P2 Distributed Systems complete: distributed_systems 11/11; 69/69 at 11/11; 759/759 validator; next: 2.6.x opens P3 audio + AI/ML***

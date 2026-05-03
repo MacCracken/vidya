@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.2] — 2026-05-03
+
+**P2 complete — `distributed_systems` shipped at 11/11 languages.**
+Closes the Distributed Systems minor (3 topics × 11 langs over
+2.5.0–2.5.2).
+
+The topic covers three foundational patterns not subsumed by
+`transactions_and_acid` or `consensus`:
+
+- **Vector clocks** — per-node logical counters with element-wise
+  compare returning LESS / EQUAL / GREATER / **CONCURRENT** (the
+  fourth outcome that integer compare doesn't have)
+- **Quorum reads/writes** — Dynamo-style N=3, W=R=2, where R+W>N
+  intersection guarantees every read quorum overlaps the latest
+  write quorum
+- **Partition handling** — partition / heal a node, demonstrate
+  write-quorum failures on the minority side, and intersection-
+  based stale-data avoidance after heal
+
+11 new source files; validator 748/748 → **759/759**. P2 is
+**3/3 done**; next minor (2.6.x) opens **P3 audio + AI/ML**.
+
+### Added
+
+- `content/distributed_systems/` — three foundations across 11
+  languages: cyrius (12 tests, 26 asserts), HLLs (12 tests, 17
+  asserts each — HLLs collapse repetitive vector-clock comparisons
+  into single equality assertions), asm pair (5 tests, 11 asserts
+  focused on the quorum-replication core; vector clocks live in
+  cyrius.cyr — element-wise compare too verbose for asm),
+  OpenQASM (entanglement-as-replication: CNOT fan-out for write
+  quorum, measurement of read quorum demonstrates the intersection
+  guarantee).
+
 ## [2.5.1] — 2026-05-03
 
 **P2 batch 2 — `consensus` (Raft) shipped at 11/11 languages.**
