@@ -1,0 +1,316 @@
+# Vidya — LLM Inference (Decoding) — Cyrius reference (runnable)
+#
+# Three primitives, all integer arithmetic:
+#
+#   1. Greedy decoding: argmax over next-token logits
+#   2. Top-k filter:    keep only the K highest logits, others → 0
+#   3. Autoregressive loop: starting token + bigram table →
+#                           generated sequence; terminates on EOS
+#                           or when max_length reached
+#
+# Skipping temperature / softmax / random sampling — those need
+# either exp() or a portable PRNG. Both belong in concept.toml as
+# best practices and gotchas; the runnable code stays integer-only
+# so all 11 ports (including asm + shell) produce bit-identical
+# output.
+#
+# Vocabulary (8 tokens):
+#   0 = UNK   (unknown / out-of-vocabulary)
+#   1 = EOS   (end-of-sequence — terminates decode loop)
+#   2 = "hello"
+#   3 = "world"
+#   4 = "foo"
+#   5 = "bar"
+#   6 = "the"
+#   7 = "end"
+#
+# Bigram next-token logits table: bigram[prev][next] = i64.
+# Hand-designed so greedy decode from "hello" produces:
+#   hello → world → the → end → <EOS>
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var VOCAB_SIZE = 8;
+var TOK_UNK = 0;
+var TOK_EOS = 1;
+
+# === Bigram table: 8 prev × 8 next = 64 i64 cells ===
+var bigram[512];     # 64 × 8 bytes
+
+fn init_bigram_table() {
+    # Zero everything first.
+    var i = 0;
+    while (i < 64) {
+        store64(&bigram + i * 8, 0);
+        i = i + 1;
+    }
+    # After UNK (0): no preference (all zero, argmax → 0).
+    # After EOS (1): irrelevant (loop should already have stopped).
+    # After "hello" (2): predict "world" (3).
+    store64(&bigram + (2 * VOCAB_SIZE + 3) * 8, 1000);
+    store64(&bigram + (2 * VOCAB_SIZE + 4) * 8, 100);
+    # After "world" (3): predict "the" (6).
+    store64(&bigram + (3 * VOCAB_SIZE + 6) * 8, 800);
+    store64(&bigram + (3 * VOCAB_SIZE + 5) * 8, 200);
+    # After "foo" (4): predict "bar" (5).
+    store64(&bigram + (4 * VOCAB_SIZE + 5) * 8, 700);
+    # After "bar" (5): predict EOS (1).
+    store64(&bigram + (5 * VOCAB_SIZE + 1) * 8, 600);
+    # After "the" (6): predict "end" (7).
+    store64(&bigram + (6 * VOCAB_SIZE + 7) * 8, 900);
+    store64(&bigram + (6 * VOCAB_SIZE + 3) * 8, 100);
+    # After "end" (7): predict EOS (1).
+    store64(&bigram + (7 * VOCAB_SIZE + 1) * 8, 950);
+}
+
+# === Greedy decoding: argmax over logits ===
+# First-found wins on ties (matches numpy / torch convention).
+fn argmax_logits(logits, n_vocab) {
+    var best_idx = 0;
+    var best_val = load64(logits);
+    var i = 1;
+    while (i < n_vocab) {
+        var v = load64(logits + i * 8);
+        if (v > best_val) {
+            best_val = v;
+            best_idx = i;
+        }
+        i = i + 1;
+    }
+    return best_idx;
+}
+
+# === Top-k filter: zero out everything below the k-th-highest logit ===
+# In-place modification of logits buffer. Naive O(N*K) implementation
+# (loop K times, find max, mark it as "kept", set to a sentinel). For
+# educational corpus example; production uses a min-heap for O(N log K).
+fn topk_filter(logits, n_vocab, k) {
+    # We need to remember which indices to keep — track in a separate
+    # marks buffer. For simplicity, scratch-zero a marks[] of size
+    # n_vocab, then loop k times finding+marking the max.
+    var marks[64];        # vocab cap = 8 fits, this allows up to 8.
+    var i = 0;
+    while (i < n_vocab) {
+        store64(&marks + i * 8, 0);
+        i = i + 1;
+    }
+
+    # Find top-k by repeated argmax-on-unmarked.
+    var picked = 0;
+    while (picked < k) {
+        var best_idx = 0 - 1;
+        var best_val = 0;
+        var first = 1;
+        var j = 0;
+        while (j < n_vocab) {
+            if (load64(&marks + j * 8) == 0) {
+                var v = load64(logits + j * 8);
+                if (first == 1) {
+                    best_idx = j;
+                    best_val = v;
+                    first = 0;
+                } else {
+                    if (v > best_val) {
+                        best_val = v;
+                        best_idx = j;
+                    }
+                }
+            }
+            j = j + 1;
+        }
+        if (best_idx < 0) { return picked; }
+        store64(&marks + best_idx * 8, 1);
+        picked = picked + 1;
+    }
+
+    # Zero out unmarked logits (keep only top-k).
+    var m = 0;
+    while (m < n_vocab) {
+        if (load64(&marks + m * 8) == 0) {
+            store64(logits + m * 8, 0);
+        }
+        m = m + 1;
+    }
+    return picked;
+}
+
+# === Bigram lookup: copy logits row for prev_token ===
+fn bigram_logits(prev_token, dest, n_vocab) {
+    var i = 0;
+    while (i < n_vocab) {
+        var v = load64(&bigram + (prev_token * n_vocab + i) * 8);
+        store64(dest + i * 8, v);
+        i = i + 1;
+    }
+}
+
+# === Autoregressive decode loop ===
+# Starting from `start_token`, generate next tokens via bigram +
+# argmax until EOS is produced OR max_length is reached.
+# Writes generated sequence to `output` buffer; returns count.
+# The starting token is NOT included in the output.
+fn decode_sequence(start_token, output, max_length) {
+    var logits_buf[64];     # 8 i64s
+    var current = start_token;
+    var count = 0;
+    while (count < max_length) {
+        bigram_logits(current, &logits_buf, VOCAB_SIZE);
+        var next_tok = argmax_logits(&logits_buf, VOCAB_SIZE);
+        store64(output + count * 8, next_tok);
+        count = count + 1;
+        if (next_tok == TOK_EOS) { return count; }
+        current = next_tok;
+    }
+    return count;
+}
+
+# === Test scratch buffers ===
+var test_logits[64];
+var output_buf[128];      # up to 16 tokens
+
+# === Tests ===
+
+fn test_argmax_picks_max() {
+    store64(&test_logits + 0,  100);
+    store64(&test_logits + 8,  500);
+    store64(&test_logits + 16, 200);
+    store64(&test_logits + 24, 300);
+    var idx = argmax_logits(&test_logits, 4);
+    assert_eq(idx, 1, "argmax picks index 1 (value 500)");
+    return 0;
+}
+
+fn test_argmax_first_found_on_ties() {
+    store64(&test_logits + 0,  100);
+    store64(&test_logits + 8,  500);
+    store64(&test_logits + 16, 500);
+    var idx = argmax_logits(&test_logits, 3);
+    assert_eq(idx, 1, "first-found wins on ties");
+    return 0;
+}
+
+fn test_argmax_negative_logits() {
+    store64(&test_logits + 0,  0 - 100);
+    store64(&test_logits + 8,  0 - 50);
+    store64(&test_logits + 16, 0 - 200);
+    var idx = argmax_logits(&test_logits, 3);
+    assert_eq(idx, 1, "argmax over negatives picks max (least negative)");
+    return 0;
+}
+
+fn test_topk_keeps_top3() {
+    # Logits: [10, 50, 30, 20, 40, 5, 60, 25]
+    store64(&test_logits + 0,  10);
+    store64(&test_logits + 8,  50);
+    store64(&test_logits + 16, 30);
+    store64(&test_logits + 24, 20);
+    store64(&test_logits + 32, 40);
+    store64(&test_logits + 40, 5);
+    store64(&test_logits + 48, 60);
+    store64(&test_logits + 56, 25);
+    var picked = topk_filter(&test_logits, 8, 3);
+    assert_eq(picked, 3, "topk picked 3");
+    # Top 3 are 60 (idx 6), 50 (idx 1), 40 (idx 4) — these stay.
+    assert_eq(load64(&test_logits + 48), 60, "idx 6 (top) kept");
+    assert_eq(load64(&test_logits + 8), 50,  "idx 1 kept");
+    assert_eq(load64(&test_logits + 32), 40, "idx 4 kept");
+    # Others zeroed.
+    assert_eq(load64(&test_logits + 0), 0,   "idx 0 zeroed");
+    assert_eq(load64(&test_logits + 16), 0,  "idx 2 zeroed");
+    assert_eq(load64(&test_logits + 24), 0,  "idx 3 zeroed");
+    assert_eq(load64(&test_logits + 40), 0,  "idx 5 zeroed");
+    assert_eq(load64(&test_logits + 56), 0,  "idx 7 zeroed");
+    return 0;
+}
+
+fn test_topk_k_equals_n_keeps_all() {
+    store64(&test_logits + 0,  1);
+    store64(&test_logits + 8,  2);
+    store64(&test_logits + 16, 3);
+    var picked = topk_filter(&test_logits, 3, 3);
+    assert_eq(picked, 3, "topk(3, 3) keeps all 3");
+    assert_eq(load64(&test_logits + 0), 1, "all preserved");
+    assert_eq(load64(&test_logits + 8), 2, "all preserved");
+    assert_eq(load64(&test_logits + 16), 3, "all preserved");
+    return 0;
+}
+
+fn test_bigram_lookup() {
+    init_bigram_table();
+    bigram_logits(2, &test_logits, VOCAB_SIZE);     # after "hello"
+    var next_tok = argmax_logits(&test_logits, VOCAB_SIZE);
+    assert_eq(next_tok, 3, "after hello (2), argmax → world (3)");
+    return 0;
+}
+
+fn test_decode_hello_to_eos() {
+    init_bigram_table();
+    var n = decode_sequence(2, &output_buf, 10);    # start "hello"
+    # Expected sequence: world (3), the (6), end (7), EOS (1)
+    assert_eq(n, 4, "decode produced 4 tokens");
+    assert_eq(load64(&output_buf + 0),  3, "tok[0] = world");
+    assert_eq(load64(&output_buf + 8),  6, "tok[1] = the");
+    assert_eq(load64(&output_buf + 16), 7, "tok[2] = end");
+    assert_eq(load64(&output_buf + 24), 1, "tok[3] = EOS");
+    return 0;
+}
+
+fn test_decode_terminates_on_eos_in_short_chain() {
+    init_bigram_table();
+    # Start with "bar" (5) → next is EOS.
+    var n = decode_sequence(5, &output_buf, 10);
+    assert_eq(n, 1, "decode produced 1 token before EOS");
+    assert_eq(load64(&output_buf + 0), 1, "tok[0] = EOS");
+    return 0;
+}
+
+fn test_decode_respects_max_length() {
+    init_bigram_table();
+    # Start "hello", but cap at 2 — no EOS produced.
+    var n = decode_sequence(2, &output_buf, 2);
+    assert_eq(n, 2, "decode capped at max_length=2");
+    assert_eq(load64(&output_buf + 0), 3, "tok[0] = world");
+    assert_eq(load64(&output_buf + 8), 6, "tok[1] = the");
+    return 0;
+}
+
+fn test_decode_deterministic() {
+    init_bigram_table();
+    var n1 = decode_sequence(2, &output_buf, 10);
+    # Capture first run's EOS position.
+    var first_eos = load64(&output_buf + 24);
+    # Wipe + run again.
+    var i = 0;
+    while (i < 4) {
+        store64(&output_buf + i * 8, 0 - 999);
+        i = i + 1;
+    }
+    var n2 = decode_sequence(2, &output_buf, 10);
+    assert_eq(n2, n1, "second run produces same length");
+    assert_eq(load64(&output_buf + 24), first_eos, "second run produces same final tok");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("inference");
+
+    test_argmax_picks_max();
+    test_argmax_first_found_on_ties();
+    test_argmax_negative_logits();
+    test_topk_keeps_top3();
+    test_topk_k_equals_n_keeps_all();
+    test_bigram_lookup();
+    test_decode_hello_to_eos();
+    test_decode_terminates_on_eos_in_short_chain();
+    test_decode_respects_max_length();
+    test_decode_deterministic();
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

@@ -1,0 +1,56 @@
+id = "inference"
+title = "LLM Inference — Decoding"
+topic = "AI"
+description = "Three decode-time primitives behind every autoregressive LLM. (1) Greedy decoding: pick the argmax of the next-token logits at every step. Deterministic, fast, the default for code completion and structured output where you want the same answer every time. (2) Top-k filtering: keep only the K highest logits, zero out (or set to -∞) the rest. Combined with sampling, it removes the long tail of low-probability tokens that produce gibberish without restricting too aggressively. (3) Autoregressive loop: feed the model your prompt, sample the next token, append to context, repeat until end-of-sequence or max length. The 'autoregressive' part is the feedback loop — each generation step depends on all previously generated tokens, which is why generation is sequential (one token per forward pass) and slow compared to parallel-decoding approaches like speculative decoding. Beyond the corpus example: temperature scaling (divide logits by T before softmax — high T flattens distribution, low T sharpens), nucleus / top-p sampling (keep tokens whose cumulative probability ≤ P), repetition penalty (decrement logits of recently-generated tokens). Production engines (llama.cpp, vLLM, TGI) layer all of these. The core decode loop is what this corpus teaches; the variants are best-practice combinations of the same primitives."
+tags = ["inference", "decoding", "greedy", "top-k", "autoregressive", "llm", "argmax", "tokenization", "eos", "fixed-point"]
+related_topics = ["neural_networks", "embeddings", "fixed_point_arithmetic", "state_machines"]
+
+[[best_practices]]
+title = "Greedy decoding for deterministic output — code completion, structured generation, evaluation"
+explanation = "Argmax over logits at every step gives the highest-probability sequence the model can produce, deterministically. Same input → same output, every time. This is what code-completion engines (Copilot, Codeium), structured-output APIs (function calling, JSON mode), and benchmark evaluators all use. Sampling-based decoders (top-k + temperature) introduce variance that's great for creative writing but ruinous for repeatability. Pick greedy unless you have a specific reason to introduce randomness."
+
+[[best_practices]]
+title = "Top-k + sampling for creative output — beats greedy on diversity, beats pure sampling on quality"
+explanation = "Pure argmax produces repetitive output (the model finds a high-probability sequence and locks onto it). Pure random sampling produces low-quality output (long tail of low-probability tokens are usually nonsense). Top-k filtering keeps the K (typically 40-50) highest logits and samples among them — high-quality candidates only, with controlled randomness. Combined with temperature scaling, it's the modern default for chat models. nucleus / top-p sampling is the same idea adapted to keep the cumulative-probability head rather than a fixed K — slightly better on tasks with bimodal next-token distributions."
+
+[[best_practices]]
+title = "Always cap max_length — never trust the model to emit EOS in bounded time"
+explanation = "An autoregressive loop without a max_length cap can generate forever. Bugs in the model, tokenizer, or sampling temperature can prevent the EOS token from ever winning the argmax. Production deployments cap at max_new_tokens (typically 512-2048 for chat, larger for long-form). The loop terminates on the FIRST of: EOS token sampled, max_length reached, stop-sequence matched. Checking only EOS is the path to runaway generation that hangs your service."
+
+[[best_practices]]
+title = "Tokenize once, cache the input encoding — don't re-tokenize per step"
+explanation = "Tokenization (BPE / sentencepiece) is non-trivial: ~100K-vocab lookup, byte-pair merges, special-token handling. For autoregressive decoding, tokenize the prompt ONCE at the start; each new generated token comes back as an integer ID directly from argmax/sampling — no re-tokenization needed. The decoded TEXT is detokenized once at the end. Re-tokenizing every step (a common naive bug in tutorial code) burns ~5-10% of total inference time on text manipulation that does nothing."
+
+[[gotchas]]
+title = "Greedy decoding falls into repetitive loops — 'the the the the' or nonsense bigrams"
+explanation = "Greedy always picks the single highest-probability next token. If the model has a slight bias toward a particular word, that word can appear, then condition the next argmax to favor it again, and so on indefinitely. Repetition penalty (decrementing logits of recently-emitted tokens) breaks the loop. Sampling-based decoders side-step this naturally because the variance prevents lock-in. Watching for repetition in greedy output and adding a penalty parameter is the standard fix."
+bad_example = "// while (next != EOS) { next = argmax(logits); emit(next); }  // can loop on most-frequent token"
+good_example = "// after argmax: penalize logits[next] -= penalty before next step (or use sampling-based decoder)"
+
+[[gotchas]]
+title = "Off-by-one on EOS check — generate the EOS or generate AFTER the EOS?"
+explanation = "When the model samples EOS as the next token, the convention is: append EOS to the output, then stop. Some implementations emit EOS to the user; others discard it. The bug is checking BEFORE generation: 'is current_token EOS? stop' — that misses the case where the previous token was EOS and you've already over-generated by one. Standard pattern: generate; check if generated == EOS; if so, break. Append-or-not is a separate decision based on whether the consumer wants the EOS marker."
+bad_example = "// while (current != EOS) { current = generate(); }  // current was EOS at the previous step"
+good_example = "// loop { next = generate(); output.append(next); if (next == EOS) break; }"
+
+[[gotchas]]
+title = "Top-k filter doesn't normalize — sampling probabilities shift after filter"
+explanation = "Top-k zeros out all but the K highest logits. If you then call softmax on the filtered logits, the K survivors get re-normalized to sum to 1.0. If you SKIP the renormalization (e.g., by using the original softmax probabilities and just masking), the surviving probabilities don't sum to 1 — sampling becomes biased toward whichever token happens to have higher pre-filter probability. Standard pattern: filter THEN softmax. Many tutorials get this backward."
+bad_example = "// probs = softmax(logits); probs = topk_mask(probs, k); sample(probs)  // unnormalized"
+good_example = "// logits = topk_filter(logits, k, NEG_INF); probs = softmax(logits); sample(probs)  // re-softmax masks correctly"
+
+[[gotchas]]
+title = "BPE tokenizer round-trip is not lossless on unusual whitespace or control characters"
+explanation = "Byte-pair encoding tokenizers were trained on a fixed corpus. Inputs containing tab+newline+space sequences, zero-width joiners, or unusual Unicode normalization forms can encode-then-decode to subtly different text. For LLM agent applications that round-trip user input through the model and back, this can corrupt structured data (JSON keys with non-ASCII, source code with mixed line endings). Test the tokenizer round-trip explicitly on the kinds of inputs your application actually sees."
+bad_example = "// assume tokenize(detokenize(tokens)) == tokens — fails on edge whitespace"
+good_example = "// validate user input matches detokenize(tokenize(user_input)); fall back if not"
+
+[[performance_notes]]
+title = "Greedy decoding is sequential — N tokens = N forward passes, no parallelism"
+explanation = "Each token depends on all previous tokens, so the loop can't parallelize the forward passes. N output tokens at M ms per pass = N*M ms total. For a 1024-token response at 50ms/pass (typical 7B model on consumer GPU), that's 51 seconds. KV-cache reduces M significantly (cache the per-layer attention state across steps so each new token reuses prior work), but the loop itself is irreducibly sequential. Speculative decoding (draft small model, verify with large) is the modern technique that breaks this."
+evidence = "vLLM and TensorRT-LLM benchmarks: 7B model at fp16 ~30-60ms per token on H100 with KV-cache. Speculative decoding gives 2-4x speedup on top, depending on draft model accuracy."
+
+[[performance_notes]]
+title = "Top-k filter is O(N) for K << N (partial sort) — full sort O(N log N) wastes work"
+explanation = "Top-k can be implemented in O(N) with a min-heap of size K (insert each element, pop min when over K). For K=40 and N=100K (typical LLM vocab size), partial sort is 4M ops; full sort would be ~1.7M log-ops ≈ ~15M ops. Partial-sort wins by 4x. The std-lib partial-sort algorithms (C++ partial_sort, Python heapq.nlargest, Rust's BinaryHeap) implement this directly. Don't qsort + take-first-K."
+evidence = "Profile data from llama.cpp top-k benchmark: partial-sort top-40 from 32K vocab ~30μs per step; full-sort ~120μs per step. Both well under per-token forward pass cost (~30ms), but matters for high-throughput batched serving."

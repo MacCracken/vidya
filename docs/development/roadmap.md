@@ -2,11 +2,11 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-03
 >
-> **Version**: 2.6.2 | **Cyrius**: 5.8.34
-> **Topics**: 72 (72 fully covered) — **P0 → P2 complete; P3 3/5** 🎉
+> **Version**: 2.6.3 | **Cyrius**: 5.8.34
+> **Topics**: 73 (73 fully covered) — **P0 → P2 complete; P3 4/5** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 792 source files; concept files: 72
-> **Validator**: 792/792 green
+> **Examples**: 803 source files; concept files: 73
+> **Validator**: 803/803 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -42,16 +42,17 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.6.0 | 2026-05-03 | **P3 kickoff — Audio + AI/ML (minor bump)** — 1 new topic × 11 langs: `audio_dsp` (Q15 fixed-point biquad lowpass + FIR convolution + peak/mean-absolute level metering). HLLs do all three (9 tests / 14 asserts); asm ports focus on biquad + level metering (8 tests / 10 asserts); OpenQASM uses interference-as-filtering. 11 new source files; validator 759/759 → **770/770**. P3 is 1/5; `audio_synthesis`, `neural_networks`, `inference`, `embeddings` slated for 2.6.1–2.6.4. Two cyrius parser issues filed during port: `kernel` reserved-word + arithmetic-in-fn-args rejection (see `cyrius/docs/development/issues/2026-05-03-*`). |
 | 2.6.1 | 2026-05-03 | **P3 batch 2 — `audio_synthesis`** — 1 new topic × 11 langs: Q15 oscillator (sine LUT, saw, square via 16-bit phase accumulator) + ADSR 5-state envelope + voice = osc × env. API surface mirrors AGNOS production synth crate `naad` (Adsr, EnvelopeState, gate_on/off, Voice) for instant familiarity; corpus uses Q15 + naive waveforms vs naad's f32 + PolyBLEP. HLLs do all three primitives (11 tests / 25 asserts); asm ports focus on phase + sine LUT + square + ADSR (8 tests / 13 asserts); OpenQASM uses rotation-as-oscillation. 11 new source files; validator 770/770 → **781/781**. P3 is 2/5; `neural_networks`, `inference`, `embeddings` slated for 2.6.2–2.6.4. |
 | 2.6.2 | 2026-05-03 | **P3 batch 3 — `neural_networks`** — 1 new topic × 11 langs: Q15 fixed-point 2 → 3 → 2 MLP forward pass (dense layer + ReLU + argmax). Hand-designed weights classify by which input feature is larger. Skips softmax intentionally (argmax preserves order; production inference does the same). HLLs do full forward pass with intermediate-state inspection (12 tests / 16 asserts); asm pair does full forward with hardcoded layer sizes (8 tests / 8 asserts); OpenQASM uses rotation-as-weighted-sum. 11 new source files; validator 781/781 → **792/792**. P3 is 3/5; `inference` + `embeddings` slated for 2.6.3–2.6.4. |
+| 2.6.3 | 2026-05-03 | **P3 batch 4 — `inference`** — 1 new topic × 11 langs: greedy decoding (argmax) + top-k filter + autoregressive bigram decode loop with EOS termination + max_length cap. All integer arithmetic; skips temperature/softmax/random sampling intentionally (those need exp() or PRNG, both fight cross-port portability). HLLs do all three primitives (10 tests / 17–21 asserts); asm pair does argmax + decode loop (5 tests / 9 asserts); OpenQASM uses measurement-as-greedy-decode. 11 new source files; validator 792/792 → **803/803**. P3 is 4/5; `embeddings` (2.6.4) closes P3. |
 
 ---
 
 ## Current State
 
-### 72 topics fully covered (11/11 languages) — P0 → P2 complete; P3 3/5 🎉
+### 73 topics fully covered (11/11 languages) — P0 → P2 complete; P3 4/5 🎉
 
 The original 36 P0 topics, plus 24 P0C additions (v2.3.2–v2.3.10),
 plus 6 P1 additions (v2.4.0–v2.4.2), plus 3 P2 (v2.5.0–v2.5.2),
-plus 3 P3 (v2.6.0–v2.6.2):
+plus 4 P3 (v2.6.0–v2.6.3):
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
@@ -73,17 +74,18 @@ plus 3 P3 (v2.6.0–v2.6.2):
 - v2.5.2 P2 (1): distributed_systems
 - v2.6.0 P3 (1): audio_dsp
 - v2.6.1 P3 (1): audio_synthesis
-- **v2.6.2 P3 (1): neural_networks**
+- v2.6.2 P3 (1): neural_networks
+- **v2.6.3 P3 (1): inference**
 
-`vidya stats` reports `Topics: 72, Complete: 72 (all 11 languages),
-Examples: 792`; validator 792/792 green.
+`vidya stats` reports `Topics: 73, Complete: 73 (all 11 languages),
+Examples: 803`; validator 803/803 green.
 
-### 0 topics partial; P3 3/5 in flight
+### 0 topics partial; P3 4/5 in flight
 
-P0 → P2 complete. P3 (Audio + AI/ML) is 3/5: `audio_dsp`,
-`audio_synthesis`, `neural_networks` shipped. Remaining:
-`inference` (2.6.3), `embeddings` (2.6.4). After 2.6.4, P3 closes
-and the next minor (2.7.x) opens **P4 build systems**.
+P0 → P2 complete. P3 (Audio + AI/ML) is 4/5: `audio_dsp`,
+`audio_synthesis`, `neural_networks`, `inference` shipped.
+Remaining: `embeddings` (2.6.4). After 2.6.4, P3 closes and the
+next minor (2.7.x) opens **P4 build systems**.
 
 ---
 
@@ -257,10 +259,10 @@ Shipped across 3 patch releases (2.5.0/1/2):
 | **audio_dsp** | ✅ shipped 2.6.0 | Q15 fixed-point biquad lowpass + FIR convolution + peak/mean-absolute |
 | **audio_synthesis** | ✅ shipped 2.6.1 | Q15 oscillator (sine/saw/square) + ADSR envelope + voice; mirrors naad API |
 | **neural_networks** | ✅ shipped 2.6.2 | Q15 2→3→2 MLP forward pass: dense + ReLU + argmax (skips softmax) |
-| **inference** | planned 2.6.3 | Tokenization + greedy decoding + temperature sampling |
+| **inference** | ✅ shipped 2.6.3 | Greedy decoding + top-k filter + autoregressive bigram loop with EOS |
 | **embeddings** | planned 2.6.4 | Cosine similarity + nearest-neighbour search over a small fixed corpus |
 
-5 topics × 11 langs total; 3 done, 2 to go.
+5 topics × 11 langs total; 4 done, 1 to go.
 
 ## Future minor versions
 
@@ -270,7 +272,7 @@ need vidya support next.
 
 | Minor | Theme | Topics | Notes |
 |---|---|---|---|
-| 2.6.x | **P3 audio + AI/ML** (in flight 3/5) | audio_dsp ✅, audio_synthesis ✅, neural_networks ✅, inference, embeddings | The AI/ML topics align with hoosh's RAG needs. |
+| 2.6.x | **P3 audio + AI/ML** (in flight 4/5) | audio_dsp ✅, audio_synthesis ✅, neural_networks ✅, inference ✅, embeddings | The AI/ML topics align with hoosh's RAG needs. |
 | 2.7.x | **P4 build systems** | build_systems, package_resolution, reproducible_builds | Aligns with cyrius/zugot tooling. |
 | 2.8.x | **P5 functional / type theory** | functional_patterns, effect_systems, dependent_types | More research-flavored; lowest priority. |
 | 2.9.x | **P6 Cyrius-specific** | cyrius_basics, cyrius_bootstrap, cyrius_agents, cyrius_capabilities, cyrius_ipc | Programming-concept slots that document Cyrius patterns the way other topics document general patterns. Distinct from `content/cyrius/` (the language reference + field notes). |
@@ -349,4 +351,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-03 (v2.6.2) — **P3 batch 3: neural_networks 11/11 (Q15 MLP, skips softmax); 72/72 at 11/11; 792/792 validator; next: inference (2.6.3)***
+*Last Updated: 2026-05-03 (v2.6.3) — **P3 batch 4: inference 11/11 (greedy + top-k + autoregressive); 73/73 at 11/11; 803/803 validator; next: embeddings (2.6.4) closes P3***

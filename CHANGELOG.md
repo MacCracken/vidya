@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.3] — 2026-05-03
+
+**P3 batch 4 — `inference` shipped at 11/11 languages.**
+Three decode-time primitives in pure integer arithmetic: greedy
+decoding (argmax over logits), top-k filtering (zero out all but
+the K highest), and an autoregressive bigram decode loop with
+EOS termination + max_length cap.
+
+Hand-designed bigram table demonstrates greedy decode from
+"hello" → "world" → "the" → "end" → EOS, deterministic across
+all ports.
+
+Skipped intentionally: temperature scaling, softmax, random
+sampling — those need either exp() or a portable PRNG, both of
+which fight cross-port portability (especially asm + shell).
+concept.toml covers them as best practices and gotchas.
+
+11 new source files; validator 792/792 → **803/803**. P3 is 4/5
+topics in flight; `embeddings` (2.6.4) closes P3.
+
+### Added
+
+- `content/inference/` — inference decode primitives across 11
+  languages: cyrius (10 tests / 29 asserts), HLLs (10 tests /
+  17–21 asserts each — variations from per-element vs array
+  comparisons), asm pair (5 tests / 9 asserts focused on argmax
+  + bigram lookup + decode loop; top-k's triple-nested
+  mark/scan/zero pattern lives in cyrius.cyr — too verbose for
+  asm), OpenQASM (measurement-as-greedy-decode: ry encodes
+  logits as amplitudes, measurement collapses to argmax, top-k
+  modeled as amplitude amplification).
+
 ## [2.6.2] — 2026-05-03
 
 **P3 batch 3 — `neural_networks` shipped at 11/11 languages.**
