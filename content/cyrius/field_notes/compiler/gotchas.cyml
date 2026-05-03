@@ -1,0 +1,628 @@
+# Cyrius Field Notes — Compiler Internal Gotchas
+# Non-obvious traps an agent will hit when working on cyrius's
+# compiler internals: regalloc, layout, alignment, IR ordering,
+# heap caps, fn-table conventions, codegen-vs-IR divergence.
+#
+# Earn their slot when an agent is debugging a cyrius
+# regression that doesn't fit a clean pattern. The shape is
+# always "this surprised future-me; here's the diagnosis +
+# fix + how to recognize it again."
+#
+# For process methodology see methodology.cyml.
+# For design patterns see patterns.cyml.
+# For full backstory + chronological context see retros/.
+#
+# 12 entries.
+
+[[entries]]
+name = "slice_fn_local_layout_flip"
+description = "Pre-§8 16-byte fn-local slices put the canonical slot at the higher stack address; `&slice + 8` overflowed past the local frame into saved-rbp territory. §8 layout-flip (v5.8.16) allocates the high-half slot FIRST (higher address) and the canonical slot SECOND (lower address)."
+category = "cyrius"
+tags = ["slices", "layout", "stack", "v5.8.16"]
+content = """
+**The trap**: pre-v5.8.16, `var s: [u8] = 0;` allocated a
+single canonical slot (the named slot, where `&s` resolves)
+and a sentinel-cleared high-half slot. The canonical slot was
+the LOWER-numbered slot (higher stack address per cyrius's
+slot-N-at-rbp-(N+1)*8 convention). `slice_set(&s, ptr, len)`
+did `store64(s+8, len)`, which on the stack means
+`store64(rbp - canon_disp + 8, len)` — overflowing past the
+local frame into saved-rbp territory.
+
+This corrupted the caller's saved rbp. Worked anyway:
+
+  1. Round-tripped within the fn — slice_set wrote and slice_len
+     read the same (corrupted) location.
+  2. `slices_typing.tcyr`'s `return slice_len(&x);` form passed
+     because main's rbp = 0 from the C runtime — the read
+     returned 0 by coincidence.
+  3. §7 indexing tests passed because each test exited via
+     `syscall(60, ...)` before any code referenced the corrupted
+     rbp.
+
+**Surfaced when**: §8 introduced `s.len` reads via &s+8
+(memory I/O through the canonical-slot address) — same
+arithmetic as slice_set, but the test reading expected a
+deterministic value, not "whatever happened to be at saved rbp."
+
+**Fix**: for `scalar_type==16`, allocate the HIGH-HALF slot
+FIRST (slot li, higher address) and the CANONICAL slot SECOND
+(slot li+1, lower address). The name + meta live on slot li+1
+so FINDLOCAL returns it; EFLADDR(li+1) yields the lower
+address; EFLADDR(li+1) + 8 lands on slot li (higher address) —
+matching the slice convention's "second 8 bytes."
+
+Init both halves: zero the canonical slot via EFLSTORE(li+1)
+and zero the high half via address-based memory store
+(EFLADDR_X1 + EADDIMM_X1(8) + ESTOC). Address-based init for
+the high half is required because the regalloc post-body
+peephole would patch EFLSTORE(li) to `mov rbx, rax` (writing
+to a register, not the stack slot). See `slice_high_half_regalloc_pin`.
+
+**Recognize again**: any "fn-local 16-byte type silently fails"
+shape. If two adjacent `var x: u128` or `var s: [T]` interact
+weirdly, check the layout-flip is still in place.
+
+Full backstory: v5_8.cyml's `slice_fn_local_layout_flip_v5816`.
+"""
+
+[[entries]]
+name = "slice_high_half_regalloc_pin"
+description = "Slice's high-half slot has no user-visible name; the regalloc post-body peephole would allocate a callee-saved register for it, leaving the actual stack slot uninitialized. §8 routes high-half I/O through address-based memory access to keep the slot in memory."
+category = "cyrius"
+tags = ["slices", "regalloc", "v5.8.16"]
+content = """
+**The trap**: the regalloc post-body peephole (parse_fn.cyr
+v5.6.20 picker) counts `mov [rbp+disp], rax` /
+`mov rax, [rbp+disp]` patterns per slot to decide which user-
+locals to pin to callee-saved registers (rbx, r12-r15). Time-
+sliced sharing assumes every local interval starts with a STORE —
+the register holds the right value from the start of each
+interval, no LOAD-from-stack needed.
+
+The slice's high-half slot has no user-visible name (sentinel-
+cleared by the §8 layout-flip), so nothing else takes its
+address via `&<ident>`. The picker's safety scan bars
+`lea rax, [rbp+disp]` (treats `&local` as not-safe). Without
+intervention, the high-half slot looks mov-only — picker
+allocates rbx for it.
+
+Then `var s: [T] = 0;`'s init `EFLSTORE(li, rax=0)` patches to
+`mov rbx, rax` — writes 0 to rbx, leaves the stack slot
+uninitialized. Subsequent slice_set memory-writes to the slot
+are invisible to the register; `s.len` reads (which go through
+the memory access path) see uninit stack data.
+
+**Fix**: init the high half via address-based memory store
+(EFLADDR_X1 + EADDIMM_X1(8) + ESTOC) rather than EFLSTORE.
+The picker doesn't count memory-via-rcx writes, so the high
+slot stays in memory. §8 dot-syntax (.len read/write) and
+slice_len helper-fn calls all see the right value.
+
+Same reasoning for §8 dot-syntax `s.len`: lower to address-
+based load (EFLADDR_X1 + EADDIMM_X1(8) + ELODC), not direct
+EFLLOAD against the slot. `s.ptr` could safely use EFLLOAD
+(canonical slot is naturally barred from regalloc by slice_set
+taking `&s`), but uses address-based for symmetry.
+
+**Recognize again**: any "no-name auxiliary slot interacts
+weirdly with regalloc" shape. The picker's safety scan only
+bars slots with `&` taken via a NAMED ident; phantom slots
+(high half of a 16-byte type, scratch slots) need explicit
+exclusion.
+
+Full backstory: v5_8.cyml's `slice_high_half_regalloc_pin_v5816`.
+"""
+
+[[entries]]
+name = "tail_call_escape_addr_local"
+description = "PARSE_RETURN's tail-call detector now skips TCO if any arg in `return helper(args);` uses the `&` token. The TCO epilogue deallocates the current frame BEFORE the callee reads through `&local`."
+category = "cyrius"
+tags = ["tco", "tail-call", "stack", "v5.8.16"]
+content = """
+**The trap**: pre-§8 TCO matched `return IDENT(args);` and
+emitted normal call-arg setup, then the fn epilogue (restoring
+callee-saved regs, popping rbp, restoring rsp), then
+`jmp <callee>`. Inside the callee, the previous frame is gone —
+anything the callee reads through a pointer to that frame sees
+dead stack.
+
+For most call patterns this never mattered — fn args are
+passed by value (in registers). The exception: `&local` args.
+`return helper(&local);` would compile to:
+
+```
+push &local (== rbp - local_disp)
+pop rdi
+...epilogue...
+jmp helper
+```
+
+Inside helper, rdi = old caller's rbp - local_disp, but old
+caller's frame is gone; reads through that address see
+arbitrary stack memory.
+
+**Pre-§8 was masked** for slice fn-locals because the slice's
+high half coincidentally landed on saved rbp (= 0 from the
+C runtime when called from main). The §8 layout-flip moved
+the high half into a real stack slot, exposing the dead-
+stack-read deterministically.
+
+**Fix**: PARSE_RETURN scans the tail-call arg list for `&`
+(token type 27); if present, skip TCO and emit a normal call.
+Conservative — also blocks TCO for `&global` (rare and only
+loses the optimization, not correctness).
+
+**Why "skip" rather than "patch"**: the right fix would be
+escape analysis on `&local` to bar TCO only when the local's
+address actually escapes the call's lifetime. Cyrius doesn't
+have escape analysis; the conservative skip is the right
+trade-off given the rarity of `return helper(&local);`
+patterns and the catastrophic cost of false-positives
+(silently corrupted reads).
+
+**Recognize again**: any "callee silently reads garbage when
+called as `return helper(&local);`" shape.
+
+Full backstory: v5_8.cyml's `tail_call_escape_addr_local_v5816`.
+"""
+
+[[entries]]
+name = "pointer_vs_inline_struct_dispatch"
+description = "PARSE_FIELD_LOAD/STORE auto-detects pointer-to-struct vs inline-struct fn-locals by checking if slot lli-1 has the v5.5.36 sentinel name -1. Inline mode uses lea (slot IS the struct's bytes); pointer mode uses mov (slot HOLDS a pointer)."
+category = "cyrius"
+tags = ["struct", "field-access", "v5.8.17"]
+content = """
+**The trap**: PARSE_FIELD_LOAD's local-struct branch
+historically treated EVERY struct-typed local as an INLINE
+struct (the v5.5.36 no-init `var p: StructName;` path that
+allocates ceil(STRUCTSZ/8) slots, named slot at the deepest
+stack position). For inline structs, `&s` (EFLADDR(named_slot))
+yields field 0's address because the struct's bytes ARE the
+slot's bytes — `lea + offset + load` is correct.
+
+But `var s: Str = str_from(...)` allocates ONE slot whose
+value IS the heap pointer. `&s` in this case is the slot's
+address (rbp - N), NOT the struct's address. `lea + offset +
+load` reads the wrong location.
+
+**Fix**: distinguish at PARSE_FIELD_LOAD time by checking slot
+lli-1. The v5.5.36 inline path tags filler slots with sentinel
+name -1; if slot lli-1 carries that sentinel (or lli == 0,
+since inline structs always reserve a filler before the named
+slot when STRUCTSZ > 8), the slot is the named tail of an
+inline allocation. Otherwise it's a single-slot pointer.
+
+Pointer mode emits `EFLLOAD + EMOVCA` (load slot value into
+rax, move into rcx) to set rcx to the struct's base. Inline
+mode emits `EFLADDR_X1` (lea — slot address IS the struct
+base) as before.
+
+Param-decl path also extended: PARSE_FN_DEF's param loop now
+calls FINDSTRUCT on every `: Type` annotation; if the type
+resolves to a struct, sets `SLTYPE(li, -sid)` on the param's
+slot. Without this tag, `param.field` on a `: Str` parameter
+would compile-error with "unexpected ',' / ';'" because the
+struct-typed-local branch would never fire.
+
+Disambiguation works for STRUCTSZ > 8 (Str at 16, Vec at 24,
+etc.). For STRUCTSZ <= 8 (single-slot inline), the heuristic
+falls through to inline mode (no sentinel above) — these
+should be rare and the disambiguation can be revisited if a
+consumer surfaces pain.
+
+**Recognize again**: any "pointer-typed struct local + field
+access reads zero" shape — verify the dispatch is firing.
+
+Full backstory: v5_8.cyml's `pointer_vs_inline_struct_dispatch_v5817`.
+"""
+
+[[entries]]
+name = "stale_fixed_cap_drift"
+description = "Cap checks drift out of sync with the actual buffer size. The buffer gets expanded; the cap check / comment / docs DON'T. Bug sits latent until a downstream workload crosses the OLD threshold."
+category = "cyrius"
+tags = ["caps", "drift", "diagnostics", "v3.4.20", "recurring"]
+content = """
+**The trap pattern**: cyrius uses fixed-size heap regions for
+nearly every compiler data structure. Each region has an
+explicit byte count (e.g., tok_names is 64 KB, preprocess_out
+is 2 MB at v5.6.40). Most regions have a "capacity check"
+somewhere in the code that silently caps or errors out when
+the region fills.
+
+Multiple times now, a capacity check has drifted out of sync
+with the actual buffer size. The pattern:
+
+1. Buffer gets expanded in one place (the actual allocation).
+2. Cap check / comment / docs DON'T get updated in the other
+   places.
+3. Bug sits latent for N releases.
+4. Some downstream workload crosses the OLD threshold.
+5. Confusing error fires that doesn't point at the real
+   buffer.
+6. Delayed debugging session to figure out the stale cap is
+   lying.
+
+**Concrete instances**:
+
+- v3.3.17 (Bug #33): LEXHEX read hex literals from the raw
+  input buffer instead of the preprocessed buffer. Masked for
+  years.
+- v3.4.19: input_buf read loop capped at 131,072 bytes (the
+  original 128 KB) silently — mabda's 141 KB bundle triggered
+  the latent bug.
+- v3.4.20 (lex.cyr:1077): preprocess_out cap checked
+  `op > 524288` (512 KB), but the buffer was expanded to 1 MB
+  in v3.4.5. Stale for FIVE releases.
+- v3.4.20 (cyrius.toml roadmap): documented Input buffer as
+  512 KB while actual code was 128 KB then 256 KB. Three
+  different numbers across three files.
+
+**The proactive sweep** (do at every minor closeout):
+
+For each fixed-size buffer in cyrius, grep for EVERY
+occurrence of the capacity constant (allocation AND cap
+check) and confirm they agree. Also check comments, heap map,
+docs, roadmap, and Open Limits table — all four need to match.
+
+The Open Limits table in `docs/development/roadmap.md` is
+worth special attention — it's the table downstream projects
+read to decide how much headroom they have.
+
+**The diagnostic discipline** (every fixed-size buffer):
+
+Every fixed-size buffer should have an EXPLICIT overflow check
+with a CLEAR error message pointing at the exact location to
+fix:
+
+```cyr
+if (op > 1048576) {
+    syscall(SYS_WRITE, 2,
+        "error: expanded source exceeds 1MB (", 36);
+    PRNUM(op);
+    syscall(SYS_WRITE, 2,
+        " bytes; raise preprocess_out cap in src/main.cyr)\\n", 50);
+    syscall(SYS_EXIT, 1);
+}
+```
+
+Silent truncation is never acceptable — it moves the symptom
+arbitrarily far from the cause.
+
+**Recognize again**: any error message reporting a numeric
+threshold that doesn't match the comment / heap map / Open
+Limits table.
+
+Cross-ref: patterns.cyml's
+`heap_cap_growth_compiler_grows_to_fit_language` (the dual —
+when to RAISE caps vs when to discover stale caps).
+
+Full backstory: retros/v3.cyml `stale_fixed_cap_pattern` +
+`silent_stdin_truncation_saga`.
+"""
+
+[[entries]]
+name = "stdlib_alloc_grow_step_must_cover_request"
+description = "Bump-allocator grow logic must cover the requested allocation, not a fixed delta. Fixed step `0x100000` regardless of requested size returned pointers past the brk/mmap for any alloc(>1MB)."
+category = "cyrius"
+tags = ["alloc", "stdlib", "v5.6.x"]
+content = """
+**The trap**: bump allocator (`lib/alloc.cyr`) must grow its
+backing region by AT LEAST the requested size, not a fixed
+delta. Pre-fix, the grow logic was:
+
+```cyr
+if (alloc_used + n > brk_top) {
+    sys_brk(brk_top + 0x100000);   # grow by 1 MB
+    brk_top = brk_top + 0x100000;
+}
+return alloc_used; alloc_used = alloc_used + n;
+```
+
+For `alloc(1500000)` (1.5 MB request), the grow step adds 1 MB
+but the requested size is 1.5 MB → returned pointer is past
+the new brk_top. Subsequent stores write into unmapped memory
+→ SIGSEGV.
+
+**Fix**: grow by max(requested, fixed_step):
+
+```cyr
+if (alloc_used + n > brk_top) {
+    var grow = 0x100000;
+    if (n > grow) { grow = n + 0x100000; }
+    sys_brk(brk_top + grow);
+    brk_top = brk_top + grow;
+}
+```
+
+**Recognize again**: any "alloc(N) for large N silently
+SIGSEGVs in subsequent store" shape. Single-store SIGSEGVs
+right after an alloc are almost always bump-allocator
+boundary issues; print `alloc_used` and `brk_top` at the
+crash site to confirm.
+
+Full backstory: v5_6.cyml's
+`stdlib_alloc_grow_step_vs_requested_size`.
+"""
+
+[[entries]]
+name = "libssl_needs_fdlopen_not_dynlib_open"
+description = "libssl's OPENSSL_init_ssl uses a recursive pthread mutex whose __kind field lives in the glibc TCB. cyrius's dynlib_bootstrap_tls zeroed TCB reads __kind=0 (non-recursive); same-thread re-entry deadlocks on futex. Use lib/fdlopen.cyr (foreign-dlopen) instead."
+category = "cyrius"
+tags = ["dynlib", "tls-loader", "fdlopen", "v5.6.37"]
+content = """
+**The trap**: cyrius has two ways to load shared libraries at
+runtime:
+
+1. `lib/dynlib.cyr` — pure-cyrius ELF .so loader via mmap +
+   GNU hash table walk. No libc, no glibc dlopen. Bypasses
+   glibc's TLS/TCB setup entirely.
+
+2. `lib/fdlopen.cyr` — foreign-dlopen wrapper. Calls into
+   glibc's actual dlopen via the AT_BASE+offset trick, which
+   means the loaded library gets glibc's full TLS/TCB setup
+   including pthread_*.
+
+For libssl specifically, dynlib_open works for getting symbol
+addresses — but calling `OPENSSL_init_ssl()` deadlocks on a
+futex inside libcrypto's pthread_mutex_lock. Why: libssl's
+init uses `PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP`. The mutex
+struct has a `__kind` field in glibc's TCB. cyrius's
+dynlib_bootstrap_tls (the minimal TLS setup that dynlib_open
+provides) zeros the TCB. `__kind == 0` means "non-recursive"
+in pthread's encoding. Same-thread re-entry to a mutex that
+the same thread already holds → futex wait forever (because
+non-recursive).
+
+**Rule**: if a library's init function uses pthread mutexes
+internally, you NEED fdlopen (real glibc dlopen → real glibc
+TLS/TCB), not dynlib (cyrius minimal loader). The list of
+libraries that hit this includes:
+
+- libssl (OPENSSL_init_ssl)
+- libpthread (everything)
+- libgomp (OpenMP runtime)
+- libc-internal locking primitives (rare in pure cyrius use,
+  but anything that touches TLS-cancellation hooks)
+
+Conversely, dynlib is fine for:
+
+- Pure C libraries with no pthread internals (libz, libcrypto's
+  primitive routines if you skip OPENSSL_init_*)
+- Libraries you call only for symbol addresses (dlsym then
+  call manually)
+
+**Recognize again**: any "dlopen succeeds, dlsym returns valid
+pointer, calling that pointer hangs forever" shape on a
+shared library that uses pthread mutexes.
+
+Full backstory: v5_6.cyml's `libssl_needs_fdlopen_not_dynlib_open`.
+"""
+
+[[entries]]
+name = "sysv_odd_stack_args_rsp_alignment"
+description = "SysV ABI requires rsp 16-aligned at every CALL (so callee sees rsp+8 16-aligned at entry). Cyrius's ECALLPOPS for n>6 args used `add rsp, 48` unconditionally; for odd nextra (N=7,9,11) this left rsp 8-aligned at CALL, propagating misalignment."
+category = "cyrius"
+tags = ["abi", "sysv", "alignment", "v5.6.41"]
+content = """
+**The trap**: SysV AMD64 ABI requires rsp 16-byte aligned at
+every CALL instruction (so the callee sees rsp+8 16-byte
+aligned at entry, with the saved rip below it). Cyrius's
+codegen for fn calls with >6 args uses ECALLPOPS to clean up
+stack arguments after the call:
+
+```cyr
+# n > 6 args, n_extra = n - 6
+# Push n_extra extra args
+# call helper
+# add rsp, n_extra * 8  ← cleanup
+```
+
+Pre-v5.6.41, the cleanup was `add rsp, n_extra * 8`
+unconditionally. For odd `n_extra` (N = 7, 9, 11 args), this
+leaves rsp 8-byte-aligned at the next CALL. Misalignment
+propagates downstream until something does SSE on a stack-
+saved value (libssl/libc prologs commonly do `movdqa xmm,
+[rsp+N]`) — SIGSEGV at first instruction.
+
+**Fix**: align rsp to 16 BEFORE pushing extra args:
+
+```cyr
+if ((n_extra & 1) == 1) {
+    # Pre-pad rsp by 8 to absorb odd n_extra count
+    push rax  # any value; we sub rsp, 8 effectively
+}
+push n_extra args
+call helper
+add rsp, (n_extra + (n_extra_odd ? 1 : 0)) * 8
+```
+
+Win64 path was already correct via framesize-mod-15 alignment
+branch; SysV path missed it.
+
+**Recognize again**: any "SIGSEGV on the first SSE instruction
+of a libc / libssl entry" shape. Common triggers: 7-arg fn
+calls, OpenSSL's EVP_DecryptInit_ex (8 args), recvmmsg
+(7 args). Always check rsp alignment via `gdb p $rsp & 0xF`
+at the failing instruction.
+
+Full backstory: v5_6.cyml's `sysv_odd_stack_args_rsp_alignment_violation`.
+"""
+
+[[entries]]
+name = "pp_pass_helpers_take_src_base"
+description = "Preprocessor pass helpers (PP_HASH/DEFINE/DEFINED/GETVAL/EVAL_IF/DERIVE_*) must take src_base. Reading via S+pos for source > 524288 B lands in stale heap when PP_*_PASS copied content back to S+0 capped at 524288."
+category = "cyrius"
+tags = ["preprocessor", "caps", "v5.6.30", "v5.6.42"]
+content = """
+**The trap**: cyrius's preprocessor runs in passes
+(`PP_REF_PASS`, `PP_DERIVE_PASS`, `PP_IFDEF_PASS`, etc.). Each
+pass reads source from one buffer, writes processed output to
+another, then COPIES the output back to `S+0` for the next
+pass to consume.
+
+The copy-back is capped at 524288 B (the original
+preprocess_out size). For source > 524 KB, the copy truncates;
+helpers reading from `S+pos` for pos beyond 524 KB land in
+stale heap (whatever was there before the pass).
+
+v5.6.30 fixed this for `PP_DERIVE_*` helpers by threading
+`src_base` through their signatures (so they read from the
+actual buffer, not assumed-to-be-at-S+0).
+
+v5.6.42 closed the rest of the family: `PP_HASH`, `PP_DEFINE`,
+`PP_DEFINED`, `PP_GETVAL`, `PP_EVAL_IF`. Same shape — each
+function gained a `src_base` arg that callers pass through
+from the actual pass buffer.
+
+**Recognize again**: any "preprocessor truncates / corrupts at
+exactly 524 KB" shape. The fix is always "thread src_base
+through the helper family"; never "raise the cap and hope."
+Threading the argument is the structurally correct fix.
+
+**Generalize**: any helper that reads from a region the caller
+chose should TAKE THE REGION as an argument, not assume a
+fixed offset. Hardcoded `S+pos` reads in helpers are a
+recurring trap class.
+
+Full backstory: v5_6.cyml's `pp_ifdef_pass_helpers_must_take_src_base`.
+"""
+
+[[entries]]
+name = "ts_lex_jsx_lookahead_terminators"
+description = "TS_LOOKAHEAD_IS_ARROW's COLON-branch must treat JSX closing tokens as scope terminators or it false-positives on unrelated arrows far past the expression."
+category = "cyrius"
+tags = ["ts", "lex", "jsx", "v5.7.6"]
+content = """
+**The trap**: when TS_LOOKAHEAD_IS_ARROW determines whether
+`(` starts an arrow function, it scans for the matching `)`,
+then checks what follows. If COLON, it enters a secondary
+scan for `=>` (return-type form `(args): T => body`).
+
+The COLON-branch's secondary scan tracked LPAREN/RPAREN/
+LBRACKET/RBRACKET/LT/GT for depth, and treated LBRACE/SEMI/
+COMMA at depth==0 as terminators. JSX tokens were SKIPPED —
+none of them affected depth, none terminated.
+
+For ternary `a ? (<JSX/>) : (<JSX2/>)` followed by REAL JSX
+text + much later an arrow function in the same source: the
+COLON-branch scanned past the else-branch's RPAREN
+(depth → 0), past JSX closing tokens (JSX_EXPR_CLOSE,
+JSX_CLOSE_END, etc. — all skipped), into adjacent code, and
+FOUND an unrelated `=>` at depth==0. LOOKAHEAD returned 1
+(arrow), parser entered ARROW_PAREN, then ARROW_PARAMS errored
+on the JSX_OPEN_START at the start of `(<JSX/>)`.
+
+**Fix**: COLON-branch treats `JSX_EXPR_CLOSE` /
+`JSX_CLOSE_END` / `JSX_FRAGMENT_CLOSE` / `JSX_SELF_CLOSE` /
+`JSX_OPEN_END` as terminators at depth==0. A closed-out JSX
+construct can't be inside an arrow return-type position, so
+`=>` past it is unrelated.
+
+**Why this resisted bisect**: the bug requires (1) a ternary
+with JSX-containing parens, (2) an unrelated arrow function
+SOMEWHERE later in the same source. Single-line removal can't
+isolate because it depends on TWO non-adjacent constructs.
+Removing either suppresses it, neither was the culprit alone.
+
+**Recognize again**: any "TS arrow-fn detection misfires on
+file with mixed JSX + later arrow" shape. The fix is always
+"the lookahead scan needs to terminate at the JSX construct's
+close." Other lookaheads in the TS frontend may have similar
+gaps (template literals, generic-arg lists, asserts predicate
+clauses).
+
+Full backstory: v5_7.cyml's `ts_lex_jsx_lookahead_is_arrow_jsx_terminators`.
+"""
+
+[[entries]]
+name = "fn_keyword_in_param_position"
+description = "`fn` is a reserved keyword and cannot be used as a parameter name even in helper fns. Cyrius surfaces this with 'expected identifier, got reserved keyword fn' at the NEXT fn definition, not the offending one."
+category = "cyrius"
+tags = ["parser", "diagnostics", "v5.7.46"]
+content = """
+**The trap**: writing `fn helper(fn, arg)` declares a
+parameter named `fn`. Cyrius's parser treats `fn` as a
+reserved keyword (token type 32), so this fails — but the
+error message points at the WRONG location.
+
+The parser first sees `fn helper(`, accepts it, then sees the
+parameter list. When it tries to read `fn` as a parameter
+name, it errors with "expected identifier, got reserved
+keyword fn" — but the PARSE_TOKEN cursor is at the NEXT
+function definition's `fn` keyword, not the one in the param
+list. So the error reports the line of the next fn, not the
+broken param.
+
+Diagnosis is "the fn at line X is broken" → user inspects
+line X → finds nothing wrong → confused.
+
+**Fix at v5.7.46** (cyrius v5.5.26+ ERR_EXPECT enhancement):
+when the expected token is type 2 (identifier) and the got
+token is a keyword (IS_KEYWORD_TOK returns 1), the diagnostic
+explicitly names the keyword:
+
+```
+error: expected identifier, got reserved keyword 'fn'
+       (cannot be used as an identifier; rename the variable/
+       field/fn)
+```
+
+The error fires at the keyword's actual line, not the next
+fn. The "rename" hint helps users figure out the fix without
+having to know which keywords are reserved.
+
+**The reserved-keyword list** that triggers this: `fn`, `if`,
+`else`, `elif`, `while`, `for`, `return`, `var`, `struct`,
+`enum`, `union`, `match`, `defer`, `include`, `asm`, `kernel`,
+`object`, `secret`, `in`, `shared`, `default`, `as`,
+`continue`, `break`. Any of these as a param/local/struct-
+field name surfaces the same error.
+
+**Recognize again**: any "compile error 'expected
+identifier' on a line that looks fine" shape. Check the
+PREVIOUS fn's param list for keyword reuse.
+
+Full backstory: v5_7.cyml's `fn_keyword_in_param_position`.
+"""
+
+[[entries]]
+name = "lsp_globals_before_fn_definitions"
+description = "Cyrius requires top-level `var X` to be declared before any fn body that references X. Applies to programs/cyrius-lsp.cyr's symbol-table backing buffers too."
+category = "cyrius"
+tags = ["compiler", "lsp", "global-init-order", "v5.7.39"]
+content = """
+**The trap**: cyrius's parser does a single-pass top-down
+walk of source. When a fn body references a top-level
+`var X`, that `var X` must already be declared at parse time.
+Forward fn calls work (the parser pre-scans fn signatures);
+forward GLOBAL VAR references DO NOT work.
+
+This is the v5.7.32 cyrlint warning class
+(`global-init-order forward-ref`) that mabda surfaced. The
+compiler ALSO doesn't catch every shape — the warning is
+opt-in via `cyrius lint`.
+
+**The cyrius-lsp specific instance** (v5.7.39): the LSP
+extension added cross-file go-to-def + documentSymbol via a
+symbol-table backing buffer. The buffer was a top-level `var
+symbol_table[N]`. The fns that read it (`SYMBOL_LOOKUP`,
+`SYMBOL_INSERT`) were defined before the `var` line in the
+source layout.
+
+Pre-fix: the parser saw the fn defs first, registered them,
+parsed their bodies → reached `symbol_table` reference →
+"undefined variable." Post-fix: moved `var symbol_table[N]`
+above all fn defs that reference it.
+
+**Recognize again**: any "undefined variable" error on a top-
+level var that VISUALLY appears in the source somewhere.
+Check it appears BEFORE the fns that read it.
+
+**Generalize**: any new top-level `var X` declared in
+cyrius's own source (or any cyrius project) MUST go above the
+fn bodies that reference it. The parser is single-pass for
+globals.
+
+Full backstory: v5_7.cyml's `lsp_globals_before_fn_definitions_v5_7_39`.
+"""

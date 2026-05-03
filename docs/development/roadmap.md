@@ -2,7 +2,7 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-02
 >
-> **Version**: 2.4.2 | **Cyrius**: 5.8.18
+> **Version**: 2.4.3 | **Cyrius**: 5.8.19
 > **Topics**: 66 (66 fully covered) — **P0 → P1 complete** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 726 source files; concept files: 66
@@ -34,6 +34,7 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.4.0 | 2026-05-02 | **P1 kickoff — Networking & Infrastructure (minor bump)** — 2 new topics × 11 langs: `networking_fundamentals` (TCP socket state machine + bind/listen/connect/send/recv/close lifecycle, port-reuse + half-closed semantics), `http_and_web_protocols` (HTTP/1.1 request parser — sequential parse, case-insensitive header lookup, Content-Length body framing, malformed-request rejection). 24 new source files; validator 660/660 → **682/682**. P1 is 2/6 topics in flight; tls_and_encryption + dns slated for 2.4.1, ipc + serialization for 2.4.2. |
 | 2.4.1 | 2026-05-02 | **P1 batch 2 — 2 new topics × 11 langs** — `tls_and_encryption` (TLS 1.3 handshake state machine, cipher-suite negotiation rejecting legacy 1.2 suites, certificate chain validation with issuer/subject linkage to trust root, AEAD seal/open with tag verification + hostname check), `dns` (in-memory resolver: zone with A/AAAA/CNAME/MX/TXT, recursive lookup with depth-bounded CNAME chase, TTL cache with monotonic clock, negative caching). 22 new source files; validator 682/682 → **704/704**. P1 is 4/6 topics in flight; ipc + serialization slated for 2.4.2. |
 | 2.4.2 | 2026-05-02 | **P1 complete + cyrius pin bump 5.8.14 → 5.8.18** — `ipc` (shared memory + bounded FIFO pipe + named-endpoint message channel), `serialization` (LEB128 varint + length-prefix framing + stream parser + DoS guards: varint overflow cap, oversize-length rejection). 22 new source files; validator 704/704 → **726/726**. **🎉 P1 Networking & Infrastructure complete — 6/6 topics × 11 langs landed.** |
+| 2.4.3 | 2026-05-02 | **Cyrius reference closeout + cyrius pin 5.8.18 → 5.8.19** — both `content/cyrius/` surfaces reorganized in one release. Retired the 4144-line `language.cyml` (73 entries) into `language/` subfolder organized by surface area: core / features / stdlib_modules / tooling / agents (52 entries across 6 files). Recast the chronological per-version `field_notes/compiler/` (8 files, 60 entries) as topical (gotchas / methodology / patterns) plus `retros/` subfolder for chronological narrative (9 files, 46 entries). End state: humans + agents get current-state docs organized by lookup workflow, not historical accretion. Loader unaffected (`content/cyrius/` is skipped). Topics/examples/validator counts unchanged (66/66/726). |
 
 ---
 
@@ -308,4 +309,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-02 (v2.4.2) — **P0 → P1 complete; 66/66 at 11/11; next: P2 distributed systems***
+*Last Updated: 2026-05-02 (v2.4.3) — **content/cyrius/ closeout (language/ + compiler/ both reorganized); cyrius pin 5.8.19; 66/66 at 11/11; next: P2 distributed systems***

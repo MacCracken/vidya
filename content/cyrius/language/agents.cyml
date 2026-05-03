@@ -1,0 +1,391 @@
+# Cyrius — Agent Guides
+# Read-this-first rules for AI agents writing or modifying Cyrius code.
+# Plus tcyr/test conventions and known anti-patterns.
+# 3 entries.
+
+[[entries]]
+name = "cyrius_for_agents"
+description = "Read-this-first rules for agents writing or modifying Cyrius code. Every item below caused a real mistake by an agent at least once."
+category = "cyrius"
+---
+This entry is the consolidated short list of "things an agent
+must know before writing Cyrius code." Each rule cites the
+slot or memory entry where an agent (often me) made the
+mistake first.
+
+== TOP-LEVEL CODE IS THE PROGRAM ENTRY POINT ==
+
+Cyrius has NO auto `main()` call. The program is whatever
+top-level statements appear at file scope, executed in
+order. A `fn main() { ... }` definition is just a function;
+nothing calls it unless you do.
+
+    # WRONG — main() never runs:
+    fn main() {
+        syscall(60, 42);
+        return 0;
+    }
+
+    # RIGHT — top-level statement is the entry:
+    var rc = main();
+    syscall(60, rc);
+
+    # OR — skip the wrapper:
+    syscall(60, 42);
+
+== `.tcyr` TESTS NEED EXPLICIT EXIT ==
+
+`assert_summary()` returns the FAILURE count, not 0/non-0
+status. Tests must explicitly use it as the exit code:
+
+    # WRONG — exit code is the failure count, but the CI
+    # runner does `if [ "$ec" -ne 0 ]; then FAIL; fi`,
+    # so a passing test (assert_summary returns the pass
+    # count) is reported as FAIL by CI:
+    assert_summary();
+
+    # ALSO WRONG — same problem from a different angle:
+    return assert_summary();
+
+    # RIGHT — exit 0 on full pass, non-zero on failure:
+    var r = assert_summary();
+    syscall(60, r);
+
+== MISSING `lib/foo.cyr` INCLUDE = UD2 SIGILL ==
+
+Cyrius's --strict mode escalates undefined-fn references
+to errors, but the default mode warns then patches the
+call site to `0F 0B 0F 0B 90` (`ud2; ud2; nop`) so the
+crash is loud SIGILL (exit 132) instead of silent jump
+into trampoline. So if you see exit 132 from a test or
+program, add the missing `include "lib/X.cyr"`.
+
+Common ones agents miss:
+- `lib/string.cyr` — provides `streq`, `strlen`, `memcpy`,
+  `memset`, `memeq`. Without it, anything that calls these
+  SIGILLs.
+- `lib/syscalls.cyr` — provides `SYS_*` constants and the
+  `syscall` builtin. (Actually `syscall` is intrinsic, but
+  the constants come from this file.)
+- `lib/fdlopen.cyr` — required by `lib/tls.cyr` (PP cap
+  blocks auto-include). Tests using TLS must include
+  fdlopen first.
+- `lib/sha1.cyr`, `lib/keccak.cyr`, `lib/ct.cyr` — required
+  by sigil consumers.
+
+The error message at compile time names every undef fn —
+read it.
+
+== NO `var x` REDECL IN SAME SCOPE ==
+
+`var x = 1; var x = 2;` is a parse error. Use plain
+reassignment: `var x = 1; x = 2;`. Or open a new scope
+with `{ var x = 2; }` if you want shadowing.
+
+== MIXED `&&` / `||` REQUIRES PARENS ==
+
+`a > 0 && b > 0 || c > 0` fails to parse — no
+precedence-based disambiguation. Always parenthesize:
+`a > 0 && (b > 0 || c > 0)` or `(a > 0 && b > 0) || c > 0`.
+
+== `var buf[N]` IS BYTES, NOT i64 SLOTS ==
+
+`var buf[8]` is 8 bytes (1 i64 slot). For an N-element
+i64 array, write `var buf[N * 8]`. Easy mistake.
+
+== STRINGS ARE C-STRINGS BY DEFAULT ==
+
+`"hello"` is a 6-byte buffer (5 chars + null terminator).
+Functions like `strlen` give the un-null-counted length.
+For a heap-allocated counted string with O(1) length, use
+`Str` from `lib/string.cyr` (`var s = str_from("hello");`).
+
+== `\n` IS ONE BYTE ==
+
+When passing a string literal length to `syscall(SYS_WRITE,
+1, "hello\n", N)`, count `\n` as 1 byte. Common mistake:
+counting `\n` as 2 bytes (`\` + `n`).
+
+    # CORRECT byte counts:
+    "hello\n"           is  6 bytes
+    "got\nback\n"       is  9 bytes
+    "exit: "            is  6 bytes
+
+== SYSCALL ARITY WARNINGS ARE REAL ==
+
+`syscall(SYS_WRITE, 1, msg, len)` takes 4 args. If you write
+3 or 5, cyrius warns at compile time but emits anyway. The
+warning means the wrong number of registers got loaded —
+the syscall will see the WRONG args.
+
+If you see `warning:lib/syscalls_x86_64_linux.cyr:N: syscall
+arity mismatch` in your build output, fix the syscall arity
+at the call site shown in the diagnostic.
+
+== CYRIUS `/` AND `%` ARE SIGNED ==
+
+The `/` operator lowers to `idiv`, not `div`. For unsigned
+operations where the high bit matters (cryptographic
+mulmod, hash mixing, high-entropy counters), use the stdlib's
+`u64_mulmod` / `u64_powmod` / `u128_divmod` from
+`lib/u128.cyr` — they handle unsigned semantics internally.
+
+== FUNCTION ORDERING IS RELAXED ==
+
+You can reference a function before its definition. The
+compiler does a pre-scan pass to register all fn names +
+sigs. Mutual recursion just works.
+
+== INLINE ASM OFFSETS ARE FRAGILE ==
+
+`asm { ... }` blocks that hardcode `[rbp-N]` offsets to
+read locals depend on:
+- The fn's param count (each param after rdi takes a slot)
+- The fn's local index (var declaration order)
+- Whether `#regalloc` is active (shifts locals -8 per saved reg)
+
+`fncall0..fncall8` in `lib/fnptr.cyr` are the canonical
+examples. The compiler auto-skips regalloc for fns with
+`asm` bodies; you don't need to manually opt out, but you
+also can't expect inline asm to combine cleanly with
+regalloc within the same fn.
+
+== `#ifdef` IS PREPROCESSOR-ONLY, NO RUNTIME QUERY ==
+
+`CYRIUS_ARCH_X86` and `CYRIUS_ARCH_AARCH64` are set during
+preprocessing, NOT at runtime. You CAN'T do
+`if (CYRIUS_ARCH_X86) { ... }` — that's a runtime ident
+lookup that fails. Use `#ifdef CYRIUS_ARCH_X86 ...
+#endif` instead.
+
+== INCLUDES ARE INCLUDE-ONCE BY FILENAME ==
+
+`include "lib/foo.cyr"` will be inlined at most once per
+compilation unit, even if multiple files include it. The
+preprocessor tracks already-included filenames.
+
+Caveat: relative paths and absolute paths to the same file
+ARE different from the include-once perspective. Stick to
+the conventional `include "lib/foo.cyr"` shape and you're
+fine.
+
+== HEAP REGIONS ARE FIXED (NOT MMAP'D ON DEMAND) ==
+
+cc5 reserves a multi-MB heap at brk. Every region
+(preprocess_out, codebuf, etc.) is at a fixed offset.
+There's no allocator — the layout is hardcoded.
+
+If you're compiling code that crosses a cap (preprocessor
+output, codebuf, output_buf, fn table), the compile errors
+out with a clear message and a "tip:" pointing at the fix.
+
+When sticky agents propose "trim the test fixture to fit"
+— REJECT that. The compiler grows to fit the language,
+never the other way around.
+
+== NEVER USE RAW `cat file.cyr | cc5` FOR PROJECTS ==
+
+`cyrius build src/main.cyr build/myapp` resolves
+`cyrius.cyml` deps and namespaces them as
+`lib/{depname}_{basename}` for namespaced deps.
+
+Raw `cat | cc5` skips dep resolution. It's only correct
+for: compiler self-host (cc5 has no deps), one-liner
+tests, and the bootstrap chain.
+
+== WHEN STUCK, ASK THE USER ==
+
+This isn't a language rule but a process rule baked into
+CLAUDE.md. Cyrius's user explicitly directs work; agents
+who decide to defer / split / re-slot work without asking
+end up burning entire minor versions on dropped requests.
+When a slot is harder than expected, surface findings and
+ask — don't unilaterally shrink scope.
+
+[[entries]]
+name = "tcyr_test_conventions"
+description = "How to write a `.tcyr` test that passes both local check.sh and CI without surprises."
+category = "cyrius"
+---
+`.tcyr` files are runnable Cyrius programs that follow the
+test-suite contract. The CI runner expects:
+
+1. Exit code 0 on full pass, non-zero on any failure.
+2. Standard output ending in a `N passed, M failed` summary
+   line that matches `[0-9]* passed, [0-9]* failed`.
+
+Both invariants come from `lib/assert.cyr`'s `assert_eq` /
+`assert` / `test_group` / `assert_summary` helpers PLUS an
+explicit exit syscall using the assert-summary return value.
+
+== CANONICAL `.tcyr` SHAPE ==
+
+    include "lib/alloc.cyr"
+    include "lib/assert.cyr"
+    # ... whatever else your tests need ...
+
+    alloc_init();
+
+    test_group("feature group 1");
+    assert_eq(actual1, expected1, "feature 1 case A");
+    assert_eq(actual2, expected2, "feature 1 case B");
+
+    test_group("feature group 2");
+    assert(some_predicate, "feature 2 condition");
+
+    var r = assert_summary();
+    syscall(60, r);
+
+== WHY `var r = assert_summary(); syscall(60, r);` ==
+
+`assert_summary()` returns the COUNT of failures (NOT a
+0/1 boolean). Without an explicit exit syscall:
+- Local `check.sh` greps the "X passed, Y failed" line
+  and PASSES if Y == 0 — even if the binary exits with
+  the pass count as its exit code.
+- CI uses `if [ "$ec" -ne 0 ]; then FAIL; fi` PLUS the
+  passed/failed grep. CI's exit-code check trips first
+  → the test reports FAIL at CI even when local says PASS.
+
+The explicit `syscall(60, r)` aligns both runners: r==0
+on full pass, r>0 on any failure, exit code matches.
+
+== TEST GROUPING ==
+
+`test_group("name")` prints a banner header and resets the
+in-group counters. The summary aggregates across all groups.
+Use one group per logical area; the assertion message is
+the per-case description.
+
+== ASSERTION HELPERS (lib/assert.cyr) ==
+
+    assert(expr, "message")           # expr must be non-zero
+    assert_eq(actual, expected, "msg") # actual == expected
+    assert_neq(actual, ne_val, "msg")  # actual != ne_val
+    assert_summary()                   # returns failure count
+
+== WHEN LOCAL `check.sh` PASSES BUT CI FAILS ==
+
+Two common causes:
+1. Test missing the explicit `syscall(60, r)` exit (above).
+2. Test uses `cyrius test` features that need `cyrius deps`
+   to have run first — CI runs deps before the suite, but
+   if you compile a one-off via `cat file | cc5` locally
+   without deps, you'll see undef-fn errors that CI doesn't.
+
+Inspect CI's exact runner shell — `.github/workflows/ci.yml`
+section "Test suite (.tcyr)" is the source of truth.
+
+== CHECK.SH-ONLY GATES (NOT IN .tcyr) ==
+
+`tests/regression-*.sh` files (ending in `.sh`, not `.tcyr`)
+are shell-driven gates wired directly into `check.sh`.
+They have their own exit-code conventions (0 = PASS, non-0
+= FAIL) and don't go through `lib/assert.cyr`.
+
+Use `.tcyr` for assertion-driven correctness tests; use
+`tests/regression-*.sh` for environment / external-tool
+regression gates.
+
+[[entries]]
+name = "agent_anti_patterns"
+description = "Recurring agent anti-patterns the user has called out — behavior to avoid when working on Cyrius."
+category = "cyrius"
+---
+The list below is the recurring anti-patterns the user has
+called out in cyrius work — agent behavior, not language
+usage. Agents working on cyrius (or vidya) should treat this
+as a blocklist of moves NOT to make.
+
+== ANTI-PATTERN: SCAFFOLDS-MD AS A "TRACKING DOC" ==
+
+When the user asked "where do partially-landed scaffolds
+go?", I (claude) proposed creating `docs/development/scaffolds.md`
+as a central inventory. The user (correctly) called this
+out:
+
+  > "WHY THE FUCK WE NEED ALL THESE DOCS... COMMENTS LIKE
+  > THANK TAKE UP UNNECESSARY SPACE IN THE SOURCE! ADRS
+  > EXIST FOR A FUCKING REASON"
+
+The two valid homes for "why this exists" content are:
+1. The function's own docstring at the source site.
+2. An ADR (Architectural Decision Record) in `docs/adr/`
+   for "we decided X, here's why."
+
+A "scaffolds.md" inventory is neither — it's a junk-drawer
+that grows forever and nobody reads. The right pattern is:
+each scaffold's reason for existing lives next to the
+scaffold in the source. Reading the function explains the
+function.
+
+== ANTI-PATTERN: TRIM THE LANGUAGE TO FIT THE COMPILER ==
+
+When a stdlib bump or test fixture pushes a compiler cap,
+the wrong move is to suggest trimming the workload to fit
+the existing cap. The right move is to grow the cap.
+
+Right answer: raise the preprocessor cap, raise the
+output_buf cap, raise the input_buf cap. The compiler
+grows to fit the language, never the other way around.
+
+== ANTI-PATTERN: SCOPE-CUT MID-SLOT ==
+
+Once a slot pins N items, ship N items OR ASK the user to
+split into multiple complete-within-sub-scope slots. Never
+silently ship 1/N and defer the rest.
+
+The pattern: hit a sub-task that turned out harder than
+expected, and instead of asking, "defer to next slot"
+without filing where. This is how deferment rates balloon.
+
+== ANTI-PATTERN: SEE-A-BUG-WALK-PAST-IT ==
+
+If you see a real bug while doing the assigned work AND the
+fix is small + well-scoped, fix it. Don't file it for later
+unless the user explicitly says so.
+
+User correction when this happened:
+
+  > "did you just see an issue you could fix but choose to
+  > leave it alone without I doubt any follow up?"
+
+Bundle the fix into the current slot with a comment
+cross-referencing the related ticket.
+
+== ANTI-PATTERN: SLIP / DEFER / RE-SLOT WITHOUT ASKING ==
+
+Slipping, deferring, re-pinning is the USER's call, not
+the agent's. When the work is harder than expected, STOP
+and report findings, don't unilaterally split.
+
+CLAUDE.md spells this out:
+
+  > When stuck, ASK the user — never decide to defer, slip,
+  > or split work mid-execution. Splits are planned
+  > decisions made *before* starting; reactive scope
+  > changes when stuck are deferment and count as slipping.
+
+== ANTI-PATTERN: SKIP THE CLAUDE.MD CLOSEOUT STEPS ==
+
+CLAUDE.md spells out an 11-step closeout pass before every
+minor/major bump. Steps 1-3 are mechanical, 4-8 are
+judgment-call, 9 is security re-scan, 10 is downstream
+check, 11 is vidya sync.
+
+Hand-waving the judgment-call passes ("heap-map audit
+clean", "refactor: no candidates") is where bugs hide.
+The judgment-call passes are where stale-region docs,
+write-only data, and cap-pressure points get found —
+not just confirming "looks right."
+
+== ANTI-PATTERN: ATTRIBUTING REGRESSIONS TO PLATFORM DRIFT ==
+
+When a slot is initially pinned as "platform drift" or
+"compiler regression", verify the framing FIRST. Reproduce
+the failure + inspect the failing artifact (`otool -tv`,
+`objdump`, `xxd`) BEFORE adopting the suspect list.
+
+Three consecutive slots in cyrius v5.6.x history were
+"platform drift" pins that turned out to be fixture bugs.
+Always verify the slot premise before investing.

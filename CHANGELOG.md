@@ -7,6 +7,151 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.3] — 2026-05-02
+
+**Cyrius reference closeout — content/cyrius/ now organized as
+it should be, not as it accreted.** Two surfaces both retired
+into purpose-built layouts in a single release: the 4144-line
+monolithic `language.cyml` (73 entries) split into a
+usage-organized `language/` subfolder, and the chronological
+per-version `compiler/` field notes (8 files, 60 entries)
+recast as topical (gotchas / methodology / patterns) plus a
+`retros/` subfolder for chronological narrative.
+
+This is the long-overdue closeout of the incremental cyrius
+content cleanup that's been happening since v2.3.1 (field-notes
+subfolder split). End state: humans and agents now get the
+best docs for where the project is right now — surface-area
+organized, current-state focused, no archaeology required.
+
+Plus cyrius pin bump 5.8.18 → 5.8.19 (no source changes).
+
+### Changed — content/cyrius/language/ (NEW subfolder, 6 files, 52 entries)
+
+Retired `content/cyrius/language.cyml` (4144 lines, 73 entries).
+Replaced with topical-by-surface-area subfolder:
+
+- **`index.cyml`** — TOC + section markers.
+- **`core.cyml`** (7 entries) — overview, syntax,
+  compiler_architecture, development_loop, known_limitations,
+  porting_guide, stdlib catalog. Version-specific noise trimmed
+  from the prior overview.
+- **`features.cyml`** (16 entries) — every "how to use this
+  language feature" entry: multi_width_types, sizeof_operator,
+  unions, bitfield_builtins, struct_field_widths,
+  expression_type_propagation, defer_statement, ifplat_directive,
+  enum_namespacing, ref_directive, ret2_rethi,
+  continue_in_for_loops, derive_str_fields,
+  secret_var_compound_ops, slice_type_v58x, relaxed_fn_ordering.
+- **`stdlib_modules.cyml`** (12 entries) — per-module usage:
+  atoi_stdlib, f64_atan_and_math_lib, base64_module,
+  chrono_module, file_locking, csv_module, http_module,
+  patra_stdlib_module, strstr_function, hashmap_str_keys,
+  fncall_ceiling, identity_lookups_musl_pattern.
+- **`tooling.cyml`** (14 entries) — compiler binaries + CLI
+  driver + verbs + format files (.tcyr/.bcyr/.fcyr/.scyr/.smcyr)
+  + cyml + cyrius.cyml manifest + object directive + env vars +
+  flags + LSP plugins + helper scripts + release pipeline +
+  audit/test/check pipeline + minimum compiler version pin.
+- **`agents.cyml`** (3 entries) — cyrius_for_agents,
+  tcyr_test_conventions, agent_anti_patterns.
+
+### Changed — content/cyrius/field_notes/compiler/ (REORGANIZED, 9 files, 46 entries)
+
+Retired the chronological per-version layout
+(pre_v3 / v3 / v4 / v5_0_to_5_4 / v5_5 / v5_6 / v5_7 / v5_8.cyml,
+60 entries) in favor of topical files for current-work lookups,
+with chronological narrative preserved in a `retros/` subfolder.
+
+- **`compiler/index.cyml`** — per-entry TOC for the new layout.
+- **`compiler/patterns.cyml`** (7 entries) — reusable design +
+  convention patterns. Earn their slot when an agent is making
+  a structural decision: ship_now_swap_backend_later,
+  dist_bundle_stdlib_dep_convention,
+  heap_cap_growth_compiler_grows_to_fit_language,
+  version_string_via_generated_source_not_hardcoded,
+  stdlib_hook_surface_via_fn_pointer_not_callback_registry,
+  object_mode_pic_codegen_no_textrel,
+  research_first_optimizer_dce_cfg_lessons.
+- **`compiler/methodology.cyml`** (8 entries) — how to debug,
+  scope, verify slot premises, triage cross-repo bugs.
+  premise_check_at_slot_entry,
+  perf_test_dont_assume_correctness_isnt_perf,
+  verify_outputs_not_just_exit_codes,
+  verify_slot_premise_before_investing,
+  triage_dep_boundary_per_row_checksum,
+  ci_drift_detection_silent_skip_is_false_green,
+  ci_drift_detection_orphaned_path_is_certain_drift,
+  anticipated_gotcha_pre_flight_v55x.
+- **`compiler/gotchas.cyml`** (12 entries) — non-obvious traps
+  in cyrius internals: slice_fn_local_layout_flip,
+  slice_high_half_regalloc_pin, tail_call_escape_addr_local,
+  pointer_vs_inline_struct_dispatch, stale_fixed_cap_drift,
+  stdlib_alloc_grow_step_must_cover_request,
+  libssl_needs_fdlopen_not_dynlib_open,
+  sysv_odd_stack_args_rsp_alignment,
+  pp_pass_helpers_take_src_base,
+  ts_lex_jsx_lookahead_terminators,
+  fn_keyword_in_param_position,
+  lsp_globals_before_fn_definitions.
+- **`compiler/retros/`** subfolder — per-version chronological
+  narrative preserved for backstory:
+  - `pre_v3.cyml` (5 entries) — v0.9–v1.x feature lists +
+    cyrius-x VM
+  - `v3.cyml` (9 entries) — v3.0 retrospective + v3.3-3.6
+    release arcs
+  - `v4.cyml` (3 entries) — v4.0 reflections + v4.8.x handoff
+  - `v5_chronicle.cyml` (1 entry) — per-cycle v5.x feature lists
+  - `v58x_agent_perspective.cyml` (1 entry) — v5.8.x slices
+    sub-arc agent's view
+
+### Changed — pin + index
+
+- **Cyrius pin 5.8.18 → 5.8.19** (`cyrius.cyml`). No source
+  changes required. Field-notes verification range bumped to
+  5.8.19.
+- **`field_notes/index.cyml`** — compiler/ section rewritten
+  end-to-end to point at the topical layout (`compiler/index.cyml`
+  carries the per-entry TOC). The 60-line per-version enumeration
+  collapsed to an 8-line per-file pointer.
+
+### Removed
+
+- **`content/cyrius/language.cyml`** — 4144 lines retired.
+- **~19 resolved/duplicate entries** dropped from the old
+  language.cyml (the fix is in the compiler now and no agent
+  action is needed): findvar_last_match, include_path_fallback,
+  gt6_args_fix, cyrb_to_cyrius_rename, gvar_expansion,
+  p_minus_1_hardening, tail_call_gt6_fix, str_data_expansion,
+  constant_fold_identity, patra_module (superseded by
+  patra_stdlib_module), function_table_2048,
+  nested_while_codegen_bug + …_documented (resolved
+  v3.4.6-3.4.9), derive_integers_fix, platform_stubs (Mach-O + PE
+  actually work now), cc3_rename (cc5 era), and a few others.
+- **~14 entries** consolidated out of the chronological compiler/
+  per-version files when reshaped into topical patterns/
+  methodology/gotchas (60 → 46 entries via dedup of release-arc
+  rollups whose durable lessons now live in the topical files).
+
+### Verified
+
+- `cyrius test` 41/41 passing.
+- `scripts/validate-content.sh` 726/726 (no content topics
+  changed; `cyrius/` is skipped by the loader anyway).
+- `vidya stats`: Topics 66, Complete 66 (all 11 languages),
+  Examples 726 — unchanged.
+
+### Notes
+
+- This release closes out the incremental cyrius content
+  cleanup that's been happening since v2.3.1's field-notes
+  subfolder split. Both `language/` and `compiler/` surfaces
+  now follow the same per-surface-area split convention,
+  with one TOC file per directory and topical files sized
+  for actual lookup workflows (current work) rather than
+  chronological accretion (release archaeology).
+- VERSION 2.4.2 → 2.4.3.
+
 ## [2.4.2] — 2026-05-02
 
 **P1 Networking & Infrastructure complete.** Final 2 topics ship

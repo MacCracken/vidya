@@ -1,0 +1,329 @@
+# Cyrius Field Notes — Retros (v5.x chronological narrative)
+# Per-cycle release-arc feature lists (chrono-organized "what
+# shipped in this minor"). Duplicates CHANGELOG.md / docs/
+# development/completed-phases.md narrative — kept here for
+# vidya consumers who want the same content in the cyml layout.
+#
+# For current work consult the topical files:
+#   - ../patterns.cyml
+#   - ../methodology.cyml
+#   - ../gotchas.cyml
+#
+# Migrated 2026-05-02 from field_notes/compiler/v5_*.cyml.
+
+[[entries]]
+name = "v56x_features"
+description = "v5.6.x feature additions — preprocessor, attributes, overflow operators, IR optimization arc"
+category = "cyrius"
+---
+=== PREPROCESSOR EXTENSIONS (v5.6.1) ===
+
+#else / #elif / #ifndef now work alongside the existing #ifdef / #endif:
+
+    #ifdef CYRIUS_TARGET_LINUX
+        var fd = file_open("/proc/self/exe", 0);
+    #elif CYRIUS_TARGET_WIN
+        var fd = win_get_image_handle();
+    #else
+        # macOS / other platforms fall here
+    #endif
+
+    #ifndef CYRIUS_BAREMETAL
+        println("running on hosted platform");
+    #endif
+
+State machine is per nesting level (4-state encoding stored at heap
+0x97F10): EMITTING / SEARCHING / DONE / OUTER_SKIP. `#elif` after a
+taken `#ifdef` branch is correctly skipped; nested blocks inside a
+parent's skip path don't re-trigger emit.
+
+Closes the long-standing v5.4.x gap where paired `#ifdef` was the only
+way to branch. The 60+ stdlib paired-`#ifdef` sites can migrate to the
+cleaner form at leisure — no breaking change.
+
+=== EXPLICIT OVERFLOW OPERATORS (v5.6.2) ===
+
+9 new tokens make integer-overflow intent visible at the call site:
+
+    +%  -%  *%      # wrapping (alias for bare + - *; 2's complement wrap)
+    +|  -|  *|      # saturating (clamp to i64::MIN / i64::MAX)
+    +?  -?  *?      # checked (panic on overflow with exit code 57)
+
+Wrapping ops are bytes-identical to the bare operator — they document
+intent, no runtime cost. Saturating and checked variants compile to
+calls into lib/overflow.cyr helpers (`_sat_add_i64`, `_sat_sub_i64`,
+`_sat_mul_i64`, `_chk_add_i64`, `_chk_sub_i64`, `_chk_mul_i64`).
+
+Checked-panic uses `syscall(60, 57)`. Exit code 57 is reserved to
+distinguish overflow panics from POSIX signal exits and from
+assert-summary returns. Production / kernel code should prefer
+explicit wrapping + range guards over `+?` for hot paths; `+?` is
+intended for boundary checks where overflow is genuinely a bug.
+
+=== ATTRIBUTES — #must_use, @unsafe, #deprecated (v5.6.3 + v5.6.4) ===
+
+Function-level attributes flag intent at declaration; the compiler
+warns at call sites or compile time. All three are stored in a 4-bit
+mask in fn_flags[fi] at heap 0xFC000.
+
+#must_use (v5.6.3, bit 0):
+    #must_use
+    fn checked_op(x): i64 { return x * 2; }
+
+    fn main() {
+        checked_op(21);          # warning: result of #must_use fn discarded
+        var r = checked_op(21);  # OK
+        return checked_op(21);   # OK
+    }
+
+The diagnostic fires only at expression-statement discard (`fn();`).
+Assignment, `return fn();`, arg-passing, and conditional sites
+(`if (fn())`) are unaffected. Method-call discards are deferred for
+future patch.
+
+@unsafe (v5.6.3, bit 1 reserved; block-form keyword token 123):
+    @unsafe {
+        store64(some_raw_ptr, 0);
+        var x = load64(some_other_raw_ptr);
+    }
+
+Advisory only — no runtime cost. Nested `@unsafe` blocks emit a
+stylistic warning ("nested unsafe is redundant") but compile.
+
+#deprecated (v5.6.4, bit 2; required string argument):
+    #deprecated("use sha256_init() — sha1 is collision-broken")
+    fn sha1_init() { ... }
+
+Warns at every call site (unlike #must_use's discard-only). The
+required string lives in fn_deprecated_msg at heap 0x104000 (4096 ×
+8 B token offsets). Useful for ecosystem-wide migration: ship the
+deprecated marker in version N, give consumers one or two minor
+versions of warning, remove in version N+2.
+
+=== IR OPTIMIZATION ARC (v5.6.5 — v5.6.27) ===
+
+The v5.6.x minor is the **compiler optimization arc**. Six phases
+labelled O1 through O6:
+
+  O1 (v5.6.5):    FNV-1a FINDFN hash + CYRIUS_PROF baseline
+  O2 (v5.6.7-11): post-emit codebuf peephole — 5 categories
+                  • cat 1: `x * 2^n → shl/lsl` strength reduction
+                  • cat 2: ECONDCMP → `test rax, rax` flag-reuse
+                            (BIGGEST WIN: -21,856 B / -4.15 %)
+                  • cat 3: redundant push/pop cancel (CP rewind)
+                  • cat 4: commutative shuttle elim x86 (-16,960 B)
+                  • cat 5: commutative shuttle elim aarch64
+                            (closes O2; native aarch64 cc5 -17,672 B)
+  O3 (v5.6.12-18, ✅ closed):
+                  • O3a (v5.6.12-15): IR instrumentation + correctness
+                    audit — IR_RAW_EMIT markers in 15 parse_*.cyr
+                    direct-emit blocks; LASE bug found and fixed
+                    (parse_ctrl.cyr loop_top IR_NOP landing pads);
+                    ESETCC IR-emit-order inversion fixed (record IR
+                    AFTER sub-emit)
+                  • O3b (v5.6.16): IR-level constant fold (130 folds /
+                    774 B NOP-fill at IR=3 on cc5 self-compile)
+                  • O3b-fix (v5.6.17): bitmap liveness + DCE — fixed
+                    via CYRIUS_DCE_CAP bisection methodology
+                    (IR_RAX_CLOBBER reads RCX, not writes; same for
+                    IR_ADD_IMM_X1 + IR_RAW_EMIT). 678 kills /
+                    2,010 B NOP-fill at IR=3.
+                  • O3c (v5.6.18): dead-store elimination + fixed-
+                    point driver. 15 DSE / 6,099 B NOP-fill at IR=3
+                    in 3 fixpoint iterations (cascade caught 3 more
+                    folds 132→135). Copy-prop deferred long-term
+                    (recon: 0 B direct savings on stack-machine IR).
+  O4 (v5.6.19-24, ✅ closed): linear-scan register allocation.
+                  • O4a (v5.6.19): per-fn live-interval infrastructure
+                  • O4b (v5.6.20): Poletto-Sarkar picker
+                  • O4c (v5.6.22): auto-enable infra (DISABLED) +
+                    picker correctness fix (loop-back time-share)
+                  • v5.6.23: misdiagnosis correction —
+                    asm/regalloc layout collision (body-scan token 48)
+                  • v5.6.24: **default-on flip** + SysV ECALLPOPS
+                    r12-r14 clobber fix (codegen-scratch-must-be-
+                    caller-saved rule). cc5 +20,304 B for save/
+                    restore overhead.
+  O5 (dropped): maximal-munch instruction selection. Recon found
+                    0 fused-op candidates (cyrius's stack-machine IR
+                    keeps a push between sub-expression results and
+                    consumers); push-imm rewrite has rax-side-effect
+                    + forward-jump-target issues. Pinned long-term —
+                    needs an IR-level push-elision pass first. v5.6.26
+                    shipped peephole refinement + doc completion in
+                    place of the original O5 scope.
+  O6 (v5.6.27, pinned): codebuf compaction (NOP harvest with
+                            jump+fixup repair) — REAL binary shrinkage,
+                            sweeps accumulated NOP-fill from O3 passes
+                            (~6,099 B at IR=3) plus picker patches
+                            (~16 KB at default-on cc5)
+
+Late-arc bonus shrinkage:
+  v5.6.25: aarch64 EPOPARG push/pop-cancel completion (closed v5.6.11
+           mirror gap; native aarch64 cc5 −20,368 B / −3.94 %)
+
+=== IR PIPELINE ENV VARS ===
+
+CYRIUS_IR=1     Record IR while emitting x86 (no optimization passes)
+CYRIUS_IR=2     Verbose IR dump (incl. ir_dump per fn)
+CYRIUS_IR=3     Record IR + run apply_lase + ir_const_fold + ir_dce
+                (the optimization mode; 3-step b==c required)
+
+CYRIUS_DCE_CAP=N
+                Cap DCE kills at first N candidates. -1 = uncapped
+                (default at IR=3). Set to a small value to bisect
+                wrongly-killed nodes during future IR-pass debug
+                (v5.6.17 bisection methodology — saved as a load-
+                bearing knob; same pattern saved cycles at v5.6.22
+                regalloc time-share bug + v5.6.24 ECALLPOPS bug).
+
+CYRIUS_REGALLOC_AUTO_CAP=N
+                (v5.6.22 infra, default-on at v5.6.24) Cap auto-
+                regalloc at first N x86 fns (no inline asm). Default
+                = uncapped. Set 0 to disable; positive N for bisection.
+
+CYRIUS_REGALLOC_DUMP=1
+                (v5.6.19) Print per-fn live intervals to stderr.
+
+CYRIUS_REGALLOC_PICKER_CAP=N
+                (v5.6.20) Cap picker assignments per fn. Bisection knob.
+
+CYRIUS_PROF=1   (v5.6.5; cross-platform v5.6.6) Wall-clock total
+                compile time via clock_gettime (Linux syscall 228
+                / aarch64 113 / kernel32!GetTickCount64 on PE /
+                libSystem._clock_gettime_nsec_np on Mach-O via
+                __got[6]).
+
+=== BYTE-IDENTITY GATE EXPANSION ===
+
+Since v5.6.16, the 3-step fixpoint must hold at BOTH IR_ENABLED=0
+AND IR_ENABLED=3. Two distinct invariants:
+
+  IR=0:  cc5_a (built from main.cyr at IR=0) compiles main.cyr to
+         cc5_b. cc5_b compiles main.cyr to cc5_c. b == c.
+
+  IR=3:  cc5_a compiled with CYRIUS_IR=3 produces cc5_b (with
+         optimization-pass NOP-fill applied). cc5_b run with
+         CYRIUS_IR=3 produces cc5_c. b == c.
+
+The IR=0 and IR=3 outputs DIFFER from each other (NOPs in place of
+optimized-out instructions), but each is internally self-consistent.
+Real binary shrinkage waits for v5.6.22 codebuf compaction.
+
+=== STATE-DOC SPLIT (v5.6.16) ===
+
+CLAUDE.md is now preferences/process/procedures only. Volatile state
+(version, cc5 size, in-flight slots, recent shipped releases,
+consumers, verification hosts) lives in docs/development/state.md.
+Per-release narrative lives in docs/development/completed-phases.md.
+The architecture doc (docs/architecture/cyrius.md) is the durable
+"how / why" — design decisions that change rarely.
+
+This split catches the rot pattern where every release was appending
+a sentence to CLAUDE.md's "Current State" paragraph until it became
+unmaintainable. The pattern generalizes: durable rules in the
+top-level instruction file; volatile state in a refreshed-per-
+release sibling doc.
+
+=== POST-OPTIMIZATION-ARC PATCHES (v5.6.28 — v5.6.43) ===
+
+After the O1-O6 arc closed at v5.6.27, the rest of v5.6.x
+ran correctness fixes, dep bumps, and heap reshuffles. The
+significant ones:
+
+  v5.6.30 (preprocessor):  PP_DERIVE_* `src_base` fix —
+                            PP_IFDEF_PASS reads past 524288 B
+                            input_buf cap returned stale heap;
+                            v5.6.42 closed the rest of the
+                            same-class family (PP_HASH /
+                            PP_DEFINE / PP_DEFINED / PP_GETVAL /
+                            PP_EVAL_IF).
+  v5.6.31 (PE/Win11):      HIGH_ENTROPY_VA SIGSEGV — EREAD_PE/
+                            EWRITE_PE used `mov rax, [rsp+0x28]`
+                            for kernel-written DWORD, picking up
+                            4 B of stack garbage. Fix: 32-bit
+                            `mov eax` (auto-zero-extends).
+                            HIGH_ENTROPY_VA enabled by default.
+  v5.6.32 (aarch64 native): missing `include "src/common/ir.cyr"`
+                            in main_aarch64_native.cyr (latent
+                            since v5.6.12 O3a). Earlier
+                            "macOS drift" framing was wrong.
+  v5.6.33 / v5.6.36:       Mach-O / Win11 PE gate fixture
+                            rewrites. Both pinned as "platform
+                            drift" but were `fn main() { ... }`
+                            fixtures that never ran main()
+                            (cyrius has no auto-call). See
+                            `feedback_verify_slot_premise_first`.
+  v5.6.34:                 stdlib `alloc` grow-undersize SIGSEGV —
+                            lib/alloc.cyr grew by fixed 0x100000
+                            regardless of size; alloc(>1MB) near
+                            boundary SIGSEGV'd. Fix: round to
+                            1 MB grain on Linux; loop on macOS.
+  v5.6.35:                 sankoch 2.0.1 → 2.0.3 dep pin (sit
+                            symptom 2 closed via sankoch's deflate
+                            encoder fix; cyrius itself unchanged).
+  v5.6.37:                 SSL_connect deadlock — libssl routed
+                            through fdlopen instead of dynlib_open
+                            so libssl gets a real glibc TCB.
+                            BREAKING: tls.cyr consumers must
+                            include fdlopen.cyr first (PP cap
+                            blocks auto-include).
+  v5.6.38:                 .so emission slot premise check —
+                            removed dead SYSV_HASH (14 LOC).
+                            Third consecutive premise-disprove
+                            slot.
+  v5.6.39:                 cc5 --version drift fix — version
+                            string drifted from 5.6.29-1 across
+                            9 releases because version-bump.sh's
+                            regex didn't match `-N` hotfix
+                            suffix. Fix: removed hardcoded
+                            literals; src/version_str.cyr is
+                            auto-generated from VERSION.
+  v5.6.40:                 lib/tls.cyr ALPN/mTLS hook surface —
+                            tls_dlsym + tls_connect_with_ctx_hook.
+                            Sandhi-blocking. + patra 1.6.0 →
+                            1.8.3 + preprocess_out 1 MB → 2 MB
+                            heap reshuffle.
+  v5.6.41:                 SysV 16-byte stack alignment fix for
+                            odd-stack-arg callers. ECALLPOPS's
+                            `add rsp, 48` left rsp 8-aligned at
+                            CALL when nextra was odd; downstream
+                            libssl SSE-using prologs SIGSEGV'd.
+                            See field_notes/compiler.toml for
+                            the calling-convention math.
+  v5.6.42:                 PP_DEFINE/DEFINED `src_base` hardening
+                            (closes v5.6.30 same-class) +
+                            heap-map fix-through (stale
+                            `0xA0000 fixup_tbl` docs in 4 main
+                            files; v5.6.27 had repurposed the
+                            region 16 patches ago).
+  v5.6.43:                 v5.6.x closeout — sigil 2.9.0 → 2.9.3
+                            + sankoch 2.0.3 → 2.1.0 + output_buf
+                            1 MB → 2 MB heap reshuffle (16
+                            regions shifted +1 MB; brk 22.5 →
+                            23.5 MB). Last patch of v5.6.x.
+
+=== v5.6.x CLOSING METRICS ===
+
+  Date range:           2026-04-13 → 2026-04-25 (12 days)
+  Patch count:          44 (v5.6.0 through v5.6.43)
+  cc5 size delta:       508,880 → 531,888 B (+23,008 B / +4.5 %)
+                         Tradeoff: regalloc save/restore
+                         overhead + alignment branches outweigh
+                         peephole shrinkage at IR=0.
+  Native aarch64 cc5:   471,360 → 463,768 B (−7,592 B / −1.6 %).
+  check.sh gates:       22 → 26 (preprocessor_past_cap +
+                         sysv_odd_stack_args + regression-tls-live
+                         + regression-macho-cross-build).
+  .tcyr files:          84 → 87.
+  Deps refreshed:       patra 1.6.0 → 1.8.3, sigil 2.9.0 → 2.9.3,
+                         sankoch 2.0.1 → 2.1.0.
+  Heap brk:             0x150B000 (21 MB) → 0x178B000 (23.5 MB).
+
+  Optimization arc landed: O1 / O2(5/5) / O3(a-c) / O4(a-c).
+  Optimization arc dropped: O5 (maximal-munch — recon found
+                             zero fused-op candidates on cyrius's
+                             stack-machine IR; pinned long-term).
+                            O6 landed at v5.6.27 (codebuf
+                             compaction; −11,536 B / −2.13 %).
+

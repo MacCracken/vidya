@@ -1,0 +1,780 @@
+# Cyrius — Tooling & Formats
+# Compiler binaries, CLI driver, dev tools, helper scripts,
+# format files, env vars, flags, plugin/LSP wiring.
+# Refreshed 2026-05-02 at v5.8.19 ship.
+# 14 entries.
+
+[[entries]]
+name = "compiler_binaries"
+description = "cc5 + cross-compilers (aarch64 Linux/Mach-O, Windows PE, cyrius-x bytecode)"
+category = "cyrius"
+---
+The Cyrius toolchain ships multiple compiler binaries, each
+targeting a different host/output triple. All bootstrap from the
+same 29 KB seed (`bootstrap/asm`) via the bridge chain
+(seed → cyrc → bridge → cc5).
+
+== PRIMARY (Linux x86_64 self-host) ==
+
+  `cc5`              — main compiler, ~728 KB at v5.8.19. Reads .cyr
+                       source on stdin; writes ELF executable on
+                       stdout. Self-hosts byte-identical via
+                       two-step + three-step verify.
+
+== CROSSES ==
+
+  `cc5_aarch64`      — Linux ARM64 + macOS Mach-O ARM64 cross.
+                       ~412 KB. Built from `src/main_aarch64.cyr`.
+                       Apple Silicon also self-hosts byte-identically
+                       via `src/main_aarch64_native.cyr` since v5.3.13.
+  `cc5_win` (cross)  — Windows PE32+ cross. Native self-host via
+                       `cc5_win.exe` on Windows 11 since v5.5.10
+                       (byte-identical to Linux cross output).
+                       Built from `src/main_win.cyr`.
+  `cc5_macho`        — Mach-O x86_64 cross (Intel Mac).
+  `cc5_macho_arm`    — Mach-O aarch64 cross (built when not
+                       producing native via cc5_aarch64 on macOS).
+                       Built from `src/main_aarch64_macho.cyr`.
+  `cc5_cx`           — cyrius-x bytecode entry (`CYX\\0` magic +
+                       opcodes; v5.7.12 path B). Built from
+                       `src/main_cx.cyr`. Re-validated each minor
+                       via `tests/regression-cx-roundtrip.sh`.
+
+== RENAME PIN ==
+
+cc3 → cc5 at v5.0.0 was the last name-change penalty paid.
+cc5 → cyc at v6.0.0 is the FINAL rename — cyc stays cyc forever
+(no cc6 at v7.0.0, no cc7 at v8.0.0). `VERSION` file +
+`--version` output are the only sources of truth for which
+release a binary is.
+
+== STANDALONE TOOLS (per `[release].bins` in cyrius.cyml) ==
+
+  `cyrius`              CLI driver — delegates to cc5 + helpers.
+  `cyrfmt`              Source formatter (analogous to gofmt).
+  `cyrlint`             Static analyzer (warnings + dead-code).
+  `cyrdoc`              Doc generator (HTML + markdown emit).
+  `cyrc`                Bridge compiler (intermediate stage).
+  `ark`                 Package manager (.ark distributables).
+  `cyrld`               Linker (cyrius-native static linking).
+  `cyrius_api_surface`  Public API snapshot diff (v5.7.33).
+  `cyrius-lsp`          Language Server Protocol implementation.
+
+[[entries]]
+name = "cyrius_cli"
+description = "cyrius — top-level CLI driver. Orchestrates cc5 + auto-deps + standalone tools across build/test/quality/info verbs."
+category = "cyrius"
+---
+`cyrius` is the user-facing entry point. It auto-resolves
+`[deps.*]` declared in `cyrius.cyml` before any
+build/run/test/bench/fuzz/check/soak/smoke command (v5.7.21
+added the auto-prepend for fuzz; check folded in by v5.7.50).
+
+== BUILD VERBS ==
+
+  cyrius build [--aarch64] [--no-deps] [-D NAME] <src> <out>
+  cyrius run [--aarch64] <source.cyr>
+  cyrius test [--aarch64] <test.cyr>          — exit 0 = pass
+  cyrius bench <bench.cyr>
+  cyrius check [--with-deps] <src.cyr>        — syntax-only
+  cyrius self                                 — cc5==cc5 byte-identical
+  cyrius clean                                — wipe build/
+
+`-D NAME` injects `#define NAME` at the top of the bundled
+source (preprocessor-style; useful for feature flags). The
+`-D` family was added during the v5.6.x optimization arc.
+
+== PROJECT VERBS ==
+
+  cyrius init <name>                          — scaffold new project
+  cyrius package                              — emit .ark distributable
+  cyrius publish                              — push to ark registry
+  cyrius port <rust-project>                  — Rust → Cyrius scaffold
+  cyrius install <pkg>                        — fetch binary release
+  cyrius update                               — re-resolve deps to latest tags
+  cyrius deps [--no-lock|--verify]            — manifest-driven dep resolve
+
+== QUALITY VERBS ==
+
+  cyrius fmt <file.cyr> [--check]
+  cyrius lint <file.cyr>
+  cyrius doc [--check] <file.cyr>             — also: --serve [port]
+  cyrius vet <source.cyr>                     — include-graph audit
+  cyrius deny <source.cyr>                    — project-policy enforcement
+  cyrius audit                                — full sweep: self-host + test + fmt + lint
+  cyrius distlib <profile>                    — produce dist-shape stdlib
+  cyrius capacity [--check|--json] <src.cyr>  — frame/heap/code measurement
+  cyrius api-surface [--update]               — public-API snapshot diff (v5.7.33)
+
+== TESTING VERBS ==
+
+  cyrius test                                 — auto-discovers tests/tcyr/*.tcyr
+  cyrius bench                                — auto-discovers benches/*.bcyr
+  cyrius fuzz                                 — auto-discovers fuzz/*.fcyr
+  cyrius soak [N]                             — N-iter self-host loop + tests/scyr/*.scyr
+  cyrius smoke                                — auto-discovers tests/smcyr/*.smcyr
+  cyrius coverage                             — per-fn coverage report
+  cyrius doctest <file.cyr>                   — run `# example:` blocks
+
+== INFO + LSP ==
+
+  cyrius lsp                                  — build + install cyrius-lsp
+  cyrius version                              — toolchain version
+  cyrius version --project                    — project's VERSION file
+  cyrius which                                — path to cc5
+  cyrius repl                                 — expression REPL
+  cyrius help                                 — full verb list
+
+[[entries]]
+name = "tcyr_test_format"
+description = ".tcyr — assertion-driven test format with auto-discovery"
+category = "cyrius"
+---
+`.tcyr` files are runnable Cyrius programs that follow the
+test-runner contract. `cyrius test` (no args) auto-discovers
+`tests/tcyr/*.tcyr` and runs each; positional arg compiles +
+runs a specific file.
+
+Standard shape:
+
+    include "lib/string.cyr"
+    include "lib/syscalls.cyr"
+    include "lib/alloc.cyr"
+    include "lib/assert.cyr"
+
+    alloc_init();
+
+    test_group("widget basics");
+    assert_eq(widget_size(), 16, "widget is 16 bytes");
+    assert_eq(widget_id(0), 0, "ids start at 0");
+
+    var r = assert_summary();
+    syscall(60, r);   # exit 0 = all pass; non-zero = failure count
+
+`cyrius test` auto-prepends every dep distfile + the
+`[deps].stdlib` list from `cyrius.cyml` so the runner doesn't
+need to write include directives for stdlib in scope.
+
+Output convention:
+  `=== <test_group name> ===`
+  `  PASS: <assertion msg>`  (only on --verbose; default is silent on pass)
+  `  FAIL: <assertion msg> (got X, expected Y)`
+  Final line: `N passed, M failed (T total)`
+
+[[entries]]
+name = "bcyr_fcyr_scyr_smcyr_formats"
+description = ".bcyr (bench) / .fcyr (fuzz) / .scyr (soak) / .smcyr (smoke) — test-adjacent harness formats"
+category = "cyrius"
+---
+Four sibling formats to .tcyr, each scoped to a specific
+validation cadence.
+
+== .bcyr — BENCH HARNESS ==
+
+`cyrius bench` auto-discovers `benches/*.bcyr`. Same source-
+shape as .tcyr but uses `lib/bench.cyr`'s timing helpers:
+
+    bench_start("op_name");
+    ... work ...
+    bench_end("op_name");
+    bench_report();
+
+For sub-microsecond ops where `clock_gettime` overhead dominates:
+
+    bench_batch_start("hot_op", 1000000);   # 1M iterations
+    var i = 0; while (i < 1000000) { ...; i = i + 1; }
+    bench_batch_stop();
+
+`bench-history.sh` (in vidya) snapshots `cyrius bench` per-commit
+for historical regression diff.
+
+== .fcyr — FUZZ HARNESS ==
+
+`cyrius fuzz` auto-discovers `fuzz/*.fcyr`. Each harness exercises
+a module with stress patterns. Exit 0 = pass, non-0 = fail,
+139 = SIGSEGV crash. Standard fuzz harnesses ship with stdlib:
+`hashmap.fcyr`, `vec.fcyr`, `string.fcyr`, `freelist.fcyr`.
+
+`cyrius fuzz --compiler [N]` runs mutation fuzzing against cc5
+itself (separate from project-level harnesses).
+
+== .scyr — SOAK HARNESS ==
+
+`cyrius soak [N]` runs N iterations of the full validation loop
+plus walks `tests/scyr/*.scyr`. Long-running validation —
+overnight loops. Catches: non-determinism, memory leaks, state
+corruption, codegen drift.
+
+  cyrius soak 100                  # quick overnight
+  cyrius soak 1000                 # full soak
+  cyrius soak 10 "repo1 repo2"     # custom downstream-repo list
+
+Example: `tests/scyr/alloc_pressure.scyr`.
+
+== .smcyr — SMOKE HARNESS ==
+
+`cyrius smoke` auto-discovers `tests/smcyr/*.smcyr`. Quick sanity
+checks — meant to run in seconds, gate releases. Example:
+`tests/smcyr/compile_minimal.smcyr`.
+
+[[entries]]
+name = "cyml_format"
+description = "CYML (.cyml) — TOML header + markdown body in one file. Used by vidya, cyrius.cyml, this-very-file."
+category = "cyrius"
+---
+CYML — Cyrius Markup Language — is TOML above the delimiter,
+markdown below it. Implemented in `lib/cyml.cyr`.
+
+== THE PROBLEM IT SOLVES ==
+
+Three formats in the AGNOS ecosystem each solved half:
+  - TOML: typed fields, but prose in triple-quoted strings is ugly
+  - Markdown: agents read it natively, but no type system
+  - YAML frontmatter: hybrid that works, but YAML brings known
+    bugs (indentation-sensitive, Norway problem, implicit typing)
+
+CYML is the deliberate fourth option: TOML on top, markdown
+underneath, `---` separator.
+
+== SHAPES ==
+
+Single-entry:
+
+    [meta]
+    name = "example"
+    tags = ["tutorial"]
+
+    ---
+
+    Everything below the delimiter is markdown.
+    Full prose. Code blocks. Lists. No escaping.
+
+Multi-entry (vidya pattern; this file is the canonical example):
+
+    [topic]
+    id = "tooling"
+
+    [[entries]]
+    name = "first_entry"
+    type = "best_practice"
+
+    ---
+
+    First entry's markdown body.
+
+    [[entries]]
+    name = "second_entry"
+    type = "gotcha"
+
+    ---
+
+    Second entry's body.
+
+== PARSE RULES ==
+
+  1. File starts in TOML mode.
+  2. `[[entries]]` on its own line starts a new entry TOML header.
+  3. `---` on its own line switches to markdown body.
+  4. Next `[[entries]]` or EOF ends the current body.
+  5. TOML above the first `[[entries]]` is file-level metadata.
+  6. Leading/trailing whitespace on body is trimmed.
+  7. Body is stored as raw string — no markdown parsing on the
+     library side; the consumer can run a markdown parser if
+     they want HTML output.
+
+== API ==
+
+    var doc = cyml_parse(data, len);
+    var n = cyml_doc_entry_count(doc);
+    var e = cyml_doc_entry(doc, 0);
+    var hdr = cyml_entry_header(e);    # TOML pointer
+    var body = cyml_entry_body(e);     # markdown pointer
+
+    # Convenience for single-entry files:
+    cyml_split(data, len, &hdr, &hdr_len, &body, &body_len);
+
+Zero-copy parser — returns pointers into the input buffer.
+22-assertion test suite.
+
+[[entries]]
+name = "cyrius_cyml_manifest"
+description = "cyrius.cyml — project manifest. Top-level package + build + release + deps blocks."
+category = "cyrius"
+---
+Every Cyrius project carries a `cyrius.cyml` at the repo root.
+Pure CYML; the file-level header (above any `[[entries]]`) is
+the manifest. No `[[entries]]` block is used here — the manifest
+is single-entry.
+
+== TOP-LEVEL BLOCKS ==
+
+    [package]
+    name        = "myapp"
+    version     = "${file:VERSION}"   # interpolation
+    description = "..."
+    license     = "GPL-3.0-only"
+    repository  = "https://github.com/..."
+
+    [build]
+    src    = "src/main.cyr"
+    output = "build/myapp"
+
+    [release]
+    bins        = ["myapp", "myapp-cli"]
+    cross_bins  = ["myapp_aarch64"]
+    scripts     = ["scripts/install.sh"]
+
+    cyrius = "5.8.19"     # MINIMUM compiler version (v5.6.x+)
+
+    [deps]
+    stdlib = ["syscalls", "string", "alloc", "str", ...]
+
+    [deps.<name>]
+    git     = "https://github.com/MacCracken/<name>.git"
+    tag     = "X.Y.Z"
+    modules = ["dist/<name>.cyr"]
+
+== INTERPOLATION ==
+
+  ${file:PATH}       — read PATH (relative to manifest), trim
+                       trailing whitespace. Used for VERSION.
+  ${env:NAME}        — environment variable.
+  ${file:foo:default} — file with default if missing.
+
+== `cyrius` MINIMUM-VERSION CHECK ==
+
+`cyrius build` reads the top-level `cyrius` field and refuses to
+compile if the installed toolchain is older. Same pattern as
+Rust's `rust-version`, Go's `go` directive, Zig's
+`minimum_zig_version`. Bump when:
+
+  - Using a new language feature (slices, multi-width types, etc.)
+  - Using a new stdlib module that wasn't in earlier releases
+  - Using a new compiler directive
+  - Hitting a bug fix in a specific patch release
+
+== `[release]` LISTS ==
+
+`bins` / `cross_bins` / `scripts` are the SINGLE source of truth
+for what the release pipeline ships. `release.yml`, `install.sh`,
+and `cbt/pulsar.cyr` all read from this manifest — no list is
+duplicated across multiple files. Adding a new binary requires
+exactly one edit (here).
+
+== `[deps]` AUTO-PREPEND ==
+
+`stdlib = [...]` lists module bare-names (`syscalls`, not
+`lib/syscalls.cyr`); `cyrius` auto-prepends each as
+`include "lib/<name>.cyr"` to bundled source for
+build/test/bench/fuzz/check/soak/smoke. Avoids repeating include
+lines in every test/bench file.
+
+`[deps.<name>]` blocks declare git-resolved deps. Materialized
+into `lib/<name>_<basename>.cyr` (namespaced). Lockfile at
+`cyrius.lock` records resolved SHAs.
+
+[[entries]]
+name = "object_directive"
+description = "object; — emit ELF .o relocatable output (kernel_mode = 3)"
+category = "cyrius"
+---
+`object;` at the top of a .cyr file triggers ELF .o relocatable
+output (sets `kernel_mode = 3`). The compiler emits a proper
+ELF object with sections:
+
+  .text, .data, .rodata, .symtab, .strtab, .rela.text
+
+Functions become `STT_FUNC`/`STB_GLOBAL` symbols. Fixup entries
+convert to relocations:
+
+  type 0 (var addr)     → R_X86_64_64 against .data
+  type 1 (string addr)  → R_X86_64_64 against .rodata
+  type 2 (fn call)      → R_X86_64_PC32 against function symbol
+  type 3 (fn pointer)   → R_X86_64_64 against function symbol
+
+PIC codegen for `object;` mode uses `LEA [rip+disp32]` +
+`R_X86_64_PC32` relocs — eliminates `DT_TEXTREL` (glibc 2.38+
+refuses `dlopen` of TEXTREL binaries).
+
+Top-level code (enum values, global var inits) wraps in a
+callable `_cyrius_init` function that C launchers must invoke
+before any application function.
+
+[[entries]]
+name = "compiler_env_vars"
+description = "Compile-time env vars — target selection, IR pipeline, regalloc, profiling"
+category = "cyrius"
+---
+cc5 reads several `CYRIUS_*` environment variables at startup
+to switch target / enable optimizations / dump diagnostics.
+Default-off — set at compile time, no source-code annotation
+needed.
+
+== TARGET SELECTION ==
+
+  CYRIUS_TARGET_WIN=1     Windows PE32+ output (cc5 native)
+  CYRIUS_MACHO=1          Mach-O x86_64 output
+  CYRIUS_MACHO_ARM=1      Mach-O aarch64 output
+
+Cross-compile dispatch hooks. `cyrius build --aarch64` sets
+target via the appropriate cross-compiler binary; the env vars
+are mostly used by the cross-compiler binaries themselves.
+
+== IR PIPELINE ==
+
+  CYRIUS_IR (unset)  IR off (default — emit raw bytes via E*/E3*)
+  CYRIUS_IR=1        IR recording on, raw emit also runs in parallel
+  CYRIUS_IR=2        IR recording + BB construction (no opt passes)
+  CYRIUS_IR=3        IR + opt passes (LASE + const-fold + bitmap-
+                     liveness DCE + DSE + fixed-point driver) +
+                     codebuf patching of eliminated nodes
+
+  CYRIUS_DCE_CAP=N   Bisection cap — kill at most N IR nodes via DCE
+  CYRIUS_DSE_CAP=N   Bisection cap — kill at most N IR nodes via DSE
+
+DCE/DSE caps help bisect codegen-vs-IR divergence: start
+unbounded, narrow to the first cap that introduces the bug.
+The opt passes only run under CYRIUS_IR=3; the lower modes are
+recording-only diagnostics.
+
+== REGALLOC PEEPHOLE (v5.6.20+) ==
+
+  CYRIUS_REGALLOC_AUTO_CAP=N   Auto-enable picker for first N fns only
+                               (-1 = uncapped, default; 0 = picker off)
+  CYRIUS_REGALLOC_DUMP=1       Per-fn interval dump for picker debug
+  CYRIUS_REGALLOC_PICKER_CAP=N Cap total assignments per fn (bisection)
+
+The post-body peephole assigns up to 5 callee-saved regs
+(rbx, r12-r15) to hot user-locals via Poletto-Sarkar linear-scan.
+Bars `&local` slots from assignment via the safety scan. v5.8.16
+§8 highlights the picker's interaction with slice high-half
+slots — see field_notes/compiler/v5_8.
+
+== DIAGNOSTICS ==
+
+  CYRIUS_PROF=1    Per-fn compile-time profiling
+  CYRIUS_STATS=1   Final stats dump (token count, fn count,
+                   fixup count, code+data sizes, alloc usage)
+
+[[entries]]
+name = "compiler_flags"
+description = "cc5 + cyrius command-line flags — --strict, --aarch64, --version, etc."
+category = "cyrius"
+---
+== cc5 BINARY FLAGS ==
+
+  --version          Print "cc5 X.Y.Z\n" and exit 0
+  --strict           Refuse to emit a binary if any function
+                     reference is undefined. Without --strict,
+                     undefined-fn references warn but produce a
+                     binary that SIGILLs (exit 132) when the call
+                     is reached. RECOMMENDED for CI.
+
+      Output on undef:
+          error: --strict: refusing to emit binary with N undefined function(s)
+
+  CLI parsing: cc5 reads `/proc/self/cmdline` and walks every
+  arg. The walker matches `--st` prefix for --strict and
+  `--ve` for --version. Other args are ignored (cc5 reads
+  source on stdin).
+
+== `cyrius build` FLAGS ==
+
+  --aarch64          Use cc5_aarch64 cross-compiler
+  --no-deps          Skip dep auto-prepend (compile only the
+                     given source against bare stdlib)
+  -D NAME            Inject `#define NAME` at top of bundled
+                     source (feature-flag style)
+  -v / --verbose     Show resolved compiler path + bundled-source
+                     temp file path
+  -q / --quiet       Suppress non-error stderr output
+
+== `cyrius check` FLAGS ==
+
+  --with-deps        Include `[deps]` distfiles in the syntax
+                     check (default: standalone)
+
+== `cyrius fmt` / `cyrius lint` / `cyrius doc` FLAGS ==
+
+  --check            Exit-code-only mode — non-zero on drift,
+                     silent on no-drift (matches Rust/Go fmt
+                     conventions; aligned at v5.8.x cycle).
+                     Suitable for CI gates.
+
+== `cyrius doc` ADDITIONAL ==
+
+  --serve [port]     Serve generated HTML docs locally on
+                     `lib/http_server.cyr` (default port 8080).
+
+== `cyrius api-surface` FLAGS ==
+
+  --update           Regenerate `docs/api-surface.snapshot` from
+                     current source. No flag → diff against
+                     committed snapshot, exit 1 on drift.
+  --snapshot=PATH    Diff against an alternate snapshot file.
+
+== `cyrius capacity` FLAGS ==
+
+  --check            Exit non-zero on cap overflow — for CI gates
+  --json             Machine-readable output
+
+== `cyrius deps` FLAGS ==
+
+  --no-lock          Don't write/check cyrius.lock
+  --verify           Verify lockfile SHAs match resolved tags;
+                     exit non-zero on mismatch
+
+[[entries]]
+name = "lsp_and_plugins"
+description = "cyrius-lsp + .lsp.json + MacCracken/cyrius-plugins marketplace"
+category = "cyrius"
+---
+== `cyrius-lsp` (Language Server) ==
+
+JSON-RPC 2.0 over stdin/stdout. Source at
+`programs/cyrius-lsp.cyr`. Built via `cyrius lsp` →
+`~/.cyrius/bin/cyrius-lsp`. Promoted to `[release].bins` at
+v5.7.39.
+
+Capabilities (current):
+  initialize                    — handshake
+  textDocument/didOpen          — compile + return diagnostics
+  textDocument/didChange        — recompile + return diagnostics
+  textDocument/didSave          — recompile + return diagnostics
+  textDocument/definition       — cross-file go-to-def (v5.7.39)
+  textDocument/documentSymbol   — symbol outline (v5.7.39)
+  shutdown                      — exit cleanly
+
+Diagnostics are produced by invoking cc5 on the buffer and
+parsing `error:<file>:<line>: <msg>` output back into LSP
+`Diagnostic` records.
+
+== `.lsp.json` (project-root manifest) ==
+
+Editor-agnostic shape (same as gopls' `.lsp.json` convention).
+Maps file extensions to language servers:
+
+    {
+      "cyrius": {
+        "command": "cyrius-lsp",
+        "args": [],
+        "extensionToLanguage": {
+          ".cyr":   "cyrius",
+          ".tcyr":  "cyrius",
+          ".bcyr":  "cyrius",
+          ".fcyr":  "cyrius",
+          ".scyr":  "cyrius",
+          ".smcyr": "cyrius"
+        }
+      }
+    }
+
+Don't drop this file into each Cyrius repo — install the plugin
+instead (next section). Per-repo `.lsp.json` was the original
+wiring; the plugin extracts it to user scope.
+
+== `MacCracken/cyrius-plugins` (Claude Code marketplace) ==
+
+Sibling repo to `MacCracken/cyrius`. Houses the Claude Code
+plugin manifests (`.claude-plugin/marketplace.json` +
+`plugins/cyrius-lsp/`) so editor wiring lives outside the
+language repo.
+
+Install once at user scope:
+
+    /plugin marketplace add MacCracken/cyrius-plugins
+    /plugin install cyrius-lsp@cyrius-plugins
+
+Tags follow `<plugin-name>--v<X.Y.Z>` convention (e.g.
+`cyrius-lsp--v0.1.0`). Per-plugin tags so plugins version
+independently. CI in the plugins repo runs `claude plugin
+validate` + cross-checks marketplace.json ↔ plugin.json
+version agreement on every PR; release.yml fires on tag push,
+publishes a GitHub Release with auto-notes.
+
+[[entries]]
+name = "helper_scripts"
+description = "cyriusly + cyrius-init.sh + cyrius-port.sh + cyrius-watch.sh + cyrius-repl.sh + cyrius-prompt-info"
+category = "cyrius"
+---
+Shell scripts that wrap cc5 / `cyrius` for common workflows.
+Listed in cyrius.cyml's `[release].scripts`.
+
+== `cyriusly` — toolchain orchestration + status ==
+
+The Swiss-army-knife wrapper. Sub-commands:
+
+  cyriusly setup              Install ~/.cyrius/bin to PATH;
+                              symlink toolchain binaries; ensure
+                              cc5 / cyrius / cyrius-lsp resolvable
+  cyriusly status             Print installed binaries + versions
+  cyriusly upgrade            Pull + rebuild from main
+  cyriusly nightly            Soak loop + bench history snapshot
+
+Also drops a starship.toml / p10k snippet so the shell prompt
+shows the current Cyrius project's version + dep status. Glyph:
+🌀 (cyclone) for cyrius, ॐ (Om) for packages.
+
+== `cyrius-init.sh` — project scaffold ==
+
+Invoked as `cyrius init <name>`. Creates `<name>/` with:
+  cyrius.cyml          (manifest skeleton)
+  src/main.cyr         (hello-world entry)
+  tests/tcyr/          (auto-discovered test dir)
+  benches/             (bench dir)
+  docs/development/    (roadmap / state / completed-phases stubs)
+  README.md / VERSION  (version-bump-friendly defaults)
+  .lsp.json            (DEPRECATED — install cyrius-plugins instead)
+
+== `cyrius-port.sh` — Rust → Cyrius migration ==
+
+Invoked as `cyrius port <rust-project>`. Reads Cargo.toml +
+src/, scaffolds equivalent cyrius.cyml + src/, surfaces a
+migration playbook at `docs/development/migration-strategy.md`.
+Doesn't auto-translate Rust → Cyrius (out of scope).
+
+== `cyrius-watch.sh` — file watcher ==
+
+Invoked as `cyrius watch [src] [out]`. Polls `*.cyr` files via
+`find -newer` and recompiles on change. Defaults: `src/main.cyr`
+→ `build/app`. Interval via `CYRIUS_WATCH_INTERVAL` env (default
+1 second). Polling rather than inotify — simple, portable,
+sufficient for dev workflows. Ctrl+C to stop.
+
+== `cyrius-repl.sh` — expression REPL ==
+
+Invoked as `cyrius repl`. Reads expressions on stdin, wraps each
+in a minimal `fn main` template, compiles + runs, prints result.
+
+== `cyrius-prompt-info` — shell-prompt status helper ==
+
+Used by the cyriusly starship/p10k integration. Reads the
+nearest cyrius.cyml + dep lockfile, emits a compact status
+string for prompt rendering. Drops redundant "name (name)"
+when project name == repo name (v5.8.1 polish).
+
+[[entries]]
+name = "release_pipeline"
+description = "release.yml + install.sh + cbt/pulsar.cyr — driven by [release] in cyrius.cyml"
+category = "cyrius"
+---
+The release pipeline reads `[release]` from `cyrius.cyml` —
+single source of truth for what ships. Adding a new binary
+requires exactly one edit (the `bins` array); release.yml,
+install.sh, and pulsar all pick it up automatically.
+
+== `release.yml` (GitHub Actions) ==
+
+Triggers on tag push (`vX.Y.Z`). Builds:
+  - x86_64 Linux: cc5 + every binary in `[release].bins`
+  - aarch64 Linux: cross-compiles each binary in `[release].cross_bins`
+    via cc5_aarch64
+  - Windows PE: cross-compiles cc5_win + tools (when wired)
+  - macOS Mach-O: cross-compiles via cc5_macho_arm
+
+Stages binaries under `$STAGE/bin/`; `cross_bins` go under
+`$STAGE/bin/` alongside the native (cc5_aarch64 in same dir as
+cc5). v5.8.2 fixed a stage-path drift where cc5_aarch64 went to
+`$STAGE/` instead of `$STAGE/bin/`.
+
+Tarballs uploaded to the GitHub Release page.
+
+== `install.sh` ==
+
+Curl-pipeable installer:
+    curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | sh
+
+Detects host triple, downloads the matching tarball, extracts to
+`~/.cyrius/<version>/`, symlinks `~/.cyrius/bin/*` to the latest
+version. `cyriusly setup` runs after to put `~/.cyrius/bin` on
+PATH and write the `.cyriusrc` profile snippet.
+
+== `cbt/pulsar.cyr` ==
+
+Internal toolchain build orchestrator. Invoked by `cyrius
+pulsar` (mostly a maintainer-side verb). Cross-compiles
+`build/cc5-native-aarch64` so users on ARM64 hardware can
+self-host without a manual cross-compile pass.
+
+The `cc5-native-aarch64` binary is committed to `build/`
+(gitignored except this one + the prior-major seed; see CLAUDE.md
+"build/ tracking policy").
+
+[[entries]]
+name = "audit_test_check_pipeline"
+description = "scripts/check.sh + cyrius audit — the 64-gate full-validation pipeline"
+category = "cyrius"
+---
+The validation pipeline runs in three layers:
+
+== LAYER 1 — `scripts/check.sh` (CI-grade, 64 gates at v5.8.19) ==
+
+The repo's primary acceptance gate. Runs end-to-end and reports
+N/M with each gate as PASS / FAIL / SKIP. Categories:
+
+  - Build verifies: cc5 compiles, cc5_aarch64 cross compiles,
+    cc5_cx bytecode roundtrip, Mach-O cross, PE cross
+  - Self-host verifies: byte-identical two-step + three-step
+  - Heap map: 0 region overlaps, structure intact
+  - Test suite: every tests/tcyr/*.tcyr (105 files at v5.8.19)
+  - Format: cyrfmt --check on stdlib + src
+  - Lint: cyrlint --check on stdlib + src
+  - api-surface: snapshot drift detection (re-enables at v5.8.42)
+  - Capacity: each cap (frame, heap, code, fixup) within budget
+  - Topic-grouped TS suite: lex_combined / parse_core /
+    parse_decls / parse_advanced
+  - Per-feature regression scripts: regression-*.sh
+
+== LAYER 2 — `cyrius audit` (dev-loop driver) ==
+
+Runs the same set as a single command. Suitable for `pre-commit`
+hook + post-feature verification. Aborts on first FAIL.
+
+== LAYER 3 — `cyrius soak [N]` (long-running) ==
+
+Wraps check.sh in N iterations + walks tests/scyr/*.scyr.
+Catches non-determinism and codegen drift across runs.
+
+== CLOSEOUT-PASS DISCIPLINE ==
+
+CLAUDE.md "Closeout Pass (before every minor/major bump)"
+defines the 11-step protocol that runs at the end of each
+minor cycle. Mechanical (1-3) → judgment-call (4-8) → compliance
+(9-10) → docs (11). Self-host break short-circuits the chain.
+
+[[entries]]
+name = "minimum_compiler_version_pin"
+description = "`cyrius` field in cyrius.cyml — pin a minimum compiler version, error early if older"
+category = "cyrius"
+---
+`cyrius.cyml` supports a top-level `cyrius` field specifying the
+minimum compiler version a project requires. `cyrius build`
+checks this and errors early if the installed toolchain is older
+than declared.
+
+USAGE:
+
+    cyrius = "5.8.19"        # minimum compiler version
+
+PATTERN: same shape as Rust's `rust-version`, Go's `go`
+directive in go.mod, Zig's `minimum_zig_version` in build.zig.zon.
+
+WHEN TO BUMP YOUR PROJECT'S MINIMUM:
+  - Using a new language feature (slices, multi-width types,
+    dot-syntax field access on Str / slice locals, etc.)
+  - Using a new stdlib module that wasn't in earlier releases
+    (e.g. `lib/random.cyr`, `lib/security.cyr` from v5.7.35;
+    `lib/test.cyr` from v5.7.43; slice-typed wrappers from v5.8.18)
+  - Using a new compiler directive (`#ifplat`, `#regalloc`,
+    `#must_use`, `#derive`)
+  - Hitting a bug fix in a specific patch release (e.g.
+    16-byte fn-local layout-flip needed v5.8.16+)
+
+`${file:VERSION}` interpolation works in `cyrius.cyml`, so a
+project with its own VERSION file can avoid duplicating the
+literal — vidya itself uses this pattern.
+
+The minimum-version check fires at `cyrius build` time before
+parse, so the error message is clear ("requires cyrius >= X.Y.Z;
+have Y.X.Z") instead of failing later with a syntax error on
+something the older parser doesn't understand.

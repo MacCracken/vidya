@@ -1,0 +1,586 @@
+# Cyrius — Language Features
+# How to use specific Cyrius language features: types, syntax, derives, directives.
+# 16 entries.
+
+[[entries]]
+name = "multi_width_types"
+description = "Multi-width types (i8, i16, i32, i64, u128) with width-correct codegen"
+category = "cyrius"
+---
+SYNTAX:
+    var x: i8 = 42;       # 1-byte variable
+    var y: i16 = 30000;   # 2-byte variable
+    var z: i32 = 100000;  # 4-byte variable
+    var w: i64 = 0;       # explicit 8-byte (same as untyped)
+    var u: u128 = 0;      # 16-byte (storage only, arithmetic via lib/u128.cyr)
+
+SEMANTICS:
+    Type annotations control BOTH storage size AND load/store width.
+    var x: i8 = 256; → stores 0 (truncated to 1 byte).
+    Reading x back gives 0 (movzx zero-extends to rax).
+
+    Globals: var_sizes[idx] = 1/2/4/8/16 (actual byte allocation in data section).
+    Locals: 8-byte stack slots, but loads/stores use correct width within the slot.
+
+CODEGEN:
+    EVLOAD_W(S, idx, width) / EVSTORE_W(S, idx, width) for globals.
+    EFLLOAD_W(S, idx, width) / EFLSTORE_W(S, idx, width) for locals.
+    Width 1: movzx rax, byte [addr] / mov byte [addr], al
+    Width 2: movzx eax, word [addr] / mov word [addr], ax
+    Width 4: mov eax, [addr]        / mov dword [addr], eax
+    Width 8: mov rax, [addr]        / mov qword [addr], rax (default)
+
+GOTCHA (resolved at v5.8.16 §8 layout-flip): pre-v5.8.16,
+`var x: u128 = 0;` at fn scope only allocated an 8-byte slot —
+type-annotated locals carried size on globals but not locals.
+Two adjacent fn-local 16-byte vars (slices, u128) silently
+shared a stack slot, with `slice_set` / `store64(&x+8, ...)`
+overflowing into saved-rbp territory. Post-v5.8.16:
+scalar_type=16 fn-locals reserve TWO 8-byte slots, with the
+canonical (named) slot at the LOWER stack address — `&x + 8`
+correctly addresses the high half. The pre-v5.8.16 workaround
+(`var buf[16]; pass as pointer`) still works but is no longer
+needed — `var x: u128 = 0;` is fully load-bearing today. See
+slice_type_v58x for the same fix on slices.
+
+BACKWARD COMPATIBLE: Untyped variables remain i64. The compiler
+source uses no type annotations.
+
+[[entries]]
+name = "sizeof_operator"
+description = "sizeof(Type) compile-time constant"
+category = "cyrius"
+---
+SYNTAX:
+    var n = sizeof(i8);      # 1
+    var n = sizeof(i16);     # 2
+    var n = sizeof(i32);     # 4
+    var n = sizeof(i64);     # 8
+    var n = sizeof(u128);    # 16
+    var n = sizeof(Point);   # recursive struct size
+
+IMPLEMENTATION:
+    Detected in PARSE_FACTOR as an identifier matching "sizeof"
+    (6-byte packed comparison). NOT a lexer keyword — the klen=6
+    lexer keyword block had a code-size issue that silently dropped
+    sizeof recognition. Identifier-based detection in the parser
+    is more robust.
+
+    Parses: sizeof ( TypeName ) → EMOVI(S, size)
+    For scalars: direct byte width.
+    For structs: STRUCTSZ(S, sid-1) recursively sums field widths.
+
+[[entries]]
+name = "unions"
+description = "union keyword — all fields at offset 0, size = max field"
+category = "cyrius"
+---
+SYNTAX:
+    union Value {
+        as_int;
+        as_ptr;
+    }
+
+SEMANTICS:
+    All fields share offset 0. sizeof(Value) = max(sizeof(field)).
+    Field access: v.as_int and v.as_ptr read from the same memory.
+    Init: var v = Value { 42, 42 }; (all fields, like struct init).
+
+IMPLEMENTATION:
+    Token 101 (UNION). Parsed by PARSE_UNION_DEF — same as
+    PARSE_STRUCT_DEF but sets high bit (bit 63) of struct_fcounts
+    as union flag. ISUNION(S, si) checks bit 63. FIELDOFF returns
+    0 for all union fields. STRUCTSZ returns max field size
+    instead of sum.
+
+[[entries]]
+name = "bitfield_builtins"
+description = "Bit manipulation builtins — bit_get/set/clear, popcount, ctz/clz"
+category = "cyrius"
+---
+Bit-level operations as compiler builtins:
+
+    bit_get(value, n)        — extract bit n (returns 0 or 1)
+    bit_set(value, n)        — set bit n
+    bit_clear(value, n)      — clear bit n
+    bit_toggle(value, n)     — flip bit n
+    popcount(value)          — count set bits (POPCNT instruction)
+    ctz(value)               — count trailing zeros (BSF / TZCNT)
+    clz(value)               — count leading zeros (BSR / LZCNT)
+
+These compile to single x86 instructions where available (POPCNT
+/ BSF / BSR via SSE4.2 / BMI1). Fallback paths for older CPUs
+emit equivalent unrolled loops.
+
+[[entries]]
+name = "struct_field_widths"
+description = "Per-field type annotations on structs — size and alignment correctness"
+category = "cyrius"
+---
+SYNTAX:
+    struct Header {
+        magic:   i32;       # 4 bytes
+        version: i16;       # 2 bytes
+        flags:   i8;        # 1 byte
+        _pad:    i8;        # 1 byte (manual padding)
+        size:    i64;       # 8 bytes
+    }
+
+SEMANTICS:
+    Field types control individual field widths. STRUCTSZ sums them.
+    FIELDOFF returns the byte offset of each field considering prior
+    fields' widths.
+
+    Unannotated fields default to i64 (8 bytes). Mix is fine:
+
+    struct Mixed { tag: i32; payload; }   # 4 + 8 = 12 bytes
+
+    Programmer is responsible for alignment-aware ordering. The
+    compiler does NOT auto-pad — write padding fields explicitly
+    if a downstream consumer needs C ABI compatibility.
+
+[[entries]]
+name = "expression_type_propagation"
+description = "Type annotations propagate through expressions for width-correct codegen"
+category = "cyrius"
+---
+When operands have known widths, the compiler picks the correct
+load/store size at codegen time. Mixing widths warns:
+
+    var x: i32 = 100000;
+    var y: i64 = 5;
+    var z = x + y;        # warning: i32 + i64 — narrowing
+
+    var x: i8 = 200;
+    var n = x;            # n is i64; movzx zero-extends to 8 bytes
+
+    var p: *i32 = ...;
+    *p = 42;              # 4-byte store via mov dword [p], 42
+
+NOTES:
+- No implicit signed-vs-unsigned conversions; all integer types
+  are signed under the `iN` annotation.
+- Pointer arithmetic on typed pointers (`*i32`) scales by element
+  size — `p + 1` advances 4 bytes for `*i32`, 8 bytes for `*i64`.
+
+[[entries]]
+name = "defer_statement"
+description = "defer { body } — execute cleanup code at function return (LIFO)"
+category = "cyrius"
+---
+defer { body } executes body when the enclosing function returns.
+Multiple defers execute in LIFO order (last declared = first to run).
+Return value preserved (push/pop rax around defer chain).
+
+USAGE:
+  fn process_file(path) {
+      var fd = file_open(path, O_RDONLY, 0);
+      defer { file_close(fd); }
+      defer { file_unlock(fd); }
+      file_lock(fd);
+      # ... work with file ...
+      return result;  # defers run: unlock, then close
+  }
+
+EXIT-PATH SAFETY:
+  Per-defer runtime flags (hidden locals). Each defer sets a flag
+  to 1 when reached. At epilogue, flag is checked before running
+  the block. Unreached defers are skipped — early return BEFORE
+  a defer statement won't trigger that defer's cleanup (closing
+  the resource-double-free class).
+
+IMPLEMENTATION:
+  Token 106. Deferred blocks compiled inline (jumped over during
+  normal flow). At function epilogue, emit jmp→block→jmp→block→
+  epilogue chain. Each block's end-jmp patched to return to the
+  chain.
+
+Max 8 defer blocks per function. Zig/Odin parity.
+
+[[entries]]
+name = "ifplat_directive"
+description = "#ifplat PLAT / #endplat — sugar for #ifdef CYRIUS_ARCH_<UPPER>"
+category = "cyrius"
+---
+`#ifplat PLAT` / `#endplat` is a cleaner spelling for arch-gated
+blocks. Strictly additive — the old `#ifdef CYRIUS_ARCH_X86` /
+`#ifdef CYRIUS_ARCH_AARCH64` forms keep working.
+
+USAGE:
+
+    #ifplat x86
+    asm { ... x86 bytes ... }
+    #endplat
+    #ifplat aarch64
+    asm { ... aarch64 bytes ... }
+    #endplat
+
+SUPPORTED PLATFORMS:
+- x86      → resolves to CYRIUS_ARCH_X86
+- aarch64  → resolves to CYRIUS_ARCH_AARCH64
+- Unknown tokens (e.g. riscv64) fail closed — the body is
+  skipped unconditionally.
+
+SEMANTICS:
+Identical to `#ifdef CYRIUS_ARCH_<UPPER>`. The evaluator
+hashes the token to the canonical compiler-builtin symbol
+and looks it up in the same flag table as #ifdef. No separate
+state; no new scopes.
+
+NESTED BLOCKS work (skip_depth tracking mirrors #ifdef).
+`#ifplat` can be nested inside `#ifdef` and vice versa.
+
+WHEN TO USE:
+- New code that gates on architecture: prefer `#ifplat`.
+- Existing code using `#ifdef CYRIUS_ARCH_*`: no migration
+  required. Both forms are first-class.
+
+FUTURE: the `(arch, format)` tuple form — e.g.
+`#ifplat aarch64-macho`, `#ifplat x86-pe` — is reserved.
+
+[[entries]]
+name = "enum_namespacing"
+description = "Enum.VARIANT syntax — qualified enum access in all expression contexts"
+category = "cyrius"
+---
+SYNTAX:
+    enum Color { RED; GREEN; BLUE; }
+    var c = Color.RED;
+    if (c == Color.BLUE) { ... }
+    fn paint(color) { return color == Color.GREEN; }
+
+SEMANTICS:
+    Enum.VARIANT works everywhere an expression is valid:
+    assignments, comparisons, function arguments, return values,
+    array indices.
+
+    The parser resolves Enum.VARIANT by checking if the identifier
+    after the dot is a global variable (which enum variants are
+    compiled as). If it is, the dot expression is treated as an
+    enum variant access. If not, it falls back to struct field
+    access.
+
+IMPLEMENTATION:
+    No enum metadata table needed. Enum variants are already
+    compiled as global variables (e.g., Color_RED). The parser
+    just needs to recognize the Enum.VARIANT pattern and map it
+    to the global variable name.
+
+[[entries]]
+name = "ref_directive"
+description = "#ref directive — compile-time TOML loading"
+category = "cyrius"
+---
+SYNTAX:
+    #ref "config.toml"
+    # If config.toml contains:
+    #   width = 800
+    #   height = 600
+    # Then after preprocessing, the source contains:
+    #   var width = 800;
+    #   var height = 600;
+
+SEMANTICS:
+    #ref "file.toml" loads a TOML file at compile time and emits
+    var declarations for each key-value pair. Skips comments (#),
+    section headers ([section]), and blank lines. String values
+    become string literals, numeric values become integer literals.
+
+IMPLEMENTATION:
+    PP_REF_PASS runs as a separate preprocessing pass BEFORE PP_PASS.
+    This ordering is critical — #ref must expand before #ifdef and
+    other preprocessor directives see the generated var declarations.
+
+    ISREF() detects the #ref directive. The pass reads the TOML
+    file, parses key = value lines, and emits `var key = value;`
+    for each valid entry.
+
+[[entries]]
+name = "ret2_rethi"
+description = "Return two values via rax:rdx register pair"
+category = "cyrius"
+---
+SYNTAX:
+    fn divmod(a, b) {
+        var q = a / b;
+        var r = a % b;
+        ret2(q, r);        # return two values: rax=q, rdx=r
+    }
+    var result = divmod(17, 5);   # rax = 3 (quotient)
+    var remainder = rethi();      # rdx = 2 (remainder)
+
+SEMANTICS:
+    ret2(a, b) packs two values into the rax:rdx register pair and
+    returns. The first argument goes to rax (normal return), the
+    second to rdx. rethi() retrieves the second return value from
+    rdx (mov rax, rdx).
+
+    Follows the System V AMD64 ABI convention where functions can
+    return two 64-bit values in rax and rdx.
+
+ALTERNATIVE — NATIVE MULTI-RETURN:
+    fn divmod(a, b) { return a / b, a % b; }
+    var q, r = divmod(10, 3);
+
+Two values come back via rax (ret1) + rdx (ret2). No tuple
+wrapper; two `return` expressions, comma-separated. ret2/rethi
+still work as the lower-level primitive.
+
+IMPLEMENTATION:
+    Tokens: ret2 = 97, rethi = 98. Handled in PARSE_SIMD_EXT.
+
+    ret2(a, b):
+      1. Evaluate b → rax
+      2. mov rdx, rax    # second value in rdx
+      3. Evaluate a → rax  # first value in rax
+      4. Emit function return (epilogue + ret)
+
+    rethi():
+      1. mov rax, rdx    # move second return value to rax
+
+[[entries]]
+name = "continue_in_for_loops"
+description = "continue statement with forward-patch mechanism for for/while-loops"
+category = "cyrius"
+---
+SYNTAX:
+    for (var i = 0; i < 10; i = i + 1) {
+        if (i == 5) { continue; }
+        print_i64(i);
+    }
+
+SEMANTICS:
+    continue skips the rest of the loop body and jumps to the step
+    expression (i = i + 1) in for-loops, or to the condition check
+    in while-loops.
+
+IMPLEMENTATION:
+    Forward-patch mechanism. Array of up to 8 continue patches per
+    loop scope.
+
+    For-loop compilation:
+    1. Compile init (var i = 0)
+    2. Emit condition check (i < 10)
+    3. Compile body — any `continue` emits a jmp with placeholder
+       and records the patch location in the array
+    4. After body, record current position as the step expression start
+    5. Compile step (i = i + 1)
+    6. Patch all continue jmps to point to step expression
+
+[[entries]]
+name = "derive_str_fields"
+description = "#derive(Serialize) — auto-generate JSON serializer for structs"
+category = "cyrius"
+---
+`#derive(Serialize)` before a struct auto-generates
+`Name_to_json(ptr, sb)` that writes JSON into a str_builder.
+
+USAGE:
+    #derive(Serialize)
+    struct Agent { id; name: Str; }
+
+    var a = Agent { 42, str_from("alice") };
+    var sb = str_builder_new();
+    Agent_to_json(&a, sb);
+    var s = str_builder_build(sb);   # {"id":42,"name":"alice"}
+
+SEMANTICS:
+    Scalar fields (no type annotation) → bare JSON numbers: 42
+    Str fields (`: Str` annotation)   → quoted JSON strings: "alice"
+
+    Detection: preprocessor checks if field type bytes match
+    "Str\0" (83, 116, 114, 0). Simple byte comparison, no string
+    table lookup.
+
+ALSO AVAILABLE — #derive(accessors):
+    #derive(accessors) struct Point { x; y; }
+    Generates: Point_x(p), Point_set_x(p, v), Point_y(p), Point_set_y(p, v)
+
+PP_DERIVE handles both — same preprocessor codegen pattern.
+Single-pass JSON deserializer also generated for `_from_json`
+counterpart.
+
+[[entries]]
+name = "secret_var_compound_ops"
+description = "Cyrius syntax extras — struct init, &local arch dispatch, #regalloc, secret var"
+category = "cyrius"
+---
+A grab-bag of syntactic additions consolidated for agent reference.
+
+STRUCT INITIALIZER SYNTAX:
+    var p = Point { x: 10, y: 20 };
+Emits struct-shaped stores in declaration order. Pairs with
+#derive(accessors) for accessor-fn generation.
+
+NATIVE MULTI-RETURN:
+    fn divmod(a, b) { return a / b, a % b; }
+    var q, r = divmod(10, 3);
+Two values come back via rax (ret1) + rdx (ret2). No tuple
+wrapper; two `return` expressions, comma-separated.
+
+&LOCAL ARCH DISPATCH:
+`&local_var` — takes the address of a local variable.
+Compiler dispatches per-arch in the emit: x86 uses
+`lea rax, [rbp - N]`, aarch64 uses `sub x0, x29, #N`.
+
+#regalloc DIRECTIVE:
+    #regalloc 1
+    fn hot_loop() { ... }
+Opt-in per-fn flag. Routes the innermost loop's accumulator
+local to rbx via a post-emit peephole with width-aware safety
+abort (reverts to stack if it spots a width violation).
+~12% speedup on nested accumulators.
+
+SECRET VAR:
+    secret var key = load_key();
+    if (ct_eq(key, candidate)) { ... }
+Marks a variable whose comparison must be constant-time. Used
+by sigil's PQC code (ML-DSA signature verification). Pairs
+with `ct_select(c, a, b)` and `mulh64(a, b)` builtins.
+
+EXPRESSION-POSITION COMPARISONS:
+    var flag = (x == y);
+Comparisons return 0/1 and can live anywhere an integer
+expression does. PARSER LIMITATION: comparisons inside function
+CALL ARGUMENTS are rejected (parser ambiguity with generic/
+templated forms). Work around by assigning first:
+    var eq = (x == y); foo(eq);
+
+OVERFLOW-EXPLICIT OPERATORS (lib/overflow.cyr):
+    +%  -%  *%      # wrapping (alias for bare + - *; 2's complement wrap)
+    +|  -|  *|      # saturating (clamp to i64::MIN / i64::MAX)
+    +?  -?  *?      # checked (panic on overflow with exit code 57)
+
+Wrapping ops are bytes-identical to the bare operator — they
+document intent, no runtime cost. Saturating and checked
+variants compile to calls into lib/overflow.cyr helpers.
+
+ATTRIBUTES — #must_use, @unsafe, #deprecated:
+    #must_use
+    fn checked_op(x): i64 { return x * 2; }
+
+    @unsafe { store64(some_raw_ptr, 0); }
+
+    #deprecated("use sha256_init() — sha1 is collision-broken")
+    fn sha1_init() { ... }
+
+#must_use warns at expression-statement discard. @unsafe is
+advisory only. #deprecated warns at every call site.
+
+[[entries]]
+name = "slice_type_v58x"
+description = "slice<T> / [T] type — bounds-aware indexing s[i], dot-syntax field access s.ptr / s.len"
+category = "cyrius"
+---
+Slices are a first-class type with the syntactic ergonomics of
+any other primitive — not just a 16-byte fat-pointer convention.
+
+== TYPE ANNOTATIONS ==
+
+Two equivalent forms accepted everywhere a type annotation goes
+(var, fn param, field):
+
+    var s: [u8] = 0;        # bracket form
+    var s: slice<u8> = 0;   # ident form
+
+Element type may be any scalar (u8/i8/u16/i16/u32/i32/u64/i64/
+u128) or pointer (*T). Element width is captured at PARSE_VAR
+time and drives sized loads in indexing.
+
+== ALLOCATION + LAYOUT ==
+
+A slice fn-local reserves TWO 8-byte slots:
+  - canonical slot (lower address) — holds the .ptr field
+  - high-half slot (higher address) — holds the .len field
+
+Layout puts the canonical slot at the LOWER stack address so
+`&slice + 8` correctly addresses the .len field. `var s: [T] = 0;`
+zero-inits BOTH halves via address-based memory stores.
+
+== HEAP-FALLOC INTEROP ==
+
+A slice value is byte-identical to:
+  - Str (lib/str.cyr) — heap-allocated 16 bytes, data@0, len@8
+  - vec (lib/vec.cyr) first 16 bytes — same shape
+
+Consequence: a Str pointer or vec value can be passed directly to
+slice_ptr / slice_len / slice_eq / slice_is_empty / slice_is_null
+without conversion. The only difference is lifetime — Str/vec
+live in heap; fn-local slices are frame-scoped.
+
+== SUBSCRIPT ==
+
+    var d[5];  store8(&d, 65);  store8(&d+1, 66);  ...
+    var s: [u8] = 0;
+    slice_set(&s, &d, 5);
+    var b = s[0];      # = 65 — bounds-checked u8 load
+    var c = s[2];      # = 67
+    # OOB / negative idx → stderr "slice bounds violation\n", exit 134
+
+`s[i]` lowers at parse time to `_slice_idx_get_W(&s, i)` where
+W is the element byte-width (1/2/4/8/16). Width-16 returns a
+POINTER to the u128 slot (cyrius's ABI can't return u128 by value).
+
+For perf hot paths inside already-bounds-checked loops, the
+unchecked variants `slice_unchecked_get_W(&s, i)` skip the
+bounds check.
+
+== DOT-SYNTAX FIELD ACCESS ==
+
+    var s: [u8] = 0;
+    slice_set(&s, &d, 5);
+    var p = s.ptr;            # = &d (lower-half slot)
+    var n = s.len;            # = 5  (higher-half slot via &s + 8)
+    s.len = 3;                # truncate the view
+    s.ptr = &d + 1;           # rewrite view start
+
+Only `.ptr` and `.len` are accepted; other field names hard-error
+with "slice has only .ptr and .len fields".
+
+== POINTER-TO-STRUCT DOT SYNTAX ==
+
+    var s: Str = str_from("hello");
+    var n = s.len;           # = 5  (pointer-deref first)
+    var p = s.data;          # = pointer to "hello" bytes
+
+PARSE_FIELD_LOAD/STORE auto-detects pointer-vs-inline by checking
+the slot above the named slot for a sentinel name `-1`:
+  - sentinel present → inline mode (lea, slot IS the struct)
+  - sentinel absent → pointer mode (mov, slot HOLDS a pointer)
+
+`fn foo(s: Str) { return s.len; }` also works.
+
+== SLICE-TYPED WRAPPER HELPERS ==
+
+    fn sys_read_slice(fd, &s)     — sys_read into s.data, up to s.len bytes
+    fn slice_copy_bytes(&dst, &src) — memcpy with min(dst.len, src.len) cap
+    fn slice_eq_bytes(&a, &b)     — content equality; length-mismatch is unequal
+
+Additive — the canonical (ptr, len) primitives in lib/string.cyr
+/ lib/syscalls.cyr remain the building blocks.
+
+[[entries]]
+name = "relaxed_fn_ordering"
+description = "fn definitions can appear after top-level statements"
+category = "cyrius"
+---
+SYNTAX:
+    var x = 42;
+    print_i64(x);      # top-level statement
+    fn helper(a) {     # fn defined AFTER top-level code
+        return a * 2;
+    }
+
+SEMANTICS:
+    fn definitions can be freely interleaved with top-level code.
+    Forward calls already worked (two-pass compilation), so this
+    only affected fn definitions appearing physically after
+    executed statements.
+
+IMPLEMENTATION:
+    PARSE_PROG handles `fn` tokens by:
+    1. Emitting a jmp instruction to jump over the function body
+    2. Compiling the function body normally (same as before)
+    3. Patching the jmp to land after the function body
+
+    Same jmp-over pattern used for if/else blocks.

@@ -1,0 +1,348 @@
+# Cyrius — Stdlib Modules (per-module usage)
+# How to use specific stdlib modules — APIs, conventions, gotchas.
+# 12 entries.
+
+[[entries]]
+name = "atoi_stdlib"
+description = "atoi() in lib/string.cyr — parse decimal string to integer"
+category = "cyrius"
+---
+`atoi(s)` parses a null-terminated decimal string to integer.
+Handles negative numbers (leading -). Returns 0 for invalid input.
+Stops at first non-digit character.
+
+Usage:
+  var n = atoi("42");    # 42
+  var n = atoi("-7");    # -7
+  var n = atoi("12abc"); # 12
+  var n = atoi("abc");   # 0
+
+In `lib/string.cyr`. Used by anything that takes CLI arg parsing.
+
+[[entries]]
+name = "f64_atan_and_math_lib"
+description = "f64_atan builtin and lib/math.cyr transcendental library"
+category = "cyrius"
+---
+SCALAR BUILTIN:
+    var angle = f64_atan(slope);   # arctangent — token 99, x87 fpatan
+
+LIB/MATH.CYR (composed from builtins):
+    var s = sinh(x);
+    var c = cosh(x);
+    var t = tanh(x);
+    var p = pow(base, exp);
+    var v = clamp(x, lo, hi);
+    var m = min(a, b);
+    var M = max(a, b);
+
+IMPLEMENTATION:
+    f64_atan uses x87 FPU: fld1 + fpatan, computing atan(ST(1)/ST(0)).
+
+    The lib/math.cyr functions compose from existing builtins:
+      sinh(x) = (f64_exp(x) - f64_exp(f64_neg(x))) / 2
+      cosh(x) = (f64_exp(x) + f64_exp(f64_neg(x))) / 2
+      tanh(x) = sinh(x) / cosh(x)
+      pow(b,e) = f64_exp(f64_mul(e, f64_log(b)))
+
+KEY LESSON: x87 FPU transcendentals (fpatan, fsin, fcos, fsqrt)
+are the most compact way to implement these — single instructions
+vs. Taylor series or lookup tables.
+
+[[entries]]
+name = "base64_module"
+description = "lib/base64.cyr — RFC 4648 base64 encode/decode"
+category = "cyrius"
+---
+base64_encode(buf, len) → null-terminated base64 string
+base64_decode(encoded, enc_len) → {data_ptr, length} pair
+
+Uses standard alphabet (A-Z, a-z, 0-9, +/) with = padding.
+Lookup table in string literal (64 bytes). Decode table built
+on first call.
+
+12 assertions in base64.tcyr. Unblocks: API clients, HTTP auth,
+data serialization.
+
+[[entries]]
+name = "chrono_module"
+description = "lib/chrono.cyr — time, duration, and sleep utilities"
+category = "cyrius"
+---
+CLOCK FUNCTIONS:
+  clock_now_ns()     — monotonic nanoseconds (clock_gettime CLOCK_MONOTONIC)
+  clock_now_ms()     — monotonic milliseconds
+  clock_epoch_secs() — wall clock epoch seconds (CLOCK_REALTIME)
+  clock_epoch_ns()   — wall clock epoch nanoseconds
+
+DURATION STRUCT {secs, nsecs}:
+  dur_new(secs, nsecs), dur_secs(d), dur_nsecs(d)
+  dur_to_ms(d), dur_to_ns(d), dur_between(start_ns, end_ns)
+
+BLOCKING:
+  sleep_ms(ms) via nanosleep syscall.
+
+ISO-8601:
+  Format/parse helpers, epoch↔date conversions, leap year.
+
+8 assertions in chrono.tcyr.
+
+[[entries]]
+name = "file_locking"
+description = "flock(2) wrappers in lib/io.cyr — concurrency-safe file I/O"
+category = "cyrius"
+---
+fn file_lock(fd)         — exclusive blocking lock (flock LOCK_EX)
+fn file_unlock(fd)       — release lock (flock LOCK_UN)
+fn file_trylock(fd)      — non-blocking exclusive (returns -1 if locked)
+fn file_lock_shared(fd)  — shared/read lock (flock LOCK_SH)
+fn file_append_locked(path, buf, len) — atomic append: open O_APPEND, lock, write, unlock, close
+
+Constants: LOCK_SH=1, LOCK_EX=2, LOCK_UN=8, LOCK_NB=4
+
+Usage pattern: JSON Lines + flock = tamper-proof append-only log
+without a database, without a server, without a dependency.
+
+Two functions. Two syscalls. That is the entire concurrency-safe
+append-only log foundation.
+
+[[entries]]
+name = "csv_module"
+description = "lib/csv.cyr — RFC 4180 CSV parse/write"
+category = "cyrius"
+---
+csv_parse_line(line)     — parse CSV line into vec of field strings
+csv_escape(field)        — quote field if it contains comma, quote, or newline
+csv_write_line(fields)   — write vec of fields as CSV line with escaping
+
+Handles: quoted fields, escaped quotes (""), commas within quotes.
+
+[[entries]]
+name = "http_module"
+description = "lib/http.cyr — HTTP/1.0 client"
+category = "cyrius"
+---
+http_get(url)           — HTTP GET, returns response struct {status, body_ptr, body_len}
+http_status(resp), http_body(resp), http_body_len(resp) — accessors
+
+Internal: _http_parse_url, _http_build_request, _http_parse_response
+Uses lib/net.cyr TCP sockets. CRLF-injection hardened.
+
+For HTTPS, pair with lib/tls.cyr (TLS 1.3 client).
+
+[[entries]]
+name = "patra_stdlib_module"
+description = "lib/patra.cyr — sovereign SQL database in stdlib"
+category = "cyrius"
+---
+Patra: structured storage, SQL queries, transactions. Zero
+external dependencies.
+
+SQL: CREATE TABLE, INSERT, SELECT (WHERE, ORDER BY, LIMIT),
+     UPDATE, DELETE
+Storage: B-tree indexed 4KB pages in .patra file
+Concurrency: flock (advisory file locking)
+Types: INT (i64) and STR (fixed-size, null-terminated)
+Durability: Write-ahead logging (WAL) with crash recovery,
+            fdatasync on commit
+
+API:
+  patra_init()
+  patra_open(path) → db handle
+  patra_exec(db, sql) → status code
+  patra_query(db, sql) → result set
+  patra_result_count / get_int / get_str / col_name / col_type
+  patra_begin / commit / rollback (transactions)
+  patra_close(db)
+
+Distribution pattern: patra repo is source of truth,
+lib/patra.cyr is a single-file stdlib snapshot via
+`cyrius distlib`. `include "lib/patra.cyr"` and go.
+
+[[entries]]
+name = "strstr_function"
+description = "strstr() / strchr() / memchr() in lib/string.cyr — substring + byte search"
+category = "cyrius"
+---
+fn strstr(haystack, needle) — find substring, returns index or -1
+fn strchr(s, byte)          — single byte search in null-terminated string
+fn memchr(buf, byte, len)   — byte search in raw buffer
+
+Both haystack and needle are null-terminated C strings for strstr.
+Uses memeq internally for substring comparison.
+
+[[entries]]
+name = "hashmap_str_keys"
+description = "map_new_str() — hashmap constructor for Str-struct keys"
+category = "cyrius"
+---
+`lib/hashmap.cyr` ships two constructors:
+
+    var m_cstr = map_new();           # cstr keys (null-terminated)
+    map_set(m_cstr, "alpha", 42);
+    map_get(m_cstr, "alpha");         # → 42
+
+    var m_str = map_new_str();        # Str struct keys (data+len)
+    map_set(m_str, str_from_int(42), 99);
+    map_get(m_str, str_from_int(42)); # → 99
+
+The two constructors differ only in their `key_type` tag
+(0 = cstr, 1 = Str); the rest of the API (`map_set` / `map_get` /
+`map_has` / `map_delete` / `map_size` / `map_keys` / `map_values` /
+`map_clear` / `map_iter` / `map_print`) works unchanged for both.
+
+WHY IT EXISTS: cstr-mode `hash_str` byte-walks until NUL — correct
+for cstr keys but silently broken for Str-struct keys (fat
+`{data_ptr, len}` pairs with no NUL at offset 0). The byte-walk
+read the struct's address bytes and adjacent freelist memory,
+producing address-derived hashes that collided constantly,
+silently overwriting earlier entries (~3% loss on Str keys).
+
+INTERNAL: the map header carries `key_type` at m+24. `_map_find`
+and `map_print` branch on it; `_map_hash` and `_map_key_eq`
+dispatch to `hash_str`+`streq` or `hash_str_v`+`str_eq`.
+
+MIGRATION: zero work for existing cstr-keyed callers. Anyone
+using `map_set(m, str_from_int(i), v)` should switch
+`map_new()` → `map_new_str()` at the call site.
+
+Also available: `map_u64_new` for u64 keys (SplitMix64,
+zero-alloc hot path).
+
+TEST: 17 assertions covering 500 str_from_int entries +
+2000-entry grow + cstr regression.
+
+[[entries]]
+name = "fncall_ceiling"
+description = "lib/fnptr.cyr fncall0..fncall8 — function-pointer dispatch and when to shim"
+category = "cyrius"
+---
+`lib/fnptr.cyr` exposes `fncall0(fp)` through `fncall8(fp,
+a..h)` for calling a function pointer with 0–8 args.
+
+CALLING CONVENTION (cyrius's own, NOT AAPCS64 on aarch64):
+- Args 1-6 in registers: rdi/rsi/rdx/rcx/r8/r9 (x86_64 SysV)
+  or x0..x5 (aarch64 — cyrius uses 6 regs to stay symmetric
+  with x86_64).
+- Args 7+ on the stack. x86_64: 8 bytes each at [rsp+N*8].
+  aarch64: 16 bytes each via `str xN, [sp, #-16]!` (preserves
+  SP alignment).
+- fp loaded into rax (x86) / x9 (aarch64) for the indirect call.
+- Result comes back in rax / x0.
+
+WHEN DIRECT fncallN IS SAFE:
+- N ≤ 8 args.
+- Every arg is a scalar (integer, pointer, enum widened to i64).
+- No float / double args (they go in xmm0..xmm7 on SysV, v0..v7
+  on AAPCS64 — fncallN doesn't touch SSE/FP regs).
+- Not variadic (SysV needs AL = #SSE regs; fncallN doesn't set
+  AL).
+- On aarch64: ≤ 6 args if calling a C function — past arg 6,
+  cyrius's convention diverges from AAPCS64's 8-reg form.
+
+WHEN TO USE A C SHIM:
+- Struct-by-value arg (SysV §3.2.3 / AAPCS64 §B.4 aggregate
+  rules split these across regs or stack-home; fncallN loads
+  integer regs only).
+- Float / double arg or return.
+- Variadic callee.
+- >6 args into a C function on aarch64.
+
+CANONICAL SHIM SHAPE: accept a `SomethingArgs*` by pointer,
+unpack in C, call the real fn with ABI-correct layout. Cyrius
+calls the shim via `fncall2(shim_fp, subject, &args)`.
+
+DOCS: docs/ffi/fncall-abi.md (direct-vs-shim decision table) +
+docs/ffi/struct-packing.md (worked examples).
+
+TEST: 14 assertions covering fncall0..fncall8 correctness on
+both arches.
+
+[[entries]]
+name = "identity_lookups_musl_pattern"
+description = "lib/pwd.cyr + lib/grp.cyr + lib/shadow.cyr + lib/pam.cyr — NSS-free identity surface"
+category = "cyrius"
+---
+Cyrius's identity surface is a deliberate architectural stance:
+don't try to bootstrap glibc NSS dispatch from a static binary
+(it's not tractable). Instead, do what musl libc does for its
+entire identity surface: parse `/etc/passwd`, `/etc/group`,
+`/etc/shadow` directly and skip NSS.
+
+== MODULES ==
+
+  lib/pwd.cyr     — /etc/passwd reader
+  lib/grp.cyr     — /etc/group reader
+  lib/shadow.cyr  — /etc/shadow reader
+  lib/pam.cyr     — password verification (non-root path)
+
+Each reader uses the same shape:
+  * Internal cache keeps the whole file in a heap buffer after
+    first read; `{pwd|grp|shadow}_invalidate_cache()` resets.
+  * Caller passes (record_buf, strbuf, strbufsz). Parsed strings
+    land in strbuf; record_buf holds ints + pointers into strbuf.
+  * Return codes: 1=found, 0=not found, -1=file unreadable,
+    -2=strbuf overflow.
+
+== API ==
+
+  pwd_getpwuid(uid, pwrec, strbuf, strbufsz)
+  pwd_getpwnam(name, pwrec, strbuf, strbufsz)
+    — 56 B pwrec: uid, gid, name, passwd, gecos, dir, shell
+    — accessors: pwd_uid / pwd_gid / pwd_name / pwd_passwd /
+                 pwd_gecos / pwd_dir / pwd_shell
+
+  grp_getgrgid(gid, grrec, strbuf, strbufsz)
+  grp_getgrnam(name, grrec, strbuf, strbufsz)
+  grp_getgrouplist(user, primary_gid, gid_buf, max)
+    — 24 B grrec: gid, name, passwd
+    — grp_getgrouplist always prepends primary_gid, then walks
+      /etc/group adding any group that lists user as a member
+
+  shadow_getspnam(name, sprec, strbuf, strbufsz)
+    — 24 B sprec: name, hash, last_change
+    — /etc/shadow is 0600 root:root — non-root callers get rc=-1;
+      use lib/pam.cyr for non-root auth
+
+  pam_unix_authenticate(user, password)
+    — forks /usr/sbin/unix_chkpwd (Linux-PAM's setuid-root helper),
+      pipes password to its stdin, waits for exit
+    — same path pam_unix.so uses from unprivileged processes
+    — works against any NSS backend configured (files/LDAP/SSSD)
+    — returns PAM_AUTH_OK (0), PAM_AUTH_FAIL (1), or negative
+      infrastructure errors (HELPER_MISSING / PIPE_FAILED /
+      FORK_FAILED / EXEC_FAILED)
+    — pam_unix_available() probes whether the helper is installed
+
+== USAGE ==
+
+```
+include "lib/pwd.cyr"
+include "lib/pam.cyr"
+
+var pwrec[56];
+var strbuf[1024];
+var rc = pwd_getpwuid(uid, &pwrec, &strbuf, 1024);
+if (rc == 1) {
+    # pwd_name(&pwrec) is a null-term cstring in strbuf
+}
+
+# Verify a password without being root:
+var r = pam_unix_authenticate("alice", pw);
+if (r == PAM_AUTH_OK) { ... }
+```
+
+== DESIGN NOTES ==
+
+* Bypasses glibc NSS entirely. Same stance as musl. Handles 95%
+  of Linux deployments (passwd: files is default). For LDAP/SSSD/
+  winbind systems that configure non-files backends, pam.cyr's
+  fork to unix_chkpwd covers the auth path; read paths would need
+  a separate route.
+
+* shadow.cyr requires root to read /etc/shadow directly. The
+  non-root auth story routes through pam.cyr's unix_chkpwd helper.
+
+* All four readers cache the parsed file. Re-calling into the
+  same module in a loop is cheap. Call invalidate_cache() after
+  an external change (e.g. `usermod`, `passwd`).

@@ -1,0 +1,472 @@
+# Cyrius Field Notes — Compiler Design Patterns
+# Reusable design + convention patterns for compiler / stdlib
+# work. These earn their slot when an agent is making a
+# structural decision (API surface, dep distribution, hook
+# wiring, version-source design).
+#
+# For methodology / process patterns see methodology.cyml.
+# For non-obvious internal traps see gotchas.cyml.
+# For full backstory + retrospective context see retros/.
+#
+# 7 entries.
+
+[[entries]]
+name = "ship_now_swap_backend_later"
+description = "Decouple the stability contract from the implementation — ship the public API via a transitional backend (C shim), freeze the surface, swap to native later. Consumers don't notice."
+category = "cyrius"
+tags = ["api-design", "stdlib", "ffi", "v3.4.19"]
+content = """
+**The pattern**: when stdlib needs to expose a capability whose
+sovereign implementation isn't ready, ship the API NOW with a
+transitional backend (typically a C shim + foreign-loaded
+library) and freeze the surface as the stability boundary. The
+backend swap to native happens later; consumer code compiled
+against the API surface is byte-identical-compatible across
+the swap.
+
+**Mechanics**:
+
+1. **Public API is the contract.** Consumer-facing functions
+   (`gpu_context_*`, `tls_connect_*`, etc.) are the stability
+   boundary. Consumers write code against them and never touch
+   the FFI layer.
+
+2. **FFI layer is scaffolding.** Mark the bridge files
+   `# @internal`. They exist to get the API in consumers'
+   hands NOW, not as long-term architecture.
+
+3. **Backend swap is planned but unscoped.** Roadmap says "X
+   replaces the C shim with native at TBD"; no commitment to
+   when. Avoids vaporware promises.
+
+4. **The contract survives the swap.** Consumer source compiled
+   against vN compiles unchanged against the post-swap version.
+   Their bridge dep disappears, their build becomes a one-liner;
+   nothing else changes.
+
+5. **Regression test = the consumer example.** The stdlib repo
+   ships an `examples/stdlib-consumer/` project that compiles
+   a minimal "hello X" program. THAT example must compile
+   byte-identically after the backend swap.
+
+6. **The bridge lives at the consumer's edge, not in cyrius
+   itself.** Cyrius the language stays dependency-free; an
+   individual stdlib lib can be transitional without
+   compromising the language.
+
+**When to use**: any stdlib lib that wraps an existing C
+library and would otherwise block downstream consumers for
+months waiting for a sovereign port. mabda (GPU foundation
+via wgpu-native) is the canonical example. tls.cyr (libssl
+via dynlib bridge) followed the same shape.
+
+**When NOT to use**: APIs simple enough to native-port
+directly (more cyrius effort up front; fewer transitional
+files to retire later). Don't add bridge scaffolding for a
+50-line library.
+
+**Risks + mitigations**:
+- "Temporary" scaffolding becoming permanent → document
+  transitional bits as `# @internal`; add roadmap section for
+  the backend swap (even if unscoped).
+- FFI types leaking into public signatures → never expose
+  bridge-pointer types in public fn parameters; consumers must
+  not see a `wgpu_fn_table*` arg.
+- Swap breaking consumers silently → the consumer example
+  test catches this on every release.
+
+Full backstory: retros/v3.cyml `ship_now_swap_backend_later_pattern`.
+"""
+
+[[entries]]
+name = "dist_bundle_stdlib_dep_convention"
+description = "Single-file dist/<name>.cyr is the stdlib dep convention — no vendored modules, reproducible bundles via cyrius distlib"
+category = "cyrius"
+tags = ["stdlib", "distribution", "deps", "v3.x"]
+content = """
+**The convention**: a stdlib dep ships ONE file at
+`dist/<name>.cyr` containing the entire module's API + impl.
+Consumers add `[deps.<name>]` to cyrius.cyml and the cyrius
+build tool fetches at the pinned tag, dropping the single
+file into `lib/<name>_*.cyr` (namespaced by dep name).
+
+**No vendored modules**: the dep repo's source layout
+(multiple .cyr files in `src/`, internal helpers, tests) does
+not ship to consumers. Only the bundled `dist/<name>.cyr`.
+
+**Reproducible bundles**: `cyrius distlib <profile>` produces
+the bundle from the dep repo's source. Profiles are declared in
+the dep's own cyrius.cyml — most deps ship one profile; some
+(sakshi, sankoch) ship multiple (slim / full / per-feature).
+
+**Single-file means**:
+- Consumer `include "lib/<name>.cyr"` works without further
+  setup. No path prefixes, no per-helper includes.
+- The dep's `# @internal` helpers are present but namespaced
+  with `_` prefix; consumers don't accidentally depend on them.
+- Bundle is a TEXTUAL concatenation, NOT a binary archive.
+  Reviewable, diffable, vendorable in CI logs.
+
+**Distlib growth pattern**: when a dep's bundle approaches the
+distlib per-module read cap (currently 256 KB after the v5.7.36
+raise from 64 KB; surfaced by mabda crossing the old cap with
+its full backend), raise the cap at the cyrius compiler layer.
+Don't trim the dep — this is an instance of the
+heap_cap_growth pattern.
+
+**Why one file, not a directory**: simpler for the cyrius
+build tool (one tag → one fetch → one rename); reproducible
+hash; agent-readable in single grep; namespace conflicts
+avoided by dep-name prefix.
+
+**Examples**: sakshi, patra, sigil, yukti, mabda, sankoch all
+follow this. Each lives in its own repo, ships dist/<name>.cyr
+at every tag, fetched into cyrius's lib/ via cyrius deps.
+
+Full backstory: retros/v3.cyml `dist_bundle_stdlib_dep_convention`.
+"""
+
+[[entries]]
+name = "heap_cap_growth_compiler_grows_to_fit_language"
+description = "When a stdlib bump or test fixture pushes a compiler cap (preprocessor / output_buf / fixup table / fn count), the right answer is to grow the cap, not trim the workload."
+category = "cyrius"
+tags = ["heap", "caps", "stdlib-growth", "v5.6.40", "v5.6.43"]
+content = """
+**The rule**: cyrius's compiler grows to fit the language, never
+the other way around. When a downstream consumer or stdlib
+addition pushes a fixed-size buffer's cap, the right answer is
+to raise the cap — not trim the input, not shard the file, not
+suggest the consumer "use less."
+
+**Caps that get raised**:
+- Preprocessor expanded-source buffer (currently 2 MB, was 1 MB
+  pre-v5.6.40 then crossed by patra 1.8.3 + full stdlib).
+- output_buf (currently 2 MB, was 1 MB pre-v5.6.43).
+- Fixup table (currently 1 M entries, was 32 K → 1 M at v5.7.7).
+- Codebuf (currently 3 MB, was 1 MB → 3 MB at v5.7.27).
+- Distlib per-module read buffer (currently 256 KB, was 64 KB
+  pre-v5.7.36).
+- Aarch64 codebuf (currently 3 MB, was 524 KB pre-v5.7.34).
+
+**Reshuffle methodology** (when raising a cap shifts addresses
+of every region after it in the heap):
+
+1. **Top-down sed substitution.** sed every offset from the
+   highest address downward. Avoids new-addr-equals-old-addr
+   collisions during the rewrite (if you renamed
+   `0x1A0000` → `0x1B0000` first, the next region's
+   `0x1B0000` would now be ambiguous).
+
+2. **Disambiguation discipline.** Each constant gets a unique
+   identifier (region name OR fully-qualified line number)
+   while moving — never search-and-replace by raw value alone.
+
+3. **Heap map comment in src/main.cyr is canonical.** Update
+   the comment block FIRST to reflect new layout, then sed-
+   migrate references to match. Comment + code stay in sync
+   because the comment is the design doc.
+
+4. **Two-step bootstrap verify.** After the shift, byte-
+   identical self-host MUST pass on both the moved-from and
+   moved-to layouts. Pre-shift cc5 builds post-shift cc5;
+   post-shift cc5 builds itself. Both must match.
+
+5. **Diagnostic helpers anchor the cap.** Every cap has an
+   explicit overflow check with a clear error pointing at the
+   exact location to fix:
+
+```cyr
+if (op > 1048576) {
+    syscall(SYS_WRITE, 2, "error: expanded source exceeds 1MB (", 36);
+    PRNUM(op);
+    syscall(SYS_WRITE, 2, " bytes; raise preprocess_out cap in src/main.cyr)\\n", 50);
+    syscall(SYS_EXIT, 1);
+}
+```
+
+Silent truncation is the worst failure mode — it moves the
+symptom arbitrarily far from the cause. The difference between
+"patra bundle corrupts in mysterious ways" and
+"error: input exceeds 256 KB buffer (raise input_buf in
+src/main.cyr)" is hours of debugging time.
+
+**When the user says "trim the test fixture to fit"**: REJECT
+that. The compiler grows to fit the language. Always.
+
+**Anti-pattern**: see retros/v3.cyml's
+`stale_fixed_cap_pattern` for the recurring "cap was raised
+in the allocation but not in the cap-check" bug class.
+Cross-ref: see gotchas.cyml's
+`stale_fixed_cap_drift` entry for the dual: one buffer with
+the cap-check stale relative to the actual size.
+
+Full backstory: retros/v3.cyml + v5.6.x narratives.
+"""
+
+[[entries]]
+name = "version_string_via_generated_source_not_hardcoded"
+description = "Route cc5 --version through src/version_str.cyr (auto-generated by version-bump.sh). Hardcoded version literals in source drift silently when the bump-script's regex doesn't match."
+category = "cyrius"
+tags = ["versioning", "release", "v5.6.39"]
+content = """
+**The rule**: NEVER hardcode the cyrius version in
+`src/main.cyr` or any other source file. The version comes
+ONLY from:
+
+- `VERSION` (the source-of-truth file at the repo root)
+- `cc5 --version` output (read via `--version` flag at runtime)
+
+Mechanically: `scripts/version-bump.sh` writes
+`src/version_str.cyr` containing the version literal as a
+generated source file. `src/main.cyr` includes it. The
+include resolves the symbol; the literal lives nowhere else.
+
+**Why**: pre-v5.6.39, the version was hardcoded as
+`"cc5 X.Y.Z\\n"` directly in `src/main.cyr`. The bump script
+used a sed regex to find and replace the literal at every
+release. When the regex stopped matching (suffix change,
+hyphenation, manual edit drift), sed silently produced zero
+changes; `|| true` swallowed the warning; `--version` reported
+the stale string for 9 releases (5.6.29-1 → 5.6.38).
+
+Users filing bugs against 5.6.34 would paste version output
+saying `5.6.29-1`. Diagnosis time wasted; release process
+quality regressed.
+
+**The post-v5.6.39 contract**:
+
+```sh
+# scripts/version-bump.sh writes:
+cat > src/version_str.cyr <<EOF
+# Auto-generated by version-bump.sh — do not edit
+var _VERSION_STR = "cc5 ${NEW}\\n";
+var _VERSION_LEN = $((${#NEW} + 5));
+EOF
+```
+
+```cyr
+# src/main.cyr:
+include "src/version_str.cyr";   # provides _VERSION_STR + _VERSION_LEN
+# ... at --version:
+syscall(1, 1, _VERSION_STR, _VERSION_LEN);
+```
+
+**Generalizes to**: any literal a release process needs to
+update across releases (build hash, tag name, license year,
+etc.). Generate the literal source from the bump script;
+include the generated file. The bump script's correctness is
+verified by `--version` round-trip in CI, not by trusting sed.
+
+**Anti-pattern alert**: see methodology.cyml's
+`exact_match_sed_is_fragile` entry for the broader rule
+("verify outputs, not just exit codes").
+
+Full backstory: retros/v3.cyml `version_string_silent_drift`
++ v5.6.39 ship notes.
+"""
+
+[[entries]]
+name = "stdlib_hook_surface_via_fn_pointer_not_callback_registry"
+description = "Expose stdlib customization surface via ONE hook fn-pointer + ONE symbol-resolver, not per-concern callback registries (set_alpn / set_verify / set_cert / ...)."
+category = "cyrius"
+tags = ["stdlib", "api-design", "tls", "v5.6.40"]
+content = """
+**The pattern**: when a stdlib lib needs to expose
+customization points to consumers, prefer a single hook
+fn-pointer + a symbol-resolver over a registry of named
+callbacks. Bounded surface; consumers compose freely; no
+per-concern API to grow over time.
+
+**Concrete example** — `lib/tls.cyr`:
+
+Bad shape (registry):
+```cyr
+fn tls_set_alpn(ctx, alpn_list, len);
+fn tls_set_verify(ctx, mode, depth);
+fn tls_set_cert(ctx, cert_buf, len);
+fn tls_set_session_cache(ctx, cb_fp);
+fn tls_set_keylog(ctx, cb_fp);
+# ... grows forever as new TLS features land ...
+```
+
+Good shape (hook + resolver):
+```cyr
+fn tls_connect_with_ctx_hook(sock, host, hook_fp, hook_ctx);
+fn tls_dlsym(name);   # returns &libssl_function
+
+# Consumer:
+fn my_hook(ssl_ctx, hook_ctx) {
+    var set_alpn = fncall1(tls_dlsym, "SSL_CTX_set_alpn_protos");
+    fncall3(set_alpn, ssl_ctx, my_alpn_list, my_alpn_len);
+    var set_verify = fncall1(tls_dlsym, "SSL_CTX_set_verify");
+    fncall3(set_verify, ssl_ctx, SSL_VERIFY_PEER, 0);
+    return 0;
+}
+tls_connect_with_ctx_hook(sock, "example.com", &my_hook, my_hook_ctx);
+```
+
+**Why this scales better**:
+- The hook fn runs at the right moment (post-CTX-create,
+  pre-connect) — consumer can do ANYTHING with the CTX.
+- New TLS features (post-handshake auth, ECH, kTLS, etc.)
+  don't need new stdlib API; the consumer dlsym's the new
+  symbol and calls it.
+- One arg passed through (`hook_ctx`) for consumer state —
+  no global state, no callback registry to lock.
+- The stdlib surface stays at TWO functions even when libssl
+  grows hundreds of new APIs.
+
+**When the registry shape is right**: when the customization
+points are SEMANTICALLY DISTINCT and the lib needs to dispatch
+events at different times (e.g., parser callbacks: on-token,
+on-stmt, on-error). Then the registry IS the API.
+
+**When the hook shape is right**: when the customization is
+DURING a single setup phase (TLS handshake setup, allocator
+configuration, signal-handler installation). Then one hook +
+symbol-resolver beats a growing registry.
+
+Full backstory: retros/v3.cyml + v5.6.40 ship notes;
+implemented in lib/tls.cyr.
+"""
+
+[[entries]]
+name = "object_mode_pic_codegen_no_textrel"
+description = "object; mode emits PIC via LEA [rip+disp32] + R_X86_64_PC32 relocs — no DT_TEXTREL. Required for glibc 2.38+ dlopen-safety."
+category = "cyrius"
+tags = ["object-mode", "elf", "pic", "v5.0.x"]
+content = """
+**The rule**: `object;` directive emits ELF .o relocatable
+output with PIC codegen — `LEA rax, [rip+disp32]` against the
+data section, `R_X86_64_PC32` relocations. NO `R_X86_64_64`
+relocs in `.text`, NO `DT_TEXTREL` flag in the resulting
+shared object.
+
+**Why**: glibc 2.38+ refuses to `dlopen()` shared objects with
+`DT_TEXTREL` set (the "text section needs relocation at load
+time" flag — historically permitted, now treated as a security
+issue). Any cyrius `object;` build that produced text-section
+relocs would be undlopenable on modern Linux.
+
+**Mechanics**:
+- `&global_var` (taking the address of a top-level var):
+  emit `LEA rax, [rip+disp32]` + register a `R_X86_64_PC32`
+  reloc against `.data` + the var's offset.
+- `"string literal"` (string-literal address):
+  emit `LEA rax, [rip+disp32]` + `R_X86_64_PC32` against
+  `.rodata` + the string's offset.
+- `&fn_name` (function-pointer address):
+  emit `LEA rax, [rip+disp32]` + `R_X86_64_PC32` against the
+  fn symbol.
+- Direct fn calls already use rel32 (`E8` opcode +
+  `R_X86_64_PC32`) — naturally PIC.
+
+**Top-level code wrapper**: `_cyrius_init` is auto-generated
+to wrap any top-level statements (enum value computations,
+global var inits) into a callable function. C launchers MUST
+call `_cyrius_init()` before `alloc_init()` before any
+application function — otherwise enum-value globals are zero.
+
+**Reloc type table** (compiler fixup → ELF reloc):
+
+| Cyrius fixup type | ELF reloc      | Section          |
+|-------------------|----------------|------------------|
+| 0 (var addr)      | R_X86_64_64    | .data            |
+| 1 (string addr)   | R_X86_64_64    | .rodata          |
+| 2 (fn call rel32) | R_X86_64_PC32  | function symbol  |
+| 3 (fn pointer)    | R_X86_64_64    | function symbol  |
+
+Fixup types 0 + 3 still emit `R_X86_64_64` because they go
+into the `.data` section (variable storage) where TEXTREL
+doesn't apply. Only `.text`-section relocs need PC32.
+
+**Verify** (objdump):
+```sh
+objdump -h build/lib.so | grep DT_TEXTREL  # should print nothing
+readelf -d build/lib.so | grep TEXTREL     # should print nothing
+```
+
+If either prints a line, the codegen regressed and any glibc
+2.38+ consumer will fail to load the .so.
+
+Full backstory: language/tooling.cyml `object_directive` +
+v5.x ship notes.
+"""
+
+[[entries]]
+name = "research_first_optimizer_dce_cfg_lessons"
+description = "Pre-v5.0 research roundup on DCE/CFG/PIE — what maps onto a single-pass no-IR compiler and what doesn't. Reference for future opt work."
+category = "cyrius"
+tags = ["optimization", "research", "cfg", "dce", "pic", "v4.4.0"]
+content = """
+**Context**: pre-v5.0 cc3 was single-pass with no IR and no
+basic-block analysis. Adding optimization passes (DCE,
+copy-prop, register allocation) needed grounding in what's
+been done before — chibicc, tcc, QBE, ldisasm, PIC/PIE across
+ELF/Mach-O/PE.
+
+**What maps onto cyrius's single-pass no-IR compiler**:
+
+1. **Post-emit codebuf peephole** (chibicc-inspired). Walk the
+   emitted bytes, identify ad-hoc patterns (e.g., `push rax;
+   pop rax`, `mov rcx, rax; pop rax; op rax, rcx`), rewrite
+   in place. Cyrius v5.6.x O2 phase delivered 5 categories of
+   peephole this way. NO basic-block analysis required —
+   patterns are byte-level and adjacent.
+
+2. **FNV-1a hash for FINDFN** (tcc convention). Replaced linear
+   scan; -1.7% compile time win at v5.6.5. Tiny code change,
+   measurable benefit on large fn tables.
+
+3. **PIC codegen via LEA [rip+disp32]** (mandated by glibc
+   2.38+; section above). No CFG needed — every reference
+   already gets a fixup; just change the encoding of the
+   fixup-pending instruction.
+
+4. **Bitmap liveness for unreachable-fn DCE**. O(T+N) bitmap
+   marking which fns are referenced as non-fn identifiers
+   (for type-tagging) vs called. Dead fn detection drops
+   floor by ~36 fns = ~22 KB at v5.6.x. Cap-bisection
+   (`CYRIUS_DCE_CAP=N`) is the standard knob for diagnosing
+   over-aggressive DCE.
+
+**What does NOT map without IR + basic-block analysis**:
+
+1. **LASE (load-after-store elimination)**. Worked in straight-
+   line code; broke loops at v3.8.1 because back-edges make
+   adjacent store+load pairs unsafe to eliminate without
+   knowing they're branch targets. Re-attempted at v5.6.12 with
+   `parse_ctrl.cyr loop_top` IR_NOP landing pads that force
+   ir_build_bbs to split BBs at loop tops. Worked the second
+   time around.
+
+2. **Per-fn register allocation**. Needs liveness intervals
+   per local across the whole fn body. Cyrius v5.6.20 landed
+   Poletto-Sarkar linear-scan via post-emit codebuf scan
+   instead of true IR — works because the picker only patches
+   `mov rax, [rbp+disp]` patterns it can identify.
+
+3. **Maximal-munch instruction selection**. Recon at v5.6.x O5
+   found 0 fused-op candidates because cyrius's stack-machine
+   IR keeps a push between sub-expression results and
+   consumers; push-imm rewrite has rax-side-effect + forward-
+   jump-target issues. Pinned long-term — needs an IR-level
+   push-elision pass first.
+
+**General lesson from this research**: cyrius's single-pass
+shape supports more optimization than naive readers expect, AS
+LONG AS the post-emit peephole has clear pattern signatures
+to walk. The work the IR pipeline (CYRIUS_IR=3) does on top is
+SAFETY — IR_RAW_EMIT markers, basic-block analysis, fixed-
+point driver — for opts where pattern-matching the bytes is
+ambiguous.
+
+**Read for any future opt work** to avoid re-discovering the
+same dead ends. The chibicc / tcc / QBE source bases are the
+prior art; their docs cover the BB analysis and SSA reduction
+that cyrius opts route around with peephole patterns.
+
+Full backstory: retros/v4.cyml's removed
+`dce_cfg_research_roundup_440` (kept here distilled — full
+research is in the cyrius v4.4.0 ship docs).
+"""

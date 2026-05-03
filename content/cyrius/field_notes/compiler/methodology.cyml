@@ -1,0 +1,561 @@
+# Cyrius Field Notes — Compiler Process Methodology
+# Process patterns: how to debug compiler issues, how to scope
+# slot work, how to verify slot premises, how to triage cross-
+# repo bug reports. Earn their slot when an agent is starting a
+# slot, debugging a regression, or scoping a fix.
+#
+# For design / convention patterns see patterns.cyml.
+# For non-obvious internal traps see gotchas.cyml.
+#
+# 8 entries.
+
+[[entries]]
+name = "premise_check_at_slot_entry"
+description = "Read the actual code + run a 5-line probe BEFORE adopting a pin's stated scope. Three out of six slots in the v5.8.x slices sub-arc had pin premises that were empirically wrong."
+category = "cyrius"
+tags = ["process", "scoping", "v5.7.x", "v5.8.x"]
+content = """
+**The rule**: when starting a slot, the pin describes intended
+scope based on what the previous slot's author thought was true.
+Empirically, those assumptions are wrong often enough that a
+5-line probe at slot entry is the highest-value 5 minutes of
+the slot.
+
+**Probe shape**: write the smallest possible cyrius source that
+exercises what the pin assumes works. Compile + run. Observe.
+
+**Examples from v5.8.x** (the discipline earned its keep across
+the sub-arc):
+
+§7 (v5.8.15) pin assumed slice indexing was straightforward —
+just lower `s[i]` to a bounds-checked load. Probe: write
+`var s1: [u8] = 0; var s2: [u8] = 0; slice_set(&s1, ...);
+slice_set(&s2, ...);`. Crashed. Found a pre-existing 16-byte
+fn-local slot-collision bug (silent since v5.5 because no tcyr
+exercised adjacent fn-local slices). §7 scope expanded honestly
+to "indexing + layout-fix in one slot."
+
+§8 (v5.8.16) pin assumed dot-syntax was straightforward. Probe:
+`var s: [u8] = 0; slice_set(...); s.len = 3; var n = s.len;`.
+Read 0 instead of 3. Found regalloc post-body peephole was
+patching the high-half slot's EFLSTORE to a register move,
+leaving the stack slot uninitialized. Plus the layout-flip
+exposed a pre-existing tail-call escape bug. §8 scope expanded
+honestly to "dot-syntax + address-based field I/O + tail-call
+escape skip."
+
+§9 (v5.8.17) pin assumed `s.data` / `s.len` already worked on
+Str-typed locals and §9 was just a stdlib migration. Probe:
+`var s: Str = str_from("hello"); return s.len;`. Returned 0.
+Found PARSE_FIELD_LOAD's struct-typed-local branch always used
+inline-mode addressing, but heap-alloc'd Str pointers store a
+pointer in a single slot. §9 scope FLIPPED — capability had
+to ship first; mass migration moved to §10.
+
+**Anti-pattern** (the alternative: skip the probe, commit to
+the pin's framing, hit a wall mid-slot, defer half the work
+to "next slot" without filing where): see anti-patterns.cyml's
+`scope_cut_mid_slot` entry. Ballooned v5.6.x's deferment rate;
+v5.7.x discipline + v5.8.x sub-arc's three premise-flips
+explicitly avoided that trajectory.
+
+**When the probe passes**: still a valuable 5 minutes — confirms
+the slot's foundation. The probe + a quick assertion in a
+.tcyr regression run becomes the slot's `step 0` tests.
+
+Cross-ref: methodology.cyml's `attribute_regressions_to_platform_drift`
+(verify the FRAMING of "regression" pins before investing).
+
+Full backstory: v5_8.cyml's `premise_check_at_slot_entry_v58x`
++ feedback memory `feedback_premise_check_at_slot_entry`.
+"""
+
+[[entries]]
+name = "perf_test_dont_assume_correctness_isnt_perf"
+description = "Correctness tests are not performance tests. Add benchmarks BEFORE shipping an optimization. Global taxes never pay for local wins."
+category = "cyrius"
+tags = ["performance", "optimization", "regression", "v3.3.5"]
+content = """
+**The rule**: when shipping a codegen change labeled as an
+optimization, write the benchmark FIRST. The .bcyr harness
+exists for exactly this reason. Correctness tests passing
+(self-host byte-identical, full .tcyr suite green) is
+NECESSARY but NOT SUFFICIENT — a perf regression is silent on
+those gates.
+
+**Two related rules**:
+
+1. **Global taxes never pay for local wins.** If your "speedup
+   for hot loops" adds overhead to every function call (extra
+   prologue/epilogue, stack frame shift), the tax bill exceeds
+   the savings unless the optimization is gated per-function.
+   `#regalloc 1` directive style — opt-in, per-fn — is correct;
+   "every fn always pays the cost" is wrong.
+
+2. **Silent fallback is dangerous.** If your optimization can
+   regress correctness on a code shape it doesn't recognize,
+   either fix it to be safe across all shapes OR refuse to
+   compile that shape. NEVER silently produce wrong code on
+   inputs your peephole pattern doesn't match.
+
+**Concrete example** (v3.3.5 r12 loop-var cache regression):
+
+Cached the loop counter in r12 to avoid stack reload every
+iteration. Tests passed; self-host byte-identical. Then
+cyrius-doom benchmarks caught it:
+
+  render_frame:  2.2ms → 4.3ms   (2x slower)
+  fixed_mul:     435ns → 662ns   (1.5x slower)
+
+Why: every fn call paid `push r12 / pop r12` to preserve the
+caller's r12 value across the call. The cost on every caller
+exceeded the savings on the optimized loops. Plus the frame
+shift (rsp prologue change to make room for r12 save) silently
+broke 7+ arg functions — they read garbage for the 7th arg
+because stack-arg offsets shifted from `[rbp+16]` to `[rbp+24]`.
+Bug #32 (silent miscompile) and the 2x perf regression were
+the SAME underlying change.
+
+Reverted at v3.3.12. Dead accessors sat in util.cyr until
+v3.4.16 closeout cleaned them up.
+
+**The right shape** (eventually delivered at v5.6.20+): per-fn
+register allocation via Poletto-Sarkar linear-scan picker.
+Auto-enabled via picker for fns that benefit; opt-out via
+`#regalloc 0`; safety scan abort if the picker hits an unsafe
+shape (asm + regalloc, &local taken, etc.).
+
+**Generalize to**: any codegen change. ALWAYS pair with a
+.bcyr that measures the workload the optimization targets.
+Compare pre/post on a real consumer (cyrius-doom, sigil PQC,
+sankoch encode/decode) to verify the win is real and the tax
+is bounded.
+
+Full backstory: retros/v3.cyml `r12_loop_var_regression_lesson`.
+"""
+
+[[entries]]
+name = "verify_outputs_not_just_exit_codes"
+description = "sed/grep returning 0 doesn't mean it changed anything. Diff the file or re-read the value to confirm. Exact-match sed is fragile; permissive regex + verification > strict-match + || true."
+category = "cyrius"
+tags = ["release-process", "scripts", "v3.4.16", "v5.6.39"]
+content = """
+**The rule**: a successful exit code from sed / grep / awk /
+any data-mutating script does NOT mean the script changed what
+you expected. ALWAYS verify the OUTPUT — diff the file, re-read
+the literal, hash the result.
+
+**Two related anti-patterns**:
+
+1. **`|| true` swallowing failures**. Convenient until it
+   hides silent data corruption. Prefer explicit error
+   handling — detect no-match, warn, continue (or fail).
+
+2. **Exact-match sed**. When you sed-replace a literal, ANY
+   drift makes the replacement a no-op. Use permissive regexes
+   that tolerate drift AND validate the result.
+
+**Two cyrius examples**:
+
+v3.4.10–v3.4.16: `cc3 --version` reported `cc3 3.4.10` for 5
+releases because the bump script's exact-match sed silently
+failed. Users filed bugs with stale version output.
+Diagnosis: `./build/cc3 --version | od -c` — 30 seconds of
+bytewise inspection found it.
+
+v5.6.29-1 → v5.6.38: same shape recurred (9 releases of stale
+version output). Fix at v5.6.39 routed the version through
+generated source (see patterns.cyml's
+`version_string_via_generated_source_not_hardcoded`) so the
+bump script no longer rewrites `src/main.cyr` directly.
+
+**The right release-process shape**:
+
+```sh
+# OLD (fragile):
+sed -i "s/\"cc3 $OLD/\"cc3 $NEW/" src/main.cyr 2>/dev/null || true
+
+# BETTER:
+if ! sed -i -E "s|\"cc3 [0-9]+\\.[0-9]+\\.[0-9]+\\\\n\"|\"cc3 $NEW\\\\n\"|" src/main.cyr; then
+    echo "ERROR: sed failed" >&2
+    exit 1
+fi
+# Verify:
+if ! grep -q "\"cc3 $NEW\\\\n\"" src/main.cyr; then
+    echo "ERROR: post-sed source doesn't contain expected version" >&2
+    exit 1
+fi
+
+# BEST (the v5.6.39 shape):
+# Don't sed source at all — generate src/version_str.cyr from
+# the bump script and have src/main.cyr include it.
+cat > src/version_str.cyr <<EOF
+var _VERSION_STR = "cc5 ${NEW}\\n";
+var _VERSION_LEN = $((${#NEW} + 5));
+EOF
+# Then verify by running the binary:
+if [ "$(./build/cc5 --version)" != "cc5 $NEW" ]; then
+    echo "ERROR: --version output mismatch" >&2
+    exit 1
+fi
+```
+
+**Generalize**: any release-process step that mutates source +
+relies on regex matching needs a corresponding verification
+step. The build IS the product; verifying the build's
+correctness is a first-class release deliverable.
+
+Full backstory: retros/v3.cyml `version_string_silent_drift`
++ patterns.cyml `version_string_via_generated_source_not_hardcoded`.
+"""
+
+[[entries]]
+name = "verify_slot_premise_before_investing"
+description = "When a slot is initially pinned as 'platform drift' or 'compiler regression', verify the framing FIRST. Reproduce the failure + inspect the failing artifact (otool/objdump/xxd) BEFORE adopting the suspect list."
+category = "cyrius"
+tags = ["debugging", "regression-triage", "v5.6.33", "v5.6.36"]
+content = """
+**The rule**: when a roadmap slot is pinned as "platform X
+regressed" or "arch Y broke," the pin is the AUTHOR'S best
+guess about WHERE the bug lives — not the actual diagnosis.
+Before investing in the suspect list, reproduce the failure +
+inspect the failing artifact directly.
+
+**The cyrius example**: v5.6.33 (Mach-O) and v5.6.36 (PE) were
+two consecutive "platform drift" regression pins on the cyrius
+roadmap. Both turned out to be the SAME test-fixture bug — a
+fn named `main` in a tcyr that the runner's auto-discover
+treated specially on platforms whose entry-point convention
+differed.
+
+Neither was a compiler regression. Both pins suggested
+investigating Mach-O LC_DYLD_INFO_ONLY emission and PE
+.reloc generation respectively. Both directions were wrong.
+
+**The diagnostic that would have saved the time**:
+
+```sh
+# Reproduce on the platform:
+./build/cc5_macho_arm < failing_test.cyr > /tmp/fail
+otool -tv /tmp/fail   # disassemble the fail
+xxd /tmp/fail | head  # inspect the bytes
+
+# Compare to a passing test:
+./build/cc5_macho_arm < passing_test.cyr > /tmp/pass
+otool -tv /tmp/pass
+diff <(otool -tv /tmp/fail) <(otool -tv /tmp/pass)
+```
+
+Within minutes the diff would have shown that the differing
+bytes were a fn label / symbol issue, not a relocation issue.
+The pin's framing pointed at the wrong layer.
+
+**Generalize**: for any slot pinned as "regression in X":
+
+1. Reproduce on the platform.
+2. Inspect the failing artifact (`otool -tv` for Mach-O,
+   `objdump -d` for ELF, `xxd` for raw bytes).
+3. Compare to a passing build.
+4. ONLY THEN read the pin's suspect list — and treat it as
+   one hypothesis among several.
+
+**Anti-pattern**: starting from the pin's suspect list and
+spending hours instrumenting LC_DYLD_INFO_ONLY emission code
+that turns out to be unchanged across the regression. The
+pin's author wasn't malicious — they wrote the best framing
+they could from the symptom they observed. But the symptom is
+not the diagnosis.
+
+Cross-ref: methodology.cyml's `premise_check_at_slot_entry`
+(read code + probe BEFORE adopting scope). Same shape — verify
+the foundation before building.
+
+Full backstory: v5_6.cyml's
+`two_consecutive_platform_drift_pins_were_both_fn_main_fixture_bugs`.
+"""
+
+[[entries]]
+name = "triage_dep_boundary_per_row_checksum"
+description = "When a downstream consumer reports 'X corrupts at scale' and the suspect crosses a dep boundary (cyrius compiler / sankoch encoder / patra page allocator), instrument both sides of the boundary with per-row checksums. Standalone replay of dumped buffers + in-process roundtrip + per-row checksum localizes the corruption."
+category = "cyrius"
+tags = ["debugging", "cross-repo", "triage", "v5.6.35"]
+content = """
+**The rule**: cross-repo bug reports of the shape "X works
+fine for small inputs, corrupts at scale" usually have a
+specific tipping point. The triage methodology is:
+
+1. **Standalone replay of dumped buffers.** Get the actual
+   buffer bytes from the failing run; try to re-run the
+   suspect operation outside the consumer.
+
+2. **In-process roundtrip instrumentation.** Add per-row
+   checksums (CRC32 / SHA-1 / even XOR-hash) at every
+   suspected stage. Encode → decode → compare per-row.
+
+3. **Per-row checksum at each dep boundary.** When the data
+   flows compiler → sankoch encoder → patra page allocator →
+   sankoch decoder → consumer reader, instrument BOTH SIDES
+   of each boundary. The corruption shows up as the first row
+   where pre-boundary checksum != post-boundary checksum.
+
+**The cyrius example** (v5.6.35): sit's "fsck reports unreadable
+objects at scale" pin was filed against cyrius. Initial
+suspicion: `alloc()` corruption (sit's blob layer was a
+plausible victim of a heap regression).
+
+Triage applied:
+
+1. Dumped the failing blob from sit's WAL → standalone
+   sankoch replay outside sit.
+2. Added per-row checksums INSIDE sankoch's encode loop +
+   decode loop.
+3. Found checksum drift in the encoder's deflate output.
+   First mismatch was at row N=128k; pre-deflate checksum was
+   stable, post-deflate checksum diverged.
+
+Conclusion: not a cyrius bug. Sankoch's deflate encoder had a
+buffer-aliasing bug that was masked at small scale (deflate
+output buffer < input buffer almost always; corruption only
+when a specific bit pattern caused the encoder's literal-vs-
+ref decision to land on a stale offset). Filed as a sankoch
+issue; cyrius pin closed.
+
+**Generalize**: any cross-repo "corrupts at scale" should
+START with this methodology. Cyrius gets blamed often (it's
+the language layer; everything routes through it); the actual
+bug is usually one layer higher in a dep. Fast triage saves
+days of misattributed compiler-internal investigation.
+
+**The instrumentation pattern**:
+
+```cyr
+# Encoder side (sankoch):
+fn encode_row(row_buf, row_len) {
+    var pre_checksum = sha1_hash(row_buf, row_len);
+    var enc = deflate_encode(row_buf, row_len);
+    syscall(SYS_WRITE, 2, "row pre=", 8); print_hex(pre_checksum);
+    syscall(SYS_WRITE, 2, " post=", 6); print_hex(sha1_hash(enc.data, enc.len));
+    syscall(SYS_WRITE, 2, "\\n", 1);
+    return enc;
+}
+
+# Decoder side (sankoch consumer):
+fn decode_row(enc_buf, enc_len) {
+    var dec = deflate_decode(enc_buf, enc_len);
+    syscall(SYS_WRITE, 2, "row dec=", 8); print_hex(sha1_hash(dec.data, dec.len));
+    syscall(SYS_WRITE, 2, "\\n", 1);
+    return dec;
+}
+```
+
+Run both sides with the failing fixture. The first row where
+encoder's `post=X` != decoder's `dec=X` is the corruption
+boundary.
+
+Full backstory: v5_6.cyml's
+`sit_symptom_2_was_sankoch_encoder_not_cyrius`.
+"""
+
+[[entries]]
+name = "ci_drift_detection_silent_skip_is_false_green"
+description = "Silent SKIP in CI gates is False-PASS in disguise. Every gate must report PASS / FAIL / SKIP explicitly, and SKIP must be a known-acceptable state, not 'binary not built so we'll just continue.'"
+category = "cyrius"
+tags = ["ci", "regression-prevention", "v5.7.36", "v5.7.50"]
+content = """
+**The rule**: in any CI gate that can be skipped (binary not
+built, dep not available, platform not supported), the SKIP
+must be EXPLICIT and KNOWN-ACCEPTABLE. A gate that silently
+returns 0 when it can't run is reporting False-PASS.
+
+**The two cyrius regressions caused by this**:
+
+v5.7.29: `check.sh` had `set -e` AT THE TOP, which made any
+non-zero exit abort the script entirely. A failing gate
+mid-script aborted the whole run + the FINAL pass-count print
+was never reached → CI saw "no output, exit 0" and reported
+green. Latent for an unknown duration; user-surfaced when a
+deliberate mid-script failure didn't bubble up to red.
+
+Fix at v5.7.29: removed `set -e`; replaced with explicit gate-
+level checks. Each gate prints `PASS:` / `FAIL:` / `SKIP:` and
+the final tally line counts each.
+
+v5.7.36 + v5.7.50: format/lint gates checked for cyrfmt /
+cyrlint binaries via `[ -x "$ROOT/build/cyrfmt" ]` and SILENTLY
+returned 0 if missing. So a fresh-install failure (binary not
+built) reported PASS.
+
+Fix at v5.7.36: print `SKIP: cyrfmt not built` explicitly, and
+the gate counts SKIP separately from PASS in the tally line.
+Final state: a green check.sh with N gates SKIPPED is
+distinguishable from a green check.sh with N gates PASSED.
+
+v5.8.18 (current): the api-surface gate has been silently
+skipping since v5.7.50 because the binary isn't auto-built
+(see roadmap.md v5.8.42 pin). The gate prints `skip: not
+built` and exits 0. v5.8.42 will fix the binary auto-build +
+re-enable the gate as a PASS-or-FAIL, not skip.
+
+**The right gate shape**:
+
+```sh
+# Bad — silent skip:
+if [ ! -x "$ROOT/build/cyrfmt" ]; then exit 0; fi
+"$ROOT/build/cyrfmt" --check src/...
+# (returns 0 in either case; CI can't tell built-and-passed
+#  from not-built-and-skipped)
+
+# Better — explicit + counted:
+if [ ! -x "$ROOT/build/cyrfmt" ]; then
+    echo "  SKIP: $ROOT/build/cyrfmt not built"
+    exit 0
+fi
+"$ROOT/build/cyrfmt" --check src/...
+rc=$?
+if [ "$rc" -eq 0 ]; then echo "  PASS"; else echo "  FAIL"; fi
+exit $rc
+
+# Best — failed-skip is a hard error after first ship:
+# Once a binary has shipped in [release].bins, missing-binary
+# is a regression, NOT acceptable skip. Promote SKIP → FAIL
+# after the first release that includes the binary.
+```
+
+**Generalize**: every CI gate's exit code should be one of
+PASS / FAIL / KNOWN-SKIP. A KNOWN-SKIP must have a documented
+reason that's tracked toward resolution. Anything else is
+False-PASS until proven otherwise.
+
+Full backstory: v5_7.cyml's
+`audit_silent_skip_is_false_green_v5_7_36` +
+`auto_deps_gate_inflates_self_host_size_v5_7_38`.
+"""
+
+[[entries]]
+name = "ci_drift_detection_orphaned_path_is_certain_drift"
+description = "Code paths with no CI gate accumulate silent drift. The cyrius-x bytecode entry (main_cx.cyr) accumulated 4+ silent-drift breakages across v5.6.x + v5.7.x because no CI ever built it. Add a gate before working on a backend, not after."
+category = "cyrius"
+tags = ["ci", "backend", "drift-prevention", "v5.7.11"]
+content = """
+**The rule**: any code path that doesn't have a CI gate WILL
+accumulate silent drift. Not "might" — WILL. The drift
+accumulates at exactly the rate at which surrounding code
+changes; for a cyrius backend (frontend changes ripple through
+each backend), that's every few patches.
+
+**The cyrius example**: `src/main_cx.cyr` (the cyrius-x
+bytecode entry point) accumulated 4+ silent breakages across
+v5.6.x + v5.7.x because no CI ever built it:
+
+1. Missing `include "common/ir.cyr"` after IR was added in
+   v5.6.x — main_cx.cyr never picked it up.
+2. Missing globals for new-since-v5.6 IR helpers: `_AARCH64_BACKEND`,
+   `_TARGET_MACHO`, `_TARGET_PE`, `_flags_reflect_rax`, 4
+   peephole-tracker globals. Each was added without a
+   corresponding update to main_cx.cyr.
+3. Two dead `PF64BIN` / `PF64CMP` cx stubs collided with
+   parse_expr.cyr's authoritative versions; v5.7.9's new
+   duplicate-fn warning surfaced this when ANY consumer tried
+   to build cx.
+4. brk start was 5.5 MB but cx needed 39 MB to reach
+   tok_types — silently failing alloc behavior on cx-only
+   workloads.
+
+Each breakage was found independently when somebody actually
+tried to build cx for a downstream use. Fix at v5.7.11: the
+DURABLE fix wasn't fixing the 4 issues — it was adding
+`tests/regression-cx-build.sh` (gate 4u) so any future drift
+fails CI immediately.
+
+**Generalize**: BEFORE doing meaningful work on a backend or
+infrequently-built tool, add the CI gate for it. Drift since
+the last build IS what you're paying for in your slot —
+account for it in the budget.
+
+**The "orphaned path" inventory** (paths that get silent drift
+without a gate):
+
+- Each backend (`src/main_*.cyr`): cc5 / cc5_aarch64 /
+  cc5_win / cc5_macho_arm / cc5_cx. Each needs its own
+  build-gate.
+- Each cross-compiler output type: ELF, Mach-O, PE32+,
+  cyrius-x bytecode. Each needs an output-gate (`xxd | grep`
+  for known-bad byte patterns; readelf / otool / dumpbin for
+  format validity).
+- Each downstream consumer dep (sigil/mabda/yukti/etc.): each
+  needs `cyrius soak` integration so a cyrius-side change
+  that breaks them is caught before the downstream agent
+  reports a regression.
+- Each helper script (cyriusly / cyrius-init.sh /
+  cyrius-port.sh): silent until a user runs it. Add a
+  `--check` mode that exercises the script in CI.
+
+**Anti-pattern**: assuming "if I'm not actively working on
+backend X, it's still fine because last release shipped." It
+ISN'T. The frontend evolves; backends silently rot.
+
+Full backstory: v5_7.cyml's `cx_drift_silent_accumulation_lesson`
++ v5.7.11 ship notes.
+"""
+
+[[entries]]
+name = "anticipated_gotcha_pre_flight_v55x"
+description = "Pre-flight gotcha bundles — record anticipated issues BEFORE starting an arc, not after. v5.5.3 (Win64 ABI) + v5.5.4 (native self-host) + v5.5.5+ (PE tail) shipped this way."
+category = "cyrius"
+tags = ["scoping", "pre-flight", "v5.5.x"]
+content = """
+**The rule**: when an arc spans multiple slots and crosses
+known-fragile territory (new platform, ABI change, large
+refactor), record anticipated gotchas in a pre-flight doc
+BEFORE starting. Not as predictions — as RUNNING NOTES that
+the slot owner consults during the work and updates as
+findings either confirm or refute each anticipation.
+
+**The cyrius example** (v5.5.x platform-completion arc):
+
+Before starting v5.5.3 (Win64 ABI), v5.5.4 (native self-host
+on Win11), and v5.5.5+ (PE tail), the arc owner wrote
+`v5_5_x_anticipated_gotchas` covering:
+
+- Win64's caller-saves-XMM-args convention vs SysV's no-save
+- Stack alignment requirement at CALL: rsp 16-byte aligned
+  on SysV vs Win64 difference
+- Win64's hidden RCX retptr for struct-return (vs SysV's RDI)
+- Shadow space (Win64): callee gets 32 bytes of pre-allocated
+  stack space caller MUST reserve
+- PE32+ section layout: .text, .rdata, .data, .pdata, .reloc;
+  each with its own alignment + RVA constraints
+- LC_DYLD_INFO_ONLY (Mach-O): different from PE entirely;
+  don't mix lessons
+
+Some anticipated gotchas hit (shadow space caused 4 patches
+in v5.5.4–v5.5.7); some didn't (RCX retptr was straightforward
+once mapped). The pre-flight doc was the running journal that
+captured each finding INLINE — not after the arc shipped, when
+context is lost.
+
+**Generalize**: write the pre-flight gotchas BEFORE the work,
+update them DURING the work, archive them AFTER as field
+notes. The discipline:
+
+1. Brainstorm gotchas at arc-start (~30 min). Cover ABI,
+   alignment, calling convention, error-code semantics, build-
+   system diffs, test-runner diffs.
+2. Each anticipated gotcha gets a 2-line entry: what + why-
+   we-think-this-might-bite-us.
+3. As work progresses, mark each as CONFIRMED (here's what
+   bit) / REFUTED (turned out to be a non-issue) / OPEN
+   (still ambiguous).
+4. At arc closeout, the populated doc is the field-notes
+   bundle — name it `v<arc>_x_gotchas_bundle`.
+
+**Anti-pattern**: post-hoc retrospective that lists "what bit
+us." Loses the prior-art context (what we DID anticipate vs
+what surprised us). Pre-flight + update-in-place gives both.
+
+Full backstory: v5_5.cyml's
+`windows_arc_anticipated_gotchas` was the pre-flight doc,
+v5_5.cyml's `v5_5_x_platform_rounding_gotchas` was the post-
+arc bundle. Compare them — the diff is the arc's actual
+surprise factor.
+"""

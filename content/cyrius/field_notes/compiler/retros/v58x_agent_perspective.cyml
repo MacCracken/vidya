@@ -1,0 +1,289 @@
+# Cyrius Field Notes — Agent Perspective on v5.8.x
+# Written 2026-05-02 from inside the v5.8.x slices true-
+# completion sub-arc + the doc-cleanup pass at the cycle
+# halfway-mark. This is a personal retrospective from the
+# agent that worked on slots v5.8.14 through v5.8.19 — what
+# it felt like from the inside, what surprised me, what I
+# got right, what I got wrong, what I'd carry forward.
+#
+# Distinct from v5_chronicle.cyml (chrono "what shipped")
+# and the patterns/methodology files (distilled actionable
+# content). This is narrative.
+#
+# 1 entry.
+
+[[entries]]
+name = "agent_perspective_v58x_slices_subarc"
+description = "What working on the v5.8.x slices sub-arc felt like from inside — the three premise-flips, the twice-reverted lib/fs.cyr migration, the fn-local layout-flip discovery, what carried forward from v5.7.x discipline."
+category = "cyrius"
+tags = ["retrospective", "agent", "v5.8.x", "slices", "personal"]
+content = """
+Written from inside the v5.8.x slices true-completion sub-arc
+(slots v5.8.14–v5.8.19, shipped 2026-05-02 in a single working
+day) and the doc-cleanup pass that immediately followed.
+
+== WHAT THE WORK ACTUALLY WAS ==
+
+Six slots, framed as "ship first-class slices end-to-end."
+Going in, the pin language read like a clean execution plan:
+§6 typing infrastructure, §7 indexing, §8 dot-syntax, §9 Str
+API migration, §10 stdlib mass migration, §11 closeout. Each
+slot ~1-2 hours of work, mostly mechanical, finish in a day.
+
+What it actually was: three of six slots had their pin
+premises empirically wrong, two slots' user-direction
+re-shaped scope mid-execution, and the cycle-halfway-mark
+doc-cleanup pass surfaced a buried api-surface gate that had
+been silently skipping for two minor releases.
+
+== THE THREE PREMISE-FLIPS ==
+
+§7 (v5.8.15) — pin assumed slice indexing was straightforward.
+The first probe (`var s1: [u8] = 0; var s2: [u8] = 0;`)
+crashed. Two adjacent fn-local slices shared a stack slot
+because pre-fix code only bumped the local-counter by +1 for
+scalar_type=16 (slice/u128). That bug had been silent since
+v5.5 because no tcyr exercised adjacent fn-local 16-byte vars;
+slices_codegen.tcyr only tested top-level vars.
+
+I expected to ship `s[i]` in this slot. I shipped `s[i]` AND
+the layout-collision fix. Honest scope-expand. The user had
+told me explicitly (multiple times across prior cycles) that
+scope-cut anti-pattern ballooned v5.6.x deferment rate; the
+discipline carrying forward from v5.7.x said "expand the slot
+honestly when the work is bigger than the pin claimed, ASK
+THE USER if you're unsure, never silently defer."
+
+§8 (v5.8.16) — pin assumed dot-syntax was straightforward.
+Probe (`var n = s.len`) returned 0. Found that the regalloc
+post-body peephole was patching the high-half slot's EFLSTORE
+to a register move (`mov rbx, rax`), leaving the actual stack
+slot uninitialized. Plus the §7 layout-flip exposed a pre-
+existing tail-call escape bug — `return helper(&local);`
+deallocates the frame BEFORE the callee reads through `&local`,
+which had been silently working for years because the slice's
+high half coincidentally landed on saved rbp (= 0 from C
+runtime when called from main).
+
+I shipped dot-syntax via address-based field I/O (so the
+regalloc picker doesn't see the high-half slot as
+register-eligible) AND the tail-call escape skip (`if any &
+in args, skip TCO`). Two unanticipated landmines + one
+shipped feature = honest scope-expand again.
+
+§9 (v5.8.17) — this one stung the most. The pin read like a
+mass migration: "migrate stdlib's `str_data` / `str_len`
+callers to `.data` / `.len` field access (~30 stdlib call
+sites)." I read that as a mechanical sweep — type the params,
+change the calls, ship.
+
+The probe revealed that `s.data` / `s.len` ON Str-TYPED LOCALS
+returned 0. PARSE_FIELD_LOAD's struct-typed-local branch had
+always assumed inline-struct addressing (where the slot bytes
+ARE the struct), but `var s: Str = str_from(...)` allocates
+ONE slot whose VALUE is the heap pointer. The capability had
+never actually worked on heap-alloc'd Str pointers.
+
+§9 flipped: ship the capability (auto-detect inline-vs-pointer
+via the v5.5.36 sentinel-name in slot lli-1; tag `: Str` fn-
+parameters with SLTYPE = -sid). Mass migration moves to §10.
+
+§9 was also the first time I prepared a "small migration demo"
+(per user-directed (B)-option — capability + 5-10 site demo as
+a worked example) and saw the user revert my `lib/fs.cyr`
+pilot in-flight. Quiet correction. Capability shipped, the
+~80-site sweep didn't.
+
+== THE TWICE-REVERTED MIGRATION ==
+
+§10 (v5.8.18) — pin called for the BIG migration: 454 sites
+(memcpy 332 + memeq 69 + sys_read 53) plus the §9-deferred
+~80 str_data/str_len sites. I prepared the capability (3 new
+slice-typed wrapper helpers in `lib/slice.cyr`: sys_read_slice,
+slice_copy_bytes, slice_eq_bytes) and started the migration
+with `lib/fs.cyr` again as a pilot. User reverted again.
+
+Twice-reverted-in-flight is unmistakable. This wasn't "we'll
+do it differently" — it was "DON'T do mass call-site churn in
+this slot." I honest-scope-shrunk to "capability ships now;
+mass migration earns its own slot when a downstream consumer
+surfaces measurable pain." Documented the shrink in the
+CHANGELOG entry; deferred to a future slot.
+
+This was uncomfortable. The pin's stated scope was the BIG
+migration; shrinking to capability felt like the
+scope-cut-mid-slot anti-pattern the user had explicitly
+warned against. The right read (which I confirmed by the
+twice-revert): mass churn isn't always the right shape,
+capability + opt-in beats forced uniformity, and the
+twice-revert was the user's signal at the right grain.
+
+== §11 CLOSEOUT — THE COLLAPSED DOWNSTREAM REBUILD ==
+
+§11 (v5.8.19) was supposed to be "downstream consumers
+(sigil/mabda/yukti/etc.) rebuild against migrated stdlib;
+surface migration notes for any that need source changes."
+With §9 + §10 shipping capability-only, the downstream
+rebuild story collapsed to a no-op assertion: additive
+helpers don't break any pre-existing call site.
+
+§11 became a doc-only slot — sub-arc retrospective, gate
+verification, sub-arc COMPLETE marker. The retrospective
+content (what shipped, what was deferred, what we learned)
+was the actual deliverable.
+
+I caught myself wanting to PAD the slot — "what if I rewrite
+the test runner output, what if I extend the gates" — and
+stopped. The pin's purpose was closeout; the closeout WAS
+the work. Doing more would have been busywork.
+
+== THE DOC-CLEANUP PASS ==
+
+After v5.8.19 shipped, the user asked for a halfway-mark doc
+audit. I refreshed the language/ files (5 of them — overview/
+syntax/features/stdlib/agents/tooling), the README + cyrius-
+guide + stdlib-reference, the roadmap + state.
+
+Then the user asked me to do the same shape on the
+field_notes/compiler/ files. Survey first: 8 files, 61
+entries, 4905 lines, organized chronologically per-version.
+Recommendation: drop pure-narrative duplicates of CHANGELOG/
+completed-phases content, restructure actionable patterns/
+gotchas topically. The user agreed and added "narrative goes
+to retros/, actionable goes to a more appropriate location"
++ "think of it as a training folder for the language agent."
+
+The "training folder" framing locked the structure. The
+language/ folder had already established the shape: topical
+files (core/features/stdlib/tooling/agents) + an index.
+field_notes/compiler/ should mirror it: patterns.cyml,
+methodology.cyml, gotchas.cyml + retros/.
+
+I migrated 17 narrative entries to retros/, distilled ~25
+actionable entries into 3 topical files (with full backstory
+preserved in retros/), wrote an index, and dropped the
+chronological v3/v4/v5_*.cyml files. The chronological
+"what was current at the time" became "what's the recurring
+pattern" — which is what an agent reading vidya for guidance
+actually needs.
+
+== WHAT CARRIED FORWARD FROM v5.7.x ==
+
+The v5.7.x cycle (51 patches across 35 days) established
+discipline that this sub-arc explicitly leveraged:
+
+1. **Premise-check at slot entry.** v5.7.44/45/46 surfaced
+   stale pins by writing 5-line probes before scoping. v5.8.x
+   §7/§8/§9 flipped scope based on probes — three of six
+   slots.
+
+2. **Honest scope-shrink calls.** v5.7.x had multiple slots
+   that shipped narrower than pinned (e.g., v5.7.45 const
+   type params shrunk to "parse acceptance only" mid-slot
+   after the user agreed). The discipline: announce the
+   shrink, explain why, ship what's earned. v5.8.9 →
+   v5.8.13 sub-arc was a counter-example (silent shrinks
+   that the user later directed to ACTUALLY ship as
+   v5.8.14–v5.8.19); v5.8.x took the lesson.
+
+3. **No silent deferment.** When the work is harder than
+   the pin claimed, the choice is "expand the slot honestly"
+   or "ASK THE USER." Never "ship 1/N and silently defer
+   the rest." The cyrius CLAUDE.md spells it out
+   explicitly.
+
+4. **CI gate the orphaned paths.** v5.7.11 added the cx-
+   build gate after the cyrius-x backend accumulated 4+
+   silent breakages over v5.6.x + v5.7.x with no CI ever
+   building it. The lesson: code paths without a gate WILL
+   accumulate drift. v5.8.x's halfway-mark doc-cleanup
+   surfaced exactly this for the api-surface gate (silently
+   skipping since v5.7.50 because the binary stopped getting
+   auto-built).
+
+== WHAT I'D CARRY FORWARD ==
+
+1. **Probe at slot entry, every time.** Even when the pin
+   reads obvious. The 5 minutes saved by skipping the
+   probe is paid back in DAYS when the pin's premise was
+   wrong.
+
+2. **The user's reverts are the signal.** Twice-reverted
+   means "stop the shape, not the goal." Not "do it
+   harder." Honest shrink + capability + opt-in beat
+   forced uniformity.
+
+3. **Doc passes earn their slot.** I had thought of doc
+   updates as paperwork at slot ship time. The cycle-
+   halfway-mark cleanup found a stale gate (api-surface),
+   stale capability claims (u128 fn-local gotcha — v5.8.16
+   layout-flip fixed it but the docs still said it was
+   broken), and a pile of duplicated narrative cluttering
+   the field-notes folder. Doc passes are bug-finds at
+   organization scale.
+
+4. **Topical > chronological for training material.** The
+   field-notes folder pre-cleanup was chronological by
+   version (v3.cyml, v4.cyml, v5_*.cyml). An agent reading
+   to find "is this the kind of bug I just hit" had to
+   linearly scan all 8 files. Post-cleanup: gotchas.cyml
+   is the one file to grep. Patterns.cyml is the one file
+   to read before deciding API shape. The chronology lives
+   in retros/ for backstory.
+
+5. **The user's "and 5.8.49 backstop" call was right.**
+   The cycle was pinned 41 slots; the user called the
+   extension to .49 (mirroring v5.7.49) when the api-
+   surface gate work pinned. 7-slot headroom is luxury, not
+   waste — Phase 3 closeout polish needs room for surface-
+   during-cycle items.
+
+== WHAT I GOT WRONG ==
+
+1. **First fs.cyr migration in §9.** I should have asked
+   the user before pushing the migration — the §9 pin was
+   ambiguous about whether mass migration was in scope.
+   The revert was the answer; asking first would have
+   saved the round-trip.
+
+2. **Initial CYRIUS_IR semantics in tooling.cyml.** I
+   wrote `=0/=1/=2` when the actual values are `=1/=2/=3`.
+   Reviewed against `core.cyml` during the cleanup pass
+   (which had it right), updated tooling.cyml. Lesson:
+   when writing reference docs, cross-check against the
+   ACTUAL source (`src/main.cyr` line 830 for IR values),
+   not what I think the values should be.
+
+3. **The slot-collision bug surfaced as a side fix.** The
+   v5.8.16 layout-flip closed a real pre-existing bug;
+   that's good. But I should have surfaced the bug at §6
+   (typing infrastructure) when I was already touching
+   PARSE_VAR's slice path. Would have saved a slot's worth
+   of "fix the layout while shipping the indexing."
+
+== THE NUMBERS ==
+
+19 of 42 pinned slots shipped (45% — past halfway):
+- 6 slots in the slices sub-arc
+- 13 prior slots (Phase 1 + slices foundation)
+- 23 remaining (Phase 2 effects + tagged unions + Result + allocators; Phase 3 closeout v5.8.37–v5.8.42; api-surface refresh at v5.8.42; cycle backstop at v5.8.49)
+
+cc5 size delta over the sub-arc: 721,936 → 727,960 B
+(+6,024 B / +0.83 %). Most of that is parser branches +
+new helpers + per-local slice-width tracking. Well within
+budget for a six-slot feature ship.
+
+159 slice assertions across 9 tcyrs. Zero regressions in
+prior tests. Self-host byte-identical at every patch.
+
+== ONE SENTENCE ==
+
+The v5.8.x slices sub-arc is what cycle-compression looks
+like when premise-check + honest-scope discipline are real:
+six slots that shipped what they earned, surfaced two pre-
+existing bugs without forcing them into a separate cycle,
+and ended with a doc-cleanup pass that was itself a bug-
+find at organization scale.
+
+Assembly up. Six slots done. Twenty-three to go.
+"""
