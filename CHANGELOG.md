@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.0] — 2026-05-03
+
+**P2 kickoff — Distributed Systems (minor bump)** —
+`transactions_and_acid` shipped at 11/11 languages. OCC store with
+explicit read-set/write-set tracking; demonstrates the four ACID
+properties under tests. Atomicity (commit installs all-or-nothing,
+abort discards), Consistency (transfer preserves balance invariant),
+Isolation (no dirty reads in HLLs; OCC version-snapshot detects
+write-write conflicts in all 11 langs), Durability (committed state
+survives "crash-recovery" wipe of tx scratch).
+
+11 new source files; validator 726/726 → **737/737**. P2 is 1/3
+topics in flight; `consensus` + `distributed_systems` slated for
+2.5.1 / 2.5.2.
+
+### Added
+
+- `content/transactions_and_acid/` — OCC transaction store across
+  11 languages: cyrius, rust, python, c, go, typescript, shell, zig,
+  asm_x86_64, asm_aarch64, openqasm. The Cyrius reference tests 9
+  scenarios with 23 assertions (full multi-tx with dirty-read
+  prevention + conflict detection); HLL ports mirror that. The asm
+  ports cover a focused single-tx subset (atomicity, consistency,
+  durability, OCC validation — 12 asserts each). OpenQASM models
+  entanglement-as-commit with a controlled-fan-out gate as the
+  all-or-nothing primitive.
+
+## [2.4.4] — 2026-05-03
+
+**Cyrius pin bump 5.8.19 → 5.8.34** — patch-level alignment with
+upstream cyrius. No source changes required: build clean, all 41
+tests pass, validator 726/726 unchanged. CLI surface identical
+across the bump (no verbs added/removed/renamed). Field-notes
+verification range extended.
+
+### Changed
+
+- `cyrius.cyml` — `cyrius = "5.8.19"` → `cyrius = "5.8.34"`.
+- `content/cyrius/field_notes/index.cyml` — verification range
+  `Cyrius 2.2 → 5.8.19` → `Cyrius 2.2 → 5.8.34`.
+- `cyrius.lock` refreshed via `cyrius deps`.
+
 ## [2.4.3] — 2026-05-02
 
 **Cyrius reference closeout — content/cyrius/ now organized as

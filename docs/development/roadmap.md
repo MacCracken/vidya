@@ -1,12 +1,12 @@
 # Vidya — Development Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-05-02
+> **Status**: Active | **Last Updated**: 2026-05-03
 >
-> **Version**: 2.4.3 | **Cyrius**: 5.8.19
-> **Topics**: 66 (66 fully covered) — **P0 → P1 complete** 🎉
+> **Version**: 2.5.0 | **Cyrius**: 5.8.34
+> **Topics**: 67 (67 fully covered) — **P0 → P1 complete; P2 1/3** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 726 source files; concept files: 66
-> **Validator**: 726/726 green
+> **Examples**: 737 source files; concept files: 67
+> **Validator**: 737/737 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -35,15 +35,17 @@ Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md). Highlights:
 | 2.4.1 | 2026-05-02 | **P1 batch 2 — 2 new topics × 11 langs** — `tls_and_encryption` (TLS 1.3 handshake state machine, cipher-suite negotiation rejecting legacy 1.2 suites, certificate chain validation with issuer/subject linkage to trust root, AEAD seal/open with tag verification + hostname check), `dns` (in-memory resolver: zone with A/AAAA/CNAME/MX/TXT, recursive lookup with depth-bounded CNAME chase, TTL cache with monotonic clock, negative caching). 22 new source files; validator 682/682 → **704/704**. P1 is 4/6 topics in flight; ipc + serialization slated for 2.4.2. |
 | 2.4.2 | 2026-05-02 | **P1 complete + cyrius pin bump 5.8.14 → 5.8.18** — `ipc` (shared memory + bounded FIFO pipe + named-endpoint message channel), `serialization` (LEB128 varint + length-prefix framing + stream parser + DoS guards: varint overflow cap, oversize-length rejection). 22 new source files; validator 704/704 → **726/726**. **🎉 P1 Networking & Infrastructure complete — 6/6 topics × 11 langs landed.** |
 | 2.4.3 | 2026-05-02 | **Cyrius reference closeout + cyrius pin 5.8.18 → 5.8.19** — both `content/cyrius/` surfaces reorganized in one release. Retired the 4144-line `language.cyml` (73 entries) into `language/` subfolder organized by surface area: core / features / stdlib_modules / tooling / agents (52 entries across 6 files). Recast the chronological per-version `field_notes/compiler/` (8 files, 60 entries) as topical (gotchas / methodology / patterns) plus `retros/` subfolder for chronological narrative (9 files, 46 entries). End state: humans + agents get current-state docs organized by lookup workflow, not historical accretion. Loader unaffected (`content/cyrius/` is skipped). Topics/examples/validator counts unchanged (66/66/726). |
+| 2.4.4 | 2026-05-03 | **Cyrius pin bump 5.8.19 → 5.8.34** — patch-level alignment, no source changes (CLI surface identical, build clean, 41/41 tests, 726/726 validator). Field-notes verification range extended. |
+| 2.5.0 | 2026-05-03 | **P2 kickoff — Distributed Systems (minor bump)** — 1 new topic × 11 langs: `transactions_and_acid` (OCC store with explicit read-set/write-set tracking; A/C/I/D demonstrated under tests in HLLs; asm ports cover the single-tx OCC core). 11 new source files; validator 726/726 → **737/737**. P2 is 1/3 topics in flight; `consensus` + `distributed_systems` slated for 2.5.1 / 2.5.2. |
 
 ---
 
 ## Current State
 
-### 66 topics fully covered (11/11 languages) — P0 → P1 complete 🎉
+### 67 topics fully covered (11/11 languages) — P0 → P1 complete; P2 1/3 🎉
 
 The original 36 P0 topics, plus 24 P0C additions (v2.3.2–v2.3.10),
-plus 6 P1 additions (v2.4.0–v2.4.2):
+plus 6 P1 additions (v2.4.0–v2.4.2), plus 1 P2 (v2.5.0):
 
 - v2.3.2 (1): fixed_point_arithmetic
 - v2.3.3 P0C-1 (8): collision_detection_2d, game_ai_decisions,
@@ -59,17 +61,18 @@ plus 6 P1 additions (v2.4.0–v2.4.2):
 - v2.3.10 P0C-2c (2): direct_drm_gpu_compute, render_graph_architecture
 - v2.4.0 P1 (2): networking_fundamentals, http_and_web_protocols
 - v2.4.1 P1 (2): tls_and_encryption, dns
-- **v2.4.2 P1 (2): ipc, serialization**
+- v2.4.2 P1 (2): ipc, serialization
+- **v2.5.0 P2 (1): transactions_and_acid**
 
-`vidya stats` reports `Topics: 66, Complete: 66 (all 11 languages),
-Examples: 726`; validator 726/726 green.
+`vidya stats` reports `Topics: 67, Complete: 67 (all 11 languages),
+Examples: 737`; validator 737/737 green.
 
-### 0 topics partial; P1 fully done
+### 0 topics partial; P2 1/3 in flight
 
-P0 → P0C → P1 arc complete. Next minor (2.5.x) opens **P2 —
-Distributed Systems** (transactions_and_acid, consensus,
-distributed_systems). 3 topics × 11 langs ≈ 33 new files,
-sized as ~2 patch sub-releases.
+P0 → P0C → P1 complete. P2 (Distributed Systems) is in flight: 1 of
+3 topics shipped (`transactions_and_acid`). Remaining: `consensus`
+(2.5.1) + `distributed_systems` (2.5.2). After 2.5.2, P2 closes and
+the next minor (2.6.x) opens **P3 audio + AI/ML**.
 
 ---
 
@@ -224,6 +227,16 @@ shipped.** Plus cyrius pin progression: 5.8.14 (entered 2.4.x) →
 
 ---
 
+## In-flight minor (2.5.x) — Distributed Systems (P2)
+
+| Topic | Status | Notes |
+|---|---|---|
+| **transactions_and_acid** | ✅ shipped 2.5.0 | OCC store with read-set version snapshots; A/C/I/D under test |
+| **consensus** | planned 2.5.1 | Raft-style log replication or Paxos — TBD on which fits the corpus better |
+| **distributed_systems** | planned 2.5.2 | Vector clocks / quorum reads / failure modes |
+
+3 topics × 11 langs total; 1 done, 2 to go.
+
 ## Future minor versions
 
 Each minor is one thematic cluster, sized similarly to P1 (3–6 topics).
@@ -232,8 +245,7 @@ need vidya support next.
 
 | Minor | Theme | Topics | Notes |
 |---|---|---|---|
-| 2.5.x | **P2 distributed systems** | transactions_and_acid, consensus, distributed_systems | Subsumes the original `database_fundamentals` (handled in P0C-3). Builds on `concurrent_file_access` (P0C-4) and `write_ahead_logging`. |
-| 2.6.x | **P3 audio + AI/ML** | audio_dsp, audio_synthesis, neural_networks, inference, embeddings | The AI/ML topics align with hoosh's RAG needs. |
+| 2.6.x | **P3 audio + AI/ML** | audio_dsp, audio_synthesis, neural_networks, inference, embeddings | The AI/ML topics align with hoosh's RAG needs. Opens after P2 closes (2.5.2). |
 | 2.7.x | **P4 build systems** | build_systems, package_resolution, reproducible_builds | Aligns with cyrius/zugot tooling. |
 | 2.8.x | **P5 functional / type theory** | functional_patterns, effect_systems, dependent_types | More research-flavored; lowest priority. |
 | 2.9.x | **P6 Cyrius-specific** | cyrius_basics, cyrius_bootstrap, cyrius_agents, cyrius_capabilities, cyrius_ipc | Programming-concept slots that document Cyrius patterns the way other topics document general patterns. Distinct from `content/cyrius/` (the language reference + field notes). |
@@ -287,6 +299,9 @@ History:
 - v2.3.0 — cyrius 5.7.0 (sandhi fold, CYML migration)
 - v2.3.1 — cyrius 5.8.3 (no API delta; field-notes split)
 - v2.3.7 — cyrius 5.8.14 (no API delta; verification range bumped)
+- v2.4.2 — cyrius 5.8.18 (no API delta)
+- v2.4.3 — cyrius 5.8.19 (no API delta; content/cyrius/ closeout)
+- v2.4.4 — cyrius 5.8.34 (no API delta; verification range bumped)
 
 ---
 
@@ -309,4 +324,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-02 (v2.4.3) — **content/cyrius/ closeout (language/ + compiler/ both reorganized); cyrius pin 5.8.19; 66/66 at 11/11; next: P2 distributed systems***
+*Last Updated: 2026-05-03 (v2.5.0) — **P2 kickoff: transactions_and_acid 11/11; 67/67 at 11/11; 737/737 validator; next: consensus (2.5.1)***

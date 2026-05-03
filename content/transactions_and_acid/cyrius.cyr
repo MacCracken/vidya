@@ -1,0 +1,406 @@
+# Vidya — Transactions and ACID — Cyrius reference (runnable)
+#
+# Optimistic Concurrency Control (OCC) transaction store.
+# Demonstrates the four ACID properties under tests:
+#
+#   A — Atomicity   commit installs every write or none; abort discards.
+#   C — Consistency a transfer preserves the sum-of-balances invariant.
+#   I — Isolation   no dirty reads (tx2 cannot see tx1's uncommitted
+#                   writes); read-set version snapshot detects
+#                   write-write conflicts (lost-update prevention).
+#   D — Durability  committed state lives in `accounts[]` outside the
+#                   per-tx scratch buffers — clearing tx state ("crash")
+#                   does NOT drop committed values. Real systems pair
+#                   this with WAL fsync; we model the durability
+#                   boundary with the durable-store / scratch split.
+#
+# OCC algorithm:
+#   tx_begin()                    -> reserve a tx slot, status = ACTIVE
+#   tx_read(tx, k)                -> if k in own write-set, return that;
+#                                    else return durable value AND
+#                                    record (k, current_version) snapshot
+#                                    in read-set
+#   tx_write(tx, k, v)            -> append/update local write-set only
+#   tx_commit(tx)                 -> validate: every read-set key's
+#                                    version unchanged on durable store?
+#                                    pass: install writes, bump versions,
+#                                          status = COMMITTED, return 1
+#                                    fail: status = ABORTED, return 0
+#   tx_abort(tx)                  -> status = ABORTED, drop write-set
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var N_ACCOUNTS = 8;
+var N_TX = 2;
+var TX_CAP = 4;            # per-tx read-set / write-set capacity
+
+var TX_FREE = 0;
+var TX_ACTIVE = 1;
+var TX_COMMITTED = 2;
+var TX_ABORTED = 3;
+
+# --- Durable store (post-commit; survives "crash") ---
+var accounts[64];          # 8 × i64 balances
+var accounts_version[64];  # 8 × i64 version counters
+
+# --- Per-tx scratch (NOT durable; cleared on crash) ---
+var tx_status[16];         # 2 × i64 status
+var tx_wkeys[64];          # 2 × 4 × i64 write-set keys
+var tx_wvals[64];          # 2 × 4 × i64 write-set values
+var tx_wcount[16];         # 2 × i64 write-set sizes
+var tx_rkeys[64];          # 2 × 4 × i64 read-set keys
+var tx_rsnaps[64];         # 2 × 4 × i64 read-set version snapshots
+var tx_rcount[16];         # 2 × i64 read-set sizes
+
+# === Initialisation ===
+
+fn store_init() {
+    var i = 0;
+    while (i < N_ACCOUNTS) {
+        store64(&accounts + i * 8, 0);
+        store64(&accounts_version + i * 8, 0);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < N_TX) {
+        store64(&tx_status + i * 8, TX_FREE);
+        store64(&tx_wcount + i * 8, 0);
+        store64(&tx_rcount + i * 8, 0);
+        i = i + 1;
+    }
+}
+
+# Direct durable-store accessor — NOT transactional. Used to seed
+# initial balances and to verify final state outside any tx. Bumps
+# version so a tx that read the seed value sees a stale snapshot.
+fn account_set_raw(key, val) {
+    if (key < 0) { return 0; }
+    if (key >= N_ACCOUNTS) { return 0; }
+    store64(&accounts + key * 8, val);
+    var v = load64(&accounts_version + key * 8);
+    store64(&accounts_version + key * 8, v + 1);
+    return 1;
+}
+
+fn account_get_raw(key) {
+    if (key < 0) { return 0; }
+    if (key >= N_ACCOUNTS) { return 0; }
+    return load64(&accounts + key * 8);
+}
+
+# === Transaction lifecycle ===
+
+fn tx_begin() {
+    var t = 0;
+    while (t < N_TX) {
+        if (load64(&tx_status + t * 8) == TX_FREE) {
+            store64(&tx_status + t * 8, TX_ACTIVE);
+            store64(&tx_wcount + t * 8, 0);
+            store64(&tx_rcount + t * 8, 0);
+            return t;
+        }
+        t = t + 1;
+    }
+    return 0 - 1;
+}
+
+# Find existing write in tx's write-set; -1 if absent.
+fn tx_find_write(tx, key) {
+    var n = load64(&tx_wcount + tx * 8);
+    var i = 0;
+    while (i < n) {
+        var k = load64(&tx_wkeys + (tx * TX_CAP + i) * 8);
+        if (k == key) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Has tx already snapshotted a read for key? 1 if so, 0 otherwise.
+fn tx_has_read(tx, key) {
+    var n = load64(&tx_rcount + tx * 8);
+    var i = 0;
+    while (i < n) {
+        if (load64(&tx_rkeys + (tx * TX_CAP + i) * 8) == key) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn tx_read(tx, key) {
+    if (tx < 0) { return 0 - 1; }
+    if (tx >= N_TX) { return 0 - 1; }
+    if (load64(&tx_status + tx * 8) != TX_ACTIVE) { return 0 - 1; }
+    if (key < 0) { return 0 - 1; }
+    if (key >= N_ACCOUNTS) { return 0 - 1; }
+
+    # Read-your-own-writes: prefer tx's local write-set
+    var widx = tx_find_write(tx, key);
+    if (widx >= 0) {
+        return load64(&tx_wvals + (tx * TX_CAP + widx) * 8);
+    }
+
+    # Fall back to durable; record OCC version snapshot once per key.
+    if (tx_has_read(tx, key) == 0) {
+        var rn = load64(&tx_rcount + tx * 8);
+        if (rn < TX_CAP) {
+            store64(&tx_rkeys + (tx * TX_CAP + rn) * 8, key);
+            store64(&tx_rsnaps + (tx * TX_CAP + rn) * 8,
+                    load64(&accounts_version + key * 8));
+            store64(&tx_rcount + tx * 8, rn + 1);
+        }
+    }
+    return load64(&accounts + key * 8);
+}
+
+# Append (or overwrite) into tx's local write-set. Returns 1 on success,
+# 0 on bad-args / inactive-tx / write-set-full.
+fn tx_write(tx, key, val) {
+    if (tx < 0) { return 0; }
+    if (tx >= N_TX) { return 0; }
+    if (load64(&tx_status + tx * 8) != TX_ACTIVE) { return 0; }
+    if (key < 0) { return 0; }
+    if (key >= N_ACCOUNTS) { return 0; }
+
+    var widx = tx_find_write(tx, key);
+    if (widx >= 0) {
+        store64(&tx_wvals + (tx * TX_CAP + widx) * 8, val);
+        return 1;
+    }
+    var n = load64(&tx_wcount + tx * 8);
+    if (n >= TX_CAP) { return 0; }
+    store64(&tx_wkeys + (tx * TX_CAP + n) * 8, key);
+    store64(&tx_wvals + (tx * TX_CAP + n) * 8, val);
+    store64(&tx_wcount + tx * 8, n + 1);
+    return 1;
+}
+
+# Validate: every read-set key has unchanged version on durable store.
+fn tx_validate(tx) {
+    var n = load64(&tx_rcount + tx * 8);
+    var i = 0;
+    while (i < n) {
+        var key = load64(&tx_rkeys + (tx * TX_CAP + i) * 8);
+        var snap = load64(&tx_rsnaps + (tx * TX_CAP + i) * 8);
+        if (load64(&accounts_version + key * 8) != snap) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn tx_commit(tx) {
+    if (tx < 0) { return 0; }
+    if (tx >= N_TX) { return 0; }
+    if (load64(&tx_status + tx * 8) != TX_ACTIVE) { return 0; }
+
+    if (tx_validate(tx) == 0) {
+        store64(&tx_status + tx * 8, TX_ABORTED);
+        return 0;
+    }
+
+    # All-or-nothing: validate first, THEN install. Atomicity is the
+    # invariant that the durable store is never observed mid-install.
+    var n = load64(&tx_wcount + tx * 8);
+    var i = 0;
+    while (i < n) {
+        var key = load64(&tx_wkeys + (tx * TX_CAP + i) * 8);
+        var val = load64(&tx_wvals + (tx * TX_CAP + i) * 8);
+        store64(&accounts + key * 8, val);
+        var v = load64(&accounts_version + key * 8);
+        store64(&accounts_version + key * 8, v + 1);
+        i = i + 1;
+    }
+    store64(&tx_status + tx * 8, TX_COMMITTED);
+    return 1;
+}
+
+fn tx_abort(tx) {
+    if (tx < 0) { return 0; }
+    if (tx >= N_TX) { return 0; }
+    if (load64(&tx_status + tx * 8) != TX_ACTIVE) { return 0; }
+    store64(&tx_status + tx * 8, TX_ABORTED);
+    return 1;
+}
+
+fn tx_status_of(tx) {
+    if (tx < 0) { return 0 - 1; }
+    if (tx >= N_TX) { return 0 - 1; }
+    return load64(&tx_status + tx * 8);
+}
+
+# Wipe all tx scratch (model "crash + restart"). Durable arrays
+# are NOT touched — that is what gives us the D.
+fn crash_recovery() {
+    var t = 0;
+    while (t < N_TX) {
+        store64(&tx_status + t * 8, TX_FREE);
+        store64(&tx_wcount + t * 8, 0);
+        store64(&tx_rcount + t * 8, 0);
+        t = t + 1;
+    }
+}
+
+# === Tests ===
+
+fn seed_accounts() {
+    store_init();
+    account_set_raw(0, 1000);
+    account_set_raw(1, 500);
+    account_set_raw(2, 200);
+}
+
+fn account_total() {
+    var sum = 0;
+    var i = 0;
+    while (i < N_ACCOUNTS) {
+        sum = sum + load64(&accounts + i * 8);
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn test_atomicity_abort_discards_writes() {
+    seed_accounts();
+    var tx = tx_begin();
+    tx_write(tx, 0, 9999);
+    tx_write(tx, 1, 8888);
+    tx_write(tx, 2, 7777);
+    tx_abort(tx);
+    assert_eq(account_get_raw(0), 1000, "abort: key 0 unchanged");
+    assert_eq(account_get_raw(1), 500, "abort: key 1 unchanged");
+    assert_eq(account_get_raw(2), 200, "abort: key 2 unchanged");
+    assert_eq(tx_status_of(tx), TX_ABORTED, "tx status = ABORTED");
+    return 0;
+}
+
+fn test_atomicity_commit_installs_all_or_none() {
+    seed_accounts();
+    var tx = tx_begin();
+    tx_write(tx, 0, 100);
+    tx_write(tx, 1, 200);
+    tx_write(tx, 2, 300);
+    var ok = tx_commit(tx);
+    assert_eq(ok, 1, "commit succeeded");
+    assert_eq(account_get_raw(0), 100, "commit: key 0 installed");
+    assert_eq(account_get_raw(1), 200, "commit: key 1 installed");
+    assert_eq(account_get_raw(2), 300, "commit: key 2 installed");
+    assert_eq(tx_status_of(tx), TX_COMMITTED, "tx status = COMMITTED");
+    return 0;
+}
+
+fn test_consistency_transfer_preserves_total() {
+    seed_accounts();
+    var initial = account_total();
+
+    var tx = tx_begin();
+    var src = tx_read(tx, 0);
+    var dst = tx_read(tx, 1);
+    tx_write(tx, 0, src - 100);
+    tx_write(tx, 1, dst + 100);
+    tx_commit(tx);
+
+    assert_eq(account_get_raw(0), 900, "src debited");
+    assert_eq(account_get_raw(1), 600, "dst credited");
+    assert_eq(account_total(), initial, "total preserved");
+    return 0;
+}
+
+fn test_isolation_no_dirty_read() {
+    seed_accounts();
+    var tx1 = tx_begin();
+    var tx2 = tx_begin();
+
+    tx_write(tx1, 0, 9999);          # uncommitted write
+    var seen = tx_read(tx2, 0);
+    assert_eq(seen, 1000, "tx2 sees committed value, not tx1's uncommitted write");
+    return 0;
+}
+
+fn test_isolation_read_your_own_writes() {
+    seed_accounts();
+    var tx = tx_begin();
+    tx_write(tx, 0, 4242);
+    var seen = tx_read(tx, 0);
+    assert_eq(seen, 4242, "tx sees its own uncommitted write");
+    assert_eq(account_get_raw(0), 1000, "durable store unchanged before commit");
+    return 0;
+}
+
+fn test_isolation_write_write_conflict() {
+    seed_accounts();
+    var tx1 = tx_begin();
+    var tx2 = tx_begin();
+
+    var v1 = tx_read(tx1, 0);                 # snapshot of v_at_seed
+    tx_write(tx1, 0, v1 + 50);
+
+    var v2 = tx_read(tx2, 0);                 # same snapshot
+    tx_write(tx2, 0, v2 + 100);
+
+    var ok1 = tx_commit(tx1);                 # bumps version
+    var ok2 = tx_commit(tx2);                 # snap stale → conflict
+
+    assert_eq(ok1, 1, "tx1 commits");
+    assert_eq(ok2, 0, "tx2 conflicts and aborts (lost-update prevention)");
+    assert_eq(tx_status_of(tx2), TX_ABORTED, "tx2 status = ABORTED");
+    assert_eq(account_get_raw(0), 1050, "tx1's write is durable; tx2's lost");
+    return 0;
+}
+
+fn test_durability_committed_survives_crash() {
+    seed_accounts();
+    var tx = tx_begin();
+    tx_write(tx, 0, 12345);
+    tx_commit(tx);
+
+    crash_recovery();                         # wipe tx scratch
+
+    assert_eq(account_get_raw(0), 12345, "committed value survives crash");
+    return 0;
+}
+
+fn test_no_double_commit() {
+    seed_accounts();
+    var tx = tx_begin();
+    tx_write(tx, 0, 7);
+    var ok1 = tx_commit(tx);
+    var ok2 = tx_commit(tx);
+    assert_eq(ok1, 1, "first commit ok");
+    assert_eq(ok2, 0, "second commit rejected (status != ACTIVE)");
+    return 0;
+}
+
+fn test_writeset_capacity_bounded() {
+    seed_accounts();
+    var tx = tx_begin();
+    tx_write(tx, 0, 1);
+    tx_write(tx, 1, 2);
+    tx_write(tx, 2, 3);
+    tx_write(tx, 3, 4);
+    var fifth = tx_write(tx, 4, 5);
+    assert_eq(fifth, 0, "5th write rejected (cap = 4)");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("transactions_and_acid");
+
+    test_atomicity_abort_discards_writes();
+    test_atomicity_commit_installs_all_or_none();
+    test_consistency_transfer_preserves_total();
+    test_isolation_no_dirty_read();
+    test_isolation_read_your_own_writes();
+    test_isolation_write_write_conflict();
+    test_durability_committed_survives_crash();
+    test_no_double_commit();
+    test_writeset_capacity_bounded();
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

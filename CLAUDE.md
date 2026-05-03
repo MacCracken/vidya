@@ -6,7 +6,7 @@
 
 - **Type**: Cyrius CLI binary + content directory (no longer a Rust crate; migrated at v2.0)
 - **License**: GPL-3.0-only
-- **Cyrius pin**: 5.8.3 (`cyrius.cyml`)
+- **Cyrius pin**: 5.8.34 (`cyrius.cyml`)
 - **Version**: SemVer; canonical source is `VERSION` (read by `cyrius.cyml` via `${file:VERSION}`)
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)

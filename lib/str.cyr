@@ -16,21 +16,40 @@
 
 struct Str { data; len; }
 
-# Create a Str from a C string literal (null-terminated)
-fn str_from(cstr) {
+# v5.8.35 — Allocator-as-first-arg variant of str_from. Allocates
+# the 16-byte Str header through `a`. Returns 0 on OOM. The
+# pointed-to data is NOT copied — the Str shares the cstr's storage
+# (same as the back-compat str_from). For an owning copy, use
+# str_clone_a / str_dup_a.
+fn str_from_a(a, cstr) {
     var slen = strlen(cstr);
-    var s = alloc(16);
+    var s = alloc_via(a, 16);
+    if (s == 0) { return 0; }
     store64(s, cstr);
     store64(s + 8, slen);
     return s;
 }
 
-# Create a Str from buffer + length
-fn str_new(data, len) {
-    var s = alloc(16);
+# Create a Str from a C string literal. v5.8.35 wrapper —
+# delegates to str_from_a with default_alloc().
+fn str_from(cstr) {
+    return str_from_a(default_alloc(), cstr);
+}
+
+# v5.8.35 — Allocator-as-first-arg variant of str_new. Allocates
+# the 16-byte Str header through `a`. Data buffer is borrowed,
+# not copied. Returns 0 on OOM.
+fn str_new_a(a, data, len) {
+    var s = alloc_via(a, 16);
+    if (s == 0) { return 0; }
     store64(s, data);
     store64(s + 8, len);
     return s;
+}
+
+# Create a Str from buffer + length. v5.8.35 wrapper.
+fn str_new(data, len) {
+    return str_new_a(default_alloc(), data, len);
 }
 
 # Get length
@@ -64,15 +83,25 @@ fn str_eq(a: Str, b: Str) {
     return memeq(load64(a), load64(b), la);
 }
 
-# Concatenate two Strs (allocates new)
-fn str_cat(a: Str, b: Str) {
-    var la = load64(a + 8);
-    var lb = load64(b + 8);
+# v5.8.35 — Allocator-as-first-arg variant of str_cat. Allocates
+# both the concatenated data buffer AND the Str header via `alloc`.
+# Returns 0 on OOM (either allocation). The header points into the
+# fresh buffer — caller owns both.
+fn str_cat_a(alloc, x: Str, y: Str) {
+    var la = load64(x + 8);
+    var lb = load64(y + 8);
     var newlen = la + lb;
-    var buf = alloc(newlen);
-    memcpy(buf, load64(a), la);
-    memcpy(buf + la, load64(b), lb);
-    return str_new(buf, newlen);
+    var buf = alloc_via(alloc, newlen);
+    if (buf == 0) { return 0; }
+    memcpy(buf, load64(x), la);
+    memcpy(buf + la, load64(y), lb);
+    return str_new_a(alloc, buf, newlen);
+}
+
+# Concatenate two Strs (allocates new). v5.8.35 wrapper —
+# delegates to str_cat_a with default_alloc().
+fn str_cat(a: Str, b: Str) {
+    return str_cat_a(default_alloc(), a, b);
 }
 
 # Substring (allocates new Str header, shares data)
@@ -80,13 +109,21 @@ fn str_sub(s, start, len) {
     return str_new(load64(s) + start, len);
 }
 
-# Clone a Str (deep copy — new buffer)
-fn str_clone(s) {
+# v5.8.35 — Allocator-as-first-arg variant of str_clone. Allocates
+# a fresh `slen + 1` byte buffer (null-terminated) AND the 16-byte
+# Str header via `a`. Returns 0 on OOM.
+fn str_clone_a(a, s) {
     var slen = str_len(s);
-    var buf = alloc(slen + 1);
+    var buf = alloc_via(a, slen + 1);
+    if (buf == 0) { return 0; }
     memcpy(buf, str_data(s), slen);
     store8(buf + slen, 0);
-    return str_new(buf, slen);
+    return str_new_a(a, buf, slen);
+}
+
+# Clone a Str (deep copy — new buffer). v5.8.35 wrapper.
+fn str_clone(s) {
+    return str_clone_a(default_alloc(), s);
 }
 
 # Check if Str contains needle Str
@@ -131,11 +168,19 @@ fn str_index_of(s, ch) {
     return 0 - 1;
 }
 
-# Convert integer to Str
-fn str_from_int(n) {
-    var buf = alloc(24);
+# v5.8.35 — Allocator-as-first-arg variant of str_from_int. Allocates
+# a 24-byte format buffer + the 16-byte Str header via `a`. Returns 0
+# on OOM.
+fn str_from_int_a(a, n) {
+    var buf = alloc_via(a, 24);
+    if (buf == 0) { return 0; }
     var blen = fmt_int_buf(n, buf);
-    return str_new(buf, blen);
+    return str_new_a(a, buf, blen);
+}
+
+# Convert integer to Str. v5.8.35 wrapper.
+fn str_from_int(n) {
+    return str_from_int_a(default_alloc(), n);
 }
 
 # Parse integer from Str (returns 0 on invalid)

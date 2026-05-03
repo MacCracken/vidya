@@ -1,0 +1,56 @@
+id = "transactions_and_acid"
+title = "Transactions and ACID"
+topic = "Database"
+description = "ACID is the contract a transactional store offers: Atomicity (all-or-nothing — commit installs every write or none), Consistency (invariants the application defines, like 'sum of balances unchanged across a transfer', preserved across commits), Isolation (concurrent transactions cannot see each other's uncommitted writes — no dirty reads, no lost updates), Durability (committed state survives crash — typically via WAL fsync). Optimistic concurrency control (OCC) is one classic implementation: each transaction tracks a read-set with version snapshots; on commit, validate that no key in the read-set has been overwritten by another committed tx. Pass → install writes + bump versions. Fail → abort. Distinct from MVCC and 2PL but shares the same correctness contract."
+tags = ["acid", "transactions", "atomicity", "consistency", "isolation", "durability", "occ", "optimistic-concurrency", "snapshot", "commit"]
+related_topics = ["write_ahead_logging", "concurrent_file_access", "btree_indexing", "consensus", "distributed_systems"]
+
+[[best_practices]]
+title = "Treat ACID as four independent properties — they each fail differently"
+explanation = "Atomicity fails as partial writes (half the rows updated). Consistency fails as broken invariants (money created or destroyed). Isolation fails as wrong reads (saw uncommitted state). Durability fails as lost commits (acked but gone after crash). Code that 'has transactions' often only solves one or two; the others are silent landmines. When designing, walk through each letter: what mechanism enforces it here?"
+
+[[best_practices]]
+title = "Optimistic concurrency control wins for low-contention workloads"
+explanation = "OCC defers conflict detection to commit time: take a read-set version snapshot, do work, validate-then-install. No locks held during the body of the transaction. Throughput beats two-phase locking when most transactions don't conflict — and degrades gracefully (aborts + retry) when they do. The cost: aborted work is wasted. Pick OCC for read-heavy or independent-key workloads; pick locking for high-contention hotspots."
+
+[[best_practices]]
+title = "Read-your-own-writes inside the same transaction — always"
+explanation = "If a transaction writes key K then reads K within the same tx, it MUST see its own write — even before commit. Implement by checking the local write-set first on every read. Skipping this is a common bug: the tx writes, then reads, gets the stale durable value, and proceeds with wrong data. The user-facing symptom is 'I just set this — why doesn't it see my change?'"
+
+[[best_practices]]
+title = "Durability requires a sync that returns AFTER bytes hit non-volatile storage"
+explanation = "A write() syscall returning OK only means the data is in the page cache, not on disk. The transaction is durable only after fsync (or O_DSYNC, or fdatasync) confirms the bytes are on the device. fsync is slow (1-10ms on SSD, 10-50ms on spinning disk) — which is exactly why WAL exists: one sequential fsync per commit instead of many random page fsyncs. ACID's D is the most expensive letter."
+
+[[gotchas]]
+title = "Dirty read — a transaction sees another tx's uncommitted write"
+explanation = "If tx2's read returns a value that tx1 wrote but hasn't committed, and tx1 then aborts, tx2 acted on a value that never existed. This is the canonical Read Uncommitted failure. Real systems either lock writes (writers block readers, slow) or version writes (readers see the last committed version, never the in-flight one — OCC and MVCC both do this)."
+bad_example = "// tx2.read(k) returns tx1's pending write before tx1 commits — tx1 aborts, tx2 already used the bogus value"
+good_example = "// tx2.read(k) returns the durable value (or its own write-set entry); never another tx's pending write"
+
+[[gotchas]]
+title = "Lost update — two transactions read, modify, and write the same key with no conflict detection"
+explanation = "Both tx1 and tx2 read balance=100. Both compute balance+50 = 150. Both write 150 and commit. Final balance = 150, but two +50 increments should give 200. One increment was silently lost. OCC catches this: tx2's read recorded version=N, but tx1's commit bumped it to N+1, so tx2's commit fails validation and aborts. Without versioning OR locking, this bug ships and corrupts data quietly."
+bad_example = "// tx1: read(k)=100, write(k, 150), commit. tx2 (concurrent): read(k)=100, write(k, 150), commit. Final=150 — one +50 lost."
+good_example = "// OCC: tx1 read snapshots v=N; tx2 read snapshots v=N. tx1 commits → v=N+1. tx2 validate: snap=N != curr=N+1 → ABORT + retry."
+
+[[gotchas]]
+title = "Commit returning OK before fsync — the durability lie"
+explanation = "If the system tells the client 'committed' before fsync completes, a power failure between the ack and the fsync loses an acknowledged commit. This violates D. Some databases offer a 'group commit' mode that batches fsyncs to amortize cost — that's fine because the ack is held until the batch fsync returns. The bug is acking individually before the disk-resident write."
+bad_example = "write(wal); send_ack(client); fsync(wal);  // crash here = client believes commit, disk doesn't have it"
+good_example = "write(wal); fsync(wal); send_ack(client);  // ack only after durability confirmed"
+
+[[gotchas]]
+title = "Long-running OCC transactions starve under high contention"
+explanation = "OCC is great until reads outlive concurrent writes. A 10-second analytics tx that reads 1000 keys will likely see at least one of them get bumped by some short writer — and abort. Retry, abort again. Long-running readers need a different mechanism: snapshot isolation (MVCC) lets them read a stable version without conflicting with writers. Pure OCC for long reads is a liveness bug."
+bad_example = "// 30s analytics scan with OCC: aborts every retry because some hot key keeps getting written"
+good_example = "// Same scan with MVCC snapshot: reads from a fixed version, never aborts; writes proceed independently"
+
+[[performance_notes]]
+title = "OCC validate-and-commit is O(read_set_size) — keep read-sets small"
+explanation = "The validation pass on commit walks every key in the read-set, comparing snapshot version to current version. For a 10-key read-set this is ~10 cache-friendly i64 loads — a few ns. For a 10000-key read-set it's noticeable, and the abort-rate compounds since long read-sets see more conflicting writers. Most well-designed transactional code touches <50 keys per tx; if yours touches more, audit."
+evidence = "Silo (SOSP'13) reports 700K txns/sec on 32 cores with read-sets averaging ~10 keys; throughput drops 10x when read-sets grow to ~1000 keys due to validation cost AND increased abort rate."
+
+[[performance_notes]]
+title = "Group commit amortizes fsync — 1 fsync for 100 commits, not 100 fsyncs"
+explanation = "fsync is dominated by device latency (single seek + flush) not by the data volume. Batching N concurrent commits into one fsync gives ~N× throughput improvement on commits-per-second, at the cost of per-commit latency growing by the batch wait. Postgres `commit_delay` and MySQL `innodb_flush_log_at_trx_commit=1+group` are the production knobs. The math: at 5ms fsync and 200 concurrent commits, group commit gives ~40K commits/sec; per-tx fsync gives 200/sec."
+evidence = "PostgreSQL group commit: 10-50x throughput gain on commit-heavy benchmarks vs per-tx fsync. Batch size auto-tunes to the in-flight commit window."
