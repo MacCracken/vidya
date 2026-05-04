@@ -1,0 +1,323 @@
+# Vidya — Embeddings and Vector Search — Cyrius reference (runnable)
+#
+# Three primitives, all integer Q15 arithmetic:
+#
+#   1. Cosine similarity: dot(a, b) — OK because both vectors are
+#      pre-normalized to unit length. Cosine = dot / (|a|×|b|);
+#      with |a|=|b|=1 the denominator is constant.
+#   2. Nearest-neighbour search: argmax over similarities to a
+#      query, scanning the entire corpus (brute force).
+#   3. Top-k neighbours: keep the K most-similar corpus indices,
+#      ranked. Uses repeated argmax-on-unmarked (O(N×K)) for
+#      clarity; production uses a min-heap (O(N log K)).
+#
+# Q15 convention: 32768 = 1.0; vectors and similarities all in
+# [-32767, 32767]. Multiply via q_mul (sign-handled because
+# Cyrius `>>` is logical, not arithmetic).
+#
+# Vectors are pre-normalized (sum of squares ≈ ONE), so cosine
+# similarity is just the dot product. Verified: dot(v0, v0) ≈
+# ONE for every corpus vector.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var SCALE = 15;
+var ONE   = 32768;
+
+fn q_mul(a, b) {
+    var p = a * b;
+    if (p < 0) {
+        var pneg = 0 - p;
+        var r = pneg >> SCALE;
+        return 0 - r;
+    }
+    return p >> SCALE;
+}
+
+# === Corpus: 4 unit-length 4-dimensional vectors ===
+var DIM       = 4;
+var N_CORPUS  = 4;
+var CORPUS_BYTES = 128;   # 4 vectors × 4 dims × 8 bytes
+
+var corpus[128];
+
+fn init_corpus() {
+    # Vector 0: [1, 0, 0, 0] (axis-aligned, x-axis positive)
+    store64(&corpus + 0,  32767);
+    store64(&corpus + 8,  0);
+    store64(&corpus + 16, 0);
+    store64(&corpus + 24, 0);
+    # Vector 1: [0, 1, 0, 0] (y-axis positive)
+    store64(&corpus + 32, 0);
+    store64(&corpus + 40, 32767);
+    store64(&corpus + 48, 0);
+    store64(&corpus + 56, 0);
+    # Vector 2: [1/2, 1/2, 1/2, 1/2] (diagonal — sum of squares = 4 × 0.25 = 1.0)
+    store64(&corpus + 64, 16384);
+    store64(&corpus + 72, 16384);
+    store64(&corpus + 80, 16384);
+    store64(&corpus + 88, 16384);
+    # Vector 3: [-1, 0, 0, 0] (opposite of v0)
+    store64(&corpus + 96,  0 - 32767);
+    store64(&corpus + 104, 0);
+    store64(&corpus + 112, 0);
+    store64(&corpus + 120, 0);
+}
+
+# === Cosine similarity (= dot product on pre-normalized vectors) ===
+fn dot(a, b, n) {
+    var acc = 0;
+    var i = 0;
+    while (i < n) {
+        var ai = load64(a + i * 8);
+        var bi = load64(b + i * 8);
+        var prod = q_mul(ai, bi);
+        acc = acc + prod;
+        i = i + 1;
+    }
+    return acc;
+}
+
+# Convenience: similarity of query against corpus vector at given index.
+fn corpus_sim(query, corpus_idx) {
+    var corpus_vec = &corpus + corpus_idx * DIM * 8;
+    return dot(query, corpus_vec, DIM);
+}
+
+# === Nearest-neighbour: brute-force scan over corpus ===
+fn nearest(query) {
+    var best_idx = 0;
+    var best_sim = corpus_sim(query, 0);
+    var i = 1;
+    while (i < N_CORPUS) {
+        var sim = corpus_sim(query, i);
+        if (sim > best_sim) {
+            best_sim = sim;
+            best_idx = i;
+        }
+        i = i + 1;
+    }
+    return best_idx;
+}
+
+# === Top-k neighbours: O(N×K) repeated argmax-on-unmarked ===
+# Writes top-k indices into `out_indices`, ranked by similarity.
+# Returns k (or N if k > N).
+fn top_k_neighbors(query, k, out_indices) {
+    var marks[32];        # bitmap up to 4 corpus entries
+    var i = 0;
+    while (i < N_CORPUS) {
+        store64(&marks + i * 8, 0);
+        i = i + 1;
+    }
+
+    var picked = 0;
+    while (picked < k) {
+        var best_idx = 0 - 1;
+        var best_sim = 0;
+        var first = 1;
+        var j = 0;
+        while (j < N_CORPUS) {
+            if (load64(&marks + j * 8) == 0) {
+                var sim = corpus_sim(query, j);
+                if (first == 1) {
+                    best_idx = j;
+                    best_sim = sim;
+                    first = 0;
+                } else {
+                    if (sim > best_sim) {
+                        best_sim = sim;
+                        best_idx = j;
+                    }
+                }
+            }
+            j = j + 1;
+        }
+        if (best_idx < 0) { return picked; }
+        store64(&marks + best_idx * 8, 1);
+        store64(out_indices + picked * 8, best_idx);
+        picked = picked + 1;
+    }
+    return picked;
+}
+
+# === Test scratch ===
+var query_buf[32];
+var topk_buf[32];
+
+# === Tests ===
+
+fn test_self_similarity_is_one() {
+    init_corpus();
+    # dot(v0, v0) ≈ ONE (32766 actually, due to 32767² >> 15 ≈ 32766)
+    var sim = corpus_sim(&corpus + 0, 0);
+    assert(sim >= 32760, "self-sim ≈ ONE (lower)");
+    assert(sim <= ONE, "self-sim ≤ ONE (upper)");
+    # All 4 corpus vectors should self-sim ≈ ONE.
+    var i = 0;
+    while (i < N_CORPUS) {
+        var v_ptr = &corpus + i * DIM * 8;
+        var s = corpus_sim(v_ptr, i);
+        assert(s >= 32760, "vec self-sim ≈ ONE");
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_orthogonal_is_zero() {
+    init_corpus();
+    # v0 = [1,0,0,0], v1 = [0,1,0,0] → dot = 0
+    var sim = corpus_sim(&corpus + 0, 1);
+    assert_eq(sim, 0, "orthogonal sim = 0");
+    return 0;
+}
+
+fn test_opposite_is_negative_one() {
+    init_corpus();
+    # v0 = [1,0,0,0], v3 = [-1,0,0,0] → dot ≈ -ONE
+    var sim = corpus_sim(&corpus + 0, 3);
+    assert(sim <= 0 - 32760, "opposite sim ≈ -ONE (upper)");
+    assert(sim >= 0 - ONE, "opposite sim ≥ -ONE (lower)");
+    return 0;
+}
+
+fn test_diagonal_self_sim() {
+    init_corpus();
+    # v2 = [1/2,1/2,1/2,1/2], dot(v2,v2) = 4 × q_mul(16384,16384) = 4 × 8192 = 32768
+    var sim = corpus_sim(&corpus + 64, 2);
+    assert_eq(sim, ONE, "diagonal self-sim = ONE");
+    return 0;
+}
+
+fn test_diagonal_with_axis() {
+    init_corpus();
+    # v0 = [1,0,0,0], v2 = [1/2,1/2,1/2,1/2] → dot = 1×1/2 = 1/2 = 16383 (via q_mul)
+    var sim = corpus_sim(&corpus + 0, 2);
+    assert(sim >= 16380, "axis-vs-diagonal sim ≈ 0.5 (lower)");
+    assert(sim <= 16384, "axis-vs-diagonal sim ≈ 0.5 (upper)");
+    return 0;
+}
+
+fn test_dot_symmetric() {
+    init_corpus();
+    var v0_ptr = &corpus + 0;
+    var v2_ptr = &corpus + 64;
+    var ab = dot(v0_ptr, v2_ptr, DIM);
+    var ba = dot(v2_ptr, v0_ptr, DIM);
+    assert_eq(ab, ba, "dot is symmetric");
+    return 0;
+}
+
+fn test_nearest_axis_query() {
+    init_corpus();
+    # Query [0.9, 0, 0, 0] in Q15: closest to v0 = [1,0,0,0]
+    store64(&query_buf + 0,  29490);
+    store64(&query_buf + 8,  0);
+    store64(&query_buf + 16, 0);
+    store64(&query_buf + 24, 0);
+    var idx = nearest(&query_buf);
+    assert_eq(idx, 0, "near-x-axis query → v0");
+    return 0;
+}
+
+fn test_nearest_y_axis_query() {
+    init_corpus();
+    store64(&query_buf + 0,  0);
+    store64(&query_buf + 8,  32767);
+    store64(&query_buf + 16, 0);
+    store64(&query_buf + 24, 0);
+    var idx = nearest(&query_buf);
+    assert_eq(idx, 1, "y-axis query → v1");
+    return 0;
+}
+
+fn test_nearest_diagonal_query() {
+    init_corpus();
+    # Query exactly the diagonal = v2
+    store64(&query_buf + 0,  16384);
+    store64(&query_buf + 8,  16384);
+    store64(&query_buf + 16, 16384);
+    store64(&query_buf + 24, 16384);
+    var idx = nearest(&query_buf);
+    assert_eq(idx, 2, "diagonal query → v2");
+    return 0;
+}
+
+fn test_nearest_picks_opposite_for_negative() {
+    init_corpus();
+    # Query [-0.9, 0, 0, 0] is closest to v3 = [-1, 0, 0, 0]
+    store64(&query_buf + 0,  0 - 29490);
+    store64(&query_buf + 8,  0);
+    store64(&query_buf + 16, 0);
+    store64(&query_buf + 24, 0);
+    var idx = nearest(&query_buf);
+    assert_eq(idx, 3, "negative-x query → v3");
+    return 0;
+}
+
+fn test_top_k_axis_query() {
+    init_corpus();
+    # Query [1, 0, 0, 0]:
+    # sim to v0 ≈ ONE, v1 = 0, v2 ≈ 0.5, v3 ≈ -ONE
+    # → top-3 ranked: v0, v2, v1 (sim values ONE, 0.5, 0)
+    store64(&query_buf + 0,  32767);
+    store64(&query_buf + 8,  0);
+    store64(&query_buf + 16, 0);
+    store64(&query_buf + 24, 0);
+    var n = top_k_neighbors(&query_buf, 3, &topk_buf);
+    assert_eq(n, 3, "top_k returned 3");
+    assert_eq(load64(&topk_buf + 0),  0, "rank 0 = v0");
+    assert_eq(load64(&topk_buf + 8),  2, "rank 1 = v2");
+    assert_eq(load64(&topk_buf + 16), 1, "rank 2 = v1");
+    return 0;
+}
+
+fn test_top_k_returns_all_when_k_exceeds_corpus() {
+    init_corpus();
+    store64(&query_buf + 0,  32767);
+    store64(&query_buf + 8,  0);
+    store64(&query_buf + 16, 0);
+    store64(&query_buf + 24, 0);
+    var n = top_k_neighbors(&query_buf, 10, &topk_buf);
+    assert_eq(n, 4, "top_k caps at corpus size when k > N");
+    return 0;
+}
+
+fn test_nearest_deterministic() {
+    init_corpus();
+    store64(&query_buf + 0,  29490);
+    store64(&query_buf + 8,  0);
+    store64(&query_buf + 16, 0);
+    store64(&query_buf + 24, 0);
+    var idx1 = nearest(&query_buf);
+    var idx2 = nearest(&query_buf);
+    assert_eq(idx1, idx2, "nearest is deterministic");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_group("embeddings");
+
+    test_self_similarity_is_one();
+    test_orthogonal_is_zero();
+    test_opposite_is_negative_one();
+    test_diagonal_self_sim();
+    test_diagonal_with_axis();
+    test_dot_symmetric();
+    test_nearest_axis_query();
+    test_nearest_y_axis_query();
+    test_nearest_diagonal_query();
+    test_nearest_picks_opposite_for_negative();
+    test_top_k_axis_query();
+    test_top_k_returns_all_when_k_exceeds_corpus();
+    test_nearest_deterministic();
+
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

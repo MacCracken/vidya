@@ -1,0 +1,56 @@
+id = "embeddings"
+title = "Embeddings and Vector Search"
+topic = "AI"
+description = "Three primitives behind every vector-search and RAG system. (1) Cosine similarity: the inner product of two unit-length vectors, in [-1, 1]. Identical vectors give 1.0; orthogonal give 0; opposite give -1. The standard distance metric for semantic embeddings because it's scale-invariant — only direction matters. (2) Nearest-neighbour search: find the corpus vector with highest similarity to a query. The naive O(N×D) brute-force scan is what every small embedding store does; production systems at scale (>1M vectors) layer ANN indexes (HNSW, IVF, ScaNN) to reduce to O(log N) at the cost of recall. (3) Top-k neighbours: extend NN search to return the K best matches, ranked. The retrieval step in RAG (retrieval-augmented generation): top-K most-similar chunks are concatenated into the LLM prompt as context. The corpus example uses Q15 fixed-point with PRE-NORMALIZED vectors — production embedding stores do this too. Normalize once at insert, then cosine similarity reduces to a plain dot product. No square root, no division at query time. The whole stack is integer multiply-accumulate, runs identically on every CPU/MCU."
+tags = ["embeddings", "vector-search", "cosine-similarity", "nearest-neighbour", "top-k", "rag", "retrieval", "fixed-point", "q15", "ann"]
+related_topics = ["neural_networks", "inference", "fixed_point_arithmetic", "btree_indexing"]
+
+[[best_practices]]
+title = "Pre-normalize vectors at insert — cosine becomes a plain dot product"
+explanation = "Cosine similarity = dot(a, b) / (|a| × |b|). The denominator is constant if both vectors are unit-length. Normalize ONCE when adding to the index (divide each component by sqrt(sum_of_squares)); cosine queries become bare dot products. No sqrt at query time, no division, just N integer multiplies + adds. Production systems (FAISS, ScaNN, Pinecone) do this. The cost: an L2-normalize step per insert (~D ops) once vs ~D ops + 1 sqrt + 1 div per query saved forever."
+
+[[best_practices]]
+title = "Brute-force scan is the right answer for small N — don't over-engineer"
+explanation = "An O(N×D) brute-force scan over 10K vectors at D=384 is ~4M multiplies — under 1ms on any modern CPU. ANN indexes (HNSW, IVF, ScaNN) start to win above ~100K vectors and dominate above ~1M. Below 100K, the brute force is faster, simpler, and recall=1.0 (no approximation). Most application embedding stores never grow past 100K and don't need ANN. Pick the simple thing first; add complexity when measurements justify it."
+
+[[best_practices]]
+title = "Top-k via partial sort (heap), not full sort"
+explanation = "The corpus example uses repeated argmax for clarity — O(N×K). Production uses a min-heap of size K: scan once, push each similarity onto the heap, pop the min if heap exceeds K. Total cost O(N log K), which beats both repeated argmax (O(N×K) for moderate K) and full sort (O(N log N)). At N=10K and K=10, partial sort is ~33K ops; full sort is ~133K. Partial sort wins by 4x. Standard library partial-sort variants (C++ partial_sort, Python heapq.nlargest, Rust BinaryHeap) implement this directly."
+
+[[best_practices]]
+title = "Pick D to match your model's output dimension — don't truncate, don't pad"
+explanation = "Embedding dimension D is set by the model (BERT-base = 768, OpenAI ada-002 = 1536, sentence-transformers = 384). Truncating drops information and breaks similarity quality; padding with zeros wastes storage and does nothing useful. Match exactly. If you need smaller vectors for storage, train a smaller model or apply a learned dimensionality reduction (PCA, autoencoder) — not by chopping coordinates. The only reason to truncate is to compare across models, and the right way to do that is to re-embed everything in the smaller model."
+
+[[gotchas]]
+title = "Forgetting to normalize the query — 'similar' results actually depend on query magnitude"
+explanation = "If the corpus is normalized but the query isn't, dot(query, corpus_i) = |query| × cos(angle). The angle ranking is preserved, but the magnitudes are scaled by |query|. For pure top-k retrieval this works. For threshold filtering ('keep results with similarity > 0.7') it's broken — the threshold is now relative to query magnitude, not the cosine. Always normalize the query at retrieval time, or document that thresholds aren't comparable across queries."
+bad_example = "// for filter, similarity = dot(unnormalized_query, corpus_i); if (sim > 0.7) keep  // threshold meaningless"
+good_example = "// query = normalize(raw_query); similarity = dot(query, corpus_i); if (sim > 0.7) keep  // cosine, comparable"
+
+[[gotchas]]
+title = "Cosine similarity vs Euclidean distance for normalized vectors — different formulas, same ranking"
+explanation = "For unit-length vectors, |a - b|² = 2 - 2·dot(a, b) = 2(1 - cos(angle)). So Euclidean distance and cosine similarity rank vectors IDENTICALLY (since the transformation is monotonically decreasing). Many tutorials present them as alternatives; for normalized vectors, they're equivalent for ranking purposes. Cosine is more efficient (no subtract, no sqrt) and is what production systems use. Pick cosine; mention Euclidean only as an equivalence."
+bad_example = "// confused docs: 'use cosine for direction, Euclidean for magnitude' — irrelevant when vectors are unit-length"
+good_example = "// for unit vectors: cosine_sim = dot(a, b); euclidean² = 2 - 2*dot; same ranking"
+
+[[gotchas]]
+title = "Q15 dot product overflow when D is large or values near max"
+explanation = "Each Q15 multiply gives a result in [-32767, 32767]. Sum of D such results can exceed Q15 range when D is large. For D=384 (sentence-transformer dim), a worst-case sum is 384 × 32767 ≈ 12M — way over Q15. Use i64 accumulator inside the dot product, narrow back to Q15 only at the end. This is the same overflow as `neural_networks` dense layer; same fix. The sqrt-free pre-normalized cosine fits in Q15 only if D is small."
+bad_example = "// i16 dot = 0; for i: dot += q_mul(a[i], b[i]); // overflows for D > ~10"
+good_example = "// i64 acc = 0; for i: acc += q_mul(a[i], b[i]); // i64 holds D=1000+ safely"
+
+[[gotchas]]
+title = "ANN recall is < 1.0 — don't assume the top-1 is the true nearest"
+explanation = "Approximate nearest-neighbour indexes (HNSW, IVF, ScaNN) trade recall for speed. Typical production HNSW configurations achieve 95-99% recall@10 — meaning 1-5% of queries return suboptimal results. For RAG, this usually doesn't matter (the LLM gets 'a relevant chunk' rather than 'the most relevant chunk'). For deduplication or canonical-match lookup, recall<1.0 means false negatives — the duplicate isn't found. Check your application's tolerance. Brute-force at recall=1.0 is the safe default for small N."
+bad_example = "// dedupe: ann.search(new_doc, k=1); if (sim > 0.95) skip;  // misses duplicates with HNSW recall<1"
+good_example = "// dedupe: brute_force_scan(new_doc); if (max_sim > 0.95) skip;  // recall=1.0 guaranteed"
+
+[[performance_notes]]
+title = "Brute-force NN: ~D × N multiplies; <1ms for 10K vectors at D=384 on modern CPU"
+explanation = "10K vectors × 384 dimensions = 3.84M multiplies. At ~3 GFLOP/s scalar (conservative), that's 1.3ms per query. With AVX2 SIMD, ~10-15 GFLOP/s gets you to 0.3ms. With AVX-512 or NEON, 0.1ms. Production embedding stores at this scale don't even bother with ANN — brute force is fast enough to serve 10K-QPS on a single core."
+evidence = "FAISS benchmarks: brute-force IndexFlatIP on 1M vectors at D=128 ~5ms per query single-thread. Below 100K vectors, brute force consistently beats HNSW + IVF in latency due to no index-traversal overhead."
+
+[[performance_notes]]
+title = "HNSW gives 100-1000x speedup at 95-99% recall — the production default for >1M vectors"
+explanation = "Hierarchical Navigable Small World (HNSW) graphs let queries traverse from a coarse 'highway' layer down to neighbour-precise layers in O(log N) hops. For 1M vectors at D=128, HNSW queries are ~50μs vs brute-force ~5000μs — 100x speedup. The cost: index build time (~minutes for 1M), memory overhead (~2x raw vectors), and that 1-5% recall miss. Standard tuning (M=16, ef=200) gives ~99% recall@10 on most datasets."
+evidence = "ann-benchmarks.com: HNSW achieves 5K-50K QPS at 95% recall on 1M-vector datasets at D=128-256, vs ~200 QPS brute-force on the same hardware. ScaNN, FAISS-IVF, and HNSW all converge to similar throughput within 2x."

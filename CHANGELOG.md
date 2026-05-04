@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.4] — 2026-05-03
+
+**P3 complete — `embeddings` shipped at 11/11 languages.**
+Closes the Audio + AI/ML minor (5 topics × 11 langs over
+2.6.0–2.6.4).
+
+Three vector-search primitives in Q15 fixed-point:
+- **Cosine similarity** as a plain dot product over pre-normalized
+  unit vectors (the production trick — normalize once at insert,
+  cosine is sqrt-free at query time)
+- **Brute-force nearest-neighbour** scan
+- **Top-k neighbours** via repeated argmax-on-unmarked
+
+Hand-designed 4-vector unit-length corpus (axis-aligned + diagonal +
+opposite) demonstrates: self-similarity ≈ 1.0, orthogonal = 0,
+opposite ≈ -1.0, ranking by alignment, all bit-identical across
+ports.
+
+11 new source files; validator 803/803 → **814/814**. **🎉 P3
+Audio + AI/ML complete — 5/5 topics × 11 langs landed.**
+
+### Added
+
+- `content/embeddings/` — vector-search primitives across 11
+  languages: cyrius (13 tests / 23 asserts), HLLs (13 tests /
+  16–17 asserts each), asm pair (9 tests / 9 asserts focused on
+  dot + brute-force nearest; top-k mark/scan/zero in cyrius.cyr —
+  too verbose for asm), OpenQASM (inner-product-as-overlap: SWAP
+  test with cswap decomposed as cx + ccx + cx since qiskit
+  qasm2's standard set excludes cswap).
+
 ## [2.6.3] — 2026-05-03
 
 **P3 batch 4 — `inference` shipped at 11/11 languages.**
