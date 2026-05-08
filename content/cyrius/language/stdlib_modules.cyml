@@ -1,6 +1,6 @@
 # Cyrius — Stdlib Modules (per-module usage)
 # How to use specific stdlib modules — APIs, conventions, gotchas.
-# 15 entries.
+# 16 entries.
 
 [[entries]]
 name = "atoi_stdlib"
@@ -532,4 +532,109 @@ Future cyrius cycles propagate niyama bug-fix patches by
 re-running `cyrius distlib` against an updated niyama checkout
 and copying the resulting dist/niyama.cyr into lib/niyama.cyr
 byte-identical (same procedure used at v5.9.0 fold).
+"""
+
+[[entries]]
+name = "regression_module"
+description = "lib/regression.cyr — testing-stdlib primitives carved from programs/check.cyr at v5.9.42"
+category = "cyrius"
+tags = ["stdlib", "testing", "regression", "v5.9.42"]
+---
+`lib/regression.cyr` carves out 22 reusable primitives accumulated
+through the v5.9.6 → v5.9.41 dispatcher conversions. Five surface
+groups; downstream test runners (yantra, agnosys/mabda smoke
+suites) reach for them via a single include rather than
+re-rolling fork/exec/SSH/timeout boilerplate.
+
+USAGE:
+    include "lib/regression.cyr"
+    # along with: string.cyr, syscalls.cyr, io.cyr, alloc.cyr,
+    # str.cyr, fmt.cyr (already in any nontrivial program).
+
+SURFACE GROUPS (22 verbs):
+
+  Display (4):
+    regression_print(s)                    Print without newline
+    regression_section(name)               "── name ──\\n" header
+    regression_check(name, exit_code)      PASS/FAIL line
+    REGRESSION_ANSI_RED/_GREEN/_RESET      ANSI color constants
+
+  Buffer scan (3):
+    regression_buf_eq(p, s, n)             Byte prefix compare
+    regression_count_substr(buf, n, needle) Skip-on-match count
+    regression_file_contains_substr(p, s)  strstr-backed file scan
+
+  Process (8):
+    regression_pipe_to_bin(bin, src, envp)
+    regression_pipe_to_bin_capture(...)    Pipe stdin → bin, ±capture
+    regression_run_with_timeout(bin,
+        timeout_ms, envp)                  WNOHANG poll + SIGKILL
+    regression_exec_capture(bin, buf,
+        buflen, envp)                      Run, capture stdout
+    regression_exec_run(bin, envp)         Run, discard output
+    regression_exec_with_arg_capture(...)
+    regression_exec_with_arg_capture_both(...) Combined stdout+stderr
+    regression_exec_in_dir3(work_dir, bin,
+        a1, a2, a3, out, envp)             cwd + ≤3 args
+    regression_exec_in_dir3_env(...,
+        env_extras_vec, ...)               + env-extras-vec merge
+
+  Network (1):
+    regression_network_probe(addr_ipv4,
+        port, timeout_ms)                  Non-blocking connect +
+                                           poll(POLLOUT) + SO_ERROR.
+                                           Replaces bash /dev/tcp.
+
+  SSH cluster (6):
+    regression_ssh_target(env, default)    Env override or default
+    regression_ssh_skip_check(target)      "ssh -o BatchMode=yes
+                                           target echo alive"
+    regression_scp_to(target, local,
+        remote, envp)                      "scp -q local target:remote"
+    regression_ssh_remote_exit(target,
+        cmd, envp)                         "ssh target cmd"; exit code
+    regression_ssh_remote_exec_capture(...,
+        out_path, envp)                    Same + stdout to file
+    regression_codesign_remote(target,
+        remote, envp)                      "ssh target chmod +x &&
+                                           codesign -s -" (Apple
+                                           Silicon adhoc-codesign)
+
+CONVENTIONS:
+
+  - Every fork+exec verb takes an explicit `envp` arg (null-
+    terminated array of "KEY=VAL" cstrings). No implicit env;
+    caller passes their own. Pass a 1-elem array of `0` for
+    "empty environment".
+  - Exit-code convention: 0..127 = normal exit; 128+sig on
+    signal; -1 on fork/exec/syscall failure; -2 specifically
+    for timeout (in `_run_with_timeout`).
+  - `regression_pipe_to_bin*` use a 1 MB src cap. Cyrius
+    self-host's `_self_host_pipe` uses 2 MB and raw status —
+    not interchangeable. Compile-shaped helpers stay in
+    `programs/check.cyr` for that reason.
+
+WHAT THIS MODULE DOES NOT PROVIDE:
+
+  - A test framework with assert macros / fixture discovery /
+    parallel runners. That's `lib/test.cyr` material, gated
+    on consumer ask (memory pin 2026-04-30).
+  - cyrius-specific gate dispatchers (`_tcyr_relay_gate`,
+    `_expected_output_gate`) — they use audit-internal
+    accounting (`_check`, `ROOT_PATH`); generalizing would
+    require parameterizing dispatcher-idiosyncratic shapes.
+  - cyrius-specific tool integration (`_cyrlint_count_marker`,
+    `_ts_mode_run`) — stay in their dispatchers as thin
+    wrappers over the primitives this module exports.
+
+CONSUMER NOTE — sandhi:
+sandhi's `_sandhi_conn_connect_nb` (in `src/http/conn.cyr`)
+shares the exact non-blocking-connect + poll + SO_ERROR-readback
+mechanics as `regression_network_probe` here. If a future
+sandhi minor (1.2.0+) wants to factor down to a shared
+primitive, the natural target is a `lib/net.cyr` extension
+of the form `net_connect_nb(fd, addr, port, timeout_ms)`
+that both this module and sandhi compose-use. Default per
+sandhi's pinned 1.2.0 roadmap entry: leave parallel impls
+intentional unless profiling surfaces a hot-path reason.
 """
