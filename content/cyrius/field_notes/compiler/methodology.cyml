@@ -7,7 +7,7 @@
 # For design / convention patterns see patterns.cyml.
 # For non-obvious internal traps see gotchas.cyml.
 #
-# 8 entries.
+# 9 entries.
 
 [[entries]]
 name = "premise_check_at_slot_entry"
@@ -558,4 +558,127 @@ Full backstory: v5_5.cyml's
 v5_5.cyml's `v5_5_x_platform_rounding_gotchas` was the post-
 arc bundle. Compare them — the diff is the arc's actual
 surprise factor.
+"""
+
+[[entries]]
+name = "stdlib_dep_care_not_application_care"
+description = "Any repo whose `dist/<name>.cyr` ships into cyrius `lib/` AND into downstream `lib/` via `cyrius deps` IS stdlib. Touching its public surface is the same severity as touching `lib/string.cyr` — full ecosystem-grep + major-bump-on-removal discipline, NOT application-style refactor-and-patch."
+category = "cyrius"
+tags = ["process", "ecosystem", "semver", "stdlib", "v5.9.x"]
+content = """
+**The rule**: sigil, sakshi, agnosys, sankoch, niyama, sit, et al
+ship `dist/<name>.cyr` bundles vendored into cyrius `lib/<name>.cyr`
+AND into downstream consumer `lib/<name>.cyr` via `cyrius deps`.
+That makes them stdlib dependencies, not applications. The
+discipline transfer:
+
+- **Public surface = every fn in the bundle that doesn't have a
+  `_` prefix or explicit private convention.** "Internal by
+  convention" doesn't mean private — if the symbol is reachable
+  after `include "lib/<name>.cyr"`, it's API.
+- **Symbol removal is a MAJOR version bump, never a patch.**
+  Patches add fns, fix bugs, or rewrite internals while keeping
+  public symbols stable. Removing a fn that was reachable
+  yesterday is breaking, even if you "checked all the callers"
+  inside the dep's own source tree.
+- **"Checked all the callers" is a half-grep until it covers the
+  ecosystem.** `grep -rn "<symbol>" /home/macro/Repos/` finds
+  direct downstream callers. `find /home/macro/Repos -name
+  "<dep>.cyr" -path "*/lib/*"` enumerates vendored copies. Both
+  are mandatory before any public removal.
+- **Snapshot + dist ping-pong is cross-repo.** Editing
+  `cyrius/lib/<name>.cyr` requires same-version
+  `~/.cyrius/.../lib/` refresh (per the
+  `Snapshot-ping-pong-protection` CLAUDE.md pin). Editing
+  `<dep>/dist/<name>.cyr` ALSO requires refold into
+  `cyrius/lib/<name>.cyr` AND any downstream `<consumer>/lib/
+  <name>.cyr` that pins the dep. Forgetting any side ships a
+  partial change.
+
+**Why — the sigil 3.0.2 incident (2026-05-06; cyrius v5.9.20
+slot)**: Deleted `sigil/src/ct.cyr` to consolidate `ct_eq` /
+`ct_eq_32` into cyrius stdlib's `lib/ct.cyr`. Justified as
+"patch release — internal refactor only; sigil's API
+unchanged." That framing was a category error:
+
+1. `fn ct_eq(a, a_len, b, b_len)` was a PUBLIC symbol of sigil's
+   bundle. Direct downstream callers grep'd post-hoc:
+   `kavach` (1), `hoosh` (5), `libro` (9), `majra` (3) — none
+   checked at slot entry. All would break when their sigil
+   pin bumps to 3.0.2.
+2. `ct_eq_32` "zero callers" claim was a half-grep of
+   `sigil/src/*.cyr` only. Real callers in
+   `sigil/programs/smoke.cyr` and `sigil/tests/bcyr/sigil.bcyr`
+   — both of which the bundled tcyr/bcyr suite executes —
+   caused immediate CI SIGILL. CI feedback loop took several
+   round-trips to root-cause because each round patched
+   downstream symptoms (missing tcyr includes, stale CI
+   version pin) instead of admitting the fundamental
+   stdlib-vs-application category error.
+3. 17 sigil test/fuzz files included the deleted `src/ct.cyr`;
+   9 tcyr files called bare `ct_eq` directly. None checked.
+4. CI version pin `CYRIUS_VERSION=5.7.48` had been stale across
+   multiple cyrius releases; the dep change required a
+   v5.9.20+ bump that nobody surveyed.
+
+The contrast with cyrius-side discipline was stark in the same
+session: in cyrius the agent ran pre-delete grep,
+snapshot-ping-pong protection, premise-check at slot entry,
+full audit before bump, cross-arch propagation. In sigil the
+agent deleted a file and labeled the changelog "internal
+refactor."
+
+**How to apply — checklist for any stdlib-dep change:**
+
+Before editing the dep:
+1. Identify the dep's public surface — every fn in `dist/<name>.cyr`
+   without `_` prefix or `# private` annotation.
+2. If the change removes or renames any public symbol:
+   - Major version bump, OR a deprecation cycle with a compat
+     shim that lets you keep a minor bump.
+   - `grep -rn "<symbol>" /home/macro/Repos/` to find direct
+     callers. Each is a downstream slot.
+   - `find /home/macro/Repos -name "<dep>.cyr" -path "*/lib/*"`
+     to enumerate vendored copies. Each is a future bump cost.
+3. If the change is purely additive (new fn, no removal):
+   - Patch / minor bump fine.
+   - Still grep for collisions with downstream-defined names
+     (consumers may have local fns with the same name; a
+     stdlib add can shadow them).
+4. Ecosystem premise-check at slot entry — same shape as
+   `methodology.cyml::premise_check_at_slot_entry`, but
+   spans every consumer repo, not just the cyrius source.
+5. CI version pins in the dep's repo (and in every consumer
+   repo) belong in the pre-ship checklist when the change
+   depends on a specific upstream symbol.
+
+**Anti-pattern to avoid**: "I'm just refactoring this repo
+to use the new cyrius helper" — NO. If the repo is a stdlib
+dep, refactoring its public surface IS publishing breaking
+changes, regardless of whether the local-only callers were
+the only call sites you happened to find. Ecosystem grep is
+the gate, not local intuition.
+
+**The smell**: when about to delete or rename a symbol in
+ANY of: sigil, sakshi, agnosys, sankoch, niyama, sit, libro,
+majra, kavach, hoosh — or any other repo with `dist/<name>.cyr`
+vendored elsewhere — pause and ecosystem-grep first. Two
+seconds saves a multi-round-trip CI hotfix loop and downstream
+breakage rippled across 4+ consumer repos.
+
+Cross-ref: `methodology.cyml::premise_check_at_slot_entry`
+(the pin describes intended scope; the empirical state is
+the actual scope). Memory pin
+`feedback_stdlib_dep_discipline.md` carries the same rule
+in the per-project memory layer.
+
+Full backstory: cyrius CHANGELOG v5.9.20 entry (in flight),
+sigil CHANGELOG 3.0.2 entry (in flight; pending recovery
+decision: revert / compat-shim / major bump). The fact that
+this incident happened in the same conversation that wrote
+ecosystem-grep memory pins for v5.9.4 + v5.9.17 .sh-delete
+incidents tells you the discipline transfer doesn't happen
+automatically — it has to be EXPLICIT in vidya so an agent
+searching "before deleting from sigil" hits it before the
+first grep.
 """

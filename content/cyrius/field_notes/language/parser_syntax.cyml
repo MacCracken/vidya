@@ -68,9 +68,21 @@ fuzz harnesses, not just crash tests.
 
 [[entries]]
 name = "no_var_redecl_same_scope"
-description = "Cyrius rejects `var x` re-declaration in the same scope, even across if/elif/else branches"
+description = "✅ FIXED in cyrius v5.8.x — `var` re-declaration in sibling if/elif/else branches now compiles cleanly; PRE-FIX behavior + workarounds preserved below for pre-v5.8.x toolchain users"
 category = "cyrius"
 ---
+✅ FIXED in cyrius v5.8.x. Empirical premise-check at the v5.8.47
+vidya audit boundary: `if (x == 1) { var buf[8]; } elif (y == 1) {
+var buf[16]; }` compiles cleanly + runs correctly. The fix landed
+as a side-effect of the v5.8.x scope/local-table work (exact
+shipping version not bisected — same pattern as the v5.8.46
+arithmetic-in-fn-args entry, where the fix landed earlier in the
+cycle as a side-effect of expression-grammar work and the entry
+went stale waiting for an explicit refresh).
+
+PRE-v5.8.x BEHAVIOR (kept for historical context + workaround
+text for anyone still on a pre-v5.8.x toolchain):
+
 Cyrius treats all branches of an if / elif / else chain as ONE
 scope for `var` purposes. Declaring the same name in two branches
 is a compile error ("duplicate variable"), even though the two
@@ -112,32 +124,58 @@ local to `astart`.
 
 [[entries]]
 name = "no_comparisons_in_fn_args"
-description = "Parser rejects == != < > <= >= inside function call arguments"
+description = "✅ FIXED in v5.8.46 — comparisons + arithmetic now parse cleanly in fn-call argument positions"
 category = "cyrius"
 ---
+✅ FIXED in cyrius v5.8.46 (regression-floor lock). All six
+comparison forms (`==`, `!=`, `<`, `>`, `<=`, `>=`) AND all ten
+binary arithmetic operators (`+ - * / % | & ^ << >>`) now parse
+cleanly in function-call argument positions. Short-circuit `&&` /
+`||` also fine. The originally-rejected shapes all work:
+
+    foo(x == y, z);              # OK
+    assert_eq(n > 0, 1, "name"); # OK
+    biquad_set(a, 0, 0, a - K, 0); # OK (companion arithmetic case)
+
+Closed via the v5.8.46 slot's regression-floor lock at
+`tests/tcyr/expr_in_fn_args.tcyr` (30 assertions covering all 18
+operator shapes × operand-source mix × arg-position variation,
+plus the original `vidya/content/audio_dsp/cyrius.cyr`
+`biquad_lowpass_1pole` repro). The actual fix landed earlier in
+the v5.8.x cycle as a side-effect of the parser/expression-
+grammar work — `lib/assert.cyr:11` already comment-noted "Now
+that comparisons work in function arguments, assert(x == 42,
+'name') works." — but neither this field-note nor the
+`docs/development/issues/2026-05-03-arithmetic-in-fn-args-rejected.md`
+issue file was refreshed until v5.8.46. Workaround text below
+preserved for pre-v5.8.46 toolchain users.
+
+PRE-v5.8.46 BEHAVIOR (kept for historical context):
+
 Comparison operators return 0/1 and can live anywhere an integer
 expression does — EXCEPT inside a function call's argument list.
-The parser rejects them there because of an ambiguity with the
+The parser rejected them there because of an ambiguity with the
 generic-bracket syntax reserved for future use.
 
-    # REJECTED:
+    # REJECTED (pre-v5.8.46):
     foo(x == y, z);
     assert_eq(n > 0, 1, "non-negative");
 
-    # OK — assign to a temp first:
+    # OK — assign to a temp first (still works post-fix):
     var eq = (x == y);
     foo(eq, z);
     var nn = (n > 0);
     assert_eq(nn, 1, "non-negative");
 
-Applies to all six comparison forms (`==`, `!=`, `<`, `>`, `<=`,
-`>=`). Short-circuit `&&` / `||` and arithmetic operators are
-fine in call args; just the pure comparisons get rejected.
+Applied to all six comparison forms (`==`, `!=`, `<`, `>`, `<=`,
+`>=`). Short-circuit `&&` / `||` and arithmetic operators were
+also (sometimes) rejected; the companion case was tracked as
+arithmetic-in-fn-args (issue closed alongside).
 
-Error message today: the parser's generic hard-error for
-unexpected-token-in-arg-list. No special diagnostic. Future
-work: emit a specific "comparisons in fn call args — assign to
-a temp" hint.
+Error message before the fix: the parser's generic hard-error
+for unexpected-token-in-arg-list. No special diagnostic. The
+v5.8.46 lock asserts the working forms; if the parser regresses,
+the test catches it before ship.
 
 [[entries]]
 name = "caret_binds_tighter_than_binary_minus"
@@ -169,9 +207,15 @@ GENERAL RULE when porting bitwise algorithms from C to cyrius:
 
 [[entries]]
 name = "var_bracket_size_must_be_literal"
-description = "`var name[N]` requires N to be an integer literal; `var name[CONST_IDENT]` is rejected at parse"
+description = "`var name[N]` requires N to be an integer literal; `var name[CONST_IDENT]` is rejected at parse — STILL ACTIVE at v5.8.46 (re-confirmed at v5.8.47 vidya audit)"
 category = "cyrius"
 ---
+**Status (2026-05-03)**: still active at cyrius v5.8.46. Tracked
+at:
+`cyrius/docs/development/issues/2026-05-03-parser-cosmetic-limits-bare-return-and-var-bracket.md`
+(filed during the v5.8.47 vidya audit alongside its companion
+`bare_return_in_if_block_rejected`).
+
 The `var name[N]` stack-local syntax requires N to be an integer
 literal at parse time. Even if `CONST_IDENT` is a `var` initialized
 to a constant integer expression, the parser rejects it.
@@ -216,9 +260,23 @@ duplicated as a literal at the call site.
 
 [[entries]]
 name = "multi_line_struct_enum_bodies_dont_parse"
-description = "Cyrius parser expects struct and enum bodies on a single line; multi-line braced bodies trip struct-vs-block disambiguation"
+description = "✅ FIXED in cyrius v5.8.x — multi-line struct + enum bodies parse cleanly; PRE-FIX behavior + single-line workaround preserved below for pre-v5.8.x toolchain users"
 category = "cyrius"
 ---
+✅ FIXED in cyrius v5.8.x. Empirical premise-check at the v5.8.47
+vidya audit boundary: both
+`struct Point { x: i64; y: i64; }` and the same shape spread
+across multiple lines parse + compile cleanly; same for
+multi-line `enum` bodies (`enum Color { Red = 1; Green = 2;
+Blue = 3; }`). The fix landed as a side-effect of the v5.8.x
+struct/enum work (sum-type syntax v5.8.21, exhaustive match
+v5.8.22, the multi-slot enum-generics + dispatch run); exact
+shipping version not bisected. Same stale-pin pattern as the
+v5.8.46 arithmetic-in-fn-args entry.
+
+PRE-v5.8.x BEHAVIOR (kept for historical context + single-line
+workaround for anyone still on a pre-v5.8.x toolchain):
+
 THE TRAP:
 
     struct Player {
@@ -316,9 +374,15 @@ test to construct Stats inline.
 
 [[entries]]
 name = "bare_return_in_if_block_rejected"
-description = "Cyrius's parser rejects bare `return;` inside an `if { ... }` block — must use `return 0;` (no void in Cyrius)"
+description = "Cyrius's parser rejects bare `return;` inside an `if { ... }` block — must use `return 0;` (no void in Cyrius) — STILL ACTIVE at v5.8.46 (re-confirmed at v5.8.47 vidya audit)"
 category = "cyrius"
 ---
+**Status (2026-05-03)**: still active at cyrius v5.8.46. Tracked
+at:
+`cyrius/docs/development/issues/2026-05-03-parser-cosmetic-limits-bare-return-and-var-bracket.md`
+(filed during the v5.8.47 vidya audit alongside its companion
+`var_bracket_size_must_be_literal`).
+
 THE TRAP:
 
     fn fb_set(x, y, color) {

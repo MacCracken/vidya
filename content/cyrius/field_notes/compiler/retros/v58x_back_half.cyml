@@ -1,0 +1,260 @@
+# Cyrius Field Notes — v5.8.x back half (slots .49–.65)
+# Written 2026-05-05 from the v5.8.x cycle close. Companion to
+# v58x_agent_perspective.cyml (which covers the slices sub-arc
+# at slots .14–.19). This entry covers the second half of the
+# cycle: Unicode 17.0.0 fold, two-step heap bootstraps, refactor
+# passes A+B, dep version-patch round, stdlib foldin.
+#
+# 65 patches over 5 days (2026-05-01 → 2026-05-05) — longest
+# minor in cyrius history by patch count, more compressed than
+# v5.7.x's 51 patches / 36 days. Compression came from
+# disciplined slot-pinning + the user's "just keep moving"
+# cadence at every cycle inflection.
+#
+# 1 entry.
+
+[[entries]]
+name = "agent_perspective_v58x_back_half"
+description = "What the v5.8.x back half (slots .49–.65) felt like from inside — Unicode 17 fold, two-step heap bootstraps, the .59→.61 layout pivot pair, the foldin's CI-on-Ubuntu trap that took three pushes to settle, what carried forward from the slices-arc discipline."
+category = "cyrius"
+tags = ["retrospective", "agent", "v5.8.x", "unicode", "foldin", "personal"]
+content = """
+Written from the v5.8.x cycle close, looking back on the
+second half: slot .49 (Unicode categories) through slot .65
+(stdlib foldin). The first half (slots .0-.48) ran four-and-a-
+half feature minors in parallel — slices, effects, sum types
++ exhaustive match, Result+?, allocators. The back half was
+a different shape: structural work + Unicode + cycle-shape
+discipline.
+
+== WHAT THE WORK ACTUALLY WAS ==
+
+**Slots .49–.52 — Unicode 17.0.0 fold (4 slots)**:
+- .49 categories (4144 merged ranges, ~58 KB)
+- .50 case folding (simple + full; 4 tables)
+- .51 NFC + NFD canonical normalization
+- .52 NormalizationTest.txt regression suite (20034-row
+  conformance corpus shipped as a runtime data file —
+  `tests/data/NormalizationTest.txt` — because string-literal
+  embedding would have been ~10 MB of source, way past
+  str_data's 256 KB cap)
+
+NFKC/NFKD got DEFERRED at .51 over the str_data cap. The
+compat-decomp table at fixed-width 116 chars was ~445 KB —
+1.7x the cap. Pinned for after a heap bump.
+
+**Slots .53–.54 — aarch64 cross-arch parity** (sit v0.7.2
+release surfaced this; install-pipeline rebuild miss + 7
+emit-fn parity gaps).
+
+**Slots .55–.57 — audit/dedup/refactor trio**:
+- .55 UTF-8 codec dedup (lifted into lib/unicode/_decode.cyr)
+- .56 dead-code removal (4 fn names, 11 fn defs)
+- .57 sovereign UCD generator (programs/gen_unicode_data.cyr
+  replaced the Python predecessor that v5.8.49 had carried
+  in for fold-in pragmatism — RESCOPED MID-SLOT after user
+  pushback "How dare you USE ANOTHER LANGUAGE")
+
+**Slots .58–.61 — heap two-step bootstraps**:
+- .58 deps cleanup + release-valve (no actual changes — caught
+  state.md silent rot since .47)
+- .59 str_data 256 KB → 2 MB (Option B high-block at 0x4E8C000;
+  picked over Option A's ~200-edit downstream shift cascade)
+- .60 NFKC + NFKD ship — the K-forms .51 deferred. Mid-slot
+  pivot from fixed-width 116-char compat encoding (445 KB) to
+  2-table IDX+DATA split (87 KB) when fixed-width hit the
+  preprocess_out 2 MB cap (a different wall than str_data —
+  this caught me; field-noted).
+- .61 monotonic heap-map reorg — moved str_data back to a
+  sane low offset (0x21A000) once the gap was right. brk
+  shrunk 2 MB. The Option A vs Option B pattern crystallized
+  (see compiler gotchas).
+
+**Slots .62–.63 — refactor passes**:
+- .62 lib/ structural cleanup: vidya.cyr → programs/ (no API
+  consumers), stale-comment sweep across 6 main_*.cyr,
+  hashmap_fast experimental annotation
+- .63 main_*.cyr boilerplate extraction: _HEAP_INIT_SCRATCH(S)
+  helper in src/common/util.cyr, 237 lines of duplication
+  collapsed across 6 files, cc5 -80 B
+
+**Slot .64 — official closeout** per CLAUDE.md 11-step protocol.
+All 11 steps ticked. Migrated v5.8.0–.63 narratives into
+completed-phases.md (94 lines, sub-arc grouped). Captured the
+6-dep work-list for the foldin.
+
+**Slot .65 — stdlib foldin (sandhi-pattern)** + the back-half's
+biggest stumble. Covered in detail below.
+
+**Slot .66 — held-open release-valve, RETIRED unused**: foldin
+fallout absorbed in .65 itself.
+
+== WHAT SURPRISED ME ==
+
+**The two-step bootstrap is byte-identity-critical, not just
+build-correctness**. v5.8.59's str_data move had a moment of
+"wait, what does cc5b == cc5b' mean exactly" — turns out it
+means the stage-2 compiler (built by stage-1 from new sources)
+must produce the IDENTICAL stage-3 from those same new sources.
+If a heap layout change introduces ANY non-determinism (timing,
+memory addresses leaking into output, field ordering), the
+two-step diverges. v5.8.59 + .61 both held byte-identical at
+their target sizes; not a given.
+
+**preprocess_out is a different wall than str_data, but same
+shape**. v5.8.60 was the 4th heap-cap interaction in the
+cycle (after .46 token-array, .59 str_data, and the implicit
+fixup_tbl considerations) and I STILL got tripped up by
+assuming the str_data bump cleared the way for the compat
+table. Different region; different consumer. Fix was the
+2-table IDX+DATA encoding (80% size reduction, same lookup
+semantics) — but the trip-up cost a mid-slot redesign. The
+gotcha is now in compiler/gotchas.cyml under
+`preprocess_out_vs_str_data_caps`.
+
+**The "minimum-blast vs full-reorg" choice is a real lever**.
+v5.8.61's heap-map refactor offered two paths: minimum-blast
+(just move str_data back to monotonic, ~80 edits) or full-
+reorg (close all 8.4 MB of closeable gaps, ~800 edits). User
+direction at slot entry: "minimum blast is probably the safer
+bet to allow for some potential bumps in the future without a
+full restructure ... should be something we consider as a last
+minor effort before 6.0". This is a great slot-shape pattern:
+take the small win now, pin the big restructure to a pre-major-
+bump slot. Updated the pre-v6.0 hardening pin in roadmap's
+Long-term considerations. Tagged for revisit.
+
+**The foldin took three pushes to settle**. v5.8.65 was the
+slot's third re-push that finally cleared CI. The pattern:
+
+1. First push: foldin worked locally (`cyrius deps` populated
+   lib/<name>.cyr as symlinks to /home/macro/.cyrius/...).
+   `check.sh` self-host green, all 127 tcyrs PASS via
+   `cyrius test`. Pushed.
+2. Ubuntu CI fails mid-tcyr-loop without printing FAIL. User
+   asks for log. Diagnosis from raw log: lib/<dep>.cyr
+   symlinks dangle on CI (home is /home/runner/...), tcyr
+   compile fails, `bash -e` kills the loop silently.
+3. Second push: convert symlinks to regular files, extend
+   audit-walk.sh's distlib-bundle marker to recognize sakshi's
+   bundle.sh header (sakshi's dist file uses
+   `# Bundled distribution of sakshi v2.2.3` instead of
+   `# Generated by: cyrius distlib`). Local check.sh green.
+4. Ubuntu CI fails AGAIN — same fmt drift on sakshi.cyr.
+   Diagnosis: I fixed `scripts/lib/audit-walk.sh` but missed
+   the THREE inline copies of the marker check in
+   `.github/workflows/ci.yml` (Format/Lint/Doc-coverage stdlib
+   steps). They had their own grep-q lines.
+5. Third push: extend marker in all 4 places consistently +
+   add a comment cross-referencing audit-walk.sh as the
+   "canonical" copy. CI passed.
+
+The lesson: when introducing a marker check, audit ALL call
+sites at once. The "shared library + 3 inline duplicates"
+pattern is exactly the kind of thing CLAUDE.md's "ONE change
+at a time" rule guards against — but the foldin marker
+extension SHOULD have been one change spanning all 4 sites,
+not one site followed by 3 fan-out fixes.
+
+The user's "make sure you review them properly please..." came
+between push 2 and push 3. Took the cue, did the proper end-
+to-end CI lane walk for each dep, found additional issues
+(yukti/sankoch fmt drift CI invocation bug — `cyrius fmt $f
+--check` emitted no stdout while the CI's `diff -q <(...)` was
+expecting formatted output; canonical invocation is `cyrius
+fmt $f` without the flag). Fixed those across 3 dep CIs. Then
+the .65 ship landed.
+
+== WHAT I GOT RIGHT ==
+
+**Cycle-shape discipline carried forward**. The slot-by-slot
+ship-and-version-bump rhythm from v5.7.x stayed in v5.8.x.
+Every slot got: design → implement → two-step verify (where
+applicable) → check.sh + cross-host → CHANGELOG → state.md →
+roadmap → version-bump → ship. The discipline kept slot
+boundaries crisp and avoided the "bundle all changes into one
+big patch" trap.
+
+**Out-of-band work between .64 and .65 was treated as its own
+cycle phase**. The 6-dep version-patch round (sakshi 2.2.2 →
+2.2.3, etc.) happened in topological order (no deps first,
+then patra+yukti, then vani last) with cyrius pin bumps in
+each sibling repo + dist regen + tag. Documented in the .64
+closeout's §10 inventory. Cleanly scoped between cyrius
+slots.
+
+**Honest scope shrinks where they happened**. The original
+v5.8.65 pin called for adding the 6 folded names to
+`[deps].stdlib` auto-prepend. Reverted at slot entry after
+surveying — all cyrius tcyrs already do explicit
+`include "lib/<dep>.cyr"`, and auto-prepending ~28 KLOC into
+every consumer's preprocess_out would risk the v5.8.60-tested
+2 MB cap. Sandhi precedent (v5.7.0) supported the
+explicit-include-only model. Documented the deviation in the
+slot's CHANGELOG entry.
+
+== WHAT I GOT WRONG ==
+
+**The foldin symlink trap was 100% preventable**. Should have
+checked `git ls-tree HEAD lib/sakshi.cyr` for mode 120000
+before pushing — would have caught the symlinks and spared
+the two re-pushes. Now in the foldin playbook (gotcha:
+`foldin_symlink_vs_regular_file`).
+
+**The audit-walk marker fix was incomplete**. The `cyrius fmt`
+distlib-bundle skip lives in 4 places (1 shared + 3 inline).
+Fixed only the shared one first push; took a second push for
+the inline trio. Should have grep'd the marker pattern across
+the whole repo before claiming the fix.
+
+**Premature .66 bump**. After CI failed on .65, my reflex was
+to ship the fixes as a NEW slot (.66 — the held-open release-
+valve). User correctly pushed back: ".65 never went out cause
+of the issue" — the right move was to fix in .65 and re-push,
+not advance the version. Reverted; .66 retired unused. The
+slot pin's "release-valve held open" model worked: the fallout
+got absorbed in .65 itself, exactly as the valve was meant to
+support.
+
+**Vidya refresh deferred too long**. Per
+reference_vidya_location memory pin, vidya gets refreshed each
+closeout. v5.8.64 closeout flagged this as out-of-band; .65
+shipped before vidya touched. Now (post-cycle) catching it up
+is a bigger lift than per-slot increments would have been.
+
+== WHAT I'D CARRY FORWARD ==
+
+1. **Foldin playbook** with the de-symlink + marker-audit
+   steps explicit. The next sibling-fold (likely mabda + agnosys
+   post-v5.9.x Class B FFI) shouldn't re-trip these.
+2. **Two-cap heap audit** at every cap-raise: str_data AND
+   preprocess_out. They're different walls; size both.
+3. **In-slot fix-ups before version bumps**. If CI fails, fix
+   in the same slot (commit, force-push if necessary), not as
+   a new slot. The slot-version is the LANDING tag, not the
+   first-attempt tag.
+4. **Cross-call-site grep** when extending a pattern check.
+   The "shared library + N inlines" anti-pattern is real
+   in CI yml files; treat the inlines as call sites of the
+   shared abstraction.
+5. **Out-of-band sibling rounds** as named-phase work. The
+   6-dep version-patch between .64 and .65 deserved a phase
+   name in roadmap (it implicitly was, but explicit is better).
+
+== ACKNOWLEDGEMENT ==
+
+The v5.8.x back half went fast because the user kept saying
+"lets keep moving" at every cycle inflection — which forced
+me to ship the small win and pin the bigger restructure
+forward, instead of paralysis-by-perfectionism. Half a dozen
+slots pinned forward (heap-map full reorg, mabda + agnosys
+fold, security re-audit, cmdline parser extraction, parser-
+to-emit named-op refactor) — that's pre-v6.0 hardening fuel,
+not deferral.
+
+Next: v5.9.x — bare-metal arc + RISC-V port + sovereignty
+pass (bash-toolchain conversion ~8500 LOC). Different shape
+from v5.8.x's language-vocabulary cycle. The back-half
+discipline (small slots, two-step bootstrap, in-slot fix-
+ups) carries forward.
+"""

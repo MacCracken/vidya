@@ -375,30 +375,99 @@ category = "cyrius"
 `#derive(Serialize)` before a struct auto-generates
 `Name_to_json(ptr, sb)` that writes JSON into a str_builder.
 
+REQUIRED INCLUDES (cyrius doesn't auto-pull these):
+    include "lib/syscalls.cyr"
+    include "lib/string.cyr"
+    include "lib/str.cyr"
+    include "lib/alloc.cyr"
+    include "lib/fmt.cyr"
+    # serializer-only ↑    ↓ deserializer (round-trip) needs these too:
+    include "lib/vec.cyr"
+    include "lib/hashmap.cyr"
+    include "lib/json.cyr"
+
 USAGE:
     #derive(Serialize)
-    struct Agent { id; name: Str; }
+    struct Agent { id: i64; name: Str; }
 
     var a = Agent { 42, str_from("alice") };
     var sb = str_builder_new();
     Agent_to_json(&a, sb);
-    var s = str_builder_build(sb);   # {"id":42,"name":"alice"}
+    var s = str_builder_build(sb);
+    # s is a `Str` (16-byte heap header {ptr, len}).
+    # To print:
+    str_println(s);
+    # NOT `println(s)` — `println` expects a cstring and will
+    # interpret the Str header bytes as garbage (low addr +
+    # length). Use `str_println(s)` for the Str-typed case;
+    # it's the canonical helper (lib/str.cyr line 72,
+    # `str_print` + `\n`). Surfaced by agnosys 1.1.12 re-file
+    # 2026-05-07 where the consumer used `println(out)` and
+    # reported "garbage output"; root cause was API misuse,
+    # not codegen.
 
 SEMANTICS:
-    Scalar fields (no type annotation) → bare JSON numbers: 42
-    Str fields (`: Str` annotation)   → quoted JSON strings: "alice"
+    Untyped scalar fields (no annotation) → bare JSON numbers: 42
+    `: i8` / `: i16` / `: i32` / `: i64`  → bare JSON numbers via
+                                            str_builder_add_int +
+                                            width-correct loadN
+                                            (v5.9.30 i64; v5.9.36
+                                            i8/i16/i32 added)
+    `: Str` fields                        → quoted JSON strings: "alice"
+    Nested struct fields (typed by another
+    `#derive(Serialize)` struct name)     → recursive _to_json call
 
-    Detection: preprocessor checks if field type bytes match
-    "Str\0" (83, 116, 114, 0). Simple byte comparison, no string
-    table lookup.
+    Detection: preprocessor checks the type cstring's first
+    bytes. `Str\0` → string path. `i8\0` / `i16\0` / `i32\0`
+    / `i64\0` → primitive integer path (v5.9.36; narrow widths
+    paired with parser-side struct-literal width-correct
+    initializer fix in the same slot).
+
+DESERIALIZER COMPANION:
+    #derive(Serialize) ALSO generates `_from_json(pairs)` (the
+    `lib/json.cyr` json_get-based form) and `_from_json_str(json)`
+    (single-pass byte scanner). Round-trip works for `Str` and
+    `i64` fields:
+
+        var p = Agent_from_json_str(str_data(s));
+        var id = load64(p + 0);   # 42
+        # p + 8 holds a Str header for "alice"
+
+    Pre-v5.9.35 the deserializer emitted `<typename>_from_json(...)`
+    for every typed-non-Str field — including primitives — so
+    `i64` fields hit `i64_from_json` (undefined). v5.9.35
+    (agnosys 1.1.12 re-file close) added i64 detection: typed
+    i64 fields take the `str_to_int(v)` + `store64(ptr+offset, ...)`
+    path mirroring the serializer side.
+
+NARROW INTEGER WIDTHS (i8, i16, i32):
+    Supported as of v5.9.36. Two compounding bugs were paired
+    in that slot:
+    (1) PP_DERIVE codegen — `prim_load` byte-gate detection
+    extended with per-width outer-byte checks ('8'/'1'/'3'/'6')
+    in `_to_json`, `_from_json`, `_from_json_str` AND
+    `PP_PARSE_STRUCT_DEF`'s offset-table cumul.
+    (2) Parser-side struct-literal initializer made width-
+    correct via new `EMIT_STRUCT_FIELD_W(S, vcnt, boff, width)`
+    (picks ESTORE8/16/32/STOC by width); `PARSE_STRUCT_INIT`
+    positional + named + `EMIT_GVAR_INITS` all advance `boff`
+    by `FIELDSZ(ft)` per field. `STRUCTSZ` semantics
+    unchanged — `sizeof(Packet) == 15` (1+2+4+8 packed) still
+    asserts. The fix is at the literal-write side, not the
+    size-reporting side.
+
+PLATFORM CAVEAT (Mach-O / macOS arm64):
+    Pre-v5.9.36 the auto-generated `_to_json` body SIGSEGVs at
+    runtime on real macOS arm64 (ecb host) — the codegen path
+    works on x86_64 Linux + qemu-aarch64 + real Linux aarch64
+    (pi) + Windows PE. Pin: separate Mach-O serializer slot.
 
 ALSO AVAILABLE — #derive(accessors):
     #derive(accessors) struct Point { x; y; }
-    Generates: Point_x(p), Point_set_x(p, v), Point_y(p), Point_set_y(p, v)
+    Generates: Point_x(p), Point_set_x(p, v), Point_y(p),
+    Point_set_y(p, v)
 
 PP_DERIVE handles both — same preprocessor codegen pattern.
-Single-pass JSON deserializer also generated for `_from_json`
-counterpart.
 
 [[entries]]
 name = "secret_var_compound_ops"
@@ -432,11 +501,50 @@ abort (reverts to stack if it spots a width violation).
 ~12% speedup on nested accumulators.
 
 SECRET VAR:
-    secret var key = load_key();
-    if (ct_eq(key, candidate)) { ... }
-Marks a variable whose comparison must be constant-time. Used
-by sigil's PQC code (ML-DSA signature verification). Pairs
-with `ct_select(c, a, b)` and `mulh64(a, b)` builtins.
+    secret var key[32];
+    load_key(&key);
+    if (ct_eq_bytes(&key, candidate, 32) == 1) { ... }
+Marks an ARRAY whose comparison must be constant-time. Scalar
+form (`secret var x = 0;`) is rejected at compile time —
+secret-tagged storage requires `secret var name[N]` array
+declaration. Used by sigil's PQC code (ML-DSA signature
+verification, certpin in agnosys 1.1.2+). Stdlib-side helpers
+live in `lib/ct.cyr`:
+  - `ct_select(cond, a, b)`             — branchless select (v3.x)
+  - `ct_eq_bytes(a, b, n)`              — branchless byte-array
+                                          equality, equal-length
+                                          (v5.9.18; canonical XOR-
+                                          accumulate)
+  - `ct_eq_bytes_lens(a, alen, b, blen)` — dual-length variant;
+                                           returns 0 on length
+                                           mismatch then runs the
+                                           CT compare on the equal-
+                                           length common prefix
+                                           (v5.9.20; additive
+                                           stdlib helper).
+The single-length form is the workhorse — use it for fixed-
+length compares where lengths are equal-by-construction (MAC
+tags, signature components, SHA-256 digests). The dual-length
+variant exists for cstring or variable-length compares where
+the call site genuinely needs a length-mismatch fast path.
+
+**Sigil's `ct_eq` family**: sigil ships its own
+`fn ct_eq(a, a_len, b, b_len)` and `fn ct_eq_32(a, b)` in
+`sigil/src/ct.cyr` (vendored into cyrius `lib/sigil.cyr`).
+Those are sigil-public symbols downstream consumers (kavach,
+hoosh, libro, majra, plus 11+ vendored-copy holders) call
+directly. They remain in sigil; the cyrius-side
+`ct_eq_bytes_lens` is an additive helper, NOT a replacement.
+A consolidation slot would require coordinated downstream
+migration + a sigil major-version bump, since removing
+`fn ct_eq` from sigil's bundle is a breaking public-surface
+change across the ecosystem.
+
+**agnosys 1.1.2+ certpin** uses `ct_eq_bytes` (the
+single-length form). The cstring variant (`certpin_ct_streq`)
+remains hand-rolled in agnosys pending a separate
+cstring-helper slot. Compiler builtins in this neighborhood:
+`mulh64(a, b)` for constant-time multiplication.
 
 EXPRESSION-POSITION COMPARISONS:
     var flag = (x == y);
