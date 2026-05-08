@@ -1,6 +1,6 @@
 # Vidya — Development Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-05-03
+> **Status**: Active | **Last Updated**: 2026-05-08
 >
 > **Version**: 2.6.4 | **Cyrius**: 5.8.34
 > **Topics**: 74 (74 fully covered) — **P0 → P3 complete** 🎉
@@ -118,6 +118,108 @@ filed during 2.6.x — see `cyrius/docs/development/issues/`.
 
 ---
 
+## Renderer integration — vyakarana (open work, untimed)
+
+> **Status**: Ready upstream as of vyakarana **1.10.0** (2026-05-08).
+> Pick up when a vidya renderer rewrite is on the agenda — no
+> hard sequencing into the topic roadmap above.
+
+vyakarana ships 38 bundled grammars covering every language in
+vidya's reference shelf (the 11 vidya tracks plus 27 more). It
+also ships a stable public API and a written contract for
+how renderers integrate with it. Vidya can swap its current
+code-rendering path over to vyakarana whenever a renderer
+rewrite is planned.
+
+**What needs to happen on vidya's side:**
+
+1. Add the dep in `cyrius.cyml`:
+   ```toml
+   [deps.vyakarana]
+   git     = "https://github.com/MacCracken/vyakarana.git"
+   tag     = "1.10.0"   # bump as later vyakarana releases ship
+   modules = ["dist/vyakarana.cyr"]
+   ```
+2. Run `cyrius deps` — pulls `dist/vyakarana.cyr` into vidya's
+   `lib/`.
+3. Replace the existing code-rendering path with calls into the
+   vyakarana public API (see the integration guide). Expected
+   surface:
+   - `tokenize_source(src, lang)` → tokenbuf
+   - `tokenbuf_count` / `tokenbuf_kind` / `tokenbuf_start` /
+     `tokenbuf_len`
+   - `kind_name(k)` for theme indirection (the **stable
+     contract** — index palettes by kind-name string, not
+     integer)
+   - 10 token-kind constants (`TK_IDENT` through `TK_ERROR`)
+4. Pick a starter scope. Suggested order:
+   - **`content/lexing_and_parsing/`** — vyakarana's own test
+     corpus root. Best dogfooding loop: bugs in either side
+     show up as render diffs.
+   - **`content/cyrius/`** — vidya already has Cyrius corpus
+     samples; the cyml grammar (vyakarana 1.9.0) handles them.
+   - **Topic concept pages** — extend to other languages' tracks
+     once the first two prove the pipeline.
+5. Decide on a theme. vyakarana's bundled `default` theme is
+   the reference palette; for vidya's web-content rendering you
+   probably want a vidya-specific theme that maps the 10 kinds
+   to vidya's style tokens. The contract is documented; how
+   themes look is a vidya design call.
+
+**Required reading (in order):**
+
+- [Consumer integration guide](https://github.com/MacCracken/vyakarana/blob/main/docs/guides/consumer-integration.md)
+  — full setup + API walkthrough. **Start here.**
+- [Architecture note 004 — theme-palette contract](https://github.com/MacCracken/vyakarana/blob/main/docs/architecture/004-theme-palette-contract.md)
+  — how to bind vidya's renderer styles to the 10 token kinds
+  via stable `kind_name` strings.
+- [Architecture note 001 — coverage invariant](https://github.com/MacCracken/vyakarana/blob/main/docs/architecture/001-coverage-invariant.md)
+  — guarantees you can rely on. Every input byte produces
+  exactly one token; never partial state.
+- [Architecture overview](https://github.com/MacCracken/vyakarana/blob/main/docs/architecture/overview.md)
+  "Frozen public contracts" — the names / signatures that
+  don't change across the 1.x line.
+
+**API stability**: The public surface above is stable across
+vyakarana 1.0.0 → 1.x.x. **2.0.0** brings one breaking change
+(streaming-tokenizer return type goes from `tokenbuf` to
+iterator); a migration guide will ship alongside. Until 2.0.0
+lands, pinning to `1.x.x` is safe.
+
+**Reciprocal corpus relationship**: Vidya's
+`content/lexing_and_parsing/<lang>` files are vyakarana's test
+corpus for those languages. When vidya updates a sample, the
+vyakarana repo can re-snapshot it (manual, per
+[vyakarana ADR 0001](https://github.com/MacCracken/vyakarana/blob/main/docs/adr/0001-corpus-sync-policy.md)).
+Vidya doesn't need to coordinate the snapshot — vyakarana
+pulls when it wants. New language tracks vidya adds eventually
+flow into vyakarana grammars (already happened in
+vyakarana 1.9.0 for cyrius via `content/cyrius/`).
+
+**Bugs to file upstream, not work around**: If vyakarana
+mistokenizes a sample, file the issue at vyakarana's repo —
+don't add per-token corrections in vidya's renderer. The
+tokenizer's `error` kind is a real signal, and silent
+work-arounds would mask grammar bugs that affect every
+consumer.
+
+**Ahead-of-time questions for whoever picks this up:**
+
+- Does vidya's HTTP service (sandhi-based) render content
+  per-request, at build time, or both? That affects whether
+  the tokenize path is hot.
+- Does vidya already have a renderer-style schema for code
+  blocks, or will the integration also define the styling
+  vocabulary?
+- Should the cutover be a single replace-the-renderer cut, or
+  an opt-in flag (e.g. a `vidya stats --renderer=vyakarana`
+  comparison mode) before flipping the default?
+
+These are vidya design calls; the integration guide handles
+the vyakarana side regardless of the answers.
+
+---
+
 ## Relationship to AGNOS
 
 Vidya feeds directly into the ecosystem:
@@ -131,6 +233,12 @@ Vidya feeds directly into the ecosystem:
   PolyBLEP synth
 - **sakshi** — vidya uses sakshi for tracing; documents tracing patterns
 - **sandhi** — vidya's HTTP service runs on sandhi
+- **vyakarana** — source-code tokenizer; ready for vidya to
+  adopt as the code-rendering layer (see "Renderer integration"
+  above). 38 bundled grammars covering all 11 vidya language
+  tracks plus 27 more. Reciprocal: vidya's
+  `content/lexing_and_parsing/<lang>` files are vyakarana's
+  test corpus for those languages.
 - **`docs/sources.md`** standard — vidya IS the source citation for
   programming knowledge
 
@@ -138,4 +246,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-03 (v2.6.4) — **🎉 P3 complete; 74/74 at 11/11; 814/814 validator; next: 2.7.x opens P4 build systems with build_systems, package_resolution, reproducible_builds***
+*Last Updated: 2026-05-08 (v2.6.4) — **🎉 P3 complete; 74/74 at 11/11; 814/814 validator; next topic batch: 2.7.x opens P4 build systems with build_systems, package_resolution, reproducible_builds. Renderer integration with vyakarana 1.10.0 documented as open-untimed work — see new "Renderer integration" section.***
