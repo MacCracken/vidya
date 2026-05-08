@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.0] — 2026-05-08
+
+**Minor opens P4 (build systems) — infra bump turn before topic
+work.** No new topic content; surface area is toolchain alignment,
+new dependency wiring, and spec/doc cleanup ahead of the
+2.7.x topic batch (build_systems, package_resolution,
+reproducible_builds).
+
+### Changed
+
+- **Cyrius pin: 5.8.34 → 5.9.43.** Entire 5.9.x cycle absorbed
+  in one bump (43 patches over 2 days, closed 2026-05-08).
+  Highlights: niyama 1.0.1 fold (.0, 8th sibling distfile,
+  6,664 lines, 5 regex engines), sovereignty pass kickoff (.1,
+  743 LOC of bash audit-dispatcher → `programs/check.cyr` +
+  `lib/audit_walk.cyr` 78th stdlib module),
+  agnosys `#derive(Serialize)` cascade incl. Mach-O ARM64 fnptr
+  ASLR fix (.33–.39), cx Phase 2c parity (.40), tls-live gate
+  conversion + `.sh-conversion arc CLOSED (.41),
+  `lib/regression.cyr` 79th stdlib testing-stdlib carve-out
+  (.42, 22 verbs across display/buffer-scan/process/network/SSH).
+  Self-host byte-identical at 751,744 B.
+- `content/cyrius/language/index.cyml` verified-on bumped to
+  5.9.42; `content/cyrius/language/stdlib_modules.cyml` adds
+  16th entry documenting `regression_module`.
+- `docs/development/content-format.md` extended to document the
+  two non-topic entries under `content/`: the `cyrius/`
+  language-reference subtree and `qelib1.inc` (load-bearing
+  shared OpenQASM include — qiskit `include_path=[content/]`).
+  Resolves the long-standing 76-vs-74 entry-count confusion in
+  `ls content/` output.
+
+### Added
+
+- `[deps.vyakarana]` in `cyrius.cyml` pinned at **1.11.1**;
+  `lib/vyakarana.cyr` vendored via `cyrius deps` (2547 lines;
+  inlines all 38 grammars via `_grammar_blob_data` so consumers
+  don't need `grammars/*.cyml` at runtime cwd).
+- **`vidya code <topic> <lang>` CLI** — prints source with
+  vyakarana token coloring (ANSI: keyword=blue, string=green,
+  number=cyan, comment=dim, operator=magenta, preprocessor=
+  yellow, error=red-bg). Falls back to plain source for
+  languages without a vyakarana grammar (OpenQASM in 1.11.x).
+- **`GET /code/{topic}/{lang}` HTTP route** — JSON response
+  `{topic, language, path, source, tokens:[{kind, start, len}]}`.
+  Theme contract per vyakarana ADR 0004: consumers index palettes
+  by `kind` string, never by integer. Smoke-verified end-to-end:
+  2187 tokens on the rust track of `content/lexing_and_parsing/`
+  (8829 source bytes); OpenQASM gracefully returns `tokens:[]`.
+
+### Fixed
+
+- Repo hygiene: removed 7× `qemu_*.core` debris (~57 MB) from
+  repo root left behind by 2026-05-02 aarch64 cross-test runs.
+  Already gitignored (`*.core` + `qemu_*.core`); was a working-
+  tree leak only.
+
 ## [2.6.4] — 2026-05-03
 
 **P3 complete — `embeddings` shipped at 11/11 languages.**

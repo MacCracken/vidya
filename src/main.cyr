@@ -806,6 +806,99 @@ fn cmd_compare(topic_id, lang1_str, lang2_str) {
 }
 
 # ================================================================
+# Code rendering — vyakarana token integration (added 2.7.0)
+# ================================================================
+#
+# Vidya does not currently render source code anywhere; the
+# `info`/`compare` surfaces return metadata + file paths only.
+# Wiring vyakarana is therefore additive — a `code` CLI command
+# and a `/code/{topic}/{lang}` HTTP route, sharing one tokenize
+# helper.
+#
+# `lang_stem(l)` ("rust", "python", "asm_x86_64", "cyrius", …)
+# already matches the names vyakarana grammars are registered
+# under. The one mismatch is OpenQASM (vyakarana ships no qasm
+# grammar in 1.11.0); `has_grammar()` short-circuits that case
+# so we still return the source body, just with no tokens.
+
+# ANSI SGR opener for a vyakarana kind name. Empty string for
+# kinds that should render in the terminal default. Reset with
+# "\x1b[0m" after each token.
+fn ansi_open_for_kind(kname) {
+    if (streq(kname, "keyword") == 1)      { return "\x1b[34;1m"; }   # bright blue
+    if (streq(kname, "string") == 1)       { return "\x1b[32m"; }     # green
+    if (streq(kname, "number") == 1)       { return "\x1b[36m"; }     # cyan
+    if (streq(kname, "comment") == 1)      { return "\x1b[2m"; }      # dim
+    if (streq(kname, "operator") == 1)     { return "\x1b[35m"; }     # magenta
+    if (streq(kname, "preprocessor") == 1) { return "\x1b[33m"; }     # yellow
+    if (streq(kname, "error") == 1)        { return "\x1b[41;97m"; }  # red bg, white fg
+    return "";
+}
+
+# Read example source for (concept, lang) into a freshly null-
+# terminated cstr. Returns 0 if the example is missing.
+fn read_example_cstr(concept, lang) {
+    var ex = get_example(concept, lang);
+    if (ex == 0) { return 0; }
+    var code = example_code(ex);
+    if (code == 0) { return 0; }
+    return to_cstr(code);
+}
+
+# CLI: `vidya code <topic> <lang>`
+fn cmd_code(topic_id, lang_str) {
+    var concept = reg_get(topic_id);
+    if (concept == 0) {
+        sys_write(STDERR_FD, "error: topic not found: ", 24);
+        println(topic_id);
+        return 1;
+    }
+    var l = lang_parse(lang_str);
+    if (l < 0) {
+        sys_write(STDERR_FD, "error: unknown language: ", 25);
+        println(lang_str);
+        return 1;
+    }
+    var src = read_example_cstr(concept, l);
+    if (src == 0) {
+        println("(no implementation in this language)");
+        return 1;
+    }
+    var stem = lang_stem(l);
+    var src_len = strlen(src);
+
+    # No vyakarana grammar (e.g. openqasm in 1.11.0) — print plain.
+    if (has_grammar(stem) == 0) {
+        sys_write(1, src, src_len);
+        if (src_len > 0 && load8(src + src_len - 1) != 10) { println(""); }
+        return 0;
+    }
+
+    var tb = tokenize_source(src, stem);
+    if (tb == 0) {
+        sys_write(1, src, src_len);
+        if (src_len > 0 && load8(src + src_len - 1) != 10) { println(""); }
+        return 0;
+    }
+
+    var n = tokenbuf_count(tb);
+    var i = 0;
+    while (i < n) {
+        var k  = tokenbuf_kind(tb, i);
+        var s  = tokenbuf_start(tb, i);
+        var lt = tokenbuf_len(tb, i);
+        var open = ansi_open_for_kind(kind_name(k));
+        var olen = strlen(open);
+        if (olen > 0) { sys_write(1, open, olen); }
+        sys_write(1, src + s, lt);
+        if (olen > 0) { sys_write(1, "\x1b[0m", 4); }
+        i = i + 1;
+    }
+    if (src_len > 0 && load8(src + src_len - 1) != 10) { println(""); }
+    return 0;
+}
+
+# ================================================================
 # Validate — compile/run examples
 # ================================================================
 
@@ -1446,6 +1539,58 @@ fn json_compare_response(topic_id, lang1_str, lang2_str) {
     return str_builder_build(sb);
 }
 
+fn json_code_response(topic_id, lang_str) {
+    var concept = reg_get(topic_id);
+    if (concept == 0) { return 0; }
+    var l = lang_parse(lang_str);
+    if (l < 0) { return 0 - 1; }
+    var ex = get_example(concept, l);
+    if (ex == 0) { return 0; }
+
+    var src = read_example_cstr(concept, l);
+    if (src == 0) { return 0; }
+    var stem = lang_stem(l);
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"topic\":\"");
+    var id = concept_id(concept);
+    if (id != 0) { str_builder_add(sb, id); }
+    str_builder_add_cstr(sb, "\",\"language\":\"");
+    str_builder_add_cstr(sb, stem);
+    str_builder_add_cstr(sb, "\",\"path\":\"");
+    var path = example_path(ex);
+    if (path != 0) { str_builder_add(sb, path); }
+    str_builder_add_cstr(sb, "\",\"source\":");
+    # sandhi_json_escape returns a fully-quoted JSON string literal.
+    str_builder_add_cstr(sb, sandhi_json_escape(src));
+    str_builder_add_cstr(sb, ",\"tokens\":[");
+
+    if (has_grammar(stem) == 1) {
+        var tb = tokenize_source(src, stem);
+        if (tb != 0) {
+            var n = tokenbuf_count(tb);
+            var i = 0;
+            while (i < n) {
+                if (i > 0) { str_builder_add_cstr(sb, ","); }
+                var k  = tokenbuf_kind(tb, i);
+                var s  = tokenbuf_start(tb, i);
+                var lt = tokenbuf_len(tb, i);
+                str_builder_add_cstr(sb, "{\"kind\":\"");
+                str_builder_add_cstr(sb, kind_name(k));
+                str_builder_add_cstr(sb, "\",\"start\":");
+                str_builder_add_int(sb, s);
+                str_builder_add_cstr(sb, ",\"len\":");
+                str_builder_add_int(sb, lt);
+                str_builder_add_cstr(sb, "}");
+                i = i + 1;
+            }
+        }
+    }
+
+    str_builder_add_cstr(sb, "]}");
+    return str_builder_build(sb);
+}
+
 fn json_gaps_response() {
     var entries = reg_list();
     var total = vec_len(entries);
@@ -1558,6 +1703,17 @@ fn http_route(cfd, path) {
         var body = json_gaps_response();
         return send_json(cfd, str_data(body), str_len(body));
     }
+    # GET /code/{topic}/{lang} — tokenized source body
+    if (memeq(path, "/code/", 6) == 1) {
+        var topic_id = sandhi_server_path_segment(path, 1);
+        var lang_str = sandhi_server_path_segment(path, 2);
+        if (topic_id == 0) { return send_400(cfd); }
+        if (lang_str == 0) { return send_400(cfd); }
+        var body = json_code_response(topic_id, lang_str);
+        if (body == 0 - 1) { return send_400(cfd); }
+        if (body == 0) { return send_404(cfd); }
+        return send_json(cfd, str_data(body), str_len(body));
+    }
     return send_404(cfd);
 }
 
@@ -1644,6 +1800,7 @@ fn usage() {
     println("  info <topic>               show concept details");
     println("  languages                  list supported languages");
     println("  compare <topic> <l1> <l2>  compare implementations");
+    println("  code <topic> <lang>        print source with vyakarana token coloring");
     println("  validate [topic]           compile/run examples");
     println("  gaps                       show missing implementations");
     println("  stats                      corpus statistics");
@@ -1702,6 +1859,14 @@ fn main() {
             return 1;
         }
         return cmd_compare(argv(2), argv(3), argv(4));
+    }
+
+    if (streq(cmd, "code") == 1) {
+        if (argc() < 4) {
+            println("Usage: vidya code <topic> <lang>");
+            return 1;
+        }
+        return cmd_code(argv(2), argv(3));
     }
 
     if (streq(cmd, "validate") == 1) {

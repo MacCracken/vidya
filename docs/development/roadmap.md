@@ -2,7 +2,7 @@
 
 > **Status**: Active | **Last Updated**: 2026-05-08
 >
-> **Version**: 2.6.4 | **Cyrius**: 5.8.34
+> **Version**: 2.7.0 | **Cyrius**: 5.9.43
 > **Topics**: 74 (74 fully covered) — **P0 → P3 complete** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 814 source files; concept files: 74
@@ -113,16 +113,28 @@ language-feature alignment. The cadence:
 5. CHANGELOG patch entry summarises the bump
 6. zugot recipe (in the upstream repo) tracks the same version
 
-Current pin: **5.8.34** (vidya 2.4.4). Upstream cyrius issues
+Current pin: **5.9.43** (vidya 2.7.0; entire 5.9.x cycle absorbed
+in one bump — niyama 1.0.1 fold at .0, sovereignty pass at .1
+[programs/check.cyr + lib/audit_walk.cyr 78th stdlib], agnosys
+`#derive(Serialize)` cascade .33–.39, cx Phase 2c parity at .40,
+tls-live gate conversion at .41, lib/regression.cyr 79th stdlib
+carve-out at .42, closeout at .43). Upstream cyrius issues
 filed during 2.6.x — see `cyrius/docs/development/issues/`.
 
 ---
 
-## Renderer integration — vyakarana (open work, untimed)
+## Renderer integration — vyakarana (live)
 
-> **Status**: Ready upstream as of vyakarana **1.10.0** (2026-05-08).
-> Pick up when a vidya renderer rewrite is on the agenda — no
-> hard sequencing into the topic roadmap above.
+> **Status**: Live on **vyakarana 1.11.1** as of 2026-05-08
+> (pin bump only; wire-up shipped in 2.7.0). `vidya code
+> <topic> <lang>` (CLI, ANSI-colored) and
+> `GET /code/{topic}/{lang}` (HTTP, JSON tokens) both flow
+> through `tokenize_source` / `tokenbuf_*` / `kind_name`.
+> Theme contract per vyakarana ADR 0004 (palette indexed by
+> kind-name string, never integer). OpenQASM falls back to
+> `tokens:[]` — no grammar in vyakarana 1.11.x by design.
+> Smoke verified: 2187 tokens on the rust track of
+> `content/lexing_and_parsing/`.
 
 vyakarana ships 38 bundled grammars covering every language in
 vidya's reference shelf (the 11 vidya tracks plus 27 more). It
@@ -133,15 +145,14 @@ rewrite is planned.
 
 **What needs to happen on vidya's side:**
 
-1. Add the dep in `cyrius.cyml`:
+1. ~~Add the dep in `cyrius.cyml`~~ — done in 2.7.0:
    ```toml
    [deps.vyakarana]
    git     = "https://github.com/MacCracken/vyakarana.git"
-   tag     = "1.10.0"   # bump as later vyakarana releases ship
+   tag     = "1.11.0"   # bump as later vyakarana releases ship
    modules = ["dist/vyakarana.cyr"]
    ```
-2. Run `cyrius deps` — pulls `dist/vyakarana.cyr` into vidya's
-   `lib/`.
+2. ~~Run `cyrius deps`~~ — done; `lib/vyakarana.cyr` vendored.
 3. Replace the existing code-rendering path with calls into the
    vyakarana public API (see the integration guide). Expected
    surface:
@@ -246,4 +257,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-08 (v2.6.4) — **🎉 P3 complete; 74/74 at 11/11; 814/814 validator; next topic batch: 2.7.x opens P4 build systems with build_systems, package_resolution, reproducible_builds. Renderer integration with vyakarana 1.10.0 documented as open-untimed work — see new "Renderer integration" section.***
+*Last Updated: 2026-05-08 (v2.7.0) — **🎉 P3 complete; 74/74 at 11/11; 814/814 validator. 2.7.0 infra bump in flight: cyrius 5.9.43, vyakarana 1.11.1 vendored, content-format spec extended, `vidya code` CLI + `GET /code/{topic}/{lang}` HTTP route live (token output flowing — verified 2187 tokens on the rust track of `content/lexing_and_parsing/`). P4 topics (build_systems, package_resolution, reproducible_builds) is the next vidya-side track.***

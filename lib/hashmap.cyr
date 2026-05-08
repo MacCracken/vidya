@@ -405,17 +405,27 @@ fn hash_u64(k) {
 var MAP_U64_EMPTY = 0;
 var MAP_U64_TOMB = 0xFFFFFFFFFFFFFFFF;
 
-# Create a new u64-keyed hash map (initial capacity 16).
-fn map_u64_new() {
-    var m = alloc(32);
+# v5.8.43 — Allocator-as-first-arg variant of map_u64_new.
+# Allocates the 32-byte map header + initial 16-slot entries
+# array (16 bytes per slot) via `a`. Returns 0 on OOM.
+fn map_u64_new_a(a) {
+    var m = alloc_via(a, 32);
+    if (m == 0) { return 0; }
     var cap = 16;
-    var entries = alloc(cap * 16);
+    var entries = alloc_via(a, cap * 16);
+    if (entries == 0) { return 0; }
     memset(entries, 0, cap * 16);
     store64(m, entries);
     store64(m + 8, cap);
     store64(m + 16, 0);
     store64(m + 24, KeyTypeU64);
     return m;
+}
+
+# Create a new u64-keyed hash map (initial capacity 16). v5.8.43
+# wrapper — delegates to map_u64_new_a with default_alloc().
+fn map_u64_new() {
+    return map_u64_new_a(default_alloc());
 }
 
 # Find slot for key. Returns entry pointer (empty slot, tombstone
@@ -445,8 +455,10 @@ fn _map_u64_find(m, key) {
     return 0;
 }
 
-# Grow backing store (double capacity, rehash).
-fn _map_u64_grow(m) {
+# v5.8.43 — Allocator-as-first-arg internal grow. Returns 0 on
+# success, -1 on grow OOM (vs back-compat _map_u64_grow which
+# aborts).
+fn _map_u64_grow_a(a, m) {
     var old_entries = load64(m);
     var old_cap = load64(m + 8);
     var new_cap = old_cap * 2;
@@ -454,11 +466,8 @@ fn _map_u64_grow(m) {
         syscall(1, 2, "map_u64: capacity overflow\n", 27);
         syscall(60, 1);
     }
-    var new_entries = alloc(new_cap * 16);
-    if (new_entries == 0) {
-        syscall(1, 2, "map_u64: alloc failed\n", 22);
-        syscall(60, 1);
-    }
+    var new_entries = alloc_via(a, new_cap * 16);
+    if (new_entries == 0) { return 0 - 1; }
     memset(new_entries, 0, new_cap * 16);
     store64(m, new_entries);
     store64(m + 8, new_cap);
@@ -469,7 +478,7 @@ fn _map_u64_grow(m) {
         var ok = load64(oep);
         if (ok != MAP_U64_EMPTY) {
             if (ok != MAP_U64_TOMB) {
-                map_u64_set(m, ok, load64(oep + 8));
+                map_u64_set_a(a, m, ok, load64(oep + 8));
             }
         }
         gi = gi + 1;
@@ -477,11 +486,25 @@ fn _map_u64_grow(m) {
     return 0;
 }
 
-# Set key=value. Overwrites if key exists. Returns 0 on success,
-# -1 if the probe chain was full (shouldn't happen — grow fires
-# at 70% load before the chain saturates).
-fn map_u64_set(m, key, value) {
-    if (load64(m + 16) * 10 >= load64(m + 8) * 7) { _map_u64_grow(m); }
+# Grow backing store (double capacity, rehash). v5.8.43 wrapper —
+# aborts on OOM (matching pre-v5.8.43 behavior).
+fn _map_u64_grow(m) {
+    var rc = _map_u64_grow_a(default_alloc(), m);
+    if (rc < 0) {
+        syscall(1, 2, "map_u64: alloc failed\n", 22);
+        syscall(60, 1);
+    }
+    return 0;
+}
+
+# v5.8.43 — Allocator-as-first-arg variant of map_u64_set. Routes
+# any grow through `a`. Returns 0 on success, -1 on grow OOM
+# (caller must check; back-compat map_u64_set aborts instead).
+fn map_u64_set_a(a, m, key, value) {
+    if (load64(m + 16) * 10 >= load64(m + 8) * 7) {
+        var rc = _map_u64_grow_a(a, m);
+        if (rc < 0) { return 0 - 1; }
+    }
     var ep = _map_u64_find(m, key);
     if (ep == 0) { return 0 - 1; }
     var existing = load64(ep);
@@ -491,6 +514,16 @@ fn map_u64_set(m, key, value) {
     store64(ep, key);
     store64(ep + 8, value);
     if (was_new == 1) { store64(m + 16, load64(m + 16) + 1); }
+    return 0;
+}
+
+# Set key=value. Overwrites if key exists. Returns 0 on success,
+# -1 if the probe chain was full (shouldn't happen — grow fires
+# at 70% load before the chain saturates). v5.8.43 wrapper —
+# aborts on grow OOM.
+fn map_u64_set(m, key, value) {
+    var rc = map_u64_set_a(default_alloc(), m, key, value);
+    if (rc < 0) { return rc; }
     return 0;
 }
 

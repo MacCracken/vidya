@@ -2,6 +2,26 @@
 
 ## Directory Structure
 
+`content/` holds three kinds of entries — topic directories, the
+Cyrius language reference, and shared toolchain resources:
+
+```
+content/
+├── {topic}/                  # 74× topic directories (see below)
+├── cyrius/                   # Cyrius language reference + field notes
+│   ├── language/             #   index, stdlib_modules, syntax notes
+│   └── field_notes/          #   recurring-pain notes (cyim, compiler, …)
+└── qelib1.inc                # Shared OpenQASM 2.0 stdlib include
+```
+
+`vidya stats` and the roadmap topic count refer to the topic directories
+only — `cyrius/` is the language-reference subtree (loaded separately
+by the field-notes path), and `qelib1.inc` is a load-bearing OpenQASM
+resource (every topic's `openqasm.qasm` resolves it via
+`include "qelib1.inc";`; the validator passes
+`include_path=[content/]` to qiskit so the file must live at the
+content root).
+
 Each topic lives in its own directory under `content/`:
 
 ```
@@ -16,7 +36,8 @@ content/{topic}/
 ├── zig.zig            # Zig implementation
 ├── asm_x86_64.s       # x86_64 Assembly implementation
 ├── asm_aarch64.s      # AArch64 Assembly implementation
-└── openqasm.qasm      # OpenQASM 2.0 quantum circuit
+├── openqasm.qasm      # OpenQASM 2.0 quantum circuit
+└── cyrius.cyr         # Cyrius implementation (primary content language)
 ```
 
 ## concept.toml
