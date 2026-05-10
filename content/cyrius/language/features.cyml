@@ -1,6 +1,6 @@
 # Cyrius — Language Features
 # How to use specific Cyrius language features: types, syntax, derives, directives.
-# 16 entries.
+# 26 entries.
 
 [[entries]]
 name = "multi_width_types"
@@ -456,11 +456,36 @@ NARROW INTEGER WIDTHS (i8, i16, i32):
     asserts. The fix is at the literal-write side, not the
     size-reporting side.
 
-PLATFORM CAVEAT (Mach-O / macOS arm64):
-    Pre-v5.9.36 the auto-generated `_to_json` body SIGSEGVs at
-    runtime on real macOS arm64 (ecb host) — the codegen path
-    works on x86_64 Linux + qemu-aarch64 + real Linux aarch64
-    (pi) + Windows PE. Pin: separate Mach-O serializer slot.
+PLATFORM CAVEAT (Mach-O / macOS arm64) — RESOLVED v5.9.38/39:
+    Pre-v5.9.38 the auto-generated `_to_json` body SIGSEGV'd
+    at runtime on real macOS arm64 (ecb host). Two compounding
+    bugs surfaced via lldb crash log:
+    (1) **v5.9.38 Bug A** — `lib/fnptr.cyr` had no
+        `#ifdef CYRIUS_TARGET_MACOS` branches in `fncall0..8`;
+        on Mach-O builds `fncallN` returned 0 → `alloc_via`
+        returned NULL → `str_builder_new` returned NULL →
+        SIGSEGV at `load64(NULL+8)` inside `_sb_grow_a`. Fix:
+        macOS branches with x86_64 + aarch64 asm copies of
+        the Linux block content (SysV-identical).
+    (2) **v5.9.39 Bug B** — `src/backend/aarch64/fixup.cyr`
+        ftype==3 emitted a static MOVZ/MOVK chain encoding
+        the unslid file VA. Apple Silicon enforces MH_PIE;
+        dyld slides the image at load time → `blr xN` jumped
+        to (file_VA, no slide), landing in `__data` / `__got`
+        instead of `__text`. Fix: dispatch to ADRP+ADD
+        relative addressing on `_TARGET_MACHO == 2`,
+        mirroring how ftype==1 (string addrs) and ftype==0
+        (var addrs) already worked.
+
+    Both fixes verified via `_macho_derive_serialize_gate`
+    in programs/check.cyr — runs `point_to_json(&p, sb)` on
+    ecb and asserts the byte-count exit code. Cross-host
+    parity with Linux aarch64 (pi) confirmed at v5.9.39 ship.
+    The agnosys 1.1.12 verbatim repro hash
+    (`6425355b6147d5a674078794310ae2c1`) now executes through
+    the build path on Mach-O — the residual SIGSEGV at the
+    `println(strlen(out))` shape is a TYPE-SYSTEM gap pinned
+    for v5.10.x, not a Mach-O codegen bug.
 
 ALSO AVAILABLE — #derive(accessors):
     #derive(accessors) struct Point { x; y; }
@@ -897,3 +922,479 @@ That's a future slot. Today's idiom for tagged values:
 
 Or use the `lib/tagged.cyr` helper API (`is_some`, `unwrap_or`,
 etc.) which encapsulates the load64 pattern.
+
+[[entries]]
+name = "char_literals_v59x"
+description = "Char literals — `'X'` syntax in lex.cyr emits NUMBER token (v5.9.37)"
+category = "cyrius"
+tags = ["lexer", "syntax", "v5.9.37", "char-literal"]
+---
+v5.9.37 added char-literal lexing. `'X'` produces a NUMBER
+token (token type 1) carrying the byte value of the character
+between the single quotes.
+
+USAGE:
+    str_builder_putc(sb, '[');           # 91
+    str_builder_putc(sb, '\\n');          # 10
+    if (c == 'a') { ... }                # c == 97
+    var space = ' ';                      # 32
+
+ESCAPES SUPPORTED (mirror string-literal escapes):
+    \\n  → 10  (LF)
+    \\t  → 9   (TAB)
+    \\r  → 13  (CR)
+    \\\\  → 92  (backslash itself)
+    \\'  → 39  (single quote)
+    \\0  → 0   (NUL)
+
+PARSING SHAPE:
+    `'` opens; one byte (or 2-char escape) follows; `'` closes.
+    No multi-byte / unicode in char literals — single ASCII byte.
+    Mismatched closing quote → lexer error at the line.
+
+WHY IT LANDED:
+    agnosys 1.1.12 verbatim repro at v5.9.37 ship used
+    `str_builder_putc(sb, '[')` and `str_builder_putc(sb, ']')`.
+    Pre-v5.9.37 cyrius had no char-literal token; consumers
+    encoded byte values as `91` etc. with a comment naming
+    the char. Adding `'X'` is consumer-ergonomic + standard
+    lexer feature.
+
+PAIRED ADDITION (lib/str.cyr):
+    `str_builder_putc(sb, ch)` — append single byte to a
+    str_builder. Mirrors the existing `str_builder_add`
+    (Str), `str_builder_add_cstr` (cstring), `str_builder_add_int`
+    helpers; pairs with the new char literal for byte-at-a-
+    time append.
+
+[[entries]]
+name = "auto_call_main_v59x"
+description = "Auto-call `main()` if defined — compiler emits ECALLTO at exit epilogue (v5.9.37)"
+category = "cyrius"
+tags = ["compiler", "behavior", "v5.9.37", "auto-call-main"]
+---
+v5.9.37 added auto-call-main behavior. If a source defines
+`fn main() { ... }` but doesn't explicitly call it via
+`var ec = main(); syscall(60, ec);` (the long-standing
+manual wiring), the compiler now walks the fn table for
+the byte-match `"main\\0"` and emits `ECALLTO(_main_off)`
+at the exit epilogue, AFTER the GLVAR-load.
+
+ORDER MATTERS:
+    Exit epilogue:
+      1. `if (lv >= 0) { EVLOAD(S, lv); }`   ; load last expr
+      2. **auto-call-main** (if `fn main` defined)            ← v5.9.37
+      3. `EEXIT(S);`                                          ; ret syscall
+
+    Auto-call AFTER GLVAR-load preserves the manual-wiring
+    case: a source with explicit `var ec = main(); syscall(60, ec);`
+    short-circuits at step 2 because syscall(60, ec) terminates
+    the process before EEXIT runs. Auto-call only fires when
+    the user didn't manually wire it.
+
+DCE EXEMPTION:
+    Cyrius's dead-code-elimination bitmap stubs unreferenced
+    fns to `xor eax, eax; ret`. With auto-call-main, `main`
+    is now reachable from the exit epilogue — but the DCE
+    bitmap doesn't know that (the ECALLTO is emitted AFTER
+    DCE marks the fn). Workaround: a name-byte-match
+    exemption (`m`/`a`/`i`/`n`/`\\0` at start of name) sets
+    `dce_is_main = 1` and bypasses the bitmap check.
+
+CROSS-ARCH:
+    Same shape in `src/main.cyr` and `src/main_aarch64.cyr`.
+    aarch64 doesn't have a DCE pass so no exemption needed
+    on that side.
+
+WHY IT LANDED:
+    agnosys 1.1.12 verbatim repro had `fn main() { ... }`
+    without the manual `var ec = main(); syscall(60, ec);`
+    wiring. Pre-v5.9.37 the compiler ran gvar inits + the
+    parse-prog walk and exited with `rax=junk` — `main` was
+    never invoked. Auto-call closes the consumer-friendliness
+    gap. Long-standing `var ec = main(); syscall(60, ec);`
+    pattern still works — it short-circuits the auto-call.
+
+[[entries]]
+name = "cx_phase2c_v59x"
+description = "cyrius-x bytecode (cx) backend Phase 2c parity — sub-byte fields, struct-byval return, 7+-arg fns (v5.9.40)"
+category = "cyrius"
+tags = ["cx-backend", "bytecode", "v5.9.40", "stdlib", "cxvm"]
+---
+v5.9.40 closed the three Phase 2c sites that v5.9.26 +
+v5.9.27 narrowed but didn't fix in the cyrius-x (cx)
+bytecode backend. End-to-end: a cyrius source exercising
+struct-by-value return, sub-8-byte struct field loads, and
+7+-arg fn calls now round-trips cleanly through cc5_cx →
+.cyx bytecode → cxvm interpreter.
+
+THREE COORDINATED CHANGES:
+
+(1) Sub-byte struct field load — new per-backend
+    `EFIELD_LOAD_W(S, width)` helper. cx version emits new
+    cxvm `load16` (0x44) / `load32` (0x45) opcodes; aarch64
+    version emits `ldrb` / `ldrh` / `ldr w0`; x86 emits
+    `movzx rax, byte [rcx]` etc. parse_decl.cyr's
+    `PARSE_FIELD_LOAD` switched from inline emit to the
+    helper.
+
+(2) Struct return by value — new per-backend
+    `ESTRUCT_BYVAL_COPY(S, src_disp, stash_disp, aligned)`
+    helper. cx emits an explicit byte-loop (load8 / store8 +
+    add / sub + jnz) since cxvm has no `rep movsb` / post-
+    incr semantics. aarch64 emits LDRB/STRB-with-post-incr.
+    x86 emits `rep movsb` block.
+
+(3) ESTORESTACKPARM — real impl in cx (was TODO stub).
+    cxvm has 32 registers so 7+-arg fn calls just pop into
+    r3..r9+ via the existing `ECALLPOPS` loop;
+    `ESTORESTACKPARM` mirrors `ESTOREPARM`'s r-to-frame
+    body shape using the call-site `disp` directly.
+
+CXVM OPCODE EXTENSIONS:
+    0x44 — load16 ra, [rb]   (zero-extend halfword)
+    0x45 — load32 ra, [rb]   (zero-extend word)
+    0x46 — store16 [ra], rb  (low halfword)
+    0x47 — store32 [ra], rb  (low word)
+
+    Composed from cyrius's native load8 / load64 + bit-shift
+    primitives (the language has no native sub-8/sub-64
+    multi-byte memory ops).
+
+CX-SIDE ABI COMPLETION (required to make the chain compile):
+    Pre-v5.9.40 these were stubs:
+    - `EFLADDR(S, lli)` — was stub returning 0
+    - `EFLADDR_X1(S, lli)` — didn't exist
+    - `ESTOREREGPARM(S, pidx, disp)` — didn't exist
+    Without them, cc5_cx SIGILL'd at compile-time on any
+    sub-byte struct-field store or `fn f(): S` declaration.
+    All three got real impls this slot mirroring the existing
+    `ESTOREPARM` r-to-frame body shape.
+
+CONSUMER NOTE:
+    cx is x86-shaped (mostly) but has 32 registers vs SysV's
+    8 GP-arg / 6 reg-arg convention. ECALLPOPS pops into
+    r3..r9+ regardless of arg count — no separate
+    "stack-arg" path is actually needed; cxvm's ESTOREPARM
+    handles arbitrary arity via `r(3+pidx)`.
+
+[[entries]]
+name = "regression_module_v59x"
+description = "lib/regression.cyr — testing-stdlib carved from programs/check.cyr at v5.9.42"
+category = "cyrius"
+tags = ["stdlib", "testing", "v5.9.42", "regression"]
+---
+v5.9.42 carved out 22 reusable testing primitives from
+`programs/check.cyr` into a new stdlib module
+`lib/regression.cyr`. Downstream test runners (yantra,
+agnosys/mabda smoke suites, future runners) can reach for
+the same shapes via `include "lib/regression.cyr"` instead
+of re-rolling fork/exec/SSH/timeout boilerplate.
+
+PUBLIC SURFACE — 22 verbs across 5 groups:
+
+  Display (4):
+    regression_print(s)
+    regression_section(name)
+    regression_check(name, exit_code)
+    REGRESSION_ANSI_RED / _GREEN / _RESET (3 const vars)
+
+  Buffer scan (3):
+    regression_buf_eq(p, s, n)
+    regression_count_substr(buf, n, needle)
+    regression_file_contains_substr(path, substr)
+
+  Process (8):
+    regression_pipe_to_bin / _capture
+    regression_run_with_timeout (poll-based wall-clock)
+    regression_exec_capture / _exec_run
+    regression_exec_with_arg_capture / _both
+    regression_exec_in_dir3 / _env
+
+  Network (1):
+    regression_network_probe(addr_ipv4, port, timeout_ms)
+        non-blocking connect + poll(POLLOUT) + SO_ERROR
+        readback. Replaces bash `/dev/tcp` trick.
+
+  SSH cluster (6):
+    regression_ssh_target / _ssh_skip_check / _scp_to /
+    _ssh_remote_exit / _ssh_remote_exec_capture /
+    _codesign_remote
+
+CONVENTIONS:
+- Every fork+exec verb takes explicit `envp` arg (no
+  implicit env). Caller passes their own; pass `0`-
+  terminated 1-elem array for empty.
+- Exit-code convention: 0..127 = normal exit; 128+sig
+  on signal; -1 on fork/exec/syscall failure; -2 for
+  timeout (`_run_with_timeout` only).
+- `regression_pipe_to_bin*` use 1 MB src cap. Cyrius
+  self-host's `_self_host_pipe` uses 2 MB + raw status —
+  not interchangeable. Compile-shaped helpers stay in
+  `programs/check.cyr` for that reason.
+
+WHAT IT DOES NOT PROVIDE:
+- Test framework with assert macros / fixture discovery /
+  parallel runners — that's `lib/test.cyr` material;
+  decision (memory pin 2026-04-30): keep narrow + earn
+  on consumer ask.
+- cyrius-specific gate dispatchers (`_tcyr_relay_gate`,
+  `_expected_output_gate`) — depend on audit-internal
+  accounting, stay in `programs/check.cyr`.
+
+CONSUMER NOTE — sandhi:
+sandhi's `_sandhi_conn_connect_nb` shares the exact
+non-blocking-connect + poll + SO_ERROR mechanics. If a
+future sandhi minor (1.2.0+) wants to factor down to a
+shared primitive, the natural target is a `lib/net.cyr`
+extension `net_connect_nb(fd, addr, port, timeout_ms)`
+that both modules compose-use. Default per sandhi's
+1.2.0 roadmap entry: leave parallel impls intentional
+unless profiling surfaces a hot-path reason.
+
+
+[[entries]]
+name = "f64v_simd_primitives"
+description = "Flat-array SIMD packed-double builtins. f64v_add/sub/mul/div/sqrt/abs/fmadd (v1.9.0; cross-arch close v5.10.16) + f64v_dot/scale/axpy (v5.10.17 — keystone for hisab gap-close). x86 SSE2 + aarch64 NEON .2D; cx no-op (cx f64 pipeline TBD)."
+category = "cyrius"
+---
+SHAPE:
+    f64v_add(dst, a, b, n);    # dst[i] = a[i] + b[i]
+    f64v_sub(dst, a, b, n);    # dst[i] = a[i] - b[i]
+    f64v_mul(dst, a, b, n);    # dst[i] = a[i] * b[i]
+    f64v_div(dst, a, b, n);    # dst[i] = a[i] / b[i]
+    f64v_sqrt(dst, src, n);    # dst[i] = sqrt(src[i])
+    f64v_abs(dst, src, n);     # dst[i] = |src[i]|
+    f64v_fmadd(dst, a, b, c, n); # dst[i] = a[i]*b[i] + c[i]
+    var s = f64v_dot(a, b, n); # f64 = sum(a[i]*b[i])
+    f64v_scale(dst, a, s, n);  # dst[i] = a[i] * s (scalar)
+    f64v_axpy(y, x, alpha, n); # y[i] += alpha * x[i]
+
+All take RAW POINTERS (i64 addresses) and i64 element
+counts (in DOUBLES, not bytes). f64 args / returns are
+i64 bit-pattern representations — use f64_from(x) /
+f64_to(x) to convert int <-> f64.
+
+PAIR-STEP:
+    Loop processes 2 doubles per iteration (SSE2 packed-
+    double has 2 lanes; aarch64 NEON .2D similarly).
+    For odd n the last iteration touches one element
+    past the array (16-byte load/store starting at
+    index n-1). Caller contract: over-allocate by one
+    slot or pass even n. Pre-existing footgun preserved
+    cross-arch for parity.
+
+CROSS-ARCH ENCODINGS:
+    x86 SSE2: addpd / subpd / mulpd / divpd / sqrtpd /
+    andpd (sign-mask abs) / mulpd+addpd (fmadd) / haddpd
+    (dot reduce) / unpcklpd (broadcast).
+
+    aarch64 NEON .2D: fadd / fsub / fmul / fdiv / fsqrt
+    / fabs / fmla (fmadd, dot accumulate, axpy) / faddp
+    (dot reduce) / dup (broadcast). FMLA gives axpy a
+    fused single-instruction y += x*alpha — measurable
+    win over the x86 mulpd+addpd two-instruction shape.
+
+    cx: no-op stubs (entire cx f64 pipeline is TBD).
+
+CONSUMER COMPOSITION (hisab Vec3/Vec4/Mat4):
+- |v|^2: f64v_dot(v, v, 3 or 4)
+- normalize(v): f64v_dot then 1/sqrt then f64v_scale
+- lerp(a, b, t): copy a → dst; f64v_axpy(dst, b-a, t, n)
+  (or compose with f64v_sub + f64v_scale)
+- mat4_mul row · col: f64v_dot per output cell
+- ray_sphere intersect: dot products dominate the cost
+
+PARSER DISPATCH:
+- Tokens: 89-91 (add/sub/mul), 93 (div), 94 (sqrt), 95
+  (abs), 96 (fmadd), 128 (dot), 129 (scale), 130 (axpy).
+- 89-91 inlined in PARSE_TERM; 93-96 + 128-130 dispatch
+  to PARSE_SIMD_EXT in src/frontend/parse_expr.cyr.
+- Statement-level dispatch in parse.cyr extended at
+  v5.10.17 to cover typ 128-130 (pre-fix bare
+  `f64v_dot(...);` statements gave "unexpected unknown").
+
+LATENT BUG HISTORY:
+- Pre-v5.10.16 the existing primitives 89-96 were
+  aarch64-stubbed (no-op) AND had an x86 codegen bug
+  under auto-regalloc (40+ byte frame-disp mismatch
+  vs EFLSTORE). Both surfaced via v5.10.16 premise
+  check. See gotchas.cyml f64v_simd_frame_disp_under_
+  regalloc.
+- programs/simd_expand_test.cyr was the only consumer
+  for ~3.5 years and was never wired into check.sh —
+  that is why both bugs hid. v5.10.16 added
+  tests/tcyr/simd.tcyr as the regression floor.
+
+[[entries]]
+name = "type_system_real_phase_arc"
+description = "Real type system: annotations + call-site checks + registry-based overload dispatch (v5.10.1 - v5.10.26 5-phase arc)"
+category = "cyrius"
+---
+SYNTAX (CALL-SITE CHECKING):
+    fn add(a: i64, b: i64): i64 { return a + b; }
+
+    var x: i64 = 5;
+    var y: i64 = 7;
+    var r = add(x, y);     # types match → pass
+    var s = add(x, "hi");  # type mismatch at parse-time → error
+
+WHAT v5.10.x ADDED:
+    - Type-annotation registry per fn: param_types[fi][pi]
+      stored at parse-time. Call-site argument expressions
+      get their result-type tagged; mismatch raises a parse
+      error before codegen.
+    - Overload dispatch: fns with the same base name but
+      different param-type fingerprints register independently.
+      Call sites pick the matching variant based on the actual
+      argument types observed.
+    - Type-rewriting for sum types / structs (consumed by
+      derive). The compiler can now answer "what is the type
+      of this expression" at every point in parse, not just
+      "what is the slot width".
+
+ARC PHASES:
+    Phase 1 (v5.10.1)  — annotations parsed + stored in registry.
+    Phase 2 (v5.10.13) — call-site arg-type checking.
+    Phase 3 (v5.10.18) — overload dispatch (same-name disambig).
+    Phase 4 (v5.10.22) — return-type recording + cross-call flow.
+    Phase 5 (v5.10.26) — sum-type rewriting + derive-friendly.
+
+WHY:
+    Pre-v5.10.x, all fn args were i64-shaped at the codegen
+    layer; type annotations existed only as documentation.
+    Real typed-simd ABI (f64v2/f64v4 value-form params) couldn't
+    work without compile-time knowledge of param types — needed
+    to pick the right register class (GPR vs XMM/V) per param.
+    The type system arc was the unblock for the typed-simd
+    ABI arc (v5.10.28 - .39).
+
+CONSUMERS:
+    - Typed-simd value-form fns (lib/simd.cyr, value-form half).
+    - Sum-type derive (agnosys serialize/deserialize).
+    - Pointer-vs-value overload dispatch (v5.10.39).
+
+[[entries]]
+name = "typed_simd_value_type_abi"
+description = "f64v2 and f64v4 as primitive value types — XMM/V0 register-pair param + return ABI across all backends"
+category = "cyrius"
+---
+SYNTAX:
+    fn add(a: f64v2, b: f64v2): f64v2 {
+        return f64v2_add(a, b);
+    }
+
+    var x: f64v2 = f64v2_make(0x4000000000000000, 0x4008000000000000);
+    var y: f64v2 = f64v2_make(0x4010000000000000, 0x4014000000000000);
+    var r: f64v2 = add(x, y);   # passes via XMM0/XMM1, returns via XMM0
+
+ABI BY BACKEND:
+    x86 SysV (Linux/macOS/BSD):
+        f64v2 → 1 XMM register (XMM0..XMM7 for params, XMM0 for return).
+        f64v4 → 2 XMM register pair (XMM0+XMM1, XMM2+XMM3, …; return
+            in XMM0+XMM1).
+
+    aarch64 AAPCS (Linux/macOS):
+        f64v2 → 1 V register (V0..V7 for params, V0 for return).
+        f64v4 → 2 V register pair (V0+V1, …; return in V0+V1).
+
+    cx bytecode:
+        f64v2 → register pair (r0+r1, r2+r3, …).
+        f64v4 → 4 registers (r0..r3, r4..r7, …; return in r0..r3).
+
+    Win64 PE:
+        Value-form params NOT SUPPORTED on PE (deliberate gap —
+        Win64 ABI requires retptr-style for >8-byte aggregates
+        which would force per-call shadow space + caller-side
+        return-buffer pre-alloc, breaks call-site overload).
+        PE consumers use pointer-form wrappers (`f64v2_add_ptr`).
+
+CYRIUS-INTERNAL SPLIT-COUNTER (SysV/AAPCS):
+    A SIMD ordinal counts XMM0..XMM7 (or V0..V7) consumption
+    independently of the int ordinal (RDI/RSI/RDX/RCX/R8/R9
+    or X0..X7). A fn signature like `fn f(a: i64, b: f64v2,
+    c: i64, d: f64v2)` places a→RDI, b→XMM0, c→RSI, d→XMM1
+    (NOT b→RSI/RDX, d→R8/R9 as would happen if everything
+    shared one counter).
+
+WHEN TO USE:
+    - Math / numeric kernels (hisab Vec3/Vec4/Mat4, geometry).
+    - Reducing call overhead in hot loops vs pointer-passing.
+    - Value-form is FASTER than pointer-form when chaining
+      ops (no stack write+read round-trip between calls).
+
+WHEN NOT TO USE:
+    - PE-targeted code (use pointer-form).
+    - Mixed-target stdlib code that must compile to all
+      backends — gate value-form definitions with
+      `#ifdef CYRIUS_HAS_VAL_SIMD_PARAMS`.
+
+ARC PHASES (v5.10.28 - .39):
+    Phase 1  (v5.10.28) — f64v2 ABI shape design (XMM0 single).
+    Phase 2  (v5.10.29) — x86 SysV f64v2 return path.
+    Phase 3  (v5.10.30) — aarch64 NEON f64v2 return (V0).
+    Phase 4  (v5.10.31) — Win64 PE retptr fallback (return only).
+    Phase 5  (v5.10.32) — cx bytecode pair (r0+r1).
+    Phase 6  (v5.10.33) — macho Mach-O inherits SysV; full pair return.
+    Phase 7  (v5.10.36) — aarch64 single V0 NEON (was X0+X1 GPR pair).
+    Phase 8  (v5.10.37) — f64v4 quad-register return.
+    Phase 9  (v5.10.38) — VALUE-FORM PARAMS (the unlock).
+    Phase 10 (v5.10.39) — pointer-vs-value overload dispatch.
+
+[[entries]]
+name = "overload_dispatch_pointer_vs_value"
+description = "Pointer-form overload routing: `f64v2_add(&x, &y)` auto-routes to `f64v2_add_ptr`; `f64v2_add(x, y)` calls value-form base"
+category = "cyrius"
+---
+SYNTAX:
+    # Pointer form — auto-routes to f64v2_add_ptr:
+    var x: f64v2; var y: f64v2;
+    var r: f64v2 = f64v2_add(&x, &y);
+
+    # Value form — calls f64v2_add (value-form base) directly:
+    var a: f64v2; var b: f64v2;
+    var r: f64v2 = f64v2_add(a, b);
+
+    # On PE, only pointer form available (overload-routed):
+    var r: f64v2 = f64v2_add(&x, &y);  # → f64v2_add_ptr
+
+HOW IT WORKS:
+    At PARSE_FNCALL in src/frontend/parse_fn.cyr, when the
+    first argument is an `&local` (PEEKT == 27), the parser
+    constructs the name `<base>_ptr` in a 128-byte stack
+    scratch and runs `_FINDFN_CSTR` against it. If found,
+    `fi` is rerouted to the _ptr variant; the call site
+    emits a call to the pointer-form fn.
+
+    No new heap region is used; this is name-mangling +
+    registry lookup. Defensive guard: `_po_base_len < 120`
+    prevents stack-scratch overflow (lesson from v5.10.39
+    in-slot bug where original 16-byte scratch overflowed
+    for ≥12-char base names).
+
+WHY:
+    Cyrius stdlib SIMD modules ship BOTH forms — value-form
+    (faster, register-passed) and pointer-form (universal,
+    PE-compatible). Without dispatch, consumers writing
+    `f64v2_add(&x, &y)` would get "fn signature mismatch"
+    because the f64v2_add VALUE-form expects f64v2 args, not
+    pointers. Dispatch hides the dual-form impl detail.
+
+CONSUMER POV:
+    Write `f64v2_add(...)` with whatever shape your args
+    happen to be in — `&local`, value, mix. The parser
+    picks the right variant. Code stays portable to PE
+    (which only has pointer-form) without consumer code
+    changes; the value-form fns are #ifdef-gated in the
+    stdlib, and dispatch transparently falls back to
+    pointer-form when value-form doesn't exist.
+
+GOTCHA — duplicate parse paths:
+    Argument stash for these intrinsics happens in MULTIPLE
+    dispatch blocks (PARSE_SIMD_EXT for ptyp 93-130, plus
+    a separate dispatch at ptyp 89-91 for f64v_add/sub/mul).
+    Stash slots MUST clear locname[idx] (= -1) at each stash
+    site or stale name entries from prior fn parses cause
+    FINDLOCAL misroute. See gotchas.cyml
+    locname_staleness_duplicate_dispatch_paths for the full
+    bug class write-up.

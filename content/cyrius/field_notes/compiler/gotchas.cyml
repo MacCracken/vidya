@@ -12,7 +12,7 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
-# 18 entries.
+# 20 entries.
 
 [[entries]]
 name = "slice_fn_local_layout_flip"
@@ -1183,4 +1183,636 @@ Full backstory: vyakarana 1.0.2 pin-bump 5.6.0 → 5.9.32 at
 cyrius `tests/tcyr/include_quote_comment.tcyr` (3 assertions)
 + `tests/fixtures/include_quote_comment/{leaf,sibling_a,
 sibling_b}.cyr` cover the regression.
+"""
+
+[[entries]]
+name = "macho_arm64_pie_aslr_static_fn_addr"
+description = "Mach-O ARM64 enforces MH_PIE; dyld slides the image at load time. Static-encoded absolute fn addresses (3-instruction MOVZ/MOVK chain in `&fn_name` ftype==3 fixup) survive ELF but NOT Mach-O — `blr xN` jumps to (file_VA, no slide), landing in `__data` / `__got` instead of `__text`. v5.9.39 fix: dispatch ftype==3 to ADRP+ADD relative addressing on `_TARGET_MACHO == 2`, mirroring how ftype==1 (string addrs) and ftype==0 (var addrs) already worked. The shape: any fixup type encoding an absolute address must be PIE-safe on Mach-O."
+category = "cyrius"
+tags = ["macho", "aarch64", "fixup", "aslr", "pie", "v5.9.39", "fn-pointer"]
+content = """
+v5.9.38/v5.9.39 paired bug. Symptom: agnosys 1.1.12 verbatim
+repro SIGSEGV'd at runtime on real macOS arm64 (ecb host)
+inside the heavy-allocator-vtable dispatch chain that
+`#derive(Serialize)` triggers.
+
+== TWO COMPOUNDING BUGS ==
+
+**Bug A** (v5.9.38, simple once seen): `lib/fnptr.cyr` had
+`#ifdef CYRIUS_TARGET_LINUX` and `#ifdef CYRIUS_TARGET_WIN`
+branches in `fncall0..8`, but no `#ifdef CYRIUS_TARGET_MACOS`.
+On Mach-O builds, neither asm{} block fired → `result`
+stayed at the `var result = 0;` init → fncallN always
+returned 0 → `alloc_via` returned NULL → str_builder_new
+returned NULL → SIGSEGV at `load64(NULL+8)`. Fix: add
+macOS branches with x86_64 + aarch64 asm copies of the
+Linux content (SysV calling convention identical).
+
+**Bug B** (v5.9.39, the deeper one): even with Bug A
+fixed, the binary got further but still SIGSEGV'd — now
+at addr 5 (`ldrb w0, [x0]` with x0=5). Tracking down
+showed PC inside what looked like a memcpy/strlen
+alignment loop. The actual cause: `&fn_name` aarch64
+emit emitted a static 3-instruction MOVZ/MOVK chain
+encoding the unslid file VA. Apple Silicon enforces
+MH_PIE; dyld slides the image at load time; `blr xN`
+jumped to (file_VA, no slide) — landing in `__data` /
+`__got` instead of `__text`. Runtime alloc_fn value was
+`0x100017C00`, past the `__text` end (`0x10000C504`).
+
+== THE FIX ==
+
+Mirror what ftype==1 (string addrs) and ftype==0 (var
+addrs) already did on Mach-O: dispatch to
+`FIXUP_ADRP_ADD` which encodes the page-diff in the
+ADRP's immhi/immlo and the low-12 bits in the ADD's
+imm12. Both halves are PC-relative; the slide cancels
+out; `blr xN` lands in `__text` correctly.
+
+Three coordinated edits (v5.9.39):
+- `src/backend/aarch64/fixup.cyr` ftype==3: dispatch to
+  `FIXUP_ADRP_ADD(S, coff, ftarget)` on
+  `_TARGET_MACHO == 2`, `FIXUP_MOV` otherwise.
+- `src/frontend/parse_expr.cyr` `&fn_name` aarch64 emit:
+  emit 2-instruction ADRP+ADD pair (8 B) on Mach-O
+  instead of 3-instruction MOVZ chain (12 B).
+- `src/frontend/parse_expr.cyr` closure-literal aarch64
+  emit: same change.
+
+Plus `src/backend/x86/emit.cyr`: stub `EADRP` and
+`EADD_IMM12` so the x86 build's dead-code branch through
+`_AARCH64_BACKEND == 1` resolves the symbols cleanly.
+
+== FIELD NOTE FOR THE NEXT AGENT ==
+
+When Mach-O ARM crashes at runtime in code that "should
+work because it works on Linux aarch64" — check ASLR/PIE
+first. Mach-O is always slid; static absolute fn addresses
+do not survive.
+
+The audit shape: every fixup type that encodes an
+ABSOLUTE address must be PIE-safe on Mach-O. ftype==1,
+ftype==0, ftype==5 (Mach-O __got slot) all use ADRP+ADD
+or ADRP+LDR. ftype==3 was the missing one — fixed at
+v5.9.39. If a new fixup type lands, it needs the same
+audit.
+
+The regression substrate is `_macho_derive_serialize_gate`
+in `programs/check.cyr` (v5.9.39 ship). Compiles + scp's +
+codesigns + runs a fixture that exercises the exact
+Bug-A-and-Bug-B chain via `point_to_json(&p, sb)`. If
+either bug regresses the gate flips red.
+
+CROSS-REPO RECEIPT:
+- agnosys 1.1.12 verbatim repro hash
+  `6425355b6147d5a674078794310ae2c1` (preserved unchanged
+  through the v5.9.33-39 partial-fix chain — see
+  `feedback_no_rewriting_consumer_repros` memory pin).
+- Cross-host parity verified at v5.9.39 ship: Mach-O ARM
+  matches Linux aarch64 byte-for-byte through
+  `point_to_json(&p, sb)`. Both fail at the same
+  `println(strlen(out))` line — that's a TYPE-SYSTEM gap
+  pinned for v5.10.x, not a Mach-O codegen bug.
+"""
+
+[[entries]]
+name = "lex_brace_count_when_inserting_dispatch_branch"
+description = "Inserting a new top-level dispatch branch into `src/frontend/lex.cyr`'s deeply-nested `else { if (...) { ... } }` cascade requires matching the closing brace count exactly. v5.9.37 char-literal addition initially had a brace imbalance; the resulting parse error pointed at `src/backend/x86/emit.cyr:340` because that's the FIRST file the mis-parsed parser hits, not the actual cause-site (lex.cyr's missing close)."
+category = "cyrius"
+tags = ["lexer", "syntax", "v5.9.37", "brace-count", "diagnostic-mislead"]
+content = """
+v5.9.37 added char-literal lexing. The implementation
+lives in `src/frontend/lex.cyr` around line 988 (between
+the `c == 37` percent-symbol branch and the `c == 34`
+string-literal branch), inserted as ~50 lines of new code.
+
+== THE BRACE-COUNT GOTCHA ==
+
+When inserting the char-literal branch into lex.cyr's
+deeply-nested if/else dispatch chain, the closing brace
+count needs to match the opened branches exactly. The
+initial v5.9.37 attempt had a brace imbalance — adding
+`else { if (c == 39) { ... }` without the matching
+closing `}` produced this self-host build error:
+
+    error:src/backend/x86/emit.cyr:340:
+        undefined variable '_cur_fn_regalloc'
+
+The error points at emit.cyr — but the cause is in
+lex.cyr. The mis-parsed parser misinterpreted emit.cyr's
+top-level structure (because the missing brace in lex.cyr
+shifted every subsequent file's parse context), and the
+FIRST symbol that broke was `_cur_fn_regalloc` in emit.cyr.
+
+Fix: add one extra `}` to the closing brace chain at
+lex.cyr line 1241 (the end of the dispatch ladder).
+
+== FIELD NOTE FOR THE NEXT AGENT ==
+
+When inserting a new top-level dispatch branch into
+lex.cyr or any deeply-nested else-if chain in cyrius
+source, count braces before building. The cascade in
+lex.cyr is ~600 lines deep; adding a branch in the middle
+needs the matching close at the bottom.
+
+If self-host fails with an "undefined variable" error in
+a file you didn't touch this slot, brace imbalance in a
+file you DID touch is the first thing to check. cyrius's
+parser is single-pass; brace-count drift cascades silently
+into subsequent files.
+
+The diagnostic message is misleading by accident — the
+parser reports the FIRST symbol it can't resolve, not
+the original brace error. Don't trust the file name in
+the error message; check the file you most recently
+edited for unbalanced braces.
+"""
+
+[[entries]]
+name = "char_literal_token_emits_number_type"
+description = "Char literals `'X'` (v5.9.37) emit NUMBER token (type 1) carrying the byte value. Indistinguishable at parser layer from `var x = 65;`. Standard escapes supported (\\n / \\t / \\r / \\\\ / \\' / \\0). Single-byte ASCII only — no multi-byte / unicode in char literals."
+category = "cyrius"
+tags = ["lexer", "syntax", "v5.9.37", "char-literal"]
+content = """
+v5.9.37 added char-literal lexing for the agnosys 1.1.12
+verbatim repro (which used `str_builder_putc(sb, '[')`).
+
+== WHAT IT EMITS ==
+
+A NUMBER token (token type 1) carrying the byte value:
+    'A'   → 65
+    'a'   → 97
+    ' '   → 32
+    '['   → 91
+    '\\n'  → 10
+    '\\t'  → 9
+    '\\\\'  → 92
+    '\\''  → 39
+    '\\0'  → 0
+
+Indistinguishable at the parser layer from `var x = 65;`
+or `if (c == 65) { ... }` — the parser sees a NUMBER
+token, not a "char-literal" token. That's intentional:
+char literals are sugar for byte values, not a separate
+type.
+
+== CONSEQUENCE ==
+
+Type system (when it lands at v5.10.x) won't have a
+distinct "char" type. `'A'` and `65` are interchangeable.
+That matches C's char-as-int semantics rather than Rust's
+char-as-Unicode-codepoint. Cyrius works at the byte
+level by design (no SIMD, no unicode-aware ops in the
+compiler itself); char literals follow the same model.
+
+If a consumer later wants `char` as a distinct narrow-
+int type (i8 typed-narrow), it can already be expressed
+via the v5.9.36 narrow-int #derive(Serialize) machinery:
+    struct ascii_byte { c: i8; }
+That gets you i8 typing without needing a new char type.
+
+== PAIRED ADDITION ==
+
+`lib/str.cyr` gained `str_builder_putc(sb, ch)` in the
+same slot — appends single byte to a str_builder. Mirrors
+the existing `str_builder_add` (Str),
+`str_builder_add_cstr` (cstring), `str_builder_add_int`
+helpers; pairs with char literals for byte-at-a-time
+append.
+"""
+
+[[entries]]
+name = "f64v_simd_frame_disp_under_regalloc"
+description = "Pre-v5.10.16 EMIT_F64V_LOOP/UNARY/FMADD in src/backend/x86/float.cyr computed slot disps as -(N+1)*8 while EFLSTORE adjusted by additional _cur_fn_regalloc * 8 + _cur_fn_ret_stash. Any caller fn that auto-enabled the regalloc cache segfaulted reading 40+ bytes off the stash. Latent ~3.5 yr — only consumer (programs/simd_expand_test.cyr) was never wired into check.sh."
+category = "cyrius"
+tags = ["codegen", "frame", "regalloc", "simd", "x86", "v5.10.16"]
+content = """
+**The trap**: cyrius's frame addressing has TWO flavors.
+
+Local-load helpers (`EFLSTORE`, `EFLLOAD`, `EFLADDR`) apply
+THREE adjustments to the raw slot-N → `-(N+1)*8` disp:
+- `_cur_fn_regalloc * 8` — callee-save register save slots
+  (when auto-regalloc fires, x86 inserts 5 stash slots
+  before the locals; +40 bytes of prologue).
+- `_cur_fn_ret_stash` — hidden retbuf-arg stash for
+  struct-returning fns (+8 bytes).
+- The cumulative offset shifts every local slot DOWN by
+  `regalloc * 8 + ret_stash`.
+
+Direct emits that compute disps inline (the SIMD f64v_*
+loops, possibly other places) MUST apply the same
+adjustment, or the load disp diverges from the store
+disp by 40+ bytes — first iteration reads off the stash
+into rdx (or wherever), segfault on next memory access.
+
+== HOW WE FOUND IT ==
+
+v5.10.16 slot scope was "close cross-arch SIMD gap":
+implement aarch64 NEON for f64v_*, since aarch64 had
+`return 0;` stubs. Premise check (per
+`feedback_premise_check_at_slot_entry`) — write a tcyr
+regression to lock the behavior. tcyr binary segfaulted
+on x86 in the FIRST f64v_add call. Bisected vs older
+cc5 versions back to v5.10.0 — they all segfaulted
+identically. So the bug wasn't introduced by aarch64
+work; it was a latent x86 bug that pre-dated the
+cross-arch claim. The claim "in production since
+v1.9.0" was wrong: only worked on x86 fns without
+auto-regalloc enabled (rare in stdlib code, common
+in user code).
+
+== THE FIX (v5.10.16) ==
+
+Factored a `_F64V_DISP(idx)` helper in
+`src/backend/x86/float.cyr` that mirrors EFLSTORE's
+adjustment formula. Also switched the load form from
+disp8 (`48 8B 55 disp8`) to disp32 (`48 8B 95 disp32`)
+— the disp8 mask `& 0xFF` silently truncates if the
+adjusted disp drops below -128. With +40 of regalloc
+adjustment, even modest vbase values can cross that
+boundary; +3 bytes per load is amortized across the
+loop.
+
+== HOW TO RECOGNIZE IT AGAIN ==
+
+Two-finger smell test for any direct frame-emit code:
+1. Does it compute disp as `-(N+1)*8` directly?
+2. Does it apply `_cur_fn_regalloc * 8 + _cur_fn_ret_
+   stash` adjustment?
+
+If yes/no, that emit will segfault under auto-regalloc.
+Search `src/backend/x86/` for `(0 - (vbase` or
+`(N + 1) * 8` and audit each one against EFLSTORE's
+formula. The cross-arch peer on `src/backend/aarch64/`
+should ALWAYS route through `EFLLOAD` for the same
+reason (and v5.10.16's aarch64 NEON impl does — that's
+why aarch64 doesn't have this bug post-fix).
+
+== ROOT-CAUSE PATTERN ==
+
+This is the "two flavors of frame addressing" pattern.
+Cyrius has been growing direct-emit codepaths for hot
+paths (SIMD primitives, struct-init, slice canonical
+slot) — each one is a place where the regalloc/ret-
+stash adjustment could be missed. Long-term fix is
+either factor ALL frame-disp computation through
+EFLSTORE/EFLLOAD (forcing the adjustment), or add an
+audit gate that scans for raw `(idx + 1) * 8` patterns
+in backend code.
+
+For now: any new direct-emit slot that touches frame
+slots MUST mirror the EFLSTORE adjustment formula.
+Use `_F64V_DISP` (now in x86/float.cyr) as the
+reference template.
+"""
+
+[[entries]]
+name = "api_surface_brace_counter_string_skip"
+description = "Pre-v5.10.16 programs/cyrius_api_surface.cyr walked source files counting { / } bytes raw — { inside JSON-emit string literals like \"{\\\"x\\\":\" inflated depth and the scanner concluded enclosing fns never closed. Every fn / struct decl after that point in the same module silently dropped from the surface. Same bug class as cyrlint v5.10.10 char-literal-brace-desync. Fix: skip strings + char literals + # comments before counting."
+category = "cyrius"
+tags = ["api-surface", "lexer", "scanner", "v5.10.16", "agnosys-1.1.13"]
+content = """
+**The pattern**: raw byte-counters that need to handle
+cyrius's literal forms.
+
+Scanner-style tools (cyrlint, cyrfmt, cyrius_api_surface)
+walk source files at the byte level rather than going
+through cc5's full lexer. They count `{` and `}` bytes
+to track block depth. WITHOUT skip-strings, skip-chars,
+and skip-comments handling, ANY `{` or `}` byte inside
+those forms is counted wrongly:
+
+- A `{` inside a JSON literal like `"{\\\"x\\\":"`
+  inflates depth — fns after this line look like
+  they're inside a block, scanner skips fn-declaration
+  logic.
+- A `}` inside `"}"` deflates depth (often correctly
+  cancelling a phantom `{` from above, so the bug only
+  shows on UNBALANCED string content).
+- A `}` inside a char literal deflates depth.
+- A `{` inside a `# comment with { in it` inflates.
+
+== THE AGNOSYS FILING WAS MIS-DIAGNOSED ==
+
+Filed 2026-05-09 as
+`2026-05-09-cyrius-api-surface-putc-brace-desync`.
+Their hypothesis: `str_builder_putc(sb, 125)` — the
+literal `125` (ASCII for `}`) was being read as a
+`}` byte. That hypothesis is WRONG: the source bytes
+of `125` are `1` (49), `2` (50), `5` (53) — none equal
+123 or 125. The byte-level counter has no way to
+misread them.
+
+Actual cause: their fn `widget_a_to_json` opened with
+a JSON `add_cstr` call containing a literal `{` byte
+inside the string. That `{` was counted as a real
+opening brace, depth went to 2 inside what should have
+been a depth-1 fn body, and depth never returned to 0
+for the rest of the file. Every subsequent fn / struct
+decl was lost.
+
+Their workaround `str_builder_add_cstr(sb, "}")` to
+emit the closing brace happened to add a `}` byte that
+balanced the phantom `{` — that's why the workaround
+worked, not because `125` vs `"}"` differed in any
+scanner-relevant way.
+
+== HOW TO RECOGNIZE IT AGAIN ==
+
+Any new scanner-style tool added under `programs/` that
+walks `.cyr` source byte-by-byte. If it's counting any
+delimiter pair (`{`/`}`, `(`/`)`, `[`/`]`) without
+literal-skip handling, it's broken on at least one
+input shape. Templates are in cyrlint v5.10.10 and
+api-surface v5.10.16.
+
+The proper long-term fix is to add a shared
+`programs/lib/scanner_skip.cyr` helper so every
+scanner-tool routes through the same skip pattern. For
+now (v5.10.16) each scanner duplicates the pattern
+inline.
+"""
+
+
+[[entries]]
+name = "locname_staleness_duplicate_dispatch_paths"
+description = "Locname-table staleness bug class — same pattern surfaces independently in EACH parse path that uses bare EFLSTORE for arg-stash slots. v5.10.35 fixed PARSE_SIMD_EXT (ptyp 93-130); missed the SEPARATE f64v_add/sub/mul dispatch at ptyp 89-91 in parse_expr.cyr. v5.10.39 paid the duplicate-path debt. When fixing locname/table-related bugs, audit ALL dispatchers that might share the pattern."
+category = "cyrius"
+tags = ["cyrius", "compiler", "parse", "locname", "stash", "simd", "v5.10.35", "v5.10.39"]
+content = """
+THE BUG CLASS
+
+Cyrius's locname table at `S + 0x191000` is per-fn-body but
+shares allocation across fn parses (SFLC(0) resets the FLC
+counter but NOT the locname entries past the new FLC).
+Stale name entries from PRIOR fn parses persist at higher
+indices.
+
+When a parse path stashes an arg value at slot N via
+`EFLSTORE(S, N)` WITHOUT also clearing locname[N], it leaves
+a stale name visible to FINDLOCAL. If that stale name happens
+to equal a var the current fn body subsequently looks up
+(e.g. `return r;` after using the var name `r`), FINDLOCAL
+returns the STASH slot index (containing the pointer-VALUE
+that was stored as the arg) instead of the real var's slot.
+
+CLASSIC SHAPE
+
+```cyr
+fn wrap(p): f64v2 {
+    var r: f64v2;
+    f64v_add(&r, p, p, 2);  # arg-stash at slot N; locname[N] stale "r"
+    return r;                # FINDLOCAL("r") returns N, loads stash
+}
+```
+
+The `return r;` emits a pair-register load from slot N (the
+stash slot, holding &r's pointer-value), NOT from r's actual
+slot. Caller gets a stack-address-shaped i64 back instead
+of the f64v2 bytes.
+
+THE FIX HELPER
+
+```cyr
+fn _SIMD_STASH(S, idx): i64 {
+    EFLSTORE(S, idx);
+    S64(S + 0x191000 + idx * 8, 0 - 1);  # anonymise
+    return 0;
+}
+```
+
+Wrap EVERY bare-EFLSTORE-for-arg-stash with this. The
+locname[idx] = -1 marks the slot as anonymous; FINDLOCAL
+skips it.
+
+THE DUPLICATE-PATH TRAP
+
+v5.10.35 applied _SIMD_STASH to the 8 intrinsics in
+PARSE_SIMD_EXT (ptyp 93 / 94 / 95 / 96 / 128 / 129 / 130 +
+bitset/bitclr 103/104). The fix DID NOT cover f64v_add /
+_sub / _mul at ptyp 89-91, which live in a SEPARATE
+dispatch block in parse_expr.cyr (around line 1397, NOT
+inside PARSE_SIMD_EXT).
+
+That separate block continued to use bare EFLSTORE. The bug
+stayed latent because pre-v5.10.39 lib/simd.cyr had a stable
+locname layout (only pointer-form wrappers, ~10 fns). When
+v5.10.39 doubled the simd.cyr fn count (adding value-form
+siblings), locname churn made the stale-collision reliable.
+
+Bisection (v5.10.39 in-slot): reverting lib/simd.cyr made
+the test pass with v5.10.39 dispatch in place → isolated to
+lib/simd.cyr changes. Direct `f64v2_add_ptr(&x, &y)` ALSO
+failed → isolated to body (not overload routing). Same
+locname-staleness shape; different parse path.
+
+HOW TO AUDIT FOR DUPLICATES
+
+When fixing a locname/stash/table bug:
+
+1. Grep for ALL call sites of the EFLSTORE family in the
+   parser code (not just the file you're editing):
+   `grep -rn "EFLSTORE(S, vbase\|EFLSTORE(S, [a-z]" src/frontend/`
+2. For each, verify locname[idx] is set (= -1 for anonymous
+   stash, or = name_offset for named) IMMEDIATELY after the
+   EFLSTORE call.
+3. Bare EFLSTORE without a locname companion is the bug.
+4. Apply the fix at the call site OR refactor to a wrapped
+   _STASH helper.
+
+LESSON: The first occurrence of a bug class fixed in slot X
+is the "this is the bug" anchor. The FIX should AUDIT for
+the bug class across the entire compiler, not assume the
+first occurrence is the only one. v5.10.35 was a complete-
+seeming fix that left an entire dispatch path with the same
+bug; v5.10.39 paid the cost.
+"""
+
+[[entries]]
+name = "install_sh_cp_L_same_file_silent_fail"
+description = "install.sh's --refresh-only path uses `cp -L lib/*.cyr` to copy stdlib into snapshot. When lib/<dep>.cyr is a `cyrius deps`-resolved symlink AND the snapshot dir has a parallel symlink to the SAME real file, cp -L exits with 'same file' error. `set -e` makes this fatal — install.sh exits BEFORE the symlink-update block at line 249-251. ~/.cyrius/bin / ~/.cyrius/current stay pointing at the previous version. Discovered v5.10.37."
+category = "cyrius"
+tags = ["cyrius", "install", "deps", "symlink", "set-e", "v5.10.37", "v5.10.46"]
+content = """
+WHAT BREAKS
+
+After `sh scripts/version-bump.sh 5.10.X`, expected end state:
+- `cat ~/.cyrius/current` → 5.10.X
+- `readlink ~/.cyrius/bin` → ~/.cyrius/versions/5.10.X/bin
+- `~/.cyrius/bin/cc5 --version` → cc5 5.10.X
+
+Observed (multi-bump streak in v5.10.x cycle):
+- ~/.cyrius/current → stale (5.10.34 e.g.)
+- readlink ~/.cyrius/bin → stale version's bin
+- cc5 --version → stale 5.10.34
+
+User-visible symptom: `cyrius-prompt-info tool` (which reads
+through ~/.cyrius/bin/cc5) shows wrong toolchain version on
+the user's starship prompt. Easy to mis-read as "starship.toml
+corruption" — actual config bytes are intact, but the cyrius
+prompt segments render with stale data.
+
+ROOT CAUSE
+
+scripts/install.sh's --refresh-only fast path includes a
+lib-copy loop (around line 224):
+
+```sh
+while IFS= read -r f; do
+    rel="${f#lib/}"
+    dst="$CYRIUS_HOME/versions/$VERSION/lib/$rel"
+    mkdir -p "$(dirname "$dst")"
+    cp -L "$f" "$dst"   # ← FAILS with "same file" for symlink colliders
+    _lib_count=$((_lib_count + 1))
+done <<EOF_LIB
+$(find -L lib -type f -name '*.cyr')
+EOF_LIB
+```
+
+When `lib/mabda.cyr` is a `cyrius deps`-resolved symlink into
+`~/.cyrius/deps/mabda/3.0.0-rc.2/dist/mabda.cyr`, AND the
+snapshot at `~/.cyrius/versions/$VERSION/lib/mabda.cyr` is
+ALSO a symlink to the same real file (set up by a prior
+refresh that ran when the deps target was the same version),
+`cp -L` dereferences BOTH and sees source and destination
+resolve to the same inode:
+
+```
+cp: 'lib/mabda.cyr' and '/home/macro/.cyrius/versions/$VER/lib/mabda.cyr' are the same file
+```
+
+install.sh's top-level `set -e` makes this exit code fatal.
+The script exits before reaching the symlink-update block:
+
+```sh
+# install.sh:249-251 (NEVER RUNS when cp -L fails)
+rm -rf "$CYRIUS_HOME/bin" "$CYRIUS_HOME/lib"
+ln -sf "$CYRIUS_HOME/versions/$VERSION/bin" "$CYRIUS_HOME/bin"
+ln -sf "$CYRIUS_HOME/versions/$VERSION/lib" "$CYRIUS_HOME/lib"
+```
+
+So ~/.cyrius/bin / ~/.cyrius/lib / ~/.cyrius/current stay
+pointing at whichever version was previously active.
+
+HOW TO DETECT IT MANUALLY
+
+After version-bump.sh, verify:
+
+```sh
+test "$(readlink ~/.cyrius/bin | sed 's|.*/versions/||;s|/bin||')" = "$(cat VERSION)" || echo "SYMLINK STALE"
+```
+
+If the readlink doesn't match VERSION, install.sh exited
+before the symlink dance. Re-run with:
+
+```sh
+rm -rf ~/.cyrius/{bin,lib} && \
+  ln -sf ~/.cyrius/versions/$(cat VERSION)/bin ~/.cyrius/bin && \
+  ln -sf ~/.cyrius/versions/$(cat VERSION)/lib ~/.cyrius/lib && \
+  echo "$(cat VERSION)" > ~/.cyrius/current
+```
+
+FIX (pinned v5.10.46 closeout)
+
+Two-part fix:
+1. **Primary** — change `cyrius deps` to physical-copy
+   lib/<dep>.cyr instead of symlinking. Eliminates the
+   inode-collision root cause at the architectural layer.
+   (Option C from the v5.10.37 user discussion.)
+2. **Belt-and-suspenders** — replace `cp -L` with
+   `rm -f "$dst" && cp -L` (always nuke dst first) AND add
+   a tail-of-refresh-only verification that `readlink
+   ~/.cyrius/bin` matches the new version with hard-fail
+   if not.
+
+The verification step would have caught this bug in seconds
+instead of multiple observations across slots; silent-skip
+is the worst kind of failure mode.
+
+LESSON: Install scripts running with `set -e` that perform
+multi-step state transitions MUST verify their end-state at
+the tail and hard-fail if not consistent. Silent partial-
+success is unrecoverable from the user's perspective. The
+two version-discovery paths (`cyrius --version` reading
+VERSION file directly vs `cyrius-prompt-info tool` reading
+through ~/.cyrius/bin/cc5) diverged for multiple version
+bumps before anyone noticed.
+"""
+
+[[entries]]
+name = "stack_local_scratch_buffer_overflow_at_dispatch"
+description = "Stack-local scratch buffer overflow corrupts adjacent locals — symptom is `fi` / `noff` (in parse_fn.cyr's PARSE_FNCALL) holding wrong values after the overflow, producing miscompiled call sites. v5.10.39 first cut had `var _po_scratch[16]` for constructing `<base>_ptr` overload-lookup strings; overflowed for any base name ≥12 chars (e.g. `f64v2_add_ptr` direct call constructs `f64v2_add_ptr_ptr` = 18 bytes). Sized check + bumped scratch to 128 bytes."
+category = "cyrius"
+tags = ["cyrius", "compiler", "parse", "stack-local", "overflow", "v5.10.39"]
+content = """
+THE PATTERN
+
+When constructing scratch strings on the stack for compile-time
+lookups (e.g. building `<base_name>_ptr` for overload dispatch),
+the stack-local array MUST be sized to accommodate the LARGEST
+possible base name + suffix + null terminator, NOT a typical case.
+
+SHAPE
+
+```cyr
+fn dispatch(noff): i64 {
+    var _scratch[16];   # ← too small for many fn names
+    var base_len = strlen(S + 0x60000 + noff);
+    # ... copy base_len bytes into scratch ...
+    # ... append "_ptr\0" (5 bytes) ...
+    # ↑ overflow if base_len > 11
+}
+```
+
+For "f64v2_add_ptr" (13 chars) + "_ptr\0" (5 chars) = 18
+bytes. Writes at offsets 16, 17 overflow a 16-byte scratch
+into adjacent stack data — typically the next stack-local
+or saved caller-state. In parse_fn.cyr's PARSE_FNCALL the
+overflow corrupted the `fi` / `noff` variables, producing
+silently-miscompiled call sites that returned wrong values.
+
+WHY 16 BYTES SEEMED SAFE
+
+The dispatch was originally designed for cyrius's own SIMD
+wrapper names (`f64v2_add`, 9 chars). "f64v2_add" + "_ptr\0"
+fits in 14 bytes → comfortable in 16-byte scratch. The
+overflow path was when the dispatch ITSELF fires for a fn
+WHOSE NAME ALREADY ENDS IN `_ptr` — e.g. a direct call to
+`f64v2_add_ptr(&x, &y)` (which doesn't need rerouting) still
+runs the dispatch and constructs `f64v2_add_ptr_ptr`.
+
+The non-found lookup returns -1 and no reroute happens, but
+the WRITE to scratch already corrupted adjacent memory.
+
+THE FIX
+
+Bump scratch size to be safely larger than ALL realistic
+fn names + suffix. v5.10.39 went with 128 bytes (`_po_scratch
+[128]`) — accommodates any fn name within the 120-char
+defensive guard. Pattern:
+
+```cyr
+var _scratch[128];
+if (base_len < 120) {
+    # ... safe to write up to base_len + suffix_len ...
+}
+```
+
+Plus the explicit `base_len < 120` guard provides defense
+in depth if base names ever grow past expected.
+
+LESSON: When sizing stack-local scratch buffers for compile-
+time string construction, target a generous CAP that
+accommodates the worst realistic input, not a "typical" case.
+Stack corruption is silent and only manifests as miscompiled
+output downstream — extremely hard to diagnose without
+bisection. Pre-fix v5.10.39 had MANY hours of debugging time
+spent before the overflow was identified.
+
+DIAGNOSTIC SIGNS
+
+If a compile-time dispatch fires for some call sites but
+produces wrong results, AND reverting the dispatch resolves
+it, AND the wrong result has the shape of a stack address —
+suspect stack-local overflow in the dispatch code.
 """
