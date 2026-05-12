@@ -263,3 +263,197 @@ silent regressions. The cycle's discipline: every slot shipped
 EITHER a feature OR a fix, never a "refactor that introduces
 new state without consumer payoff."
 """
+
+[[entries]]
+name = "v510x_cycle_close_40_through_50"
+description = "v5.10.x closeout half — slots .40-.50: compile-time-perf miniarc (10× lex / 2.8× fixup), TLS contract pin, roadmap-extension issue sweep, struct-byval ABI 3-phase arc, defensive sweep + parser cosmetics, PE premise-debunk. Cycle CLOSED at .50 with 50 patches total."
+category = "cyrius"
+tags = ["retrospective", "agent", "v5.10.x", "closeout", "perf", "compile-time", "lex-dedup", "fixup-hash", "struct-byval", "tls-contract", "issue-audit", "premise-check"]
+content = """
+v5.10.x BACK HALF (slots .40-.50) — the post-typed-simd-arc
+work. Five threads landed:
+
+1. COMPILE-TIME-PERF MINIARC (.40 + .41).
+   v5.10.40 lex dedup hot-path: length-bucketed linked-list
+   chain at 0x4E8C000..0x4EAD000 (132 KB brk extension).
+   Replaces O(N²) walk-from-zero dedup loop. **lex 603 ms →
+   59 ms (10.2× speedup)**.
+
+   v5.10.41 fixup phase: fn_start_hash at 0x110000 (8192
+   slots × 2 B Knuth golden-ratio multiplicative). Replaces
+   two O(N²) DCE byte-scan linear lookups (seed pass +
+   propagate fixpoint). Reuses 232 KB free gap between
+   fn_name_hash and struct_ftypes — no brk extension.
+   **fixup 213 ms → 76 ms (2.8× speedup)**.
+
+   **End-to-end compile time: 1037 ms → 387 ms (2.7×)**.
+   v5.10.0 profile-guided "compile-time wins" held entry
+   realised across two slots.
+
+2. TLS CONTRACT PIN (.42).
+   `docs/development/lib-tls-contract.md` (~230 lines)
+   formalises the 24-public-verb invariant layer for the
+   `lib/tls.cyr` ↔ `lib/sandhi.cyr` hook surface that
+   stabilised across v5.6.40 / v5.10.13 / .21 / .27 / .34.
+   Verb inventory tables (availability / connect-fused /
+   connect-staged / I/O / hook-time config / session
+   resumption / cache cbs / 0-RTT / soft-deprecated
+   tls_dlsym), lifecycle invariants diagram, failure /
+   partial-state contract, stability guarantee tied to
+   byte-identical self-host rule. lib/tls.cyr header points
+   to the doc. cc5 byte-identical (doc-only).
+
+3. ROADMAP-EXTENSION ISSUE SWEEP (.43/.44/.48).
+   v5.10.42-ship audit promoted 4 open issues into v5.10.x
+   slots; cycle closed all 4:
+   - .43: lib/str.cyr str_split sep-treated-as-pointer (live
+     entire v5.x cycle). Runtime byte/Str dispatch on
+     `sep < 256` preserves 21+ stdlib byte-int callers
+     byte-identical AND fixes Str-sep semantics.
+   - .44: lib/process.cyr exec_* family was cstr-only with
+     no docstring contract; argonaut-blocking on Str pushes.
+     Parallel `_str` family added (exec_vec_str /
+     exec_capture_str / exec_env_str). Runtime dispatch
+     REJECTED because both Str/cstr are pointers and
+     8+-char cstrs fail the heuristic. api-surface +3.
+   - .48: parser cosmetic limits (bare `return;`, ident
+     array sizes). Bare return synthesizes return 0; enum-
+     const-ident array sizes accepted in both PARSE_ARRAY
+     and PARSE_GVAR_ARR. `var SIZE = 16;` named constants
+     stay unsupported (would need new infrastructure
+     outside enums; idiomatic alternative documented).
+   - 4th issue (`kernel` reserved word) was already
+     resolved at v5.8.45 — archived at .43 ride-along.
+
+4. STRUCT-BYVAL ABI 3-PHASE ARC (.45/.46/.47).
+   Pin RE-SCOPED at v5.10.44 ship after empirical premise
+   check: the original "v5.10.45 macOS arm64 struct-byval"
+   pin was mis-framed. `struct Point {x: i64; y: i64;}` +
+   `fn make(): Point { ...; return p; } var got = make();`
+   returned got.y=0 on BOTH x86_64 Linux AND aarch64 Linux
+   at v5.10.44 — high half lost across ALL backends, not
+   just Mach-O. v5.5.36's "native on SysV (RDI)" + v5.9.26's
+   "Phase 2b-aarch64 struct return by value" infrastructure
+   never closed for 9-16B int-class user structs. v5.10.28's
+   pair-return fix was f64v2-specific (SSE-class XMM0).
+
+   User authorized 3-phase arc:
+   - .45 Phase 1: x86 SysV rax+rdx pair-return. New
+     `_cur_fn_ret_pair` global, EFLLOAD/STORE_STRUCT_INT_PAIR
+     emit helpers, caller-side `asv_pair` path mirroring
+     asv_try retptr path. **_STR_SID(S) carve-out** preserves
+     Str's legacy 16B handle-shape pointer-mode semantics.
+   - .46 Phase 2: aarch64 AAPCS64 X0+X1 pair-return.
+     v5.10.45 ERR_MSG stubs replaced with LDUR/STUR X0,X1
+     fast path + LDR/STR via X9 deep-frame fallback. Single
+     change covers Linux aarch64 + macOS arm64 (shared
+     AAPCS64). pi runtime: exit=42 verified.
+   - .47 Phase 3: cross-host smoke + PE retptr verify. Arc
+     CLOSED. Win64 ABI deviation acknowledged (cyrius uses
+     rax+rdx pair on PE — cyrius-internal-ABI deviation
+     from MS x64 strict hidden-RCX retptr requirement;
+     no consumer impact, closed-system rationale).
+
+5. PE PREMISE-DEBUNK (.49).
+   15-slot phantom item closed. Empirical re-verification
+   with `cmd /v /c "prog.exe & echo exit=!errorlevel!"`
+   shows `syscall(60, code)` exit propagation +
+   `syscall(1, fd, buf, len)` console output both WORK
+   today. The "broken" claims in CHANGELOG entries .33 /
+   .34 / .39 / .40 / .41 / .44 / .47 traced back to a
+   **chat-side test wrapper bug** — `cmd /c "& echo
+   %errorlevel%"` expands at parse time → false-negative
+   exit=0. `programs/check.cyr`'s `_pe_exit_gate` always
+   used correct `.bat` indirection (newlines split parse
+   passes) and passed all along; chat-side ad-hoc smoke
+   wrappers diverged. No code change shipped at .49 —
+   the "fix" was empirically debunking the premise + saving
+   memory pin `feedback_windows_errorlevel_test_wrapper`
+   so future agents don't repeat the same wrapper bug.
+   Struct-byval Phase 3 cass runtime retroactively
+   confirmed exit=42 (arc was 4/4, not 3/4 as the .47
+   entry noted under bad-wrapper assumption).
+
+PATTERNS APPLIED IN BACK-HALF (extends slots .0-.39 list):
+
+- **Premise-check at slot entry**: hit twice — once at
+  .45 (struct-byval pin re-scoped to 3-phase arc), once
+  at .49 (PE pin debunked entirely). Both saved cycles
+  from speculation-driven work that wasn't needed.
+
+- **Doc-canonical-source separation** (memory pin
+  `feedback_doc_canonical_no_redundancy`): the .49 debunk
+  did NOT rewrite shipped CHANGELOG entries (.33/.40/.47
+  etc. that propagated the phantom claim). Those stay as
+  historical record; .49's entry is the durable correction.
+  Future readers consult v5.10.49 for the corrected status.
+
+- **Lazy-defer rejection** (memory pin
+  `feedback_no_one_fix_per_slot`): every multi-slot split
+  in the back-half was planned BEFORE execution
+  (.45/.46/.47 arc shape decided at .44 ship). No mid-flight
+  splits.
+
+- **Snapshot-ping-pong guard discipline** (.42, .43, .44
+  all touched `lib/*.cyr` — each immediately mirrored
+  edits to `~/.cyrius/versions/<v>/lib/` + `~/.cyrius/lib/`
+  before any `cyrius deps` resolution).
+
+CLOSEOUT (.50):
+
+The cycle's last patch. Per CLAUDE.md §Closeout Pass:
+- Mechanical (self-host + bootstrap closure + check.sh):
+  GREEN. 96 heap regions, 0 overlaps, 0 warnings.
+- Heap-map audit: cycle additions (LEXID at 0x4E8C000,
+  fn_start_hash at 0x110000, simd_mask at 0x1282000)
+  fit cleanly; no cap pressure; one stale verify.sh
+  path fixed (stage1/ → bootstrap/).
+- Dead-code floor: 34 unreachable fns (22,792 B), all
+  env-gated reachable (TS/IR/macho cross-arch branches).
+- Code review: no new unguarded x86 emits in shared
+  parse_*.cyr; all v5.10.x ABI work routes via per-
+  backend emit helpers.
+- Security re-scan: no new sys_system / unchecked writes.
+- Downstream: 40+ ecosystem repos checked; all pin to
+  released cyrius tags (none point to unreleased).
+- Vidya: this entry + closeout-half feature entries.
+
+CYCLE STATS AT CLOSE (v5.10.50):
+
+- 50 patches in 5 days (2026-05-06 → 2026-05-11)
+- THREE completed arcs (typed-simd ABI 11 phases,
+  REAL TYPE SYSTEM 5 phases, struct-byval ABI 3 phases)
+- ONE compile-time-perf miniarc (.40+.41, 2.7× total)
+- ONE TLS contract pin (.42)
+- 4 open issues closed (str_split, exec_*, parser
+  cosmetics, kernel-reserved-word)
+- ONE PE premise debunk (15-slot phantom closed)
+- 9 in-cycle pin re-scopings (premise-check driven)
+- check.sh gate count: stable at 66
+- cyrius test count: 132 → 144 (+12 gates across the
+  cycle; +3 in the back-half: struct_byval_return,
+  parser_cosmetics, str_split, process_exec_str — wait
+  that's +4)
+- cc5 size: x86 753,768 → 804,472 (+50,704 B, +6.7%)
+- cc5_aarch64 size: ~470 KB → ~492 KB (cross-build)
+- cc5_macho_arm: ~510 KB → ~607 KB
+- cc5_win: ~530 KB → ~701 KB
+- api-surface snapshot: 2,769 → 2,876 (+107 public fns)
+
+The back-half added LESS to cc5 than the front (50,704 B
+total across 50 slots vs 43,696 B across the first 39 —
+the back-half was lighter on codegen, heavier on docs
++ empirical debunk + perf wins). The compile-time
+miniarc was the highest-leverage piece: 2.7× compile
+speedup unlocks faster downstream consumer dev loops.
+
+THE CYCLE'S META-LESSON: empirical premise-check at slot
+entry is non-negotiable. v5.10.45 (struct-byval scope)
+and v5.10.49 (PE pin) both saved 1-3 slots of mis-aimed
+work by 15-minute empirical re-tests. The memory pins
+that encode this discipline
+(`feedback_premise_check_at_slot_entry`,
+`feedback_no_silent_fix_deferrals`,
+`feedback_consumer_request_full_surface`) paid for
+themselves multiple times across v5.10.x.
+"""

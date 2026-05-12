@@ -1,6 +1,7 @@
 # Cyrius — Language Features
 # How to use specific Cyrius language features: types, syntax, derives, directives.
-# 26 entries.
+# Refreshed 2026-05-11 at v5.11.20 ship.
+# 35 entries.
 
 [[entries]]
 name = "multi_width_types"
@@ -1398,3 +1399,396 @@ GOTCHA — duplicate parse paths:
     FINDLOCAL misroute. See gotchas.cyml
     locname_staleness_duplicate_dispatch_paths for the full
     bug class write-up.
+
+[[entries]]
+name = "struct_byval_int_pair_return_abi"
+description = "9-16B int-class user struct return ABI (v5.10.45-.47 arc). x86 SysV rax+rdx pair; aarch64 AAPCS64 X0+X1 pair; PE uses same rax+rdx (cyrius-internal-ABI deviation from MS x64 strict retptr). Str's 16B handle-shape stays scalar-rax via _STR_SID carve-out."
+category = "cyrius"
+---
+SYNTAX:
+    struct Point { x: i64; y: i64; }
+    fn make(): Point {
+        var p: Point;
+        p.x = 7;
+        p.y = 35;
+        return p;          # 9-16B → pair-return mode
+    }
+    fn use(): i64 {
+        var got: Point = make();
+        return got.x + got.y;   # 42
+    }
+
+WHAT v5.10.45-.47 ADDED:
+    - 9-16B int-class struct returns transit via register-pair
+      ABI (rax+rdx on x86 SysV; X0+X1 on aarch64 AAPCS64;
+      cyrius-internal rax+rdx on Win64 PE — deviation from
+      strict MS spec).
+    - Caller-side `var got: StructName = fn();` allocates 2
+      stack slots + receives the pair via the per-backend
+      `EFLSTORE_STRUCT_INT_PAIR` helper.
+    - Callee-side `return IDENT;` emits the pair via
+      `EFLLOAD_STRUCT_INT_PAIR`.
+    - Distinguished from `var s: Str = str_from(...)` (Str's
+      16B handle-shape pointer-mode) via `_STR_SID(S)` lookup
+      at slot entry; Str-returning fns continue to use scalar
+      rax for the heap-pointer.
+    - For ≤8B struct returns: scalar rax (unchanged).
+    - For >16B struct returns: hidden retptr via RDI/X8/RCX
+      (v5.5.36 / v5.9.26 / Win64 — unchanged).
+
+PRE-v5.10.45 (the bug):
+    Pre-fix, ANY 9-16B struct return returned only the LOW
+    8 bytes via scalar rax. `got.y` (the high half) was
+    read from whatever slot happened to be adjacent in the
+    caller's frame — typically 0. Live for the entire v5.x
+    cycle; surfaced via empirical premise-check at v5.10.44
+    ship.
+
+WIN64 ABI DEVIATION NOTE:
+    Strict Microsoft x64 ABI requires hidden-RCX retptr for
+    any ≥9B composite return (no rax+rdx pair). Cyrius uses
+    rax+rdx pair on PE too — internal-ABI deviation that
+    works because all callers + callees agree on the
+    convention. Future foreign-C interop with value-typed
+    struct returns would need a separate PE-retptr-mode emit
+    path (out of scope for v5.10.x). Documented per the
+    closed-system / no-consumer-impact rationale in
+    CHANGELOG [5.10.47].
+
+CONSUMER POV:
+    Same syntax that was always documented for value-typed
+    struct returns; the implementation now matches the
+    type signature. No source migration needed for any
+    Str-using consumer — Str's pointer-mode semantics
+    preserved.
+
+[[entries]]
+name = "bare_return_in_fn"
+description = "v5.10.48: bare `return;` in fn body synthesizes `return 0;` per cyrius's int-only return convention"
+category = "cyrius"
+---
+SYNTAX:
+    fn early_zero(x): i64 {
+        if (x > 0) { return; }    # synthesizes return 0
+        return 99;
+    }
+
+WHAT v5.10.48 ADDED:
+    PARSE_RETURN peeks for `;` before calling PCMPE. If
+    present, emits `mov rax, 0` + jump-to-epilogue — byte-
+    for-byte equivalent to `return 0;` at that position.
+
+PRE-v5.10.48:
+    `if (x > 0) { return; }` errored with
+    `error:<source>:N: unexpected ';'` because PCMPE was
+    called unconditionally and rejected an empty expression.
+    Required workaround: `return 0;` explicitly.
+
+CONSUMER POV:
+    Idiomatic early-exit shape now works. No-op for fns that
+    already used `return 0;` explicitly; new ergonomic for
+    early-exit branches in conditional bodies. Cyrius
+    treats every fn as returning int (no `void`), so
+    bare `return;` is unambiguously sugar for `return 0;`.
+
+[[entries]]
+name = "enum_ident_array_size"
+description = "v5.10.48: var name[IDENT] accepts an enum-const ident as a compile-time-known array size, in both fn-local PARSE_ARRAY and top-level PARSE_GVAR_ARR paths"
+category = "cyrius"
+---
+SYNTAX:
+    enum BufSz { SMALL = 8; MEDIUM = 64; }
+    var small_buf[SMALL];          # top-level
+    fn use(): i64 {
+        var local[SMALL];          # in-fn
+        store64(&local, 42);
+        return load64(&local);
+    }
+
+WHAT v5.10.48 ADDED:
+    Both PARSE_ARRAY (in-fn) and PARSE_GVAR_ARR (top-level)
+    accept an IDENT in `[]` if it resolves to a compile-time-
+    known enum constant (high-bit-set marker at
+    `enum_const_val[idx]` per the v5.5.2 fold registration).
+
+PRE-v5.10.48:
+    `var buf[SIZE]` (where SIZE is an ident) errored with
+    `error: expected number, got identifier 'SIZE'`.
+    Workaround: inline the literal `var buf[16];`. The
+    ident error pointed at the offending token without
+    explaining the rule.
+
+PLAIN var-NAME = LITERAL NOT SUPPORTED:
+    `var SIZE = 16; var buf[SIZE];` still errors — cyrius
+    has no named-constant infrastructure outside enums.
+    The idiomatic pattern is `enum Sz { N = 16; }
+    var buf[N];`. A specific error message points at the
+    enum-const idiom rather than the generic
+    "expected number, got identifier".
+
+CONSUMER POV:
+    Named constants for array sizes via enums. Bad-shape
+    ident triggers a specific diagnostic explaining the
+    enum-only rule, not the generic message.
+
+[[entries]]
+name = "socket_syscall_wrappers_v51118"
+description = "7 socket-family syscall wrappers in lib/syscalls_x86_64_linux.cyr + lib/syscalls_aarch64_linux.cyr peers (sys_socket, sys_bind, sys_listen, sys_connect, sys_recvfrom, sys_recvmsg, sys_accept4)"
+category = "cyrius"
+---
+SYNTAX (Linux only — Windows / macOS use platform-native APIs):
+    var fd = sys_socket(domain, type, protocol);
+    var rc = sys_bind(fd, sockaddr_ptr, addrlen);
+    var rc = sys_listen(fd, backlog);
+    var rc = sys_connect(fd, sockaddr_ptr, addrlen);
+    var n = sys_recvfrom(fd, buf, len, flags, srcaddr_ptr, srcaddrlen_ptr);
+    var n = sys_recvmsg(fd, msghdr_ptr, flags);
+    var cfd = sys_accept4(fd, srcaddr_ptr, srcaddrlen_ptr, flags);
+
+USE CASES:
+    sys_socket + sys_bind + sys_recvfrom: sd_notify dgram for
+        systemd-style service-readiness notification (kybernet 1.1.5+).
+    sys_socket + sys_connect + sys_recvmsg: SCM_CREDENTIALS peer-cred
+        capture for trusted-peer auth (argonaut 1.6.2+ already used
+        sys_recvmsg via per-arch #ifdef enum — now centralized).
+    sys_socket + sys_bind + sys_listen + sys_accept4: supervisor
+        control-socket accept loop (kybernet 1.2.x edge-boot).
+
+CROSS-ARCH SAFETY (load-bearing motivation):
+    Pre-v5.11.18 consumers re-rolled per-arch syscall dispatch:
+        #ifdef CYRIUS_ARCH_X86_64
+            enum SockSysNr { SOCKET = 41; BIND = 49; RECVFROM = 45; }
+        #else
+            enum SockSysNr { SOCKET = 198; BIND = 200; RECVFROM = 207; }
+        #endif
+    Forgetting the dispatch (or copy-pasting from an x86 example)
+    silently misrouted on aarch64: x86 41 → socket; aarch64 41 →
+    pipe2. CI on x86 passes; aarch64 deployment misbehaves.
+    The stdlib wrappers centralize this — no consumer can route
+    wrong.
+
+ARCH-SPECIFIC SYSCALL NUMBERS (encoded in lib/syscalls_*.cyr's
+SysNr enums):
+
+    Wrapper            x86_64  aarch64
+    sys_socket            41     198
+    sys_connect           42     203
+    sys_recvfrom          45     207
+    sys_recvmsg           47     212
+    sys_bind              49     200
+    sys_listen            50     201
+    sys_accept4          288     242
+
+TEST: tests/tcyr/socket_syscalls.tcyr runtime-exercises
+sys_socket on AF_UNIX/SOCK_DGRAM (load-bearing aarch64
+verify — a misrouted dispatch returns pipe2 fd, not socket).
+Other 6 wrappers verified via &fn compile-time callability.
+
+[[entries]]
+name = "bote_async_primitives_v51115"
+description = "lib/thread.cyr chan_try_recv + lib/async.cyr cancel_token_* (cancel_token_new / signal / check) — bote-streaming-dispatch building blocks"
+category = "cyrius"
+---
+SYNTAX:
+    # Non-blocking channel receive (lib/thread.cyr)
+    var val = chan_try_recv(ch);     # 0 if empty (avoid sending 0
+                                     #   if 0-as-sentinel matters)
+
+    # Cancellation tokens (lib/async.cyr)
+    var tok = cancel_token_new();    # alloc 8-byte atomic-backed slot
+    cancel_token_signal(tok);        # idempotent set; atomic_store(tok, 1)
+    var cancelled = cancel_token_check(tok);  # 0 live, 1 cancelled
+
+INTENDED PATTERN (bote streaming dispatch):
+    # Transport thread:
+    var tok = cancel_token_new();
+    dispatch_streaming(handler, tok, progress_chan);
+    # ... on $/cancelRequest:
+    cancel_token_signal(tok);
+
+    # Worker thread (handler):
+    while (more_work()) {
+        if (cancel_token_check(tok) == 1) {
+            cleanup();
+            return;
+        }
+        chan_send(progress_chan, partial_result);
+        do_work_chunk();
+    }
+
+UNDERLYING:
+    chan_* shipped at v5.5.31 (MPSC, futex + mutex backed,
+        chan_new/send/recv/close). chan_try_recv added v5.11.15
+        completes the non-blocking surface.
+    cancel_token_* backed by lib/atomic.cyr's atomic_load /
+        atomic_store (aligned i64 ops on x86_64 + aarch64; explicit
+        API documents the atomicity intent). No busy-wait — worker
+        polls between work chunks at its own cadence.
+
+PREMISE-CHECK NOTE: bote's original filing speculated 3 missing
+primitives (MPSC channel, cancellation, per-thread arena). All 3
+already existed; the slot shipped 4 thin shims (`chan_try_recv` +
+3 cancel-token verbs) instead of inventing parallel infrastructure.
+See CHANGELOG [5.11.15] for the discovery doc block at top of
+lib/async.cyr.
+
+[[entries]]
+name = "arena_lifecycle_v51114"
+description = "arena_free(a) lifecycle terminator + per-frame reuse pattern docs in lib/alloc.cyr"
+category = "cyrius"
+---
+SYNTAX:
+    var a = arena_new(SIZE);      # allocate arena
+    var p = arena_alloc(a, n);    # bump-pointer alloc
+    arena_reset(a);               # rewind to start (per-frame reuse)
+    arena_free(a);                # FINAL release (v5.11.14)
+
+THE LIFECYCLE:
+    arena_new → many arena_alloc → arena_reset (reuse) → many
+    arena_alloc → ... → arena_free (terminal)
+
+LOAD-BEARING USE CASE (bote per-frame reuse):
+    # Per WS / SSE frame: alloc scratch buffers, dispatch handler,
+    # reset arena for next frame, terminate arena at session end.
+    var a = arena_new(64 * 1024);
+    while (session_alive == 1) {
+        var msg_buf = arena_alloc(a, MAX_FRAME);
+        var resp_buf = arena_alloc(a, MAX_RESP);
+        handle_frame(msg_buf, resp_buf);
+        arena_reset(a);
+    }
+    arena_free(a);
+
+PREMISE-CHECK NOTE: bote's filing was titled "fl_free" — premise
+check showed `arena_reset` (the load-bearing per-frame reuse
+primitive) already shipped at v5.5.x; the actual missing surface
+was the terminal `arena_free`. v5.11.14 added the terminator +
+refreshed docstring with the bote pattern shape.
+
+[[entries]]
+name = "sock_set_recv_timeout_v51113"
+description = "lib/net.cyr sock_set_recv_timeout(fd, secs, usecs) — Slowloris defense for HTTP / WS servers"
+category = "cyrius"
+---
+SYNTAX:
+    var rc = sock_set_recv_timeout(fd, 5, 0);    # 5-second timeout
+    var rc = sock_set_recv_timeout(fd, 0, 250000);  # 250ms
+
+SEMANTICS:
+    Sets SO_RCVTIMEO via setsockopt. After setting, sock_recv(fd, ...)
+    that blocks longer than (secs, usecs) returns -EAGAIN (or -EWOULDBLOCK).
+    Per-fd setting; persists for the fd's lifetime.
+
+LOAD-BEARING USE CASE (Slowloris defense):
+    # Per accept(), set a recv timeout so a misbehaving client
+    # can't tie up a worker thread by trickling bytes:
+    var cfd = sys_accept4(lfd, ..., SOCK_CLOEXEC);
+    sock_set_recv_timeout(cfd, 5, 0);    # 5s wall-clock cap on slow reads
+    serve_http(cfd);
+
+VERIFICATION (from bote 1.9.5 audit response):
+    var fd = sys_socket(AF_INET, SOCK_STREAM, 0);
+    # ... connect to a slow-server fixture ...
+    sock_set_recv_timeout(fd, 1, 0);    # 1-second timeout
+    var t0 = gettime_ns();
+    var n = sock_recv(fd, buf, len);    # blocks ~1.056s, returns -EAGAIN
+    var elapsed_ms = (gettime_ns() - t0) / 1000000;
+    assert(elapsed_ms >= 1000 && elapsed_ms < 1200);
+
+GAP (part B of original bote filing): getaddrinfo equivalent —
+DNS resolver surface — was deferred (multi-slot scope) and not
+pinned in v5.11.x. Track via bote consumer asks.
+
+[[entries]]
+name = "ws_handshake_rfc6455_v51116"
+description = "lib/ws_server.cyr ws_server_handshake enforces RFC 6455 §4.1: Sec-WebSocket-Key must be 24-char base64 (16-byte payload encoded with `=` padding)"
+category = "cyrius"
+---
+SEMANTICS:
+    ws_server_handshake(cfd, req_buf, req_len) parses the HTTP
+    upgrade request. Pre-v5.11.16, it accepted any non-empty
+    Sec-WebSocket-Key value — including malformed lengths.
+
+POST-v5.11.16 (RFC §4.1 conformance):
+    Sec-WebSocket-Key is the base64 encoding of a 16-byte value.
+    Base64 of 16 bytes = 22 chars + 2 chars of `=` padding = exactly
+    24 chars. Pre-fix accepted "short" / 27-char / arbitrary lengths;
+    post-fix rejects all but 24-char and returns 0 (per docstring:
+    caller responds 400 Bad Request).
+
+FIX SHAPE (5 lines in lib/ws_server.cyr::ws_server_handshake):
+    var klen = strlen(key);
+    if (klen != 24) { return 0; }      # NEW: reject malformed length
+    var magic = _wss_magic();
+    # ... SHA-1 + base64 Accept derivation continues unchanged
+
+CONSUMER IMPACT:
+    Spec-compliant clients send 24-char keys; pre-fix they were
+    accepted regardless of compliance. Post-fix they're STILL
+    accepted (no behavior change for compliant clients), but
+    malformed clients now fail-closed at the handshake instead of
+    silently progressing to bidirectional frame I/O.
+
+WHY THIS MATTERS:
+    The handshake produces Sec-WebSocket-Accept = base64(sha1(key +
+    magic)). A SHA-1 over arbitrary-length input still produces a
+    syntactically-valid Accept header — the client would receive the
+    upgrade and the WS connection would proceed normally over a
+    spec-violating handshake. Closes a real conformance hole bote
+    filed in audit.
+
+[[entries]]
+name = "cap_raises_v51118_v51119"
+description = "v5.11.18 doubled identifier-buffer cap 131072 → 262144 bytes; v5.11.19 doubled fn_table cap 4096 → 8192"
+category = "cyrius"
+---
+NEW CAPS (consumer-visible compile-time limits):
+
+    fn_table:           4096  → 8192    (v5.11.19)
+    identifier buffer:  131072 → 262144 bytes  (v5.11.18)
+
+WARNING THRESHOLDS (85% of cap):
+    cyrius capacity --check (and CYRIUS_STATS=1 default-build
+    warnings) fire at 85% of the new cap:
+
+    fn_table warn at:           >= 6963 fns        (was >= 3686)
+    identifier buffer warn at:  >= 222822 bytes    (was >= 111430)
+
+CONSUMER MOTIVATION:
+    kybernet 1.1.0 (AGNOS PID-1 init system) assembled the full
+    AGNOS surface (stdlib + agnosys-full + agnostik + libro + patra
+    + argonaut + sigil + sakshi) and hit:
+
+        fn_table at 92% (3779 / 4096)
+        identifier buffer at 85% (112094 / 131072 bytes)
+
+    Warned thresholds; non-recoverable at 100%. kybernet 1.1.1
+    worked around via profile-bundle trim (agnosys-full →
+    agnosys-core); v1.2.0 edge-boot work brings agnosys-storage +
+    agnosys-trust back into scope — would tip past hard cap.
+
+UPSTREAM FIX SHAPE:
+    v5.11.18 Part A.i — identifier buffer doubled in-place; uses
+        existing 0xA0000-0x18C100 heap-map gap; no relocation.
+    v5.11.18 Part B — 7 socket-syscall wrappers (separate consumer
+        ask from kybernet 1.1.5 P(-1) audit).
+    v5.11.19 Part A.ii — fn_table heap-map refactor: 7 scattered
+        fn_* tables relocated, contiguous extended + primary blocks
+        stride doubled, IR + fixup regions shifted +0x80000. cc5
+        self-host byte-identical at 804,456 B (was 804,464).
+        Hash tables (fn_name_hash + fn_start_hash) kept at 8192
+        slots × 2B (mask 8191 preserved) — gap couldn't fit doubled
+        hash tables AND doubled per-fn tables; trade-off documented.
+
+CONSUMER REGRESSION TESTS:
+    `tests/tcyr/capacity_*` (existing gates) verify warn-threshold
+    semantics with the new caps. programs/check.cyr::_capacity_gate
+    bumped the synthetic stress fixture from 3500 fns → 7000 fns
+    at v5.11.19 to re-trigger the >= 85% threshold (3500/8192 =
+    42.7% no longer fires).
+
+NO ALGORITHMIC / API / ON-DISK CHANGE:
+    Pure cap raise. Existing consumer source compiles unchanged.
+    Hash table load factor at 8192 fns degrades to 1.0 (was 0.5
+    at 4096); for the kybernet 3779-fn worst case load factor is
+    0.46 — well below probe cliff.

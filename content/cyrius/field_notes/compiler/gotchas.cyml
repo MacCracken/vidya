@@ -1816,3 +1816,364 @@ produces wrong results, AND reverting the dispatch resolves
 it, AND the wrong result has the shape of a stack address —
 suspect stack-local overflow in the dispatch code.
 """
+
+[[entries]]
+name = "heap_relocation_inside_input_buf_v51119"
+description = "Relocating fn_* (or any) tables into 0x00000-0x100000 collides with input_buf — first compile silently works, second compile hangs"
+category = "cyrius"
+tags = ["heap-map", "input-buf", "v5.11.19", "fn-table", "self-host"]
+---
+Surfaced 2026-05-11 mid-v5.11.19 Phase 1 when relocating
+7 scattered fn_* tables for the fn_table cap raise (4096 →
+8192). Initial placement targeted 0xA0000-0xF0000 — picked
+because the v5.11.18 identifier buffer raise extended
+tok_names to 0xA0000, and I (mis)read the heap map as having
+944 KB of free gap from 0xA0000 onward.
+
+== ROOT CAUSE ==
+
+`input_buf` is the raw stdin source buffer at S+0x00000
+sized 1 MB (0x100000 bytes). tok_names at S+0x60000 lives
+NESTED INSIDE input_buf — it's rebuilt by LEX after stdin
+is fully read, so the overlap is intentional and safe.
+
+The "free gap" I thought existed (0xA0000-0x18C100) is
+actually:
+
+  0x00000-0x100000: input_buf (1 MB)
+  0x100000-0x10C000: scattered fn_* tables (old location)
+  0x10C000-0x114000: fn_name_hash + fn_start_hash (old)
+  0x114000-0x11A000: 24 KB real gap
+  0x11A000-0x14A000: var_noffs/sizes/types
+  0x14A000-0x18C100: ~265 KB real gap
+
+The only ACTUAL free space before scratch state at 0x18C100
+is two sub-bands: 0x100000-0x10C000 + 0x14A000-0x18C100.
+0xA0000-0x100000 is INSIDE input_buf — any writes there
+clobber the source being read, and any reads return source-
+content bytes instead of fn metadata.
+
+== SYMPTOM ==
+
+First compile (using OLD cc5 to produce NEW cc5): SUCCEEDS.
+The old binary doesn't know about the new offsets; it
+generates code for the new source as documented. Output
+binary appears correct.
+
+Second compile (using NEW cc5 to produce another NEW cc5):
+HANGS. The new binary tries to USE the new offsets at
+runtime — it reads source bytes from 0x00000-0x100000 INTO
+input_buf, which overwrites whatever the lexer thought it
+wrote at 0xA0000-0xF0000. Subsequent fn lookups read source
+content (garbage as fn metadata) and the lexer/parser loops
+forever.
+
+Caught by the 2-step fixpoint check (`cmp` between first and
+second compile output). The first compile's output existed
+but cmp couldn't reach it because second compile timeout-
+killed at 30s.
+
+== MITIGATION ==
+
+Replan with REAL free gaps. For v5.11.19:
+
+  0x100000-0x118000: 96 KB — fits fn_deprecated_msg (64KB) +
+    fn_name_hash (16KB) + fn_start_hash (16KB)
+  0x14A000-0x18A000: 256 KB — fits fn_regalloc + fn_ret_sid
+    + fn_variadic + fn_flags (4 × 64KB)
+
+Pre-commit audit shape for heap-map relocations:
+
+  1. Identify the TARGET range with the heap map sorted by
+     offset (not by source-file appearance order — which is
+     scattered).
+  2. Verify ALL ranges between input_buf-end (0x100000) and
+     scratch-state-start (0x18C100) are EMPTY or holding
+     ONLY tables you're about to move.
+  3. For each candidate target offset, check that NO existing
+     `S + 0x<offset>` reference exists in src/. The new home
+     must be virgin.
+
+== PROCESS LESSON ==
+
+Phased relocations with byte-identical fixpoint check after
+EACH phase catch this class of bug. Without the per-phase
+check, the misplacement would have hidden until kybernet
+1.1.0's 3779-fn surface attempted to register a fn past the
+4096 boundary — at which point the corruption would have
+been impossible to attribute without an unwind through 4
+phases.
+
+== RELATED ==
+
+The Phase 1 false-success pattern (works on old binary,
+fails on new binary self-compile) is structurally identical
+to the v5.6.5 fn_name_hash zero-init issue and the v5.10.41
+fn_start_hash similar — heap-state regions where the
+COMPILER WRITES it interpret-able as data, so a mis-located
+write SILENTLY produces "valid" output. Fixpoint check is
+the only safety net.
+
+[[entries]]
+name = "cyrius_deps_global_symlink_wedge_v51117"
+description = "cyrius deps stdlib_dir resolved from ~/.cyrius/lib (mutable global symlink) before v5.11.17 — wedge for the snapshot-ping-pong wipe"
+category = "cyrius"
+tags = ["deps", "per-repo-isolation", "v5.11.17", "snapshot-ping-pong"]
+---
+Surfaced 2026-05-11 at v5.11.3 ship and again at v5.11.13.
+Sibling agents (agnosys, mabda, phylax) run `cyriusly use
+<other-version>` to test against pinned toolchains; this
+flips `~/.cyrius/current` + the `~/.cyrius/bin` /
+`~/.cyrius/lib` symlinks. Concurrent `cyrius deps` resolution
+in this repo read from the stale snapshot and copied OLD
+lib/*.cyr files BACK over in-flight edits.
+
+== ROOT CAUSE ==
+
+`cbt/deps.cyr::_dep_find_stdlib_dir()` resolution order
+pre-v5.11.17:
+
+  1. `~/.cyrius/lib` (the global symlink — mutable by ANY
+     sibling agent on the dev box)
+  2. `./lib` dev-mode fallback
+
+For the cyrius source repo, step 1 ALWAYS won — even though
+`./lib` was the actual source of truth. Any sibling-agent
+version flip mid-edit triggered the copy-back.
+
+== FIX (v5.11.17) ==
+
+Resolution order rewritten:
+
+  (a) `./lib` if `src/main.cyr` exists (cyrius-repo signal —
+      dev-mode preferred; closes the cyrius-repo ping-pong
+      since the repo reads from its own in-tree files)
+  (b) `~/.cyrius/versions/<cyml-cyrius-field>/lib/` if
+      cyrius.cyml's `[package].cyrius = "X.Y.Z"` field is
+      set AND that version is installed (per-repo isolation
+      for downstream consumers)
+  (c) `~/.cyrius/lib` legacy fallback for repos without a
+      cyrius pin
+
+Plus: pinned-but-not-installed produces a hard error
+(`error: cyrius.cyml pins version X.Y.Z but it is not
+installed at <path>; run: cyrius install X.Y.Z`) — never
+silent slide to `latest`.
+
+== DETECTION ==
+
+If lib/*.cyr edits revert mid-session AFTER v5.11.17 ship,
+investigate:
+
+  1. `cat ~/.cyrius/current` — if not matching `cat VERSION`,
+     a sibling agent flipped it (recovery: `cyriusly use
+     <correct-version>`).
+  2. `find ~/Repos -maxdepth 2 -type l -name lib` — finds
+     directory-level lib symlinks (the bad pattern; should
+     return empty).
+  3. `grep '^cyrius =' cyrius.cyml` — confirms which version
+     the repo pins for deps resolution.
+
+Pre-v5.11.17 the recovery dance was: copy lib snapshot back,
+re-edit, refresh install snapshot, run check.sh. Post-fix:
+just recovery for the `current` symlink flip; lib edits
+themselves are protected.
+
+== RELATED ==
+
+See `snapshot_ping_pong_lib_corruption` (v5.8.26 surface) for
+the full ping-pong shape. v5.11.17 closes one leg of the
+ping-pong; v5.11.24 (per-repo isolation Part 2 — CLI version-
+resolved dispatcher) and v5.11.25 (Part 3 — `cyriusly use
+--global` flag) will close the others.
+
+[[entries]]
+name = "aarch64_native_build_path_latent_since_v5516_v51127"
+description = "main_aarch64_native.cyr missing CYRIUS_TARGET_LINUX predefine + bare syscall(2,…) in lex.cyr broke entire aarch64-native build path silently for 6 minors"
+category = "cyrius"
+tags = ["aarch64", "syscall-xlat", "predefine", "native-build", "v5.11.27", "v5.5.16", "latent-bug", "gate-gap"]
+---
+Surfaced 2026-05-12 at v5.11.27 slot entry when a routine
+`ssh pi to verify aarch64 native` premise-check on a freshly
+cross-compiled `/tmp/cc5-native-aarch64` SIGILL'd at the
+first `alloc()` call. Two stacked stale-fork bugs, both
+latent since the v5.5.16 main_*.cyr per-arch split — six
+minors and roughly 150 patches without an end-to-end
+aarch64-native exercise on real hardware.
+
+== BUG 1: missing CYRIUS_MACHO_ARM env dispatch ==
+
+`src/main_aarch64.cyr:148-159` (cross-compiler, x86 host
+emitting aarch64) has shipped a `CYRIUS_MACHO_ARM` env-driven
+`PP_PREDEFINE(CYRIUS_TARGET_LINUX|MACOS)` block since
+v5.5.16. The native variant (`src/main_aarch64_native.cyr`,
+aarch64 host emitting aarch64) was created in the same
+v5.5.16 split but only predefined `CYRIUS_ARCH_AARCH64` +
+`CYRIUS_HAS_VAL_SIMD_PARAMS` — the LINUX/MACOS dispatch
+never made it across.
+
+Effect: every `#ifdef CYRIUS_TARGET_LINUX` block in `lib/`
+(alloc.cyr, syscalls_aarch64_linux.cyr, vec.cyr — anywhere
+the per-OS branch lived) was dead under a native-aarch64
+build. So `alloc`, `alloc_init`, `vec_*`, `sys_*` were all
+undefined, and any non-trivial program SIGILL'd at the
+first call instruction (jumps to address 0).
+
+== BUG 2: aarch64 syscall xlat doesn't reshuffle args ==
+
+`src/frontend/lex.cyr:221, :325, :356` used literal
+`syscall(2, path, 0, 0)` to open `/proc/self/environ` (and
+to probe cwd `lib/`) during `_init_cyrius_lib` /
+`_check_shadow_lib`. The aarch64 backend
+(`src/backend/aarch64/emit.cyr:495-496`) translates syscall
+number 2 → 56 (openat — aarch64 has no `sys_open`), but
+does NOT reshuffle args: openat wants `(dfd, path, flags,
+mode)` with `AT_FDCWD = -100` as `dfd`. So the path string
+pointer landed in the dfd slot, NULL/garbage in the path
+slot → EFAULT.
+
+Visible via strace on pi:
+
+```
+openat(4775887, NULL, O_RDONLY) = -1 EFAULT (Bad address)
+```
+
+With `efd < 0`, `_init_cyrius_lib` bailed silently before
+reading HOME, leaving `_cyrius_lib_len == 0`, so the
+version-pinned-lib fallback at
+`$HOME/.cyrius/versions/<v>/lib/` was unreachable — any
+include not satisfied by cwd `lib/` failed.
+
+== WHY IT HID FOR 6 MINORS ==
+
+The cross-compiler (`src/main_aarch64.cyr`, x86 host emitting
+aarch64) compiles fine and runs through every CI cycle on
+x86 hosts. cc5_aarch64 cross-bin ship happened multiple
+times. But the cross-compiler is built for an x86 host
+running with x86 syscall numbers, so SYS_OPEN=2 is correct
+in lex.cyr when the BINARY runs on x86. The bug only
+surfaces when the binary itself runs ON aarch64 hardware
+(SYS_OPEN=56, openat ABI). check.sh + cyrius test exercise
+x86_64 only. Pi-side end-to-end was never gated.
+
+Same root cause as v5.11.23's Win64 RSP-alignment 6-minor
+latency: a code path that compiles clean and looks right
+in source but only fails when actually run on the target
+arch/OS.
+
+== FIX (v5.11.27) ==
+
+(1) Ported the predefine dispatch verbatim from
+`main_aarch64.cyr:148-159` into
+`main_aarch64_native.cyr:127-141` — the LINUX vs MACOS
+selection is now identical across the cross and native
+variants.
+
+(2) Matched READFILE's existing
+`if (SYS_OPEN == 2) { syscall(SYS_OPEN, path, …); } else
+{ syscall(SYS_OPEN, 0 - 100, path, …); }` branch shape at
+the three bare-syscall sites in lex.cyr. On x86 the path
+goes in arg 1; on aarch64 AT_FDCWD (-100) goes in arg 1
+and the path slides to arg 2.
+
+== DETECTION ==
+
+If a freshly cross-compiled aarch64-native binary SIGILLs
+at first alloc() or syscall surface, check in this order:
+
+1. `grep CYRIUS_MACHO_ARM src/main_aarch64_native.cyr` —
+   must show the env-driven LINUX/MACOS predefine block.
+2. `grep -n "SYS_OPEN == 2" src/frontend/lex.cyr` — must
+   show three branches (init, check_shadow env-open, and
+   check_shadow cwd-probe).
+3. `strace -f -e openat ./cc5-native-aarch64 < src/main.cyr`
+   on pi — should show `openat(AT_FDCWD, "/proc/self/environ", …)`
+   not `openat(0x{garbage}, NULL, …)`.
+
+== CLOSE-THE-GAP PIN ==
+
+v5.11.37 (`cc5_aarch64_native cross-bin ship`) is the slot
+pinned to add a pi-side CI smoke that exercises this path
+on every release, so the next gate-gap closes here.
+
+[[entries]]
+name = "parse_nested_call_string_quirk_var_stage_hint_v51128"
+description = "expected ')', got string on nested 2-arg fn-calls inside assert — diagnostic now hints at var-stage workaround"
+category = "cyrius"
+tags = ["parser", "diagnostic", "fn-args", "var-stage", "v5.11.28", "bote", "v5.11.18"]
+---
+bote 2.7.1 filed an intermittent `expected ')', got string`
+on the shape:
+
+```cyrius
+assert(streq(vec_get(caps_v, 0), "fetch") == 1, "msg")
+```
+
+i.e. `assert( fn( fn_with_2args(a, b) , LITERAL) == 1,
+LITERAL )` — a 2-arg inner call inside another fn-call
+inside `assert`. Filing was at cyrius 5.10.34. Trigger was
+path-dependent: error position drifted line 187/184/178/173
+as preceding lines changed, and after full chunk-by-chunk
+re-add the error stopped reproducing — bote couldn't
+reliably trigger it even at filing-time. Consumer
+workaround: stage the inner call into a `var` first.
+
+== PREMISE-CHECK AT v5.11.28 SLOT ENTRY ==
+
+Reverted bote's `cap0/cap1` var-stage workaround to
+recreate the inline-nested shape, compiled at both
+v5.11.27 (current) AND v5.10.34 (filing version, intact
+at `~/.cyrius/versions/5.10.34/bin/cc5`): clean parse
+both times. Synthetic fuzz 0/28 triggers across 9
+preceding-line counts (50→240 SSRF-URL asserts before
+the trigger) × both versions AND 10 ident counts
+(100→10000 filler fns spanning the filing's ~8700
+speculation boundary). No reproduction obtainable.
+
+== LIKELY SILENT FIX ==
+
+Commit `f3e98a3e` (first in v5.11.18) doubled the
+identifier buffer 131072 → 262144 bytes. This lines up
+with the filing's Speculation 2 ("hash collision or
+scan-window boundary at ~8700 idents") — capacity
+doubling shifts hash-bucket distribution and probe-window
+boundaries. Not proof-grade (can't verify without a
+repro), but the timing fits the disappearance window.
+
+== WHAT v5.11.28 SHIPS ==
+
+(1) `tests/tcyr/parse_nested_call_assert.tcyr` (13 asserts)
+locks the nested-call shape — bote's exact trigger,
+3-deep nested variant, and the same shape preceded by a
+7-assert SSRF-URL + JSON-literal stress block
+approximating bote's ~180-line preceding context. Future
+parser refactors that reintroduce the state leak surface
+in this file.
+
+(2) `src/common/util.cyr:425-432` adds a hint to
+`ERR_EXPECT` when surface is `expected ')'` or
+`expected ','` AND got-token is a string literal:
+
+```
+error:<source>:N: expected ')', got string
+  hint: a string literal where ')' is expected often means
+        a nested call inside a fn argument confused the
+        parser; stage the inner call into a `var` first.
+```
+
+The hint sits between the diagnostic line and the existing
+capacity dump, so consumers see "stage to var" before they
+start re-balancing quotes or escapes. The filing
+explicitly called out the misleading-diagnostic burden
+("the `expected ')', got string` symptom sends consumers
+down the wrong rabbit hole") as the part worth fixing
+even when the underlying bug is intermittent.
+
+== LESSON ==
+
+A misleading diagnostic earns its own slot-share even when
+the underlying bug is unreproducible. The bote filing
+spent ~45 minutes of bisect before the var-stage rescue
+became obvious; one hint string saves that future-time
+for every consumer whose parse fails this shape, whether
+the original state-leak is still live or not.

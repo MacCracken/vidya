@@ -1,0 +1,382 @@
+# v5.11.x retro — cleanup minor + 9-sibling foldin + heap-map refactor
+
+[[entries]]
+name = "v511x_cycle_retro_through_20"
+description = "v5.11.x retrospective slots .0-.20: stdlib annotation arc (7 phases), 9-sibling foldin cascade, comment-condensation principle, per-repo isolation Part 1, kybernet 2-part bundle with audit-driven honest split (Part A.ii spawned its own slot when the reporter's 'single source-line edit' framing didn't survive empirical heap-map audit), bote streaming arc 3→1 collapse, RFC 6455 §4.1 fix-with-trivial-LOC. Plus the slot map consolidation pattern (closing OPEN buffer-band gaps when emergent runway opens up)."
+category = "cyrius"
+tags = ["retrospective", "agent", "v5.11.x", "kybernet", "heap-map", "annotation-arc", "snapshot-ping-pong", "bote", "ws-handshake", "rfc-6455", "consolidation"]
+content = """
+v5.11.x is the **cleanup minor that revealed how much
+non-cleanup work was still queued**. Framed at v5.11.0 as
+"TS test harness + held-forward absorber", expanded
+mid-cycle as consumer-filings (kybernet × 2, bote × 4,
+agnos × 2, ai-hwaccel × 1, daimon × 1) plus the
+foldin-cascade closed the longest issue queue in the
+project's history.
+
+ARC: STDLIB ANNOTATION (.1-.7)
+
+Seven phases of `: i64` / `: Str` / `: Result` return-type
+annotations across native lib/ + per-arch syscall peers
++ compiler internals. User pin at v5.11.0 ship: "STDLIB
+ANNOTATION FIRST MF EERYTHING ELSE AFTER ALL THAT IS
+DONE" — non-negotiable arc ordering. Annotation arc closed
+clean across 7 slots; mabda 747-fn out-of-band pass
+happened in parallel on the v3 branch (release-blocked
+until 3.0.0 GA — counted as project state, not slot
+deliverable).
+
+ARC: 9-SIBLING FOLDIN CASCADE (.5)
+
+vani/patra/agnosys/sandhi/sakshi/sigil/yukti/sankoch/niyama
+all released at v5.11.5; foldin happened as a single
+slot via the sandhi pattern (dist/X.cyr → lib/X.cyr
+byte-identical copy). Required `.cyrius-toolchain`
+retirement + CI version-pin rewrites across the
+ecosystem — that pattern is now `[package].cyrius` in
+cyrius.cyml as single source of version truth.
+
+ARC: PER-REPO ISOLATION (.17, .24, .25 pinned)
+
+v5.11.17 shipped Part 1 — `cbt/deps.cyr::_dep_find_stdlib_dir()`
+rewritten: dev-mode-first (./lib when src/main.cyr exists)
+then cyrius.cyml-pinned (~/.cyrius/versions/<v>/lib),
+then legacy global ~/.cyrius/lib fallback. Pinned-but-
+not-installed = hard error. Closes the snapshot-ping-
+pong wipe wedge that bit twice in v5.11.x (.3, .13).
+Parts 2 (CLI version-resolved dispatcher) + 3 (cyriusly
+use --global flag) split off to .24/.25 — original
+5-item acceptance bar was 3 distinct architectural
+pieces, user direction "Reframe — split into 3 slots".
+
+ARC: KYBERNET BUNDLE (.18-.19)
+
+The audit-driven honest split that defined the cycle's
+discipline shift. Reporter (kybernet 1.1.5) framed both
+cap raises (fn_table 4096→8192 + identifier buffer
+131072→262144) as "single source-line edit in cc5".
+Audit at .18 entry showed:
+
+- Identifier buffer raise IS mechanical (~10 literals;
+  uses existing gap; no shift)
+- fn_table raise is a **heap-map refactor**: 15+ fn_*
+  tables across scattered locations need relocate-and-
+  shift, ~85 hex-literal edits across 15 src/ files
+
+User direction at .18 entry: "Split honestly — ship .18
+partial." Honest scope shrink, NOT lazy defer — Part
+A.ii (fn_table) got its OWN slot at .19 with full
+acceptance bar in the same edit (per
+`feedback_deferral_requires_roadmap_pinnage`).
+
+v5.11.19 EXECUTION — five-phase byte-identical heap
+refactor:
+
+1. Relocate 7 scattered fn_* tables (fn_deprecated_msg
+   0x104000→0x100000, fn_name_hash 0x10C000→0x110000,
+   fn_start_hash 0x110000→0x114000, fn_regalloc
+   0x1C8000→0x14A000, fn_ret_sid 0x1EC000→0x15A000,
+   fn_variadic 0x1F4000→0x16A000, fn_flags 0x1FC000→
+   0x17A000) into the 0x100000-0x118000 + 0x14A000-
+   0x18A000 free gaps.
+2. Shift IR + fixup regions +0x80000 (ir_nodes/blocks/
+   state/edges/cp/fixup_tbl/brk-fixup-end) to free
+   0x12CA000-0x134A000 for primary block migration.
+3. Move primary fn_* block 0x128A000 → 0x12CA000 +
+   double stride 0x8000→0x10000.
+4. Double extended fn_* block stride at 0x124A000
+   (REVERSE-ORDER sed pass to avoid replacement
+   collision between adjacent tables — table N's old
+   offset is table N-1's new offset).
+5. REGFN cap check 4096 → 8192 + warning thresholds +
+   error message literals.
+
+cc5 byte-identical at every phase; final size 804,456 B
+(was 804,464 B pre-refactor; -8 from string-literal
+deltas). 5 phases of self-host fixpoint validation
+caught:
+
+- Phase 1 initial misplacement: tables at 0xA0000-
+  0xF0000 INSIDE input_buf (0x0-0x100000). First compile
+  succeeded (old cc5 unaware of the layout). Second
+  compile HUNG — input writes corrupted the relocated
+  fn_* tables. Caught at fixpoint check, NOT in ship.
+  Real-gap re-placement clean.
+
+Hash tables (fn_name_hash + fn_start_hash) kept at 8192
+slots × 2B (mask 8191) — the available gap (369KB
+across both sub-bands) couldn't fit 7 doubled tables PLUS
+doubled hash tables (384 KB needed). Load factor degrades
+to 1.0 at the 8192-fn cap extreme; kybernet's worst-case
+3779 fns puts load factor at 0.46 — well below probe
+cliff. Documented trade-off.
+
+CHAPTER: BOTE STREAMING ARC (.13-.16)
+
+Four bote consumer filings (.13 sock_set_recv_timeout, .14
+arena lifecycle, .15 streaming dispatch primitives, .16 WS
+handshake). The .15 slot was originally a 3-slot arc
+(MPSC channel + cancellation + per-frame arena); premise
+check showed cyrius already had `chan_*` + `atomic_*` (since
+v5.5.31) + `arena_*` (since v5.5.x + v5.11.14 `arena_free`)
+— actual work was 4 thin shims (`chan_try_recv`, 3 cancel
+tokens). 3-slot arc collapsed to 1 slot. .16 WS handshake
+was a 5-line fix (RFC 6455 §4.1 key-length check) — proves
+the "trivial-LOC fix that gates a real consumer bug" slot
+shape is valid when the bug is well-scoped.
+
+The .16 ship ALSO consolidated the slot map: the 2 OPEN
+slots freed by .15's arc collapse got assigned to bote WS
+handshake (.18 → .16) + the existing pinned slots shifted
+back 2 to close the gap. User direction: "close up open gap,
+so we have additional runway later." Net: gained 2 OPEN slots
+at back of cycle.
+
+KEY PATTERNS THAT RECURRED
+
+**1. Audit-driven honest split.** v5.11.18 → .19 split.
+The reporter's framing was wrong; the audit replaced it
+with actual scope. Per
+`feedback_consumer_request_full_surface`, full surface is
+required — but only as defined by the audit, not the
+filing. The split is HONEST when the audit-derived scope
+genuinely doesn't fit; LAZY when the agent has time and
+chose not to. Audit data distinguishes the two.
+
+**2. Trivial-LOC fix that closes a real consumer bug.**
+v5.11.16 (WS handshake): 5 lines of code, but those 5
+lines close RFC 6455 §4.1 non-conformance that bote
+filed. Don't confuse small-diff with low-value — bug
+scope is the metric.
+
+**3. Premise-check that finds work already done.**
+v5.11.15 — bote filed a 3-slot streaming-primitives arc;
+premise check showed 80% of it shipped 2 minors ago.
+The slot's value was the thin shims + DISCOVERY for the
+consumer (doc block at top of `lib/async.cyr` showing the
+intended bote integration pattern, so future consumers
+don't re-file the same arc).
+
+**4. Comment-condensation principle.** User pin at .7:
+"primary info and changelog pointer, shouldn't HOG
+space". The pattern is `# WHY-invariant. See CHANGELOG
+[X.Y.Z]` — keep durable rationale in source, move
+historical narrative to CHANGELOG. Applied across 8
+native lib files at .7 close.
+
+**5. Close-to-archive issue filings.** User pin at .12:
+"if issue persists it will get dug out". At slot close,
+`git mv` resolved issues → `docs/development/issues/
+archived/`. Active queue stays scannable; re-opens are
+a `git mv` back. Applied to the cycle's filings
+consistently from .12 onward.
+
+**6. Slot map consolidation as a real activity.**
+v5.11.16: OPEN slots in front of cycle ≠ fixed positions.
+When arc collapse frees runway (the v5.11.15 streaming
+arc 3→1), shift pinned items forward to close the gap.
+The buffer band moves back, not the pin order. User
+direction "close up open gap, so we have additional
+runway later" formalizes the move.
+
+**7. The byte-identical-at-every-phase discipline.** The
+v5.11.19 heap-map refactor (highest-risk slot in v5.11.x)
+ran 5 phases — cc5 byte-identical fixpoint after EACH
+phase. Without that discipline, the Phase 1 input_buf
+misplacement would have shipped silent. The fixpoint
+check is the safety net that pays for slow-and-careful
+slot execution on heap-state changes.
+
+THE CYCLE'S META-LESSON: the "cleanup minor" framing was
+real but undersized. Cleanup work tends to surface
+emergent fixes (kybernet, bote, agnos, ai-hwaccel,
+daimon) because the deeper view exposes more consumer
+gaps. The right move is to expand the buffer band, not
+compress the cleanup work into too few slots. v5.11.x
+cycle expanded from .15 close-out to .40 close-out
+mid-cycle — that decision is the cycle's procedural win.
+"""
+
+[[entries]]
+name = "v511x_cycle_retro_21_to_28"
+description = "v5.11.x slots .21-.28: per-repo isolation arc closeout (Parts 2+3), PE plumbing + path-API widening fix, #derive accessors >16-field cap, aarch64-native build path latent-since-v5.5.16 surfacing, bote parser quirk closed no-repro with diagnostic improvement"
+category = "cyrius"
+tags = ["retrospective", "agent", "v5.11.x", "per-repo-isolation", "aarch64-native", "PE-widening", "parser-diagnostic", "premise-check", "gate-gap"]
+content = """
+v5.11.x continued through the back half (.21-.28) with
+the per-repo isolation arc closing, two more PE/Win64
+fixes, the agnos accessors-cap raise, and two slots
+where premise-check at slot entry rewrote the slot scope
+mid-flight (v5.11.27 + v5.11.28).
+
+ARC CLOSEOUT: PER-REPO ISOLATION (.25 + .26)
+
+Part 2 (v5.11.25) — `cyrius` CLI version-resolved dispatcher.
+Every `cyrius <cmd>` invocation now reads `cyrius.cyml`'s
+`[package].cyrius` field, compares against the binary's
+compile-time-embedded `_VERSION_TOOLCHAIN`, and `sys_execve`
+re-execs to `~/.cyrius/versions/<pin>/bin/cyrius` if they
+differ, with `CYRIUS_RESOLVED=1` env loop guard. Pinned-
+but-not-installed = hard error matching v5.11.17 deps
+policy. NEW `_VERSION_TOOLCHAIN` literal in
+`src/version_str.cyr` (version-bump.sh regen writes it
+going forward).
+
+Part 3 (v5.11.26) — `cyriusly use --global` flag. `cyriusly
+use 5.11.X` (no flag) now writes `cyrius.cyml`'s
+`[package].cyrius` field; `--global` keeps the legacy
+`~/.cyrius/current` global-pointer write. Sibling agents
+flipping the global pointer for their own tests stopped
+affecting other repos.
+
+Together: the snapshot-ping-pong wipe vector closed
+end-to-end. v5.11.17 closed the deps stdlib_dir resolution
+leg, v5.11.25 closed the CLI dispatch leg, v5.11.26
+closed the operator-error leg (`cyriusly use 5.10.x`
+without `--global` no longer trips other repos).
+
+CHAPTER: PE/WIN64 PATH-API SURFACE (.21-.23)
+
+v5.11.21 (PE plumbing premise debunk) — ai-hwaccel filed
+"cc5_win broken on cass" with `syscall(60, 42)` exit; cass
+verify showed `exit=42` clean (the bug was the Win
+`%ERRORLEVEL%` parse-time-expansion gotcha from the
+v5.10.49 incident — `cmd /c "prog & echo %errorlevel%"`
+falsely reports 0; needs `cmd /v /c "... !errorlevel!"`).
+Real gap was unrouted syscalls 83/87/89 (mkdir, unlink,
+rmdir). v5.11.21 added CreateDirectoryW/DeleteFileW
+auto-import + parser dispatch with -ENOSYS placeholder
+bodies.
+
+v5.11.23 (UTF-16 widening fix) — surfaced once the new
+path-API kernel32 calls actually ran on Win11 26200 (cass):
+`ntdll!+0x41912` fault in path-validation. Wine accepted
+both shapes; native Win11 didn't. The fault was in
+`_pe_widen_utf8_to_utf16` for a specific input shape that
+exit42/hello-world never exercised. Fixed in
+`src/backend/x86/emit.cyr`. Added PE-mode gate to
+`programs/check.cyr` exercising CreateFileW +
+CreateDirectoryW on cass — same gate-gap pattern as the
+v5.11.27 aarch64-native discovery (cross-arch CI gap is
+the bug-incubator).
+
+SLOT: AGNOS ACCESSORS >16-FIELD (.24)
+
+agnos 1.28.3 `struct Process` (22 fields) hit a no-bounds-
+check overflow in `src/frontend/lex_pp.cyr` per-struct
+`field_names` / `field_types` / `offsets` tables (hard-
+sized at 16 entries). The 17th field overflowed into
+`field_types[0]`, offsets diverged silently, agnos's CR3
+field corrupted on first context switch → kernel
+page-fault. Raised cap + added hard-cap diagnostic. Silent
+miscompile that broke a kernel — exactly the surface
+class the agnos arc surfaces.
+
+SLOT: AARCH64-NATIVE BUILD REPAIR (.27 — RE-PINNED MID-SLOT)
+
+v5.11.27 was originally pinned as the bote parser quirk
+slot. At slot entry, the premise-check pin fired: `ssh pi
+to verify aarch64 native`. Pi-side compile of a freshly
+cross-built `cc5-native-aarch64` SIGILL'd at first
+`alloc()`. Two stacked stale-fork bugs surfaced, both
+latent since the v5.5.16 main_*.cyr per-arch split (six
+minors, ~150 patches without a real-hardware aarch64-
+native end-to-end):
+
+(1) `src/main_aarch64_native.cyr` was missing the
+`CYRIUS_MACHO_ARM` env-driven `CYRIUS_TARGET_LINUX`/MACOS
+predefine block that `main_aarch64.cyr` shipped at v5.5.16
+— so every `#ifdef CYRIUS_TARGET_LINUX` in lib/ was dead
+under native build and alloc/vec_* undefined.
+
+(2) `_init_cyrius_lib` + `_check_shadow_lib` in lex.cyr
+used bare `syscall(2, path, …)`; aarch64's xlat changes
+2→56 (openat) but does NOT reshuffle args, so the path
+landed in the dfd slot and openat got EFAULT.
+`_cyrius_lib_len` stayed 0, version-pinned-lib fallback
+dead.
+
+Per the no-unilateral-scope-decisions pin, mid-slot
+re-scoping needs explicit user direction — used
+AskUserQuestion to ask whether to ship the aarch64 repair
+or continue with the parser quirk. User answered "Native-
+aarch64 bugs first; quirk slips". Roadmap updated
+in-edit, parser quirk slipped to v5.11.28.
+
+Pi e2e verified: alloc + vec_push + vec_get + assert +
+assert_summary program ran from both cwd-with-lib AND
+cwd-without-lib (proving the version-pinned-lib fallback
+fires correctly), exit=0, "1 passed, 0 failed".
+
+Latency narrative: same shape as v5.11.23's Win64
+RSP-alignment 6-minor latency. Cross-arch CI gap is the
+incubator. v5.11.37 (cc5_aarch64_native cross-bin ship)
+is the slot pinned to add pi-side CI smoke and close the
+gate-gap permanently.
+
+SLOT: BOTE PARSER QUIRK — CLOSED NO-REPRO (.28)
+
+bote 2.7.1's `expected ')', got string` filing
+(intermittent, path-dependent, on
+`assert(streq(call(args,n), "lit") == 1, "msg")`).
+Premise-check at slot entry: reverted bote's `cap0/cap1`
+var-stage workaround to recreate the inline-nested shape,
+compiled at v5.11.27 AND v5.10.34 (filing version, intact
+in `~/.cyrius/versions/5.10.34/bin/cc5`) — clean parse
+both times. Synthetic fuzz 0/28 across 9 preceding-line
+counts × both versions and 10 ident counts spanning the
+filing's ~8700 boundary speculation.
+
+User pin "Hunt harder for the path-dependent trigger"
+required pushing past the easy "no repro, close issue"
+read. The hunt evidence: filing version + current both
+clean, identifier-fuzz boundary-spanning fuzz clean,
+no synthetic context that triggers. The likely-fix
+commit was `f3e98a3e` (first in v5.11.18, doubled ident
+buffer 131072 → 262144 bytes) — lines up with the
+filing's Speculation 2 hash-collision boundary, but
+unprovable without a repro.
+
+Ships: regression test (13 asserts locking the shape) +
+diagnostic improvement (hint line in `ERR_EXPECT` when
+`expected ')'/','` AND got-token is string, gesturing
+at "stage inner call into `var`" — saves consumers from
+the misleading-fix rabbit hole the filing called out).
+
+KEY PATTERNS THAT RECURRED IN .21-.28
+
+**1. Premise-check at slot entry rewriting scope.**
+v5.11.27 was the cleanest example: routine ssh verify
+exposed bugs bigger than the original filing, and
+mid-flight scope change required explicit user direction
+rather than silent re-scoping. The pin enforced the
+asking; the answer ("Native-aarch64 bugs first; quirk
+slips") got pinned to roadmap in the same edit per the
+deferral-requires-pinnage rule.
+
+**2. Hunt-harder when no-repro looks easy.** v5.11.28 —
+default-mode "no repro at filing version, close issue"
+was the obvious shape; user pin "Hunt harder" forced
+the synthetic fuzz across preceding-line + ident-count
+gradients. Net result was the same close-no-repro
+outcome, but earned through evidence. The diagnostic
+improvement that landed is the value layer that survives
+even when the underlying bug is unreproducible.
+
+**3. Cross-arch CI gap as bug-incubator.** Both v5.11.23
+(Win64 RSP) and v5.11.27 (aarch64-native) followed the
+same pattern: x86 host compile clean, real-target run
+fails. Pi/cass/ecb cross-test gates close after the
+fact, not before. v5.11.37 closes the aarch64-native
+leg; PE-mode check.cyr gate closed the Win path-API
+leg at v5.11.23.
+
+**4. Misleading-diagnostic earns its own slot share.**
+The bote filing's underlying bug is intermittent and
+unreproducible at v5.11.28, but the misleading
+`expected ')', got string` symptom remained a real
+consumer-time-sink. One hint string saves future-bisect
+time for any parse failure of this shape, whether the
+state-leak is still live or not. Layer 2 of the filing
+was always the higher-leverage half.
+"""
