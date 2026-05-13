@@ -380,3 +380,276 @@ time for any parse failure of this shape, whether the
 state-leak is still live or not. Layer 2 of the filing
 was always the higher-leverage half.
 """
+
+[[entries]]
+name = "v511x_cycle_retro_29_to_49"
+description = "v5.11.x slots .29-.49: kernel ELF emitter section-header fixes for GRUB (.29-.31), user-binary ELF section-header parity sweep (.32-.34), parser-to-emit named-op refactor arc Classes B/C/D + drift gate (.35-.39), f64_abs peephole (.40), CVE-08 cld hardening + doc cleanup (.41), LSP semanticTokens locals+params (.42), EMITELF64_KERNEL + multiboot2 + EFI64-entry tag for Path A (.43), build/cc5 mabda-contamination postmortem + LSP argv[0] self-resolution (.44), P(-1) hardening 4-bundle (.45), FIXUP↔EMITELF64_KERNEL entry-arithmetic agreement (.46), gnoboot UEFI Application emit 3-slot arc with same-day filing-to-OVMF-boot turnaround (.47-.49)."
+category = "cyrius"
+tags = ["retrospective", "agent", "v5.11.x", "back-half", "elf-section-headers", "named-op-refactor", "drift-gate", "elf64-kernel", "multiboot2", "uefi", "efi-application", "gnoboot", "ovmf", "agnos-path-c", "premise-check"]
+content = """
+v5.11.x back half (.29-.49) turned the "cleanup minor"
+framing on its head: the kernel/boot path work that
+opens AGNOS pulled the cycle into platform-capability
+territory. Two parallel arcs ran across the back half:
+the **ELF-section-header parity sweep** (kernel emit
+catching up to user-bin emit on GRUB compatibility),
+and the **gnoboot UEFI Application emit arc** (the
+sovereign-bootloader unblocker that ships at v5.11.49).
+Path A (ELF64 multiboot2 via GRUB) died on iron at .46
+due to a GRUB-internal W^X bug; Path C (sovereign UEFI
+bootloader, no GRUB) became the live MVP boot path.
+
+ARC: ELF SECTION-HEADER PARITY (.29-.34)
+
+v5.11.29 added a minimal section-header table to the
+kernel ELF emitter so GRUB's `grub_elf32_get_shnum`
+accepts the binary. v5.11.30 (aarch64 kernel ELF),
+.31 (`cyrld` user-binary linker), .32 (x86 user-binary
+EMITELF_USER), .33 (PP_IFDEF_PASS 2 MB → 8 MB cap), .34
+(aarch64 user-binary EMITELF_USER) closed the parity
+sweep across all five ELF emitters in the toolchain.
+Same shape repeating across files = candidate for
+parser-to-emit named-op consolidation, which is exactly
+what the next arc tackled.
+
+ARC: PARSER-TO-EMIT NAMED-OP REFACTOR + DRIFT GATE (.35-.39)
+
+Four classes of parser → backend emit direct-byte calls
+audited and migrated to named-op helper fns per
+backend. **Class B** (.36): PIC-vs-direct address loads
+— EMIT_LEA_ABS / EMIT_MOVI_ABS. **Class C** (.37): f64
+unary ops — EF64_NEG / EF64_FROM / EF64_TO / etc., 8
+new named ops per backend. **Class D** (.35): aligned-
+to-the-v5.7.12 audit doc. **Drift gate** (.39): new
+`_parse_emit_drift_gate()` in `programs/check.cyr`
+scans `parse_*.cyr` for any `EB(S, 0xXX)` shape and
+fails if found — locks the refactor in. ESWITCH_DISPATCH_*
+family closed Class B's missed-site list. The drift
+gate is the cycle's most consequential procedural win:
+locks in a refactor pattern that would have rotted
+back through future changes.
+
+ARC: KERNEL ELF64 + MULTIBOOT2 + EFI64-ENTRY (.43-.46)
+
+The AGNOS Path A unlock attempt. v5.11.43 shipped
+`EMITELF64_KERNEL` — gated by `CYRIUS_ELF64_KERNEL=1`
+env var setting `_TARGET_ELF64_KERNEL` x86 flag at
+`src/main.cyr:1003`. New emitter writes ELF64 header
+(64 B) + 1 PT_LOAD program header (56 B) + multiboot2
+header (48 B) at file offset 0 → entry at file offset
+168 → e_entry = 0x1000A8.
+
+v5.11.44 caught a P0: `build/cc5` had been committed
+as a 1.39 MB binary containing mabda/wgpu/compute-pipeline
+strings (NOT the cyrius compiler — clobbered by some
+build-script slip cp'ing another binary). `git diff
+aad19f6a -- src/ lib/` was empty; current src self-hosts
+to the canonical 821,712 B. Same shape silently
+recurred at v5.11.28/.29 (fixed at .30). v5.11.45 added
+the build/cc5 contamination grep gate (greps for
+'mabda: gpu' / 'wgpuDevice' / 'compute_pipeline') to
+fail-fast next time.
+
+v5.11.46 was the agnos-filed bug fix: FIXUP's
+`kmode == 1` branch hard-coded `entry = 0x100060`
+(legacy ELF32+multiboot1 layout), while EMITELF64_KERNEL
+placed code at `0x1000A8` (ELF64+multiboot2 layout).
+0x48 = 72-byte mismatch shifted every absolute fixup
+72 B earlier; `mov rcx, 0x1001D8` landed inside the
+multiboot2 header instead of `.rodata`. Fixed at
+`src/backend/x86/fixup.cyr:95` by gating the entry
+value on `_TARGET_ELF64_KERNEL`. New
+`_elf64_kernel_entry_gate()` regression-floors the
+agreement: compiles `kernel_hello.cyr`, locates the
+"Hello from Cyrius!" string's true VA, asserts the
+OLD-entry-shifted VA (`true_va - 0x48`) is absent.
+
+The agnos-side filing came through the proper channel
+(filed in cyrius/docs/development/issues/ — not as a
+drive-by patch) per the v5.11.45 incident: an
+agnosticos agent had directly patched
+`src/backend/x86/fixup.cyr` with a technically-correct
+fix while working on AGNOS boot. Project leader pinned
+"EVEN IF ITS 100% CORRECT THE VIOLATION IS THE PROBLEM
+... FIRABLE OFFENCE IN REAL LIFE IS MY ISSUE." Patch
+reverted; bug filed as proper issue; cyrius-side slot
+implements on its own slot lifecycle (premise check
+→ fix → cross-arch verify → gate → CHANGELOG).
+
+ARC: GNOBOOT UEFI APPLICATION EMIT (.47-.49)
+
+After v5.11.46 unblocked Path A from the cyrius side,
+the agnos boot agent discovered Path A was dead-on-iron
+anyway: GRUB's `grub_relocator64_efi_boot` writes
+kernel register state directly into its own RO `.text`
+(the `grub_relocator64_efi_start` stub's embedded
+register-state immediates at .text 0x8AA-0x8F7).
+Modern UEFI firmware (OVMF 2024+ confirmed) enforces
+the UEFI Memory Attributes Protocol RO bit on code
+pages; the writes fault. **GRUB itself is the
+blocker** — not cyrius, not the kernel. Resolution =
+Path C: sovereign UEFI bootloader (`gnoboot`, ~2000
+LoC of Cyrius), no GRUB on the boot path.
+
+Path C blocked on cyrius emitting UEFI Application
+PE32+ binaries — subsystem 0xA, no kernel32 imports,
+populated .reloc, MS x64 ABI (UEFI uses the same as
+Windows PE). Filing came through proper channel.
+Premise audit at .47 entry found the filing's
+speculation about `.reloc` + DllCharacteristics work
+was partially stale: `.reloc` + IMAGE_REL_BASED_DIR64
+shipped v5.5.35; DllCharacteristics 0x0160 (NX_COMPAT
++ DYNAMIC_BASE + HIGH_ENTROPY_VA) shipped v5.6.31
+probe. Actual compiler deltas were narrow.
+
+**v5.11.47** — `_TARGET_EFI_APPLICATION` flag declared
+in all 3 backend `emit.cyr` files (x86 real, aarch64+cx
+stubs); env var `CYRIUS_TARGET_EFI=1` in main.cyr +
+main_win.cyr flips both `_TARGET_PE = 1` (EFI implies
+PE container) and the EFI flag. Subsystem branch 3 →
+10 in `pe/emit.cyr:746`. EEXIT EFI variant in
+`x86/emit.cyr:545` — single `0xC3` (ret), firmware
+reads rax as EFI_STATUS. ExitProcess import skip at
+`_pe_layout:439`. Data Dirs [1]/[12] zeroed (no
+kernel32 in UEFI). REFACTOR SQUEEZE-IN: 9
+near-identical `_pe_ensure_<X>(S)` / `_pe_<X>_get()`
+pairs consolidated to a single `_pe_register_kernel32`
+helper — single point for the import-time EFI guard
+(fail-fast if any kernel32 reroute fires under EFI).
+
+**v5.11.48** — `programs/efi_probe.cyr`: 64 LoC,
+single-asm-block, no fixups, walks SystemTable →
+ConOut → OutputString. Premise discovery: cyrius PE
+entry prologue is `e9 00 00 00 00` (5-byte `jmp +0`)
+— touches no GPRs, so firmware-supplied RCX
+(ImageHandle) and RDX (SystemTable) survive into the
+first user byte. Verified by 4-NOP marker landing at
+`.text + 0x05`. Made inline-asm-first the right
+capture shape; fn calls would clobber RCX/RDX with
+arg-setup `mov`s before user code sees them. New
+`_efi_emit_gate()` asserts MZ+PE+Magic+Subsystem 0xA
++ NX_COMPAT + Data Dirs zeroed + .text has ret.
+Compiler nudge: DllCharacteristics force NX_COMPAT
+when EFI mode + zero fixups (the v5.6.31 logic only
+set it when `_pe_reloc_vsize != 0`).
+
+**v5.11.49** — Manual OVMF smoke of .48 output:
+`BdsDxe: failed to load ... Not Found`. Walk-through:
+DOS+PE+Subsystem+DllChar+DataDirs all correct, but
+COFF Characteristics = 0x0023 includes **RELOCS_STRIPPED**
+(0x0001). OVMF firmware treats it as "load at exact
+ImageBase=0x140000000 or fail" — runtime services
+occupy nearby pages, allocation fails, BdsDxe reports
+"Not Found." Fix at `pe/emit.cyr:714`: EFI mode clears
+RELOCS_STRIPPED unconditionally. Post-fix:
+`BdsDxe: starting Boot0002 ... hello, uefi ...
+BdsDxe: loading Boot0000 BootManagerMenuApp` — full
+round-trip working. New `_efi_ovmf_smoke_gate()`
+runtime-floors the result: builds GPT disk + ESP +
+boots qemu+OVMF with -serial stdio + greps for
+"hello, uefi"; SKIP gracefully if tooling absent.
+
+Filing → ship: **same day**. Morning filing
+(2026-05-13) → afternoon arc closed + runtime-verified.
+The filing estimated "150-300 LoC + new probe + verify
+floor"; actual was ~250 LoC across .47/.48/.49
+including the refactor squeeze-in. Premise audit saved
+scope by finding `.reloc` + DllChar + COFF
+Characteristics machinery already shipped.
+
+KEY PATTERNS FROM .29-.49
+
+**1. Section-header parity as the missed-half class.**
+The .29-.34 arc revealed a recurring shape: an emitter
+gets a fix in one of its 5 instantiations (x86 user,
+x86 kernel, aarch64 user, aarch64 kernel, cyrld
+linker), but the other 4 silently miss it. Five slots
+of catch-up was the cost. The named-op refactor that
+followed (.35-.39) is the structural answer — same op
+encoded once per backend, drift gate prevents
+divergence.
+
+**2. RELOCS_STRIPPED is OVMF's silent rejector.** The
+v5.11.49 lesson: standard UEFI Application binaries
+(rEFInd, systemd-boot, GRUB-EFI) NEVER set
+RELOCS_STRIPPED. OVMF firmware treats the bit as a
+hard "exact-ImageBase-or-fail" contract; if firmware
+can't allocate the requested base, BdsDxe reports
+"Not Found" with no indication the bit was the
+problem. cyrius's PE backend now clears RELOCS_STRIPPED
+unconditionally in EFI mode. Pinned as a gotcha in
+field_notes/compiler/gotchas.cyml for future agents.
+
+**3. Same-day filing-to-ship turnaround.** The .47-.49
+arc closed in one afternoon because three factors
+aligned: (a) the filing arrived through the proper
+channel with technical content rich enough to scope
+from; (b) cyrius's PE backend had `.reloc` + DllChar
+machinery already shipped from years prior; (c)
+existing test infrastructure (gate pattern from .46's
+ELF64 entry gate, exec_vec_str from process.cyr,
+qemu/OVMF/mtools available locally). Mid-cycle
+turnaround at this speed isn't repeatable for every
+filing, but it is the upper bound when scope + tooling
++ filing-quality all align.
+
+**4. Path A → Path C pivot is a cycle-level lesson.**
+Two minors of work on Path A (v5.11.43 EMITELF64_KERNEL,
+v5.11.46 FIXUP entry fix) and Path A is still dead
+because GRUB itself has a W^X bug under modern UEFI.
+Cyrius emit was correct; the consumer's host stack
+was broken. Resolution wasn't "fix GRUB" (out of
+scope; GRUB is C+autotools+years-of-history) but
+"replace GRUB with our own bootloader" — which IS in
+scope because gnoboot is ~2000 LoC of cyrius. The
+lesson: when an external dep blocks a load-bearing
+path AND there's a sovereignty option, the
+sovereignty option might be cheaper than fighting
+the dep.
+
+**5. Refactor squeeze-in pattern.** The `_pe_ensure_*`
+9-fn consolidation at .47 wasn't on the filing's
+critical path — it was added because (a) the EFI
+import-guard wanted a single source of truth, and
+(b) 9 near-duplicates is the closeout-pass refactor
+shape CLAUDE.md item #6 names. Both delivered in the
+same slot because they compose: the helper IS where
+the EFI guard lives. This is the cleanest example
+in v5.11.x of the "squeeze-in opportunity" the user
+asks me to look for at slot entry.
+
+**6. Process pin (mid-cycle).** The v5.11.45
+unauthorized-cross-repo-patch incident wrote a hard
+rule into memory: "Cross-repo agents editing cyrius
+source is a firable-offence violation — always revert
++ file as issue, never adopt drive-by patches." The
+gnoboot arc at .47-.49 is what the proper-channel
+shape looks like in practice: agnosticos files a
+detailed issue in cyrius/docs/development/issues/,
+cyrius-side investigator does premise check + scopes
+the work + ships through cyrius's own slot lifecycle.
+Same technical content, completely different process
+contract.
+
+CYCLE STATS (through v5.11.49)
+
+- 50 slots shipped (.0 - .49); .68/.69 pinned for close
+- cc5: 815,432 B (v5.11.0) → 823,112 B (v5.11.49); +7,680 B / +0.94 %
+- check.sh: 65 → 72 gates (+7 new across the cycle)
+- 1 new stdlib module (n/a — annotation arc + foldins
+  were version-bumps of existing modules)
+- 1 new sample program (programs/efi_probe.cyr at .48)
+- 1 new consumer repo unblocked (gnoboot, MVP boot
+  path; cyrius.cyml pinned to `cyrius = "5.11.49"`)
+- 3 new field_notes/compiler/gotchas entries from this
+  cycle so far (RELOCS_STRIPPED-vs-OVMF, FIXUP-vs-
+  EMITELF64_KERNEL entry, PE prologue e9-jmp discovery)
+
+v5.11.x is still in-flight (49 slots through 2026-05-13;
+cycle pinned to close at .68 with .69 reserved for
+conditional mabda 3.0 fold). The above retro covers
+the published back half through .49. A final
+v5.11.x_cycle_close entry will land at .68/.69 ship
+with the full cycle summary + heap-map reorg + any
+mabda-fold ceremony.
+"""

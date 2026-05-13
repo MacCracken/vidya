@@ -8,20 +8,52 @@
 # review and cleanup. Resolved patches were dropped — the fix is in the
 # compiler now and no agent action is needed.
 #
-# Verified on Cyrius 5.11.28 (shipped 2026-05-12 — v5.11.x cycle
-# IN-FLIGHT, 28 slots through 2026-05-12; cycle pinned to close
-# at v5.11.40 with explicit emergent-buffer band). cc5 self-host
-# byte-identical at 810,024 B. Stdlib module count: 79+ (sandhi
-# 1.3.3 fold at v5.10.34 was the last new-module landing; v5.11.x
-# foldins are version-bumps of already-vendored siblings).
+# Verified on Cyrius 5.11.49 (shipped 2026-05-13 — v5.11.x cycle
+# IN-FLIGHT, 50 slots through 2026-05-13; cycle pinned to close
+# at v5.11.68 / .69 — heap-map full reorg + conditional mabda
+# 3.0 fold). cc5 self-host byte-identical at 823,112 B. Stdlib
+# module count: 79 (no new-module landings v5.10.x or v5.11.x
+# back-half; foldins are version-bumps of already-vendored
+# siblings or the v5.11.5 9-sibling cascade).
 # api-surface continues to grow with per-cycle additions —
 # v5.11.x added the per-repo isolation surface (cyrius.cyml
 # [package].cyrius field + version-resolved CLI dispatch), the
-# typed-simd value-form completion, and the PE path-API surface
-# (CreateDirectoryW/DeleteFileW auto-import). See
+# parser-to-emit named-op refactor with drift-gate, ELF64
+# kernel emit + multiboot2 + EFI64-entry tag, and the UEFI
+# Application PE emit arc (gnoboot MVP unblocker). See
 # retros/v511x.cyml for the cycle narrative.
 #
-# v5.11.x highlights (in-flight, 28 slots through 2026-05-12):
+# v5.11.x highlights (in-flight, 50 slots through 2026-05-13):
+# - UEFI APPLICATION PE EMIT ARC (.47-.49): 3-slot arc
+#   unblocking the AGNOS sovereign UEFI bootloader gnoboot
+#   (~2000 LoC of cyrius replacing GRUB on the boot path).
+#   `_TARGET_EFI_APPLICATION` flag + `CYRIUS_TARGET_EFI=1`
+#   env var. Subsystem 3 → 10 (EFI_APPLICATION). EEXIT emits
+#   single 0xC3 (ret) under EFI mode — firmware reads rax as
+#   EFI_STATUS. ExitProcess import skipped; Data Dirs [1]/[12]
+#   zeroed; NX_COMPAT forced; RELOCS_STRIPPED cleared (latter
+#   was the v5.11.49 OVMF runtime smoke discovery — UEFI
+#   firmware treats the bit as exact-ImageBase-or-fail).
+#   `_pe_register_kernel32` 9-fn refactor squeeze-in at .47.
+#   New `programs/efi_probe.cyr` (.48) boots end-to-end under
+#   qemu+OVMF (.49 runtime smoke gate green).
+# - ELF64 KERNEL EMIT + AGREEMENT FIX (.43-.46): EMITELF64_KERNEL
+#   for AGNOS UEFI x86_64 boot (Path A). v5.11.46 fixed FIXUP↔
+#   EMITELF64_KERNEL entry-arithmetic mismatch (`kmode==1`
+#   branch hardcoded 0x100060 ELF32+mb1 layout vs the new ELF64+
+#   mb2 0x1000A8). Path A subsequently dead-on-iron due to GRUB
+#   `grub_relocator64_efi_boot` W^X bug under modern UEFI;
+#   replaced by Path C (gnoboot, .47-.49).
+# - PARSER-TO-EMIT NAMED-OP REFACTOR + DRIFT GATE (.35-.39):
+#   per-backend EMIT_<OP> helpers replace direct `EB(S, 0xXX)`
+#   byte emits in `parse_*.cyr`. Classes B (PIC-vs-direct
+#   address loads), C (f64 unary ops), D (v5.7.12 audit doc).
+#   v5.11.39 drift gate scans for any remaining EB(S,...) and
+#   fails check.sh. Structurally locks the refactor.
+# - ELF SECTION-HEADER PARITY SWEEP (.29-.34): kernel + user-bin
+#   ELF emitters across all 5 instantiations (x86 user/kernel,
+#   aarch64 user/kernel, cyrld linker) brought to section-header
+#   parity for GRUB compatibility + tooling acceptance.
 # - PER-REPO ISOLATION ARC (.17 + .25 + .26): three-part close
 #   on the snapshot-ping-pong wipe vector. (.17) `cbt/deps.cyr`
 #   stdlib_dir resolution rewritten: dev-mode-first (./lib when
@@ -41,31 +73,47 @@
 #   niyama via the sandhi pattern; retired .cyrius-toolchain in
 #   favor of cyrius.cyml [package].cyrius as the single version-
 #   pin source of truth.
+# - P(-1) HARDENING SWEEP (.45): 4-item bundle including
+#   `_cc5_contamination_gate` (greps build/cc5 for mabda/wgpu
+#   strings — the v5.11.43-style slip signature), `cyrius vet`
+#   restored as real audit tool, dead-fn report gated behind
+#   `CYRIUS_DCE_VERBOSE=1`, state.md compression 1451→583 lines.
+# - LSP SEMANTIC TOKENS LOCALS+PARAMS (.42): textDocument/
+#   semanticTokens/full now colors locals + parameters distinctly
+#   from globals/fn-names/types. cyrius-lsp argv[0] self-resolution
+#   (.44) via /proc/self/exe lets editors with minimal-env LSP
+#   launchers find cc5 without $CYRIUS_HOME / $HOME.
+# - CVE-08 HARDENING + f64_abs PEEPHOLE (.40-.41): cld (0xFC)
+#   emitted before any rep movsb/stosb to clear direction flag;
+#   f64_abs(x) peephole replaces 6-instr sequence with 2-instr
+#   ANDPS + RET.
+#
+# Additional v5.11.x highlights (front + middle, .1-.34):
+# - STDLIB ANNOTATION ARC (.1-.7): seven phases of return-type
+#   annotations across native lib/ + per-arch syscall peers +
+#   compiler internals.
+# - 9-SIBLING FOLDIN CASCADE (.5): single-slot fold of vani /
+#   patra / agnosys / sandhi / sakshi / sigil / yukti / sankoch /
+#   niyama via the sandhi pattern; retired .cyrius-toolchain in
+#   favor of cyrius.cyml [package].cyrius as the single version-
+#   pin source of truth.
+# - PER-REPO ISOLATION ARC (.17 + .25 + .26): three-part close
+#   on the snapshot-ping-pong wipe vector via cyrius.cyml
+#   [package].cyrius + version-resolved CLI dispatch +
+#   `cyriusly use --global` opt-in for legacy global writes.
 # - PE/WIN64 PATH-API SURFACE (.21-.23): syscall 83/87/89 auto-
 #   import + CreateDirectoryW/DeleteFileW dispatch (.21); UTF-16
-#   widening fix for path-API kernel32 calls on Win11 26200 (.23
-#   — Wine accepted both shapes, native didn't); PE-mode gate in
-#   programs/check.cyr exercising CreateFileW + CreateDirectoryW
-#   on cass.
+#   widening fix on Win11 26200 (.23); PE-mode programs/check.cyr
+#   gate exercising CreateFileW + CreateDirectoryW on cass.
 # - AARCH64-NATIVE BUILD REPAIR (.27): two stacked stale-fork
-#   bugs latent since the v5.5.16 main_*.cyr per-arch split —
-#   main_aarch64_native.cyr missing CYRIUS_TARGET_LINUX
-#   predefine, lex.cyr bare `syscall(2, …)` not handling the
-#   aarch64 openat-arg-shuffle. Cross-compiler shipped fine
-#   because it ran on x86 hosts. Surfaced via routine pi-side
-#   premise-check on the freshly-cross-built native binary.
-#   v5.11.37 pinned to add the pi-side CI smoke that would have
-#   caught this 6 minors ago.
-# - PARSER NESTED-CALL DIAGNOSTIC (.28): bote 2.7.1's
-#   `expected ')', got string` on nested 2-arg fn-calls inside
-#   assert — closed no-repro at both filing version (5.10.34)
-#   and current (5.11.27), 0/28 synthetic fuzz triggers across
-#   preceding-line counts + ident-count gradients spanning the
-#   filing's ~8700 boundary speculation. Likely silently closed
-#   by v5.11.18's identifier buffer doubling. Ships regression
-#   test (`tests/tcyr/parse_nested_call_assert.tcyr`) + hint
-#   line in `ERR_EXPECT` when `expected ')'/','` AND got-token
-#   is string, gesturing at "stage inner call into `var`".
+#   bugs latent since the v5.5.16 main_*.cyr per-arch split.
+#   pi-side CI smoke at v5.11.37 closes the gate-gap class.
+# - PARSER NESTED-CALL DIAGNOSTIC (.28): bote 2.7.1 nested-call
+#   `expected ')', got string` closed no-repro; hint line in
+#   ERR_EXPECT gestures at "stage inner call into `var`". Root
+#   cause likely silently closed by v5.11.18 identifier buffer
+#   doubling — see docs/development/issues/2026-05-13-bote-nested-call-state-leak-root-cause.md
+#   for cold-case investigation pin.
 # - SLOT-MAP CONSOLIDATION AS REAL ACTIVITY (.16, .27): when
 #   arc collapse or mid-slot re-scope frees runway, shift
 #   pinned items forward and grow the OPEN buffer band at the

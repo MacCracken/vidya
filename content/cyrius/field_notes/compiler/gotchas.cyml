@@ -115,109 +115,6 @@ Full backstory: v5_8.cyml's `slice_high_half_regalloc_pin_v5816`.
 """
 
 [[entries]]
-name = "tail_call_escape_addr_local"
-description = "PARSE_RETURN's tail-call detector now skips TCO if any arg in `return helper(args);` uses the `&` token. The TCO epilogue deallocates the current frame BEFORE the callee reads through `&local`."
-category = "cyrius"
-tags = ["tco", "tail-call", "stack", "v5.8.16"]
-content = """
-**The trap**: pre-§8 TCO matched `return IDENT(args);` and
-emitted normal call-arg setup, then the fn epilogue (restoring
-callee-saved regs, popping rbp, restoring rsp), then
-`jmp <callee>`. Inside the callee, the previous frame is gone —
-anything the callee reads through a pointer to that frame sees
-dead stack.
-
-For most call patterns this never mattered — fn args are
-passed by value (in registers). The exception: `&local` args.
-`return helper(&local);` would compile to:
-
-```
-push &local (== rbp - local_disp)
-pop rdi
-...epilogue...
-jmp helper
-```
-
-Inside helper, rdi = old caller's rbp - local_disp, but old
-caller's frame is gone; reads through that address see
-arbitrary stack memory.
-
-**Pre-§8 was masked** for slice fn-locals because the slice's
-high half coincidentally landed on saved rbp (= 0 from the
-C runtime when called from main). The §8 layout-flip moved
-the high half into a real stack slot, exposing the dead-
-stack-read deterministically.
-
-**Fix**: PARSE_RETURN scans the tail-call arg list for `&`
-(token type 27); if present, skip TCO and emit a normal call.
-Conservative — also blocks TCO for `&global` (rare and only
-loses the optimization, not correctness).
-
-**Why "skip" rather than "patch"**: the right fix would be
-escape analysis on `&local` to bar TCO only when the local's
-address actually escapes the call's lifetime. Cyrius doesn't
-have escape analysis; the conservative skip is the right
-trade-off given the rarity of `return helper(&local);`
-patterns and the catastrophic cost of false-positives
-(silently corrupted reads).
-
-**Recognize again**: any "callee silently reads garbage when
-called as `return helper(&local);`" shape.
-
-Full backstory: v5_8.cyml's `tail_call_escape_addr_local_v5816`.
-"""
-
-[[entries]]
-name = "pointer_vs_inline_struct_dispatch"
-description = "PARSE_FIELD_LOAD/STORE auto-detects pointer-to-struct vs inline-struct fn-locals by checking if slot lli-1 has the v5.5.36 sentinel name -1. Inline mode uses lea (slot IS the struct's bytes); pointer mode uses mov (slot HOLDS a pointer)."
-category = "cyrius"
-tags = ["struct", "field-access", "v5.8.17"]
-content = """
-**The trap**: PARSE_FIELD_LOAD's local-struct branch
-historically treated EVERY struct-typed local as an INLINE
-struct (the v5.5.36 no-init `var p: StructName;` path that
-allocates ceil(STRUCTSZ/8) slots, named slot at the deepest
-stack position). For inline structs, `&s` (EFLADDR(named_slot))
-yields field 0's address because the struct's bytes ARE the
-slot's bytes — `lea + offset + load` is correct.
-
-But `var s: Str = str_from(...)` allocates ONE slot whose
-value IS the heap pointer. `&s` in this case is the slot's
-address (rbp - N), NOT the struct's address. `lea + offset +
-load` reads the wrong location.
-
-**Fix**: distinguish at PARSE_FIELD_LOAD time by checking slot
-lli-1. The v5.5.36 inline path tags filler slots with sentinel
-name -1; if slot lli-1 carries that sentinel (or lli == 0,
-since inline structs always reserve a filler before the named
-slot when STRUCTSZ > 8), the slot is the named tail of an
-inline allocation. Otherwise it's a single-slot pointer.
-
-Pointer mode emits `EFLLOAD + EMOVCA` (load slot value into
-rax, move into rcx) to set rcx to the struct's base. Inline
-mode emits `EFLADDR_X1` (lea — slot address IS the struct
-base) as before.
-
-Param-decl path also extended: PARSE_FN_DEF's param loop now
-calls FINDSTRUCT on every `: Type` annotation; if the type
-resolves to a struct, sets `SLTYPE(li, -sid)` on the param's
-slot. Without this tag, `param.field` on a `: Str` parameter
-would compile-error with "unexpected ',' / ';'" because the
-struct-typed-local branch would never fire.
-
-Disambiguation works for STRUCTSZ > 8 (Str at 16, Vec at 24,
-etc.). For STRUCTSZ <= 8 (single-slot inline), the heuristic
-falls through to inline mode (no sentinel above) — these
-should be rare and the disambiguation can be revisited if a
-consumer surfaces pain.
-
-**Recognize again**: any "pointer-typed struct local + field
-access reads zero" shape — verify the dispatch is firing.
-
-Full backstory: v5_8.cyml's `pointer_vs_inline_struct_dispatch_v5817`.
-"""
-
-[[entries]]
 name = "stale_fixed_cap_drift"
 description = "Cap checks drift out of sync with the actual buffer size. The buffer gets expanded; the cap check / comment / docs DON'T. Bug sits latent until a downstream workload crosses the OLD threshold."
 category = "cyrius"
@@ -447,92 +344,6 @@ calls, OpenSSL's EVP_DecryptInit_ex (8 args), recvmmsg
 at the failing instruction.
 
 Full backstory: v5_6.cyml's `sysv_odd_stack_args_rsp_alignment_violation`.
-"""
-
-[[entries]]
-name = "pp_pass_helpers_take_src_base"
-description = "Preprocessor pass helpers (PP_HASH/DEFINE/DEFINED/GETVAL/EVAL_IF/DERIVE_*) must take src_base. Reading via S+pos for source > 524288 B lands in stale heap when PP_*_PASS copied content back to S+0 capped at 524288."
-category = "cyrius"
-tags = ["preprocessor", "caps", "v5.6.30", "v5.6.42"]
-content = """
-**The trap**: cyrius's preprocessor runs in passes
-(`PP_REF_PASS`, `PP_DERIVE_PASS`, `PP_IFDEF_PASS`, etc.). Each
-pass reads source from one buffer, writes processed output to
-another, then COPIES the output back to `S+0` for the next
-pass to consume.
-
-The copy-back is capped at 524288 B (the original
-preprocess_out size). For source > 524 KB, the copy truncates;
-helpers reading from `S+pos` for pos beyond 524 KB land in
-stale heap (whatever was there before the pass).
-
-v5.6.30 fixed this for `PP_DERIVE_*` helpers by threading
-`src_base` through their signatures (so they read from the
-actual buffer, not assumed-to-be-at-S+0).
-
-v5.6.42 closed the rest of the family: `PP_HASH`, `PP_DEFINE`,
-`PP_DEFINED`, `PP_GETVAL`, `PP_EVAL_IF`. Same shape — each
-function gained a `src_base` arg that callers pass through
-from the actual pass buffer.
-
-**Recognize again**: any "preprocessor truncates / corrupts at
-exactly 524 KB" shape. The fix is always "thread src_base
-through the helper family"; never "raise the cap and hope."
-Threading the argument is the structurally correct fix.
-
-**Generalize**: any helper that reads from a region the caller
-chose should TAKE THE REGION as an argument, not assume a
-fixed offset. Hardcoded `S+pos` reads in helpers are a
-recurring trap class.
-
-Full backstory: v5_6.cyml's `pp_ifdef_pass_helpers_must_take_src_base`.
-"""
-
-[[entries]]
-name = "ts_lex_jsx_lookahead_terminators"
-description = "TS_LOOKAHEAD_IS_ARROW's COLON-branch must treat JSX closing tokens as scope terminators or it false-positives on unrelated arrows far past the expression."
-category = "cyrius"
-tags = ["ts", "lex", "jsx", "v5.7.6"]
-content = """
-**The trap**: when TS_LOOKAHEAD_IS_ARROW determines whether
-`(` starts an arrow function, it scans for the matching `)`,
-then checks what follows. If COLON, it enters a secondary
-scan for `=>` (return-type form `(args): T => body`).
-
-The COLON-branch's secondary scan tracked LPAREN/RPAREN/
-LBRACKET/RBRACKET/LT/GT for depth, and treated LBRACE/SEMI/
-COMMA at depth==0 as terminators. JSX tokens were SKIPPED —
-none of them affected depth, none terminated.
-
-For ternary `a ? (<JSX/>) : (<JSX2/>)` followed by REAL JSX
-text + much later an arrow function in the same source: the
-COLON-branch scanned past the else-branch's RPAREN
-(depth → 0), past JSX closing tokens (JSX_EXPR_CLOSE,
-JSX_CLOSE_END, etc. — all skipped), into adjacent code, and
-FOUND an unrelated `=>` at depth==0. LOOKAHEAD returned 1
-(arrow), parser entered ARROW_PAREN, then ARROW_PARAMS errored
-on the JSX_OPEN_START at the start of `(<JSX/>)`.
-
-**Fix**: COLON-branch treats `JSX_EXPR_CLOSE` /
-`JSX_CLOSE_END` / `JSX_FRAGMENT_CLOSE` / `JSX_SELF_CLOSE` /
-`JSX_OPEN_END` as terminators at depth==0. A closed-out JSX
-construct can't be inside an arrow return-type position, so
-`=>` past it is unrelated.
-
-**Why this resisted bisect**: the bug requires (1) a ternary
-with JSX-containing parens, (2) an unrelated arrow function
-SOMEWHERE later in the same source. Single-line removal can't
-isolate because it depends on TWO non-adjacent constructs.
-Removing either suppresses it, neither was the culprit alone.
-
-**Recognize again**: any "TS arrow-fn detection misfires on
-file with mixed JSX + later arrow" shape. The fix is always
-"the lookahead scan needs to terminate at the JSX construct's
-close." Other lookaheads in the TS frontend may have similar
-gaps (template literals, generic-arg lists, asserts predicate
-clauses).
-
-Full backstory: v5_7.cyml's `ts_lex_jsx_lookahead_is_arrow_jsx_terminators`.
 """
 
 [[entries]]
@@ -920,715 +731,6 @@ single-file edits — only manifests when consumers compile.
 """
 
 [[entries]]
-name = "test_runner_pipe_capture_deadlocks_on_setuid_orphan"
-description = "When a cyrius test fixture forks a setuid helper (unix_chkpwd, su, sudo, etc.), the helper inherits the test binary's stdout fd. If that fd is a pipe, the helper — reparented to init as an orphan — keeps the pipe write-end open after the test binary exits. read-to-EOF in the dispatcher blocks forever. v5.9.2 surfaced; fixed by routing capture through a temp file + waitpid-on-direct-child-only."
-category = "cyrius"
-tags = ["test-harness", "fork", "pipe", "setuid", "orphan", "v5.9.2", "shadow_pam"]
-content = """
-**The trap**: a test-runner helper that captures a fixture's
-stdout via the canonical fork+pipe+read-to-EOF pattern (e.g.
-`lib/process.cyr`'s `exec_capture`) deadlocks when the fixture
-forks a setuid grandchild that outlives the direct child.
-
-**The shape**:
-
-  parent (dispatcher)              -- holds rfd
-   └── child (test fixture)        -- inherits wfd as fd 1
-        └── grandchild (helper)    -- inherits wfd as fd 1
-
-When child waitpid's grandchild and exits, the dispatcher reaps
-the child cleanly. But if the helper survives child's exit (PAM
-helpers like `unix_chkpwd` do this routinely — they're reparented
-to init), the pipe still has a writer (the helper's fd 1 → wfd),
-so dispatcher's `sys_read(rfd, ...)` never returns 0 (EOF).
-
-**Specific v5.9.2 incident**: `programs/check.cyr`'s
-`_tcyr_relay_gate` used `exec_capture` against `shadow_pam.tcyr`.
-The .tcyr exercises `lib/pam.cyr`, which forks `unix_chkpwd`
-(setuid root). PAM's child does `sys_dup2(rfd, 0)` — wires
-password pipe to fd 0 — but does NOT touch fd 1 or fd 2.
-unix_chkpwd inherits the dispatcher's pipe write-end and
-sometimes lingers as an orphan (parent=init), keeping the pipe
-open. Dispatcher's read-to-EOF blocked indefinitely.
-
-**Why bash didn't have this problem**: the `.sh` regression-shell
-equivalents pipe through `grep -q "0 failed"`. `grep -q` exits on
-first match, closing its read end. The dispatcher's stdin-side of
-the pipeline (the test fixture) gets SIGPIPE on next write, but
-the helpers don't write to stdout so they don't trip SIGPIPE either
-— they just outlive grep. The shell doesn't wait on grandchildren;
-`out=$(...)` returns once grep returns.
-
-**Fix shape (v5.9.2)**: route the fixture's stdout to a temp file
-instead of a pipe. After `waitpid()` on the direct child, read
-the file. Orphan grandchildren may still hold the file fd open;
-we don't care — we already have the bytes the test binary wrote.
-
-  fn _exec_capture_clean(bin_path, buf, buflen) {
-      var out_path = _tmp_path("audit_cap_");
-      var out_fd = sys_open(out_path, O_WRONLY|O_CREAT|O_TRUNC, 0644);
-      ...
-      var pid = sys_fork();
-      if (pid == 0) {
-          sys_dup2(out_fd, 1);
-          # /dev/null on stdin AND stderr — block any helper that
-          # reads stdin or writes stderr from leaking back to the
-          # dispatcher's terminal.
-          ...
-          sys_execve(bin_path, argv, envp);
-      }
-      sys_close(out_fd);
-      sys_waitpid(pid, ...);   # only waits on direct child
-      var n = file_read_all(out_path, buf, buflen);
-      sys_unlink(out_path);
-      return n;
-  }
-
-**Recognize again**:
-
-  - Test runner that captures stdout via `exec_capture` (or any
-    pipe-based fork+read pattern) and a fixture that uses
-    `lib/pam.cyr` / `lib/shadow.cyr` / anything that forks a
-    setuid helper.
-  - Symptom: dispatcher hangs at the gate, no output, no SIGCHLD
-    visible. `ps -ef` shows an orphan helper (parent=1) still
-    alive.
-  - Other fork-and-leave patterns will hit this too: spawn-and-
-    detach daemons, double-fork helpers, anything where a
-    grandchild outlives its parent and inherits fd 1.
-
-**Prereq cousin**: v5.9.2 also fixed `_tcyr_parse_failed` — its
-inner digit-walkback loop infinite-looped when the byte before
-" failed" was a digit (i.e., every PASS path matching `0 failed`).
-Combined with the pipe deadlock above, the v5.9.1 commit shipping
-`_tcyr_relay_gate` had two prereq bugs that masked each other:
-even if one was fixed, the other would have surfaced. The
-underlying lesson is *commit-with-end-to-end-verification*: a
-helper that compiles is not a helper that works.
-"""
-
-[[entries]]
-name = "parse_var_struct_init_lookahead_v5933"
-description = "PARSE_VAR / EMIT_GVAR_INITS / PARSE_GVAR_REG must require next-next token to be `{` before committing to PARSE_STRUCT_INIT. Without the lookahead, any `var X = ident <op> ...` where `ident` matches a struct name errored 'expected {, got <op>'. Surfaces only when the bug-triggering fn body is parsed (DCE-bitmap masks the bug on x86; aarch64 reveals it because syscalls is bigger)."
-category = "cyrius"
-tags = ["parser", "struct-init", "dce", "tok_names-dedup", "v5.9.33", "agnosys-1.1.12"]
-content = """
-**The trap**: cyrius does no namespacing — a struct named
-`status` and a fn parameter named `status` share the same
-`tok_names` offset because `LEXID` dedups identifier storage.
-After pass 1 registers `status` in `struct_names[]`, pass 2's
-PARSE_VAR sees `var sig = status & 0x7F;` inside a fn body
-that declared `(status)` as its parameter. The local-var
-parser does:
-
-```
-if (PEEKT(S) == 2) {
-    var sn = PEEKV(S);
-    var sid = FINDSTRUCT(S, sn);
-    if (sid > 0) {
-        PARSE_STRUCT_INIT(S, noff, sid);  # commits unconditionally
-        return 0;
-    }
-}
-```
-
-`FINDSTRUCT` hits because the offset matches the struct name.
-PARSE_STRUCT_INIT consumes the ident and demands `{`; the
-actual next token is `&` (token 27, missing from `TOKNAME`),
-producing `error:N: expected '{', got unknown`.
-
-**Why aarch64 surfaced and x86 didn't**: cyrius runs a DCE
-pre-scan in `src/main.cyr` that walks the token stream, marks
-ident references in an 8 KB bitmap covering offsets `[0,
-65536)`, and emits a 3-byte stub (`xor eax,eax; ret`) for any
-fn whose name offset is *inside* the bitmap window AND
-unreferenced. Offsets `≥ 65536` are conservative-kept (the
-DCE check is gated on `dce_fnoff < 65536`).
-
-`lib/syscalls_aarch64_linux.cyr` (677 LOC) is bigger than
-`lib/syscalls_x86_64_linux.cyr` (630 LOC). On x86, `WIFSIGNALED`
-(an unreferenced library fn) lands inside the window and is
-DCE-stubbed before parse — masking the parser bug entirely.
-On aarch64, the same fn's offset lands ≥ 65536, DCE skips,
-the body is fully parsed, and the parser trips.
-
-**Fix at v5.9.33** (`src/frontend/parse_decl.cyr`): three
-sites — `PARSE_VAR` (~line 998), `EMIT_GVAR_INITS` (~line
-615), `PARSE_GVAR_REG` (~line 540) — each require
-`TOKTYP(S, GTI(S) + 1) == 13` (next-next token is `{`)
-before committing to PARSE_STRUCT_INIT. Bare ident
-references fall through to scalar expression parsing where
-they belong. Pass 1's `PARSE_GVAR_REG` is the most subtle of
-the three: pre-fix it set `is_struct = 1` and allocated
-`STRUCTSZ` bytes for the var slot, corrupting downstream
-codegen for any global `var x = MASK & 0xF;` where MASK was
-also a struct name; the fix gates the `is_struct = 1`
-assignment on the same lookahead.
-
-**Recognize again**: any `expected '{', got <symbol>` error
-where the offending source is `var X = NAME ...;` and `NAME`
-was elsewhere declared as a `struct`. Specifically when the
-arch-pair behavior splits — works on x86, breaks on
-aarch64 (or vice versa) — the difference is almost always
-DCE-window-position, not a real arch difference. To
-narrow: `cat src.cyr | build/cc5_aarch64 2>&1 | grep -E
-'(unreachable|dead:)'` shows what got DCE'd; if a fn name
-appears on x86's dead list but not aarch64's, suspect a
-bug masked by DCE on the smaller arch.
-
-**Lesson for future parser additions**: any
-`if (FINDSTRUCT(...) > 0) { commit_to_struct_path(); }`
-pattern needs a `{` lookahead. The pattern can also appear in
-`PARSE_FN_DEF`'s return-type lookahead, `PARSE_FIELD_LOAD`,
-and anywhere else struct-name resolution gates a parser path
-choice. This is the second time tok_names-dedup has caused
-parser confusion (the first was v5.7.46
-`fn_keyword_in_param_position`); when in doubt, peek
-further before committing.
-
-Full backstory: agnosys 1.1.12 V1.1.12 evaluation, filed
-2026-05-07; cyrius `tests/tcyr/struct_name_param_collision.tcyr`
-covers 13 assertions across this shape.
-"""
-
-[[entries]]
-name = "pp_in_string_comment_blindness_v5934"
-description = "PP_IFDEF_PASS / PP_PASS `in_string` state machine added at v5.8.40 was comment-blind — `\"` characters inside line comments toggled `in_string=1` and stayed stuck across newlines, masking later `include` directives. Comment-aware tracking + reset-on-newline fix landed v5.9.34."
-category = "cyrius"
-tags = ["preprocessor", "string-state-machine", "include-resolution", "v5.9.34", "vyakarana-1.0.2"]
-content = """
-**The trap**: v5.8.40 added `in_string` tracking to PP_PASS
-and PP_IFDEF_PASS to keep `var s = "include \\"foo\\"";` from
-being mistaken for an include directive. The directive-
-detection block was gated on `bol == 1 && in_string == 0`.
-The state machine handled `"` (toggle) and `\\X` (escape next
-byte inside string) correctly for actual string literals.
-
-It did NOT handle:
-1. **Comments** — `# foo "bar"` would toggle `in_string` on
-   each `"` regardless of comment context.
-2. **`#` mid-line** — trailing comments like
-   `var x = 0;  # explanation with "quote"` had the same
-   issue.
-3. **Stray `"` in comments** — vyakarana 1.0.2's
-   `src/grammar.cyr` documenting JSON escape syntax with
-   `` # references inside strings: `\\\\`, `\\"`, ``. The
-   `` `\\"` `` (backtick + backslash + quote + backtick)
-   pattern: outside a string, `\\` was a no-op; the next `"`
-   toggled `in_string=1`; there was no closing `"` on that
-   or any subsequent line until much later. `in_string`
-   stayed 1 through every later `include` directive in
-   included files.
-
-The symptom downstream: `cyrius build src/main.cyr build/...`
-fails with `error:<some-included-file>:N: expected '=', got
-string` AT the include directive itself. `include` was
-tokenized as an identifier (its directive status lost when
-PP_IFDEF_PASS skipped it via the `in_string` gate), so the
-parser saw `include "src/X.cyr"` as `IDENT STRING` and
-expected an `=` between them.
-
-**Why minimal repros didn't trigger** (vyakarana filing's
-"ruled-out hypotheses" section): the filing's bisect chased
-structural include-graph shapes (sibling-transitive,
-duplicate, nested chain). The actual trigger was the
-`\\"` comment, which the structural minimal-repros didn't
-include. Any include graph would break IF the included
-content has a `\\"`-bearing comment upstream of an include
-directive — structural shape was incidental.
-
-**Fix at v5.9.34** (`src/frontend/lex_pp.cyr`): both PP_PASS
-(~line 1430) and PP_IFDEF_PASS (~line 1770) state machines
-made comment-aware:
-
-1. New `in_comment` state alongside `in_string` /
-   `escape_next`.
-2. `#` outside a string (and outside a comment already) sets
-   `in_comment = 1`.
-3. Inside a comment, `"` does NOT toggle `in_string` —
-   state machine routes through a simpler path that just
-   tracks the newline.
-4. Newline resets `in_string = 0`, `escape_next = 0`,
-   `in_comment = 0` as a safety net. cyrius source uses
-   single-line strings (`\\n` escape, never literal multi-
-   line), so per-line state reset is safe and bounds any
-   future state corruption to one line.
-
-**Recognize again**: any `expected '=', got string` error
-where the offending source is `include "..."`-shaped at the
-top of an included file. If the build was working before
-v5.8.40 and broken at v5.8.40+, the trigger is almost
-certainly a `\\"` (or other unmatched `"`) inside a comment
-upstream of the failing include. To diagnose:
-
-```sh
-# Search the project's already-included files for
-# unmatched-or-stray quotes in comments
-grep -rn '#.*\\\\"' src/ lib/
-```
-
-Lines that match are candidates for the trigger.
-
-**Lesson**: PP state machines that mirror lexer string
-tracking need to mirror ALL the lexer's lexical rules —
-strings AND comments AND char literals. The per-line reset
-on newline is a cheap safety net that bounds bugs to one
-line rather than the whole compilation unit. Adding it
-preemptively in similar state machines is good defensive
-practice.
-
-Full backstory: vyakarana 1.0.2 pin-bump 5.6.0 → 5.9.32 at
-2026-05-07; filed at
-`vyakarana/docs/development/issues/2026-05-07-cyrius-include-graph-regression.md`;
-cyrius `tests/tcyr/include_quote_comment.tcyr` (3 assertions)
-+ `tests/fixtures/include_quote_comment/{leaf,sibling_a,
-sibling_b}.cyr` cover the regression.
-"""
-
-[[entries]]
-name = "macho_arm64_pie_aslr_static_fn_addr"
-description = "Mach-O ARM64 enforces MH_PIE; dyld slides the image at load time. Static-encoded absolute fn addresses (3-instruction MOVZ/MOVK chain in `&fn_name` ftype==3 fixup) survive ELF but NOT Mach-O — `blr xN` jumps to (file_VA, no slide), landing in `__data` / `__got` instead of `__text`. v5.9.39 fix: dispatch ftype==3 to ADRP+ADD relative addressing on `_TARGET_MACHO == 2`, mirroring how ftype==1 (string addrs) and ftype==0 (var addrs) already worked. The shape: any fixup type encoding an absolute address must be PIE-safe on Mach-O."
-category = "cyrius"
-tags = ["macho", "aarch64", "fixup", "aslr", "pie", "v5.9.39", "fn-pointer"]
-content = """
-v5.9.38/v5.9.39 paired bug. Symptom: agnosys 1.1.12 verbatim
-repro SIGSEGV'd at runtime on real macOS arm64 (ecb host)
-inside the heavy-allocator-vtable dispatch chain that
-`#derive(Serialize)` triggers.
-
-== TWO COMPOUNDING BUGS ==
-
-**Bug A** (v5.9.38, simple once seen): `lib/fnptr.cyr` had
-`#ifdef CYRIUS_TARGET_LINUX` and `#ifdef CYRIUS_TARGET_WIN`
-branches in `fncall0..8`, but no `#ifdef CYRIUS_TARGET_MACOS`.
-On Mach-O builds, neither asm{} block fired → `result`
-stayed at the `var result = 0;` init → fncallN always
-returned 0 → `alloc_via` returned NULL → str_builder_new
-returned NULL → SIGSEGV at `load64(NULL+8)`. Fix: add
-macOS branches with x86_64 + aarch64 asm copies of the
-Linux content (SysV calling convention identical).
-
-**Bug B** (v5.9.39, the deeper one): even with Bug A
-fixed, the binary got further but still SIGSEGV'd — now
-at addr 5 (`ldrb w0, [x0]` with x0=5). Tracking down
-showed PC inside what looked like a memcpy/strlen
-alignment loop. The actual cause: `&fn_name` aarch64
-emit emitted a static 3-instruction MOVZ/MOVK chain
-encoding the unslid file VA. Apple Silicon enforces
-MH_PIE; dyld slides the image at load time; `blr xN`
-jumped to (file_VA, no slide) — landing in `__data` /
-`__got` instead of `__text`. Runtime alloc_fn value was
-`0x100017C00`, past the `__text` end (`0x10000C504`).
-
-== THE FIX ==
-
-Mirror what ftype==1 (string addrs) and ftype==0 (var
-addrs) already did on Mach-O: dispatch to
-`FIXUP_ADRP_ADD` which encodes the page-diff in the
-ADRP's immhi/immlo and the low-12 bits in the ADD's
-imm12. Both halves are PC-relative; the slide cancels
-out; `blr xN` lands in `__text` correctly.
-
-Three coordinated edits (v5.9.39):
-- `src/backend/aarch64/fixup.cyr` ftype==3: dispatch to
-  `FIXUP_ADRP_ADD(S, coff, ftarget)` on
-  `_TARGET_MACHO == 2`, `FIXUP_MOV` otherwise.
-- `src/frontend/parse_expr.cyr` `&fn_name` aarch64 emit:
-  emit 2-instruction ADRP+ADD pair (8 B) on Mach-O
-  instead of 3-instruction MOVZ chain (12 B).
-- `src/frontend/parse_expr.cyr` closure-literal aarch64
-  emit: same change.
-
-Plus `src/backend/x86/emit.cyr`: stub `EADRP` and
-`EADD_IMM12` so the x86 build's dead-code branch through
-`_AARCH64_BACKEND == 1` resolves the symbols cleanly.
-
-== FIELD NOTE FOR THE NEXT AGENT ==
-
-When Mach-O ARM crashes at runtime in code that "should
-work because it works on Linux aarch64" — check ASLR/PIE
-first. Mach-O is always slid; static absolute fn addresses
-do not survive.
-
-The audit shape: every fixup type that encodes an
-ABSOLUTE address must be PIE-safe on Mach-O. ftype==1,
-ftype==0, ftype==5 (Mach-O __got slot) all use ADRP+ADD
-or ADRP+LDR. ftype==3 was the missing one — fixed at
-v5.9.39. If a new fixup type lands, it needs the same
-audit.
-
-The regression substrate is `_macho_derive_serialize_gate`
-in `programs/check.cyr` (v5.9.39 ship). Compiles + scp's +
-codesigns + runs a fixture that exercises the exact
-Bug-A-and-Bug-B chain via `point_to_json(&p, sb)`. If
-either bug regresses the gate flips red.
-
-CROSS-REPO RECEIPT:
-- agnosys 1.1.12 verbatim repro hash
-  `6425355b6147d5a674078794310ae2c1` (preserved unchanged
-  through the v5.9.33-39 partial-fix chain — see
-  `feedback_no_rewriting_consumer_repros` memory pin).
-- Cross-host parity verified at v5.9.39 ship: Mach-O ARM
-  matches Linux aarch64 byte-for-byte through
-  `point_to_json(&p, sb)`. Both fail at the same
-  `println(strlen(out))` line — that's a TYPE-SYSTEM gap
-  pinned for v5.10.x, not a Mach-O codegen bug.
-"""
-
-[[entries]]
-name = "lex_brace_count_when_inserting_dispatch_branch"
-description = "Inserting a new top-level dispatch branch into `src/frontend/lex.cyr`'s deeply-nested `else { if (...) { ... } }` cascade requires matching the closing brace count exactly. v5.9.37 char-literal addition initially had a brace imbalance; the resulting parse error pointed at `src/backend/x86/emit.cyr:340` because that's the FIRST file the mis-parsed parser hits, not the actual cause-site (lex.cyr's missing close)."
-category = "cyrius"
-tags = ["lexer", "syntax", "v5.9.37", "brace-count", "diagnostic-mislead"]
-content = """
-v5.9.37 added char-literal lexing. The implementation
-lives in `src/frontend/lex.cyr` around line 988 (between
-the `c == 37` percent-symbol branch and the `c == 34`
-string-literal branch), inserted as ~50 lines of new code.
-
-== THE BRACE-COUNT GOTCHA ==
-
-When inserting the char-literal branch into lex.cyr's
-deeply-nested if/else dispatch chain, the closing brace
-count needs to match the opened branches exactly. The
-initial v5.9.37 attempt had a brace imbalance — adding
-`else { if (c == 39) { ... }` without the matching
-closing `}` produced this self-host build error:
-
-    error:src/backend/x86/emit.cyr:340:
-        undefined variable '_cur_fn_regalloc'
-
-The error points at emit.cyr — but the cause is in
-lex.cyr. The mis-parsed parser misinterpreted emit.cyr's
-top-level structure (because the missing brace in lex.cyr
-shifted every subsequent file's parse context), and the
-FIRST symbol that broke was `_cur_fn_regalloc` in emit.cyr.
-
-Fix: add one extra `}` to the closing brace chain at
-lex.cyr line 1241 (the end of the dispatch ladder).
-
-== FIELD NOTE FOR THE NEXT AGENT ==
-
-When inserting a new top-level dispatch branch into
-lex.cyr or any deeply-nested else-if chain in cyrius
-source, count braces before building. The cascade in
-lex.cyr is ~600 lines deep; adding a branch in the middle
-needs the matching close at the bottom.
-
-If self-host fails with an "undefined variable" error in
-a file you didn't touch this slot, brace imbalance in a
-file you DID touch is the first thing to check. cyrius's
-parser is single-pass; brace-count drift cascades silently
-into subsequent files.
-
-The diagnostic message is misleading by accident — the
-parser reports the FIRST symbol it can't resolve, not
-the original brace error. Don't trust the file name in
-the error message; check the file you most recently
-edited for unbalanced braces.
-"""
-
-[[entries]]
-name = "char_literal_token_emits_number_type"
-description = "Char literals `'X'` (v5.9.37) emit NUMBER token (type 1) carrying the byte value. Indistinguishable at parser layer from `var x = 65;`. Standard escapes supported (\\n / \\t / \\r / \\\\ / \\' / \\0). Single-byte ASCII only — no multi-byte / unicode in char literals."
-category = "cyrius"
-tags = ["lexer", "syntax", "v5.9.37", "char-literal"]
-content = """
-v5.9.37 added char-literal lexing for the agnosys 1.1.12
-verbatim repro (which used `str_builder_putc(sb, '[')`).
-
-== WHAT IT EMITS ==
-
-A NUMBER token (token type 1) carrying the byte value:
-    'A'   → 65
-    'a'   → 97
-    ' '   → 32
-    '['   → 91
-    '\\n'  → 10
-    '\\t'  → 9
-    '\\\\'  → 92
-    '\\''  → 39
-    '\\0'  → 0
-
-Indistinguishable at the parser layer from `var x = 65;`
-or `if (c == 65) { ... }` — the parser sees a NUMBER
-token, not a "char-literal" token. That's intentional:
-char literals are sugar for byte values, not a separate
-type.
-
-== CONSEQUENCE ==
-
-Type system (when it lands at v5.10.x) won't have a
-distinct "char" type. `'A'` and `65` are interchangeable.
-That matches C's char-as-int semantics rather than Rust's
-char-as-Unicode-codepoint. Cyrius works at the byte
-level by design (no SIMD, no unicode-aware ops in the
-compiler itself); char literals follow the same model.
-
-If a consumer later wants `char` as a distinct narrow-
-int type (i8 typed-narrow), it can already be expressed
-via the v5.9.36 narrow-int #derive(Serialize) machinery:
-    struct ascii_byte { c: i8; }
-That gets you i8 typing without needing a new char type.
-
-== PAIRED ADDITION ==
-
-`lib/str.cyr` gained `str_builder_putc(sb, ch)` in the
-same slot — appends single byte to a str_builder. Mirrors
-the existing `str_builder_add` (Str),
-`str_builder_add_cstr` (cstring), `str_builder_add_int`
-helpers; pairs with char literals for byte-at-a-time
-append.
-"""
-
-[[entries]]
-name = "f64v_simd_frame_disp_under_regalloc"
-description = "Pre-v5.10.16 EMIT_F64V_LOOP/UNARY/FMADD in src/backend/x86/float.cyr computed slot disps as -(N+1)*8 while EFLSTORE adjusted by additional _cur_fn_regalloc * 8 + _cur_fn_ret_stash. Any caller fn that auto-enabled the regalloc cache segfaulted reading 40+ bytes off the stash. Latent ~3.5 yr — only consumer (programs/simd_expand_test.cyr) was never wired into check.sh."
-category = "cyrius"
-tags = ["codegen", "frame", "regalloc", "simd", "x86", "v5.10.16"]
-content = """
-**The trap**: cyrius's frame addressing has TWO flavors.
-
-Local-load helpers (`EFLSTORE`, `EFLLOAD`, `EFLADDR`) apply
-THREE adjustments to the raw slot-N → `-(N+1)*8` disp:
-- `_cur_fn_regalloc * 8` — callee-save register save slots
-  (when auto-regalloc fires, x86 inserts 5 stash slots
-  before the locals; +40 bytes of prologue).
-- `_cur_fn_ret_stash` — hidden retbuf-arg stash for
-  struct-returning fns (+8 bytes).
-- The cumulative offset shifts every local slot DOWN by
-  `regalloc * 8 + ret_stash`.
-
-Direct emits that compute disps inline (the SIMD f64v_*
-loops, possibly other places) MUST apply the same
-adjustment, or the load disp diverges from the store
-disp by 40+ bytes — first iteration reads off the stash
-into rdx (or wherever), segfault on next memory access.
-
-== HOW WE FOUND IT ==
-
-v5.10.16 slot scope was "close cross-arch SIMD gap":
-implement aarch64 NEON for f64v_*, since aarch64 had
-`return 0;` stubs. Premise check (per
-`feedback_premise_check_at_slot_entry`) — write a tcyr
-regression to lock the behavior. tcyr binary segfaulted
-on x86 in the FIRST f64v_add call. Bisected vs older
-cc5 versions back to v5.10.0 — they all segfaulted
-identically. So the bug wasn't introduced by aarch64
-work; it was a latent x86 bug that pre-dated the
-cross-arch claim. The claim "in production since
-v1.9.0" was wrong: only worked on x86 fns without
-auto-regalloc enabled (rare in stdlib code, common
-in user code).
-
-== THE FIX (v5.10.16) ==
-
-Factored a `_F64V_DISP(idx)` helper in
-`src/backend/x86/float.cyr` that mirrors EFLSTORE's
-adjustment formula. Also switched the load form from
-disp8 (`48 8B 55 disp8`) to disp32 (`48 8B 95 disp32`)
-— the disp8 mask `& 0xFF` silently truncates if the
-adjusted disp drops below -128. With +40 of regalloc
-adjustment, even modest vbase values can cross that
-boundary; +3 bytes per load is amortized across the
-loop.
-
-== HOW TO RECOGNIZE IT AGAIN ==
-
-Two-finger smell test for any direct frame-emit code:
-1. Does it compute disp as `-(N+1)*8` directly?
-2. Does it apply `_cur_fn_regalloc * 8 + _cur_fn_ret_
-   stash` adjustment?
-
-If yes/no, that emit will segfault under auto-regalloc.
-Search `src/backend/x86/` for `(0 - (vbase` or
-`(N + 1) * 8` and audit each one against EFLSTORE's
-formula. The cross-arch peer on `src/backend/aarch64/`
-should ALWAYS route through `EFLLOAD` for the same
-reason (and v5.10.16's aarch64 NEON impl does — that's
-why aarch64 doesn't have this bug post-fix).
-
-== ROOT-CAUSE PATTERN ==
-
-This is the "two flavors of frame addressing" pattern.
-Cyrius has been growing direct-emit codepaths for hot
-paths (SIMD primitives, struct-init, slice canonical
-slot) — each one is a place where the regalloc/ret-
-stash adjustment could be missed. Long-term fix is
-either factor ALL frame-disp computation through
-EFLSTORE/EFLLOAD (forcing the adjustment), or add an
-audit gate that scans for raw `(idx + 1) * 8` patterns
-in backend code.
-
-For now: any new direct-emit slot that touches frame
-slots MUST mirror the EFLSTORE adjustment formula.
-Use `_F64V_DISP` (now in x86/float.cyr) as the
-reference template.
-"""
-
-[[entries]]
-name = "api_surface_brace_counter_string_skip"
-description = "Pre-v5.10.16 programs/cyrius_api_surface.cyr walked source files counting { / } bytes raw — { inside JSON-emit string literals like \"{\\\"x\\\":\" inflated depth and the scanner concluded enclosing fns never closed. Every fn / struct decl after that point in the same module silently dropped from the surface. Same bug class as cyrlint v5.10.10 char-literal-brace-desync. Fix: skip strings + char literals + # comments before counting."
-category = "cyrius"
-tags = ["api-surface", "lexer", "scanner", "v5.10.16", "agnosys-1.1.13"]
-content = """
-**The pattern**: raw byte-counters that need to handle
-cyrius's literal forms.
-
-Scanner-style tools (cyrlint, cyrfmt, cyrius_api_surface)
-walk source files at the byte level rather than going
-through cc5's full lexer. They count `{` and `}` bytes
-to track block depth. WITHOUT skip-strings, skip-chars,
-and skip-comments handling, ANY `{` or `}` byte inside
-those forms is counted wrongly:
-
-- A `{` inside a JSON literal like `"{\\\"x\\\":"`
-  inflates depth — fns after this line look like
-  they're inside a block, scanner skips fn-declaration
-  logic.
-- A `}` inside `"}"` deflates depth (often correctly
-  cancelling a phantom `{` from above, so the bug only
-  shows on UNBALANCED string content).
-- A `}` inside a char literal deflates depth.
-- A `{` inside a `# comment with { in it` inflates.
-
-== THE AGNOSYS FILING WAS MIS-DIAGNOSED ==
-
-Filed 2026-05-09 as
-`2026-05-09-cyrius-api-surface-putc-brace-desync`.
-Their hypothesis: `str_builder_putc(sb, 125)` — the
-literal `125` (ASCII for `}`) was being read as a
-`}` byte. That hypothesis is WRONG: the source bytes
-of `125` are `1` (49), `2` (50), `5` (53) — none equal
-123 or 125. The byte-level counter has no way to
-misread them.
-
-Actual cause: their fn `widget_a_to_json` opened with
-a JSON `add_cstr` call containing a literal `{` byte
-inside the string. That `{` was counted as a real
-opening brace, depth went to 2 inside what should have
-been a depth-1 fn body, and depth never returned to 0
-for the rest of the file. Every subsequent fn / struct
-decl was lost.
-
-Their workaround `str_builder_add_cstr(sb, "}")` to
-emit the closing brace happened to add a `}` byte that
-balanced the phantom `{` — that's why the workaround
-worked, not because `125` vs `"}"` differed in any
-scanner-relevant way.
-
-== HOW TO RECOGNIZE IT AGAIN ==
-
-Any new scanner-style tool added under `programs/` that
-walks `.cyr` source byte-by-byte. If it's counting any
-delimiter pair (`{`/`}`, `(`/`)`, `[`/`]`) without
-literal-skip handling, it's broken on at least one
-input shape. Templates are in cyrlint v5.10.10 and
-api-surface v5.10.16.
-
-The proper long-term fix is to add a shared
-`programs/lib/scanner_skip.cyr` helper so every
-scanner-tool routes through the same skip pattern. For
-now (v5.10.16) each scanner duplicates the pattern
-inline.
-"""
-
-
-[[entries]]
-name = "locname_staleness_duplicate_dispatch_paths"
-description = "Locname-table staleness bug class — same pattern surfaces independently in EACH parse path that uses bare EFLSTORE for arg-stash slots. v5.10.35 fixed PARSE_SIMD_EXT (ptyp 93-130); missed the SEPARATE f64v_add/sub/mul dispatch at ptyp 89-91 in parse_expr.cyr. v5.10.39 paid the duplicate-path debt. When fixing locname/table-related bugs, audit ALL dispatchers that might share the pattern."
-category = "cyrius"
-tags = ["cyrius", "compiler", "parse", "locname", "stash", "simd", "v5.10.35", "v5.10.39"]
-content = """
-THE BUG CLASS
-
-Cyrius's locname table at `S + 0x191000` is per-fn-body but
-shares allocation across fn parses (SFLC(0) resets the FLC
-counter but NOT the locname entries past the new FLC).
-Stale name entries from PRIOR fn parses persist at higher
-indices.
-
-When a parse path stashes an arg value at slot N via
-`EFLSTORE(S, N)` WITHOUT also clearing locname[N], it leaves
-a stale name visible to FINDLOCAL. If that stale name happens
-to equal a var the current fn body subsequently looks up
-(e.g. `return r;` after using the var name `r`), FINDLOCAL
-returns the STASH slot index (containing the pointer-VALUE
-that was stored as the arg) instead of the real var's slot.
-
-CLASSIC SHAPE
-
-```cyr
-fn wrap(p): f64v2 {
-    var r: f64v2;
-    f64v_add(&r, p, p, 2);  # arg-stash at slot N; locname[N] stale "r"
-    return r;                # FINDLOCAL("r") returns N, loads stash
-}
-```
-
-The `return r;` emits a pair-register load from slot N (the
-stash slot, holding &r's pointer-value), NOT from r's actual
-slot. Caller gets a stack-address-shaped i64 back instead
-of the f64v2 bytes.
-
-THE FIX HELPER
-
-```cyr
-fn _SIMD_STASH(S, idx): i64 {
-    EFLSTORE(S, idx);
-    S64(S + 0x191000 + idx * 8, 0 - 1);  # anonymise
-    return 0;
-}
-```
-
-Wrap EVERY bare-EFLSTORE-for-arg-stash with this. The
-locname[idx] = -1 marks the slot as anonymous; FINDLOCAL
-skips it.
-
-THE DUPLICATE-PATH TRAP
-
-v5.10.35 applied _SIMD_STASH to the 8 intrinsics in
-PARSE_SIMD_EXT (ptyp 93 / 94 / 95 / 96 / 128 / 129 / 130 +
-bitset/bitclr 103/104). The fix DID NOT cover f64v_add /
-_sub / _mul at ptyp 89-91, which live in a SEPARATE
-dispatch block in parse_expr.cyr (around line 1397, NOT
-inside PARSE_SIMD_EXT).
-
-That separate block continued to use bare EFLSTORE. The bug
-stayed latent because pre-v5.10.39 lib/simd.cyr had a stable
-locname layout (only pointer-form wrappers, ~10 fns). When
-v5.10.39 doubled the simd.cyr fn count (adding value-form
-siblings), locname churn made the stale-collision reliable.
-
-Bisection (v5.10.39 in-slot): reverting lib/simd.cyr made
-the test pass with v5.10.39 dispatch in place → isolated to
-lib/simd.cyr changes. Direct `f64v2_add_ptr(&x, &y)` ALSO
-failed → isolated to body (not overload routing). Same
-locname-staleness shape; different parse path.
-
-HOW TO AUDIT FOR DUPLICATES
-
-When fixing a locname/stash/table bug:
-
-1. Grep for ALL call sites of the EFLSTORE family in the
-   parser code (not just the file you're editing):
-   `grep -rn "EFLSTORE(S, vbase\|EFLSTORE(S, [a-z]" src/frontend/`
-2. For each, verify locname[idx] is set (= -1 for anonymous
-   stash, or = name_offset for named) IMMEDIATELY after the
-   EFLSTORE call.
-3. Bare EFLSTORE without a locname companion is the bug.
-4. Apply the fix at the call site OR refactor to a wrapped
-   _STASH helper.
-
-LESSON: The first occurrence of a bug class fixed in slot X
-is the "this is the bug" anchor. The FIX should AUDIT for
-the bug class across the entire compiler, not assume the
-first occurrence is the only one. v5.10.35 was a complete-
-seeming fix that left an entire dispatch path with the same
-bug; v5.10.39 paid the cost.
-"""
-
-[[entries]]
 name = "install_sh_cp_L_same_file_silent_fail"
 description = "install.sh's --refresh-only path uses `cp -L lib/*.cyr` to copy stdlib into snapshot. When lib/<dep>.cyr is a `cyrius deps`-resolved symlink AND the snapshot dir has a parallel symlink to the SAME real file, cp -L exits with 'same file' error. `set -e` makes this fatal — install.sh exits BEFORE the symlink-update block at line 249-251. ~/.cyrius/bin / ~/.cyrius/current stay pointing at the previous version. Discovered v5.10.37."
 category = "cyrius"
@@ -1740,181 +842,6 @@ bumps before anyone noticed.
 """
 
 [[entries]]
-name = "stack_local_scratch_buffer_overflow_at_dispatch"
-description = "Stack-local scratch buffer overflow corrupts adjacent locals — symptom is `fi` / `noff` (in parse_fn.cyr's PARSE_FNCALL) holding wrong values after the overflow, producing miscompiled call sites. v5.10.39 first cut had `var _po_scratch[16]` for constructing `<base>_ptr` overload-lookup strings; overflowed for any base name ≥12 chars (e.g. `f64v2_add_ptr` direct call constructs `f64v2_add_ptr_ptr` = 18 bytes). Sized check + bumped scratch to 128 bytes."
-category = "cyrius"
-tags = ["cyrius", "compiler", "parse", "stack-local", "overflow", "v5.10.39"]
-content = """
-THE PATTERN
-
-When constructing scratch strings on the stack for compile-time
-lookups (e.g. building `<base_name>_ptr` for overload dispatch),
-the stack-local array MUST be sized to accommodate the LARGEST
-possible base name + suffix + null terminator, NOT a typical case.
-
-SHAPE
-
-```cyr
-fn dispatch(noff): i64 {
-    var _scratch[16];   # ← too small for many fn names
-    var base_len = strlen(S + 0x60000 + noff);
-    # ... copy base_len bytes into scratch ...
-    # ... append "_ptr\0" (5 bytes) ...
-    # ↑ overflow if base_len > 11
-}
-```
-
-For "f64v2_add_ptr" (13 chars) + "_ptr\0" (5 chars) = 18
-bytes. Writes at offsets 16, 17 overflow a 16-byte scratch
-into adjacent stack data — typically the next stack-local
-or saved caller-state. In parse_fn.cyr's PARSE_FNCALL the
-overflow corrupted the `fi` / `noff` variables, producing
-silently-miscompiled call sites that returned wrong values.
-
-WHY 16 BYTES SEEMED SAFE
-
-The dispatch was originally designed for cyrius's own SIMD
-wrapper names (`f64v2_add`, 9 chars). "f64v2_add" + "_ptr\0"
-fits in 14 bytes → comfortable in 16-byte scratch. The
-overflow path was when the dispatch ITSELF fires for a fn
-WHOSE NAME ALREADY ENDS IN `_ptr` — e.g. a direct call to
-`f64v2_add_ptr(&x, &y)` (which doesn't need rerouting) still
-runs the dispatch and constructs `f64v2_add_ptr_ptr`.
-
-The non-found lookup returns -1 and no reroute happens, but
-the WRITE to scratch already corrupted adjacent memory.
-
-THE FIX
-
-Bump scratch size to be safely larger than ALL realistic
-fn names + suffix. v5.10.39 went with 128 bytes (`_po_scratch
-[128]`) — accommodates any fn name within the 120-char
-defensive guard. Pattern:
-
-```cyr
-var _scratch[128];
-if (base_len < 120) {
-    # ... safe to write up to base_len + suffix_len ...
-}
-```
-
-Plus the explicit `base_len < 120` guard provides defense
-in depth if base names ever grow past expected.
-
-LESSON: When sizing stack-local scratch buffers for compile-
-time string construction, target a generous CAP that
-accommodates the worst realistic input, not a "typical" case.
-Stack corruption is silent and only manifests as miscompiled
-output downstream — extremely hard to diagnose without
-bisection. Pre-fix v5.10.39 had MANY hours of debugging time
-spent before the overflow was identified.
-
-DIAGNOSTIC SIGNS
-
-If a compile-time dispatch fires for some call sites but
-produces wrong results, AND reverting the dispatch resolves
-it, AND the wrong result has the shape of a stack address —
-suspect stack-local overflow in the dispatch code.
-"""
-
-[[entries]]
-name = "heap_relocation_inside_input_buf_v51119"
-description = "Relocating fn_* (or any) tables into 0x00000-0x100000 collides with input_buf — first compile silently works, second compile hangs"
-category = "cyrius"
-tags = ["heap-map", "input-buf", "v5.11.19", "fn-table", "self-host"]
----
-Surfaced 2026-05-11 mid-v5.11.19 Phase 1 when relocating
-7 scattered fn_* tables for the fn_table cap raise (4096 →
-8192). Initial placement targeted 0xA0000-0xF0000 — picked
-because the v5.11.18 identifier buffer raise extended
-tok_names to 0xA0000, and I (mis)read the heap map as having
-944 KB of free gap from 0xA0000 onward.
-
-== ROOT CAUSE ==
-
-`input_buf` is the raw stdin source buffer at S+0x00000
-sized 1 MB (0x100000 bytes). tok_names at S+0x60000 lives
-NESTED INSIDE input_buf — it's rebuilt by LEX after stdin
-is fully read, so the overlap is intentional and safe.
-
-The "free gap" I thought existed (0xA0000-0x18C100) is
-actually:
-
-  0x00000-0x100000: input_buf (1 MB)
-  0x100000-0x10C000: scattered fn_* tables (old location)
-  0x10C000-0x114000: fn_name_hash + fn_start_hash (old)
-  0x114000-0x11A000: 24 KB real gap
-  0x11A000-0x14A000: var_noffs/sizes/types
-  0x14A000-0x18C100: ~265 KB real gap
-
-The only ACTUAL free space before scratch state at 0x18C100
-is two sub-bands: 0x100000-0x10C000 + 0x14A000-0x18C100.
-0xA0000-0x100000 is INSIDE input_buf — any writes there
-clobber the source being read, and any reads return source-
-content bytes instead of fn metadata.
-
-== SYMPTOM ==
-
-First compile (using OLD cc5 to produce NEW cc5): SUCCEEDS.
-The old binary doesn't know about the new offsets; it
-generates code for the new source as documented. Output
-binary appears correct.
-
-Second compile (using NEW cc5 to produce another NEW cc5):
-HANGS. The new binary tries to USE the new offsets at
-runtime — it reads source bytes from 0x00000-0x100000 INTO
-input_buf, which overwrites whatever the lexer thought it
-wrote at 0xA0000-0xF0000. Subsequent fn lookups read source
-content (garbage as fn metadata) and the lexer/parser loops
-forever.
-
-Caught by the 2-step fixpoint check (`cmp` between first and
-second compile output). The first compile's output existed
-but cmp couldn't reach it because second compile timeout-
-killed at 30s.
-
-== MITIGATION ==
-
-Replan with REAL free gaps. For v5.11.19:
-
-  0x100000-0x118000: 96 KB — fits fn_deprecated_msg (64KB) +
-    fn_name_hash (16KB) + fn_start_hash (16KB)
-  0x14A000-0x18A000: 256 KB — fits fn_regalloc + fn_ret_sid
-    + fn_variadic + fn_flags (4 × 64KB)
-
-Pre-commit audit shape for heap-map relocations:
-
-  1. Identify the TARGET range with the heap map sorted by
-     offset (not by source-file appearance order — which is
-     scattered).
-  2. Verify ALL ranges between input_buf-end (0x100000) and
-     scratch-state-start (0x18C100) are EMPTY or holding
-     ONLY tables you're about to move.
-  3. For each candidate target offset, check that NO existing
-     `S + 0x<offset>` reference exists in src/. The new home
-     must be virgin.
-
-== PROCESS LESSON ==
-
-Phased relocations with byte-identical fixpoint check after
-EACH phase catch this class of bug. Without the per-phase
-check, the misplacement would have hidden until kybernet
-1.1.0's 3779-fn surface attempted to register a fn past the
-4096 boundary — at which point the corruption would have
-been impossible to attribute without an unwind through 4
-phases.
-
-== RELATED ==
-
-The Phase 1 false-success pattern (works on old binary,
-fails on new binary self-compile) is structurally identical
-to the v5.6.5 fn_name_hash zero-init issue and the v5.10.41
-fn_start_hash similar — heap-state regions where the
-COMPILER WRITES it interpret-able as data, so a mis-located
-write SILENTLY produces "valid" output. Fixpoint check is
-the only safety net.
-
-[[entries]]
 name = "cyrius_deps_global_symlink_wedge_v51117"
 description = "cyrius deps stdlib_dir resolved from ~/.cyrius/lib (mutable global symlink) before v5.11.17 — wedge for the snapshot-ping-pong wipe"
 category = "cyrius"
@@ -1986,115 +913,6 @@ the full ping-pong shape. v5.11.17 closes one leg of the
 ping-pong; v5.11.24 (per-repo isolation Part 2 — CLI version-
 resolved dispatcher) and v5.11.25 (Part 3 — `cyriusly use
 --global` flag) will close the others.
-
-[[entries]]
-name = "aarch64_native_build_path_latent_since_v5516_v51127"
-description = "main_aarch64_native.cyr missing CYRIUS_TARGET_LINUX predefine + bare syscall(2,…) in lex.cyr broke entire aarch64-native build path silently for 6 minors"
-category = "cyrius"
-tags = ["aarch64", "syscall-xlat", "predefine", "native-build", "v5.11.27", "v5.5.16", "latent-bug", "gate-gap"]
----
-Surfaced 2026-05-12 at v5.11.27 slot entry when a routine
-`ssh pi to verify aarch64 native` premise-check on a freshly
-cross-compiled `/tmp/cc5-native-aarch64` SIGILL'd at the
-first `alloc()` call. Two stacked stale-fork bugs, both
-latent since the v5.5.16 main_*.cyr per-arch split — six
-minors and roughly 150 patches without an end-to-end
-aarch64-native exercise on real hardware.
-
-== BUG 1: missing CYRIUS_MACHO_ARM env dispatch ==
-
-`src/main_aarch64.cyr:148-159` (cross-compiler, x86 host
-emitting aarch64) has shipped a `CYRIUS_MACHO_ARM` env-driven
-`PP_PREDEFINE(CYRIUS_TARGET_LINUX|MACOS)` block since
-v5.5.16. The native variant (`src/main_aarch64_native.cyr`,
-aarch64 host emitting aarch64) was created in the same
-v5.5.16 split but only predefined `CYRIUS_ARCH_AARCH64` +
-`CYRIUS_HAS_VAL_SIMD_PARAMS` — the LINUX/MACOS dispatch
-never made it across.
-
-Effect: every `#ifdef CYRIUS_TARGET_LINUX` block in `lib/`
-(alloc.cyr, syscalls_aarch64_linux.cyr, vec.cyr — anywhere
-the per-OS branch lived) was dead under a native-aarch64
-build. So `alloc`, `alloc_init`, `vec_*`, `sys_*` were all
-undefined, and any non-trivial program SIGILL'd at the
-first call instruction (jumps to address 0).
-
-== BUG 2: aarch64 syscall xlat doesn't reshuffle args ==
-
-`src/frontend/lex.cyr:221, :325, :356` used literal
-`syscall(2, path, 0, 0)` to open `/proc/self/environ` (and
-to probe cwd `lib/`) during `_init_cyrius_lib` /
-`_check_shadow_lib`. The aarch64 backend
-(`src/backend/aarch64/emit.cyr:495-496`) translates syscall
-number 2 → 56 (openat — aarch64 has no `sys_open`), but
-does NOT reshuffle args: openat wants `(dfd, path, flags,
-mode)` with `AT_FDCWD = -100` as `dfd`. So the path string
-pointer landed in the dfd slot, NULL/garbage in the path
-slot → EFAULT.
-
-Visible via strace on pi:
-
-```
-openat(4775887, NULL, O_RDONLY) = -1 EFAULT (Bad address)
-```
-
-With `efd < 0`, `_init_cyrius_lib` bailed silently before
-reading HOME, leaving `_cyrius_lib_len == 0`, so the
-version-pinned-lib fallback at
-`$HOME/.cyrius/versions/<v>/lib/` was unreachable — any
-include not satisfied by cwd `lib/` failed.
-
-== WHY IT HID FOR 6 MINORS ==
-
-The cross-compiler (`src/main_aarch64.cyr`, x86 host emitting
-aarch64) compiles fine and runs through every CI cycle on
-x86 hosts. cc5_aarch64 cross-bin ship happened multiple
-times. But the cross-compiler is built for an x86 host
-running with x86 syscall numbers, so SYS_OPEN=2 is correct
-in lex.cyr when the BINARY runs on x86. The bug only
-surfaces when the binary itself runs ON aarch64 hardware
-(SYS_OPEN=56, openat ABI). check.sh + cyrius test exercise
-x86_64 only. Pi-side end-to-end was never gated.
-
-Same root cause as v5.11.23's Win64 RSP-alignment 6-minor
-latency: a code path that compiles clean and looks right
-in source but only fails when actually run on the target
-arch/OS.
-
-== FIX (v5.11.27) ==
-
-(1) Ported the predefine dispatch verbatim from
-`main_aarch64.cyr:148-159` into
-`main_aarch64_native.cyr:127-141` — the LINUX vs MACOS
-selection is now identical across the cross and native
-variants.
-
-(2) Matched READFILE's existing
-`if (SYS_OPEN == 2) { syscall(SYS_OPEN, path, …); } else
-{ syscall(SYS_OPEN, 0 - 100, path, …); }` branch shape at
-the three bare-syscall sites in lex.cyr. On x86 the path
-goes in arg 1; on aarch64 AT_FDCWD (-100) goes in arg 1
-and the path slides to arg 2.
-
-== DETECTION ==
-
-If a freshly cross-compiled aarch64-native binary SIGILLs
-at first alloc() or syscall surface, check in this order:
-
-1. `grep CYRIUS_MACHO_ARM src/main_aarch64_native.cyr` —
-   must show the env-driven LINUX/MACOS predefine block.
-2. `grep -n "SYS_OPEN == 2" src/frontend/lex.cyr` — must
-   show three branches (init, check_shadow env-open, and
-   check_shadow cwd-probe).
-3. `strace -f -e openat ./cc5-native-aarch64 < src/main.cyr`
-   on pi — should show `openat(AT_FDCWD, "/proc/self/environ", …)`
-   not `openat(0x{garbage}, NULL, …)`.
-
-== CLOSE-THE-GAP PIN ==
-
-v5.11.37 (`cc5_aarch64_native cross-bin ship`) is the slot
-pinned to add a pi-side CI smoke that exercises this path
-on every release, so the next gate-gap closes here.
 
 [[entries]]
 name = "parse_nested_call_string_quirk_var_stage_hint_v51128"
@@ -2177,3 +995,486 @@ spent ~45 minutes of bisect before the var-stage rescue
 became obvious; one hint string saves that future-time
 for every consumer whose parse fails this shape, whether
 the original state-leak is still live or not.
+
+[[entries]]
+name = "elf64_kernel_fixup_entry_mismatch_v51146"
+description = "FIXUP's kmode==1 hard-coded entry=0x100060 (ELF32+mb1 layout) while EMITELF64_KERNEL writes code at 0x1000A8 (ELF64+mb2 layout). 0x48-byte fixup shift produced garbled serial after GRUB-EFI handoff on agnos. Fix: gate FIXUP's kmode==1 entry on _TARGET_ELF64_KERNEL"
+category = "cyrius"
+tags = ["compiler", "fixup", "elf64", "multiboot2", "agnos", "v5.11.43", "v5.11.46", "cross-emitter-invariant"]
+---
+v5.11.43 shipped `EMITELF64_KERNEL` (ELF64 + multiboot2
++ EFI64-entry tag) at `src/backend/x86/fixup.cyr:873`,
+gated by env var `CYRIUS_ELF64_KERNEL=1` flipping
+`_TARGET_ELF64_KERNEL`. The new emitter writes code at
+file offset `120 + 48 = 168` (ELF64 hdr 64 + PH64 56 +
+multiboot2 48), so `e_entry = 0x100000 + 168 = 0x1000A8`.
+
+But `FIXUP()` at the same file's line 95 hardcoded
+`entry = 0x100060` for `kmode == 1` (legacy ELF32 +
+multiboot1 layout: `0x100000 + 84 + 12`). Every absolute
+fixup was computed with `dbase = entry + acp`, so every
+baked address was 0x48 = 72 bytes earlier than the
+actual symbol location. The classic shape:
+
+```cyrius
+mov rcx, 0x1001D8    ; FIXUP baked this address
+                     ; ...but string lives at 0x100220
+```
+
+A `mov rcx, 0x1001D8` lands inside the multiboot2
+header bytes instead of the actual `.rodata` string.
+After GRUB-EFI handoff, the kernel reads garbage as
+the string pointer → garbled VGA / serial output.
+
+== EMPIRICAL CONFIRMATION (v5.11.46) ==
+
+Compiled `programs/kernel_hello.cyr` with pre-fix
+`build/cc5` (v5.11.45) + `CYRIUS_KERNEL=1
+CYRIUS_ELF64_KERNEL=1`:
+
+- ELF64 `e_entry` (header, offset 24): **`0x1000A8`** ✓
+  (EMITELF64_KERNEL writes this correctly)
+- `"Hello from Cyrius!"` string at file offset `0x220`
+  → true VA `0x100220`
+- Baked address inside `.text` at file offset `0x1FE`:
+  **`0x1001D8`** = `0x100220 - 0x48` (FIXUP's bug)
+
+The header was self-consistent (EMITELF64_KERNEL did
+its own arithmetic correctly); the FIXUP-baked
+addresses were 72 B off because FIXUP didn't know
+about ELF64-kernel mode.
+
+== FIX SHAPE ==
+
+`src/backend/x86/fixup.cyr:95`:
+
+```cyrius
+if (kmode == 1) {
+    entry = 0x100000 + 84 + 12;
+    if (_TARGET_ELF64_KERNEL == 1) {
+        entry = 0x100000 + 120 + 48;
+    }
+}
+```
+
+The expanded form (vs the prior literal `0x100060`)
+keeps the arithmetic visibly tied to the same layout
+numbers EMITELF_KERNEL + EMITELF64_KERNEL use
+internally — future drift between the three sites is
+grep-detectable.
+
+== CROSS-EMITTER INVARIANT ==
+
+The general lesson: **every code-emitter that depends
+on a header-emitter's layout must consume the same
+layout constants, not reinvent them**. cyrius has 5
+ELF emitters (x86 user, x86 kernel ELF32+mb1, x86
+kernel ELF64+mb2, aarch64 user, aarch64 kernel) and
+each must agree on entry-RVA with FIXUP's absolute-
+address computation. The v5.11.29-34 section-header
+parity sweep was a sibling instance of the same class:
+fix one emitter, miss the other 4 silently.
+
+== REGRESSION GATE ==
+
+`_elf64_kernel_entry_gate()` in `programs/check.cyr`
+locks the invariant: compiles `kernel_hello.cyr` with
+`CYRIUS_KERNEL=1 CYRIUS_ELF64_KERNEL=1`, asserts ELF64
+magic + `e_entry == 0x1000A8`, locates the
+`"Hello from Cyrius!"` string, computes its true VA
+from `p_vaddr + file_offset`, asserts the OLD-entry-
+shifted pattern (`true_va - 0x48`) is **absent**
+anywhere in the binary, asserts the true-VA pattern
+is present at least once (positive sanity). Negative-
+test verified at slot time: pre-fix cc5 produces the
+`FAIL: OLD-entry-shifted address 1049048 at file
+offset 510` diagnostic with exact-match numbers.
+
+== FILING CONTEXT — PROCESS PIN ==
+
+This bug existed because an unauthorized cross-repo
+edit hit `src/backend/x86/fixup.cyr` from an
+agnosticos agent working on AGNOS boot. Patch was
+technically correct; **the process violation is the
+load-bearing reason for the v5.11.45 revert**, not
+the technical content. Cyrius does not accept drive-by
+patches from sibling-repo agents even when 100%
+correct. Project leader pinned (2026-05-13): "EVEN
+IF ITS 100% CORRECT THE VIOLATION IS THE PROBLEM ...
+FIRABLE OFFENCE IN REAL LIFE IS MY ISSUE." The filing
+form is: file as `docs/development/issues/YYYY-MM-DD-<short>.md`
+in cyrius repo, not patch. Cyrius-side investigator
+implements through cyrius's own slot lifecycle. See
+memory pin `feedback_no_unauthorized_cross_repo_edits`.
+
+[[entries]]
+name = "relocs_stripped_vs_ovmf_v51149"
+description = "OVMF firmware treats COFF Characteristics RELOCS_STRIPPED (0x0001) as 'load at exact ImageBase or fail'. UEFI Application binaries must NEVER set this bit, even with zero actual fixups. Standard UEFI loaders (rEFInd, systemd-boot, GRUB-EFI) all clear it"
+category = "cyrius"
+tags = ["compiler", "pe", "uefi", "ovmf", "efi-application", "relocs-stripped", "coff-characteristics", "v5.11.49", "gnoboot", "silent-rejection"]
+---
+v5.11.48 shipped EFI Application emit (`_TARGET_EFI_APPLICATION
+== 1` via `CYRIUS_TARGET_EFI=1` env var) that produced
+a structurally-correct PE32+: Subsystem=0xA, NX_COMPAT,
+Data Dirs [1]/[12] zeroed, `.text` with single-byte
+`ret` EEXIT. The structural gate `_efi_emit_gate()`
+asserted all of those green.
+
+At .49 entry, manual OVMF runtime smoke:
+
+```
+BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 "
+        from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+BdsDxe: failed to load Boot0002 "UEFI QEMU HARDDISK QM00001 "
+        ...: Not Found
+BdsDxe: No bootable option or device was found.
+```
+
+Firmware found the GPT disk + ESP partition + the
+file at `\EFI\BOOT\BOOTX64.EFI` (verified via mdir
+into the FAT image: content byte-identical to the
+compile output). But BdsDxe rejected the load and
+reported "Not Found" with no indication of *why*.
+
+== ROOT CAUSE ==
+
+COFF Characteristics field at PE header offset
+`pe_off + 4 + 18`:
+
+```python
+chars = 0x0023 = 0b0000_0000_0010_0011
+                            │      ││
+                            │      │└─ EXECUTABLE_IMAGE (0x0002)
+                            │      └── RELOCS_STRIPPED (0x0001) ← THIS
+                            └──────── LARGE_ADDRESS_AWARE (0x0020)
+```
+
+Per the PE/COFF spec, `RELOCS_STRIPPED` declares
+"this image's relocations are stripped — the loader
+MUST load me at exactly ImageBase or fail." Cyrius
+emits with `ImageBase = 0x140000000`. Under OVMF
+firmware, the runtime services occupy nearby pages in
+firmware's memory map; OVMF's PE loader can't allocate
+0x140000000 → BdsDxe silently rejects the image →
+reports "Not Found" with no further detail.
+
+The trap: structural correctness of the PE headers
+isn't enough. Standard UEFI Application binaries
+(rEFInd, systemd-boot, GRUB-EFI, the EDK2 sample
+apps) **never** set RELOCS_STRIPPED. Cyrius's PE
+backend was setting it by default at
+`src/backend/pe/emit.cyr:714` and only clearing it
+when `.reloc` had content (`_pe_reloc_vsize != 0`).
+A zero-fixup probe-style EFI program (no globals,
+no DIR64 entries, no `.reloc`) kept RELOCS_STRIPPED
+set → silent rejection on every UEFI firmware that
+can't honor ImageBase.
+
+== FIX SHAPE ==
+
+`src/backend/pe/emit.cyr:714` — branch unconditionally
+on `_TARGET_EFI_APPLICATION`:
+
+```cyrius
+var _chars = 0x0023;
+if (_pe_reloc_vsize != 0) { _chars = 0x0022; }
+if (_TARGET_EFI_APPLICATION == 1) { _chars = 0x0022; }
+```
+
+UEFI mode now clears RELOCS_STRIPPED regardless of
+whether `.reloc` is empty. Firmware can place the
+image at any free address; the probe doesn't care
+(all addressing is runtime register-indirect — no
+imm64 references); gnoboot will care correctly once
+it has globals (covered by `.reloc` which fires
+naturally when DIR64 fixups exist).
+
+Post-fix boot trace:
+
+```
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " ...
+hello, uefi
+BdsDxe: loading Boot0000 "BootManagerMenuApp" ...
+```
+
+Firmware loaded BOOTX64.EFI, jumped to
+AddressOfEntryPoint, our inline-asm ran
+`SystemTable→ConOut→OutputString(L"hello, uefi\\r\\n")`,
+returned EFI_SUCCESS, firmware unwound back to boot
+manager menu. **End-to-end working.**
+
+== REGRESSION GATE ==
+
+`_efi_ovmf_smoke_gate()` in `programs/check.cyr`
+runtime-floors this: builds GPT disk + ESP + boots
+qemu+OVMF with `-serial stdio` capture + greps for
+`"hello, uefi"`. Graceful SKIP if qemu / parted /
+mtools / OVMF firmware files absent. Negative-test
+verified at slot time: with pre-.49 cc5 (RELOCS_STRIPPED
+still set), gate FAILs `(sh rc=1)`; post-fix → PASS.
+
+== LESSON FOR FUTURE EMITTER WORK ==
+
+**Structural correctness is necessary but not
+sufficient when firmware silently rejects.** OVMF's
+"Not Found" was actively misleading — the firmware
+was telling us the *outcome* (couldn't load) without
+the *cause* (RELOCS_STRIPPED contract violation). The
+only way to catch this class of bug is runtime smoke,
+not structural inspection. The v5.11.49 OVMF smoke
+gate is the runtime-floor that catches RELOCS_STRIPPED
+or any future analogous silent-rejector.
+
+Reference: PE/COFF spec § 5.1 (Characteristics);
+UEFI 2.10 spec § 2.3.4.1 (LoadImage behavior on
+non-relocatable images).
+
+[[entries]]
+name = "pe_entry_prologue_e9_jmp_zero_preserves_gpr_v51148"
+description = "cyrius PE entry emits e9 00 00 00 00 (5-byte jmp +0) at AddressOfEntryPoint before user code. The jmp touches no GPRs, so RCX/RDX/R8/R9 (MS x64 first 4 args) survive into the first user instruction. Inline-asm-first is the right shape for capturing UEFI firmware-supplied args"
+category = "cyrius"
+tags = ["compiler", "pe", "entry-point", "ms-x64-abi", "uefi", "inline-asm", "v5.11.48", "register-preservation"]
+---
+While scoping `programs/efi_probe.cyr` at v5.11.48 entry,
+the question was: where in cyrius's PE entry does user
+code start, and do RCX/RDX (firmware-supplied
+ImageHandle / SystemTable per the UEFI MS x64 ABI)
+survive long enough for user code to capture them?
+
+== EMPIRICAL ANSWER ==
+
+Compiled a probe with a distinctive 4-NOP marker as
+the FIRST user inline-asm:
+
+```cyrius
+kernel;
+asm { 0x90; 0x90; 0x90; 0x90; }   # marker
+asm { 0x48; 0x89; 0xC8; }          # mov rax, rcx
+var result = 42;
+```
+
+Compiled with `CYRIUS_TARGET_EFI=1` and inspected
+`.text` from the AddressOfEntryPoint:
+
+```
+.text first 24 bytes: e9 00 00 00 00 90 90 90 90 48 89 c8 b8 2a 00 00 00 48 b9 ...
+                      └─ prologue ─┘ └─ 4 NOPs ─┘ └─ mov rax,rcx ─┘ └─ var init ...
+```
+
+The 4-NOP marker landed at `.text + 0x05` (after the
+5-byte cyrius prologue `e9 00 00 00 00` = `jmp +0`).
+
+== WHY THE PROLOGUE PRESERVES GPRS ==
+
+`jmp rel32` writes only RIP — no flags, no GPRs, no
+memory. Even when `disp32 == 0` (a 5-byte effective
+no-op), it remains a register-preserving instruction.
+So firmware-supplied RCX (ImageHandle), RDX
+(SystemTable), R8, R9 (the MS x64 first 4 args, also
+the UEFI calling convention) all survive intact into
+the first byte of user code.
+
+== WHY FN CALLS DO NOT PRESERVE GPRS ==
+
+Cyrius's normal fn-call emit shape (MS x64 ABI under
+`_TARGET_PE == 1`) emits arg-setup before the call:
+
+```
+mov rcx, <arg1>    ; clobbers ImageHandle
+mov rdx, <arg2>    ; clobbers SystemTable
+call <fn>
+```
+
+If user code calls *any* fn before capturing RCX/RDX,
+the firmware-supplied values are lost. So "capture
+RCX/RDX via inline asm before any fn call" is the
+required entry shape for UEFI Applications written
+in cyrius.
+
+== THE EFI_PROBE PATTERN ==
+
+`programs/efi_probe.cyr` (v5.11.48) uses a single
+`asm { ... }` block as the entire program body —
+no globals (no fixups → no DIR64 → minimal `.reloc`),
+no fn calls (no GPR clobbering), runtime register-
+indirect addressing only. The asm walks
+`SystemTable → ConOut → OutputString` and embeds the
+UTF-16 message bytes inline at the end of the block,
+addressed via RIP-relative LEA with a hand-computed
+displacement. ~30 bytes of code + 28 bytes of message
++ 1 NOP for 2-byte CHAR16 alignment.
+
+This pattern is the lower-bound shape for any future
+cyrius UEFI app that needs to keep firmware args
+alive. gnoboot will use a heavier shape (it has
+globals, fns, allocator) but the initial argument
+capture has to be inline-asm-first.
+
+== ALTERNATIVE NOT TAKEN ==
+
+A "tinified fn prologue" approach (preserve RCX/RDX
+via inline asm at entry, then call a regular fn with
+the captured values) was considered but rejected:
+inline-asm support for emitting a fixup-aware
+`mov reg, &global` would require compiler work
+(cyrius's `asm { 0xXX; }` byte-emit doesn't have a
+fixup-record hook). For the .48 MVP probe, the
+single-asm-block shape works because everything is
+register-indirect. A future slot may add fixup-aware
+inline asm if/when gnoboot needs it.
+
+[[entries]]
+name = "dll_characteristics_nx_compat_zero_fixup_efi_v51148"
+description = "v5.6.31 set DllCharacteristics = 0x0160 (NX_COMPAT + DYNAMIC_BASE + HIGH_ENTROPY_VA) only when .reloc was present. Zero-fixup EFI binaries (probe-style) had DllChar = 0x0000 with no NX_COMPAT, which UEFI 2.0+ may reject. Fix: EFI mode forces NX_COMPAT bit (0x0100) regardless of .reloc presence"
+category = "cyrius"
+tags = ["compiler", "pe", "dll-characteristics", "nx-compat", "uefi", "v5.11.48", "efi-application", "memory-attributes-protocol"]
+---
+The v5.6.31 logic at `src/backend/pe/emit.cyr:776`:
+
+```cyrius
+var _dllc = 0;
+if (_pe_reloc_vsize != 0) { _dllc = 0x0160; }
+```
+
+set DllCharacteristics to `0x0160` (NX_COMPAT 0x0100 +
+DYNAMIC_BASE 0x0040 + HIGH_ENTROPY_VA 0x0020) **only**
+when `.reloc` was present. For Windows-CUI consumers
+with at least one global (almost always true), this
+shipped the bits the security audits wanted.
+
+For an EFI Application probe that uses no globals (no
+DIR64 entries → no `.reloc` content → `_pe_reloc_vsize
+== 0`), DllCharacteristics = `0x0000`. UEFI 2.0+
+firmware honors NX on code pages via the Memory
+Attributes Protocol; without `NX_COMPAT` (0x0100) set,
+some firmware implementations refuse to invoke the
+image (mark `.text` as no-execute and trap on entry).
+
+== FIX SHAPE (v5.11.48) ==
+
+```cyrius
+var _dllc = 0;
+if (_pe_reloc_vsize != 0) { _dllc = 0x0160; }
+if (_TARGET_EFI_APPLICATION == 1 && _pe_reloc_vsize == 0) {
+    _dllc = 0x0100;   # NX_COMPAT only
+}
+```
+
+EFI mode + zero fixups now forces NX_COMPAT alone.
+DYNAMIC_BASE stays off because the image is
+non-relocatable (no `.reloc`); firmware honors
+ImageBase = 0x140000000 directly. EFI programs with
+at least one global fixup get the full `0x0160` from
+the existing v5.6.31 branch (.reloc present →
+relocatable → DYNAMIC_BASE meaningful → HIGH_ENTROPY_VA
+meaningful too).
+
+== CROSS-REFERENCE ==
+
+This is the **second** silent-rejection class hit by
+the v5.11.49 OVMF runtime smoke. The first was
+RELOCS_STRIPPED (see `relocs_stripped_vs_ovmf_v51149`
+entry above). Both required runtime testing to surface
+— structural inspection alone would have missed both.
+
+== HIGH_ENTROPY_VA NOTE ==
+
+The v5.5.35 comment block in `pe/emit.cyr` documents
+that HIGH_ENTROPY_VA (0x0020) was empirically observed
+to break cc5_win.exe's stdin read on Win11 (5/5 runs).
+That failure does NOT apply under UEFI — firmware
+doesn't have stdin in the Windows sense; OutputString
++ runtime services are unaffected. The `0x0160` for
+EFI mode with `.reloc` present is safe; the Win11
+stdin issue is Windows-only.
+
+[[entries]]
+name = "build_cc5_silent_contamination_recurrence_v51144"
+description = "build/cc5 has been silently overwritten with non-cyrius binaries multiple times across v5.11.x — at v5.11.28/.29 (silently fixed .30) and again at v5.11.43 (a 1.39 MB binary containing mabda/wgpu/compute-pipeline strings). install.sh --refresh-only carries the contamination into ~/.cyrius/bin/cc5. v5.11.45 added a grep gate"
+category = "cyrius"
+tags = ["compiler", "build", "contamination", "release-process", "v5.11.43", "v5.11.44", "v5.11.45", "mabda", "wgpu", "fail-fast-gate"]
+---
+v5.11.44 caught a P0 build artifact: the committed
+`build/cc5` at v5.11.43 (commit `aad19f6a` EMIT64KERNEL)
+was a **1,389,776 B binary containing mabda/wgpu/
+compute-pipeline strings — NOT the cyrius compiler**.
+
+`git diff aad19f6a -- src/ lib/` was empty;
+current `src/` self-hosted byte-identical to the
+canonical 821,712 B at v5.11.43 / 821,984 B at .44.
+v5.11.41's cc5 fed current `src/main.cyr` also produced
+821,712 B. So the source was clean; only `build/cc5`
+was wrong.
+
+== RECURRENCE PATTERN ==
+
+Same shape contamination at v5.11.28/.29, silently
+fixed at .30 with no postmortem at the time. Recurred
+at .43 → caught at .44.
+
+Most likely cause: a build script during the .43
+prep cp'd another binary (a mabda-built binary that
+happened to be in the build directory or in a sibling
+repo's `build/`) over `build/cc5` immediately before
+the commit. `install.sh --refresh-only` then carried
+the contamination into `~/.cyrius/bin/cc5` +
+`~/.cyrius/versions/5.11.43/bin/cc5` (both 1,389,776 B
+mabda carryovers verified at .44 ship).
+
+== WHY IT'S HARD TO DETECT NORMALLY ==
+
+The contamination is invisible to `cyrius test` and
+self-host verify if you happen to run them through
+the OLD cc5 in `~/.cyrius/bin/`. The new
+`build/cc5` is what's broken, but the install-snapshot
+shim might re-symlink to a previous-version's cc5
+if its mtime check skips the rebuild. Layered
+silent-fail until somebody actually pipes
+`src/main.cyr` through the committed `build/cc5`.
+
+== FIX (v5.11.45) ==
+
+New `_cc5_contamination_gate()` in
+`programs/check.cyr` (v5.11.45 P(-1) hardening bundle).
+Greps `build/cc5` for `mabda: gpu` / `wgpuDevice` /
+`compute_pipeline` substrings — the v5.11.43-style
+slip signature. Fails check.sh fast. Negative test
+verified: tainting `build/cc5` makes the gate FAIL;
+restoring → PASS.
+
+== PROCESS PIN (CLOSEOUT-CANDIDATE) ==
+
+The CLAUDE.md closeout pass should include a
+`strings build/cc5 | grep -E "mabda|wgpu|compute_pipeline"`
+check before any version-bump commits. v6.0.0
+closeout will be the natural place to lift this from
+"gate that catches it after commit" to "pre-commit
+hook that refuses to commit a contaminated cc5".
+
+== ADJACENT SLIP: cyrius vet AT v5.11.45 ==
+
+The same v5.11.45 P(-1) hardening bundle caught a
+parallel slip in `build/cyrc`: had been silently
+replaced with the 12 KB bootstrap binary instead of
+the real audit tool. install.sh `_rebuild_stale`
+skipped the rebuild because the bad binary's mtime
+was newer than source — same shape of silent-fail
+as build/cc5's mabda contamination. Fixed by adding
+an explicit `syscall(60, r)` exit to
+`programs/cyrc.cyr` (vet was running twice — module
+init + runtime fall-through), and raising the
+scan-buffer cap 16 KB → 256 KB (was truncating reads
+on 86 KB source files and falsely reporting "no
+dependencies"). cyrc 12,344 B (bootstrap) → 44,672 B
+(real audit tool).
+
+== LESSON ==
+
+`build/<binary>` mtime-based rebuild logic in
+`install.sh` is a silent-fail surface. Any committed
+build artifact should have a content-integrity check
+(strings-grep, byte-pattern, ELF-magic — whatever is
+cheap and specific) rather than relying on mtime
+comparisons against source. v6.0.0 closeout should
+generalize the .45 contamination gate to cover every
+committed `build/<binary>` artifact, not just cc5.
