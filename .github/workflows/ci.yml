@@ -19,32 +19,47 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Cyrius toolchain
+        # 5.11.x consumer pattern (sit / sigil / sandhi): pipe the
+        # upstream install.sh which lays out $HOME/.cyrius/versions/$VER/
+        # {bin,lib}, the flat $HOME/.cyrius/{bin,lib} symlinks, and the
+        # $HOME/.cyrius/current pointer. Replaces the pre-5.11 hand-rolled
+        # extract that landed stdlib at the wrong path.
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> "$GITHUB_ENV"
 
       - name: Resolve dependencies
-        run: cyrius deps
-
-      - name: Verify dep hashes
-        # Skip on the first push that introduces a new dep before
-        # `cyrius.lock` has been generated and committed. Once the
-        # lockfile lands in-tree, this step starts enforcing hashes.
+        # Two-step under cyrius 5.11.x:
+        #   1. Stdlib — install.sh laid these out at $HOME/.cyrius/lib;
+        #      cc5 reads from ./lib/ specifically, so cp -rL into the
+        #      project. `cyrius update` would also do this but is fragile
+        #      across CI $HOME shapes; direct cp is exactly what's needed.
+        #   2. `cyrius deps` resolves [deps.X] git crates (sakshi /
+        #      vyakarana) alongside the staged stdlib.
+        # cyrius.lock is empty under 5.11.x and gitignored; no verify step.
         run: |
-          if [ -f cyrius.lock ]; then
-            cyrius deps --verify
-          else
-            echo "::warning::cyrius.lock not committed — skipping hash verification"
-          fi
+          mkdir -p lib
+          cp -rL "$HOME/.cyrius/lib/"* lib/
+          cyrius deps
+
+      - name: Lint
+        # Per-file in 5.7+. The cosmetic 'exceeds 120 characters' warning
+        # is tolerated; everything else hard-fails. Mirrors sit's pattern.
+        run: |
+          fail=0
+          for f in src/*.cyr; do
+            out=$(cyrius lint "$f" 2>&1 || true)
+            echo "$out"
+            bad=$(echo "$out" | grep -E '^\s*warn ' | grep -v 'exceeds 120 characters' || true)
+            if [ -n "$bad" ]; then
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "lint: non-cosmetic warnings present"; exit 1; }
 
       - name: Build
         run: |
@@ -105,6 +120,50 @@ jobs:
             done
           done
           exit $FAIL
+
+      # ── Install per-language toolchains for validate-content.sh ───────
+      # rustc / python3 / gcc / go / node are preinstalled on
+      # ubuntu-latest. zig, aarch64 binutils, qemu-user-static, tsx,
+      # qiskit, and cyrius need explicit setup. validate-content.sh
+      # gracefully skips any language whose toolchain is absent, but CI
+      # is the place to gate every example — install all of them.
+      - name: Install zig
+        run: |
+          ZIG_VER="0.13.0"
+          curl -sSL -o /tmp/zig.tar.xz \
+            "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz"
+          mkdir -p /opt/zig && tar -xf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo "/opt/zig" >> "$GITHUB_PATH"
+
+      - name: Install aarch64 cross-tools + qemu-user-static
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            binutils-aarch64-linux-gnu \
+            qemu-user-static
+
+      - name: Install tsx (TypeScript runner)
+        run: npm install -g tsx
+
+      - name: Install qiskit (OpenQASM validator)
+        run: pip install --no-cache-dir qiskit
+
+      - name: Install Cyrius toolchain
+        # Same pattern as the build-and-test job — content validation
+        # needs `cyrius run` for cyrius.cyr examples.
+        run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> "$GITHUB_ENV"
+
+      - name: Validate all examples compile/run
+        # The gate per CLAUDE.md "Content Standards" — every concept.toml
+        # example must compile and run successfully in its language.
+        # ~10 min wallclock for 814 examples × 11 languages.
+        run: bash scripts/validate-content.sh
 
   security:
     name: Security Scan

@@ -45,6 +45,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `lib/` and `cyrius.lock` are now build artifacts under the
   5.11.x model — `lib/` is gitignored; lockfile defaults to empty
   on resolve.
+- **CI/release workflows refreshed** for the 5.11.x model
+  (mirrors sit / sigil / sandhi):
+  - Cyrius install: hand-rolled tarball extract → upstream
+    `install.sh` pipe (lays out `$HOME/.cyrius/versions/$VER/`
+    + flat symlinks + `current` pointer correctly).
+  - Dep resolution: two-step — `cp -rL $HOME/.cyrius/lib/* lib/`
+    then `cyrius deps`. The pre-5.11 `cyrius deps --verify` step
+    is gone (lockfile is empty under 5.11.x and gitignored).
+  - `cyrius lint src/main.cyr` added as a CI gate (per-file in
+    5.7+; cosmetic 120-char warnings tolerated, everything else
+    hard-fails).
+  - Release tarball no longer ships `lib/` (binary is statically
+    linked) or `cyrius.lock` (gitignored).
+- **`scripts/version-bump.sh` rewritten** — pre-2.0 cargo-era
+  references (`Cargo.toml`, `cargo generate-lockfile`, the
+  CLAUDE.md `**Version**` sed that no longer matches anything)
+  are gone. Bump now writes `VERSION` and stamps
+  `CHANGELOG.md`; cyrius.cyml inherits via `${file:VERSION}`.
+
+### Added
+
+- **`scripts/validate-content.sh` is now a CI gate.** The
+  Content Validation job installs every language toolchain
+  (zig 0.13.0, aarch64 binutils, qemu-user-static, tsx, qiskit,
+  cyrius) and runs the full 814-example × 11-language sweep on
+  every push/PR. Per CLAUDE.md Content Standards: every example
+  MUST compile/run; ~10 min wallclock.
+- **aarch64 release artifact (best-effort).** `release.yml`
+  cross-builds `vidya-<tag>-aarch64-linux` via
+  `cyrius build --aarch64` when `cc5_aarch64` is shipped with
+  the pinned cyrius. Mirrors sit's pattern; ships x86_64 alone
+  if cross-build fails or the cross-compiler isn't bundled.
 
 ## [2.7.0] — 2026-05-08
 
