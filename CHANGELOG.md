@@ -16,6 +16,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stdlib from `~/.cyrius/versions/<ver>/lib/` into `lib/` and
   re-resolves git deps); `cyrius deps` alone only handles
   `[deps.NAME]` git entries.
+- **sakshi: 2.0.0 → 2.2.4.** Picks up cycle-counter timestamps
+  (`_sk_now_ns` no longer goes through the kernel; ~22 ns on
+  x86_64 via `rdtsc`+Q32 mul-shift, instant on aarch64 via
+  `mrs cntvct_el0`), opt-in `sakshi_clock_recalibrate()`,
+  aarch64 portability with arch-dispatched syscalls, and the
+  v5.11.x `: i64` annotation pass. Public API surface
+  unchanged.
+- **vyakarana: 1.11.1 → 2.2.1.** Major bump; only scheduled
+  API break in the roadmap. `tokenize_source(src, lang)`
+  removed in favor of the push-based streaming API
+  (`tokenize_stream_new` / `_feed` / `_finish` / `_free`) per
+  vyakarana ADR 0017. Vidya's two consumers — `vidya code`
+  CLI (`src/main.cyr:877`) and `GET /code/{topic}/{lang}`
+  (`src/main.cyr:1569`) — migrated in place; observable
+  output is byte-identical (rust track of
+  `content/lexing_and_parsing/` re-verified at 2187 tokens
+  on 8829 source bytes, same as 2.7.0). Also gets the
+  compose-rule prefix-buffering streaming fix (2.2.1
+  FINDING-011).
 - `cyrius.cyml` `[deps] stdlib` extended with `tls`, `base64`,
   `fdlopen` — sandhi pulls `TLS_EARLY_DATA_*`, `fdlopen_*`,
   `base64_encode` via transitives that cyrius v5.10.x SLOT 19

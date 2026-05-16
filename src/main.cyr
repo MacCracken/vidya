@@ -818,8 +818,13 @@ fn cmd_compare(topic_id, lang1_str, lang2_str) {
 # `lang_stem(l)` ("rust", "python", "asm_x86_64", "cyrius", …)
 # already matches the names vyakarana grammars are registered
 # under. The one mismatch is OpenQASM (vyakarana ships no qasm
-# grammar in 1.11.0); `has_grammar()` short-circuits that case
+# grammar in 2.2.1); `has_grammar()` short-circuits that case
 # so we still return the source body, just with no tokens.
+#
+# 2.7.1: migrated from 1.x `tokenize_source(src, lang)` to the
+# 2.x streaming API (`tokenize_stream_new` / `_feed` / `_finish`
+# / `_free`) per vyakarana ADR 0017. Same observable output;
+# the dance is captured at each call site.
 
 # ANSI SGR opener for a vyakarana kind name. Empty string for
 # kinds that should render in the terminal default. Reset with
@@ -867,19 +872,24 @@ fn cmd_code(topic_id, lang_str) {
     var stem = lang_stem(l);
     var src_len = strlen(src);
 
-    # No vyakarana grammar (e.g. openqasm in 1.11.0) — print plain.
+    # No vyakarana grammar (e.g. openqasm in 2.2.1) — print plain.
     if (has_grammar(stem) == 0) {
         sys_write(1, src, src_len);
         if (src_len > 0 && load8(src + src_len - 1) != 10) { println(""); }
         return 0;
     }
 
-    var tb = tokenize_source(src, stem);
-    if (tb == 0) {
+    # vyakarana 2.x streaming API (ADR 0017): new → feed → finish → free.
+    var stream = tokenize_stream_new(stem);
+    if (stream == 0) {
         sys_write(1, src, src_len);
         if (src_len > 0 && load8(src + src_len - 1) != 10) { println(""); }
         return 0;
     }
+    var tb = tokenbuf_new();
+    tokenize_stream_feed(stream, src, src_len);
+    tokenize_stream_finish(stream, tb);
+    tokenize_stream_free(stream);
 
     var n = tokenbuf_count(tb);
     var i = 0;
@@ -1566,8 +1576,12 @@ fn json_code_response(topic_id, lang_str) {
     str_builder_add_cstr(sb, ",\"tokens\":[");
 
     if (has_grammar(stem) == 1) {
-        var tb = tokenize_source(src, stem);
-        if (tb != 0) {
+        var stream = tokenize_stream_new(stem);
+        if (stream != 0) {
+            var tb = tokenbuf_new();
+            tokenize_stream_feed(stream, src, strlen(src));
+            tokenize_stream_finish(stream, tb);
+            tokenize_stream_free(stream);
             var n = tokenbuf_count(tb);
             var i = 0;
             while (i < n) {
