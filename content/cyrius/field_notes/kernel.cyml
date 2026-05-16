@@ -81,3 +81,584 @@ that's suspiciously small.
 
 260KB for a hardened kernel is hard to beat. 143KB was too good to be true —
 and it was.
+
+[[entries]]
+name = "the_road_to_iron"
+description = "Three weeks, eight iron attempts, two GRUB walls, one architectural pivot to a sovereign UEFI bootloader — the walk from QEMU-clean to first kernel-on-NUC instruction"
+category = "cyrius"
+---
+THE ROAD TO IRON
+
+QEMU is a liar. Not on purpose, and not always — but reliably enough that
+"boots clean in QEMU" is at best a necessary condition for boot-on-iron,
+never a sufficient one. The AGNOS kernel had been booting clean in QEMU
+for months when we started flashing it to a USB stick and pointing the
+NUC AMD at it on 2026-05-12. Eight attempts later, we have a kernel
+that gets through `gdt_init`, walks into `tss_init`, and triple-faults
+on a single wrong byte in an inline asm block. Between those two states
+are five real walls, one wrong diagnostic, and one fairly violent
+architectural pivot. Here's the shape.
+
+THE FIRST WALL — THE DUMBEST, IN THE BEST WAY
+
+GRUB rejected the kernel with `grub_elf32_get_shnum:227: invalid section
+header table offset in e_shoff`. Cyrius's ELF emitter had been writing
+program-headers-only ELFs — valid for Linux's `execve` (which only
+consumes program headers) and therefore valid in QEMU's `-kernel` mode
+(which uses a Linux-style loader). GRUB's ELF parser is stricter and
+rejects anything with `e_shoff = 0`. Fix: a 250-line patch to
+`cyrius/src/backend/x86/fixup.cyr` to emit five real section headers
+(NULL + .text + .rodata + .bss + .shstrtab). Shipped as cyrius 5.11.29.
+Mirrored to the aarch64 emitter and the user-binary ELF64 linker as
+5.11.30 and 5.11.31. Kernel grew 232 bytes. Cost: a coffee.
+
+THE SECOND WALL — GRUB SAYS NO VIDEO
+
+`grub_video_set_mode: no suitable video mode found.` On UEFI hardware
+that exposes only GOP/UGA — which is every modern board — GRUB needs
+`insmod all_video` and `insmod efi_gop` loaded, and the grub.cfg needs
+`set gfxpayload=text` because AGNOS uses VGA text + serial, not a
+framebuffer console. One commit to `scripts/install-usb.sh`, USB
+re-provisioned. Done in twenty minutes.
+
+THE THIRD WALL — GRUB FORGOT TO LEAVE LONG MODE
+
+After fixing the video probe: `WARNING: no console will be available to
+OS` and then a reset. Attempt 4 retried with a CPUID-gated CR4 fix that
+turned out to be a no-op on Zen silicon (predicted before the run,
+confirmed after). Same warning, same reset. Bare retry was exhausted;
+we needed visibility into kernel-side execution and didn't have it.
+
+Reading GRUB source while not boot-attempting turned out to be the
+load-bearing diagnostic. GRUB-EFI on x86_64 invokes
+`grub_relocator64_efi_boot`, which calls `grub_relocator64_efi_start` —
+a 64-bit-state stub that does `jmp *jump_addr(%rip)` without `cli`,
+without `lgdt`, without clearing `CR0.PG`, `CR4.PAE`, or `EFER.LME`.
+**GRUB-EFI hands off with the CPU still in 64-bit long mode.** Our
+ELF32 kernel's 32-bit-protected-mode instructions decoded as garbage
+64-bit opcodes when fetched in long mode; the kernel triple-faulted on
+instruction #1. Linux distros don't trip this because they boot via
+`linuxefi`, not multiboot — entirely different relocator. The
+multiboot1 + UEFI path is dead for any kernel that isn't already a
+64-bit ELF with a multiboot2 header.
+
+Pivot to Path A: ELF64 + multiboot2 + `MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS_EFI64`.
+Cyrius 5.11.43 landed `EMITELF64_KERNEL`. Agnos shim rewrote the entry
+sequence for long-mode-inherited state. Build verified in QEMU `-kernel`.
+~6 hours. Felt like we'd cleared it.
+
+THE FOURTH WALL — GRUB WRITES TO ITS OWN .TEXT
+
+Then the QEMU OVMF gate — same firmware path the iron uses, just
+emulated. `WARNING: no console will be available to OS` followed by:
+
+  X64 Exception 0E (#PF — Page Fault), ErrorCode 0x3 (P=1 W=1)
+  RIP 0xBD3D22E (firmware-loaded memory)
+  RAX = 0x36D76289 (multiboot2 magic — GRUB had prepared the handoff)
+
+Protection violation on a write inside `grub_relocator64_efi_boot`.
+`objdump` + `readelf -r` on `/usr/lib/grub/x86_64-efi/relocator.mod`
+made the design explicit: `grub_relocator64_efi_boot` issues six
+`movabs %rax, <addr_inside_the_stub>` writes — **patching kernel
+register state directly into the stub's bytecode** before jumping.
+Six writes to its own `.text`. OVMF 2024+ enforces strict-W^X on PE
+`.text` pages. The writes fault.
+
+This was the wall that killed Path A. The multiboot2 + GRUB-EFI
+relocator path is genuinely broken under modern firmware, and Linux
+distros don't see it because they don't use it. We searched Red Hat
+Bugzilla and the GRUB lists — no upstream report names
+`grub_relocator64_efi_boot` + W^X by that combination. We're a fresh
+datapoint on a death the rest of the industry already arranged around.
+Fedora 42's strict-NX change in January 2025 was the explicit cliff;
+we hit it 16 months later.
+
+THE PIVOT — GNOBOOT
+
+The pivot to Path C — sovereign UEFI bootloader, no GRUB on the chain —
+happened over the next 8 hours on 2026-05-13. Path C was always the
+long-term destination per the bootloader roadmap; the W^X wall just
+brought the timeline forward to "now." Cyrius gained UEFI Application
+emit (5.11.49). A new repo, `gnoboot`, came up: PE32+ UEFI binary,
+Cyrius-native, ~35KB final size. Twelve verification gates, eleven
+cleared in one session: ConOut banner, `HandleProtocol(LoadedImage)`,
+`SimpleFileSystemProtocol`, open `\boot\agnos`, parse ELF64 program
+headers, `AllocatePages` at 0x100000, load 245KB segment, `GetMemoryMap`,
+build sovereign 80-byte boot-info struct (magic `0x41474E4F = 'AGNO'`),
+call `ExitBootServices`, `mov rdi, &boot_info; mov eax, 0x1000A8;
+jmp rax`. Agnos shim swap from MBI parse to sovereign-struct read, six
+edits in the agnos repo. End-to-end QEMU OVMF: kernel reaches
+`Activating scheduler...`. Gnoboot 0.1.0 cut, agnos 1.30.0 cut. Ready
+for iron.
+
+THE FIFTH AND SIXTH WALLS — UEFI ALLOCATEPAGES DOESN'T ZERO, AND
+                              EFILOADERDATA IS NX
+
+Iron Attempt 5: gnoboot reached step 7, kernel triple-faulted post-jump,
+machine reset. Bit-identical to a kernel that never ran. Two
+high-confidence hypotheses for the QEMU-OVMF / iron divergence:
+
+1. **BSS gap not zeroed.** UEFI 2.x § 7.2 says `AllocatePages` returns
+   undefined memory contents. QEMU OVMF happens to return zeroes; real
+   firmware leaves POST/EFI scratch. Kernel `.bss` globals read garbage
+   on iron, triple-fault at first reference.
+2. **EfiLoaderData vs EfiLoaderCode.** Strict-W^X firmware NX-marks
+   LoaderData pages. Jumping into one #PFs, IDT absent, triple-faults.
+   OVMF runs from LoaderData regardless.
+
+Both fixes shipped in Attempt 6. **No improvement.** Identical reset
+cadence. Two highest-confidence hypotheses ruled out by negation. The
+remaining hypotheses — Zen page-table W^X, GDT divergence, CR0/CR4/EFER
+divergence including CET shadow stack — all required visibility into
+kernel-side execution that we didn't have.
+
+THE VISUAL CANARY — AMBIGUOUS SIGNAL
+
+Attempt 7 added a visual canary: gnoboot located GOP pre-EBS, captured
+`fb_phys/pitch/width/height/pixel_format` into the boot-info struct
+(struct grew 80 → 112 bytes, version 1 → 2). Kernel boot-shim's first
+26 bytes read `[rdi+0x48]`, and if non-zero, painted 256 white pixels
+at top-left of screen. If we see a stripe, kernel executed at least one
+instruction. If we don't, the failure is upstream of instruction #1.
+**No stripe.** Reset. The canary's null-check meant we couldn't
+distinguish Case A (`fb_phys == 0`, kernel ran invisibly) from Case B
+(`jmp rax` never landed). We had ambiguous signal.
+
+THE SERIAL CABLE THAT WASN'T
+
+Across Attempts 4, 5, 6, and 7 we'd been recommending a USB-to-TTL
+serial cable on the NUC's COM1 header as the next diagnostic. The
+recommendation was structurally wrong. **The dev environment IS the
+iron target** — single Beelink SER, no second host. A serial cable
+needs another machine to read the wire. The right channel was always
+something that survives a triple-fault reset on the same machine. CMOS
+scratch RAM, UEFI NVRAM variables, raw disk sectors. We'd recommended
+the wrong diagnostic three attempts running because we hadn't
+internalized the dev-setup constraint. A memory pin records it now so
+the next agent doesn't repeat it.
+
+THE CMOS UNLOCK
+
+Attempt 8 shipped the CMOS persistent boot log. Six 8-byte writes in
+the kernel's boot-shim ELF64 asm block, each
+`mov al, idx; out 0x70, al; mov al, val; out 0x71, al`. Slot map:
+`CMOS[0x50]` = highest kernel checkpoint, `CMOS[0x51]` = `0xAB` magic
+(kernel ran), `CMOS[0x52]` = gnoboot pre-jump checkpoint, `CMOS[0x53]` =
+`0xCD` magic (gnoboot ran). Slots 0x50-0x7F because the archaemenid BIOS
+writes 0x42-0x44 every cold boot. After the iron reset, a Cyrius binary
+reads CMOS back through the bare-metal port-IO path: `/dev/nvram` is
+dead on this BIOS (checksum mismatch), so the Linux driver couldn't
+help us.
+
+Verdict: gnoboot magic `0xCD`, gnoboot checkpoint `5` (all the way
+through). Kernel magic `0xAB` (kernel ran). Kernel checkpoint `0x81`.
+**`0x81` is "gdt_init returned, about to call tss_init."** `0x82` is
+"tss_init returned." We didn't reach `0x82`. The fault is inside
+`tss_init_cpu(0)`. First time in eight attempts we had a clean
+bisection signal from iron, with no second host.
+
+THE [RBP-0x08] TRAP
+
+Reading `kernel/arch/x86_64/gdt.cyr`: the `ltr` asm block read
+`[rbp-0x08]` and called it `selector`. Per Cyrius's frame convention
+(documented in `ring3.cyr:25` — *"params at rbp-0x08, -0x10, -0x18;
+new locals start at rbp-0x20"*), `[rbp-0x08]` in
+`tss_init_cpu(cpu_id)` is the **parameter cpu_id**, not the local
+`selector`. For the BSP, `cpu_id == 0`. So `ltr 0` loads the null TSS
+descriptor → #GP → IDT not yet installed (`idt_init` is the very next
+call) → triple fault → reset.
+
+Fix: drop the `mov rax, [rbp-0x08]`, rely on Cyrius leaving `selector`
+in `rax` from the assignment (same pattern `gdt_init` uses for `lgdt
+[rax]` two functions up). Net: −4 instruction bytes. A second latent
+bug surfaced by code-reading after the slot fix — `var gdt[56]` was
+sized for the original 1-TSS layout but `gdt_init` writes through
+offset 96, stomping `boot_info_ptr` in BSS. Resized to `var gdt[104]`.
+Attempt 9 build sits at `build/agnos`, ready to flash.
+
+HOW OTHERS DO IT
+
+The reframe that took three weeks to earn:
+
+Linux runs the kernel as a PE/COFF binary with an EFI stub linked in
+(`drivers/firmware/efi/libstub/x86-stub.c`). The stub locates GOP,
+captures the memory map, calls `ExitBootServices`, builds its own page
+tables, jumps to the decompressor. FreeBSD's `loader.efi` does the
+same shape with a separate binary, then jumps to the kernel with a
+`modinfo` blob. OpenBSD's `efiboot/BOOTX64.EFI` does the same with
+`boot_args`. Windows's `winload.efi` does the same with
+`LOADER_PARAMETER_BLOCK` in RCX. Limine — the hobbyist reference
+design — does the same with a request/response table embedded in the
+kernel ELF. Every modern UEFI boot path on x86_64 is *some* variant
+of: load PE binary → that PE locates GOP/memmap/RSDP → call EBS →
+jump to kernel with a struct.
+
+**Path C is that pattern.** The flat 112-byte struct in RDI is
+BOOTBOOT-style. The Cyrius toolchain emitting PE/COFF is genuinely
+new; the architecture is 10+ years old and converged-on. The Linux
+EFI Handover Protocol is officially deprecated upstream as of v6.7
+(late 2023). GRUB-multiboot2-EFI is the outlier the industry has been
+quietly walking away from since 2023. AGNOS hit the cliff because OVMF
+2024+ is strict-NX and `grub_relocator64_efi_boot`'s self-patching
+`.text` is exactly the pattern strict-W^X kills.
+
+(Full comparison with citations:
+`agnosticos/docs/development/uefi-boot-prior-art.md`.)
+
+WHAT THE WALK COST
+
+  Attempts 1-4 + diagnoses:     ~30h iron testing + GRUB source review
+  Path A scaffold (5.11.43):    ~6h cyrius + agnos shim ELF64 rewrite
+  Path C scaffold (gnoboot):    ~8h cyrius UEFI emit + new repo + 11 verification gates
+  Attempts 5-8 + slot-trap fix: ~16h BSS zero, EfiLoaderCode, canary,
+                                CMOS bisector, gdt.cyr fix, gdt[104] resize
+  Elapsed wall time:            3 weeks
+  Effective engineering time:   ~60 hours
+
+  Cyrius patches the walk needed:
+    5.11.29  ELF section headers (x86 kernel emit)
+    5.11.30  ELF section headers (aarch64 mirror)
+    5.11.31  ELF section headers (cyrld user-binary linker)
+    5.11.43  EMITELF64_KERNEL + multiboot2 + EFI64 entry tag
+    5.11.49  UEFI Application emit mode (PE32+, NX_COMPAT, .reloc)
+    5.11.52  fn efi_main(handle, st) convention + entry-save bug
+    5.11.53  entry-save REX prefix hotfix
+    5.11.54  current pin
+
+  Kernel size across the walk:
+    1.29.0 (pre-iron):    250704 bytes
+    1.30.0 (gnoboot):     251040 bytes
+    1.30.0 + canary:      251072 bytes
+    1.30.0 + CMOS:        251232 bytes
+    1.30.0 + slot fix:    251616 bytes (today)
+
+LESSONS
+
+QEMU is a liar. `qemu-system-x86_64 -kernel -cpu max` boots through a
+Linux-style loader and bypasses everything GRUB-EFI does to your
+registers. `-bios OVMF` is closer, but OVMF defaults are looser than
+current iron firmware on NX. *Every QEMU "PASS" is a hypothesis test,
+not a verdict.*
+
+GRUB-EFI x86_64 doesn't exit long mode. If your kernel is ELF32, the
+path is dead. Don't argue with it.
+
+GRUB-EFI's multiboot2 relocator patches its own `.text`. Under
+strict-W^X UEFI, this faults. Linux doesn't trip this because Linux
+uses `linuxefi`, not multiboot. You will.
+
+UEFI's `AllocatePages` returns undefined memory. Zero the BSS gap
+yourself. QEMU OVMF happens to return zeroes; real firmware doesn't.
+
+Strict-W^X firmware NX-marks `EfiLoaderData`. If you're allocating
+pages you plan to jump into, ask for `EfiLoaderCode`.
+
+The right diagnostic channel depends on your dev setup. We recommended
+a serial cable for three attempts running, then realized we'd been
+recommending the wrong tool for our hardware (single-machine dev = no
+second host to read the wire). CMOS scratch RAM survives a triple-fault
+reset on the same machine and the Cyrius `read-boot-log` binary reads
+it back without needing the kernel nvram driver (which is dead on this
+BIOS anyway).
+
+Cyrius asm blocks that reference `[rbp-N]` are positional and
+unforgiving. The convention is documented in `ring3.cyr:25` and worth
+re-reading before writing a third asm-block-with-named-offset in 2026.
+
+Most importantly: **what looks novel from inside the work usually
+isn't.** AGNOS Path C is the same architectural shape as Linux's EFI
+stub, FreeBSD's `loader.efi`, OpenBSD's `BOOTX64.EFI`, Windows's
+`winload.efi`, and Limine's `BOOTX64.EFI`. The Cyrius toolchain emitting
+PE/COFF is the novel piece; the architecture is 10+ years old and
+converged-on. The walk to iron was hard because we discovered the
+walls in the wrong order, not because the destination was unusual.
+
+Attempt 9 is the next data point. Whatever it shows, the next wall
+won't be in GRUB.
+
+[[entries]]
+name = "shell_on_iron"
+description = "Attempts 9 through 29: how a kernel that compiled, booted in QEMU, and crashed on iron walked itself, repair-letter by repair-letter, to a visible shell prompt on a NUC AMD framebuffer"
+category = "cyrius"
+---
+SHELL ON IRON
+
+The first part of this story is "the_road_to_iron" — three weeks, eight
+attempts, two GRUB walls, one architectural pivot, ending with Attempt 9
+sitting at the workbench ready to flash. Repair (C) had pushed all 15
+GPRs across context switches instead of the 9-caller-saved subset that
+had been leaking rbx/rbp/r12-r15 between procs every tick. The kernel
+compiled clean. The closed-beta gate — CP 0x11 MAGENTA — was four iron
+attempts away.
+
+Twenty-one attempts and seventeen repair letters later, the kernel
+booted to a typeable shell prompt on the framebuffer. The keyboard
+didn't work yet — but the shell was there, full kernel init log
+rendering coherently above it, every checkpoint past closed-beta gate
+held. Here's the shape of those twenty-one attempts.
+
+THE QEMU LIE — IN BOTH DIRECTIONS
+
+"QEMU is a liar" was the headline lesson from the first part. The
+second part taught us the corollary: *QEMU lies in BOTH directions*.
+A bug present in QEMU may be absent on iron, and a bug absent in QEMU
+may be present on iron. Attempts 9 through 14 chased a scheduler hang
+that reproduced consistently under `gnoboot + OVMF + qemu-system-x86_64
+-cpu max` and looked architecturally serious — the kernel scheduler
+appeared to starve `proc 0` (the idle task) after ~10 timer ticks. We
+ran static walkthroughs of `sched_next` and `do_context_switch` after
+Repair (A) (unconditional state-ready post-save) and Repair (B)
+(`sched_next` fallback to proc 0); both should have worked; neither
+did. Iron, when it finally booted past Repair (C), didn't reproduce
+the hang at all. The QEMU stall was real — but specific to the
+gnoboot+OVMF inherited-mapping edge case (page tables at fixed
+physical `0x1000/0x2000/0x3000`, valid under the multiboot1 boot-shim's
+seeded tables, not under UEFI). Iron firmware sets up mappings
+differently and stepped through cleanly.
+
+If we'd insisted on fixing the QEMU-visible bug before flashing, we'd
+have walked into a real Repair (Q) that doesn't exist. "QEMU PASS" is
+a hypothesis, not a verdict. "QEMU FAIL" is a hypothesis too.
+
+REPAIR (C) — STATIC WALKTHROUGH IS HOW YOU FIND THE NEXT BUG
+
+The pattern that crystallized at Repair (C) and held the rest of the
+arc: when a fix lands, the kernel rebuilds clean, the next iron burn
+hits the SAME trap stage — STOP and do a static code-walk of the
+should-have-worked path. The bug isn't where you patched; the bug is
+upstream of where you patched, or it's a parallel hazard the patch
+didn't address.
+
+Repair (A) + Repair (B) "should have" re-enabled proc 0 in the
+scheduler rotation. Iron hit CP 0x23 anyway. Static walkthrough of
+`pic.cyr`'s `timer_isr_build` showed an in-source comment claiming
+"works on real hardware" — a prediction, never measured. The ISR
+pushed 9 caller-saved GPRs but `proc_save_context` and
+`proc_restore_context` operated on 15. rbx, rbp, r12-r15 leaked
+between processes across every context switch. When proc 0 finally
+re-ran, its `[rbp - N]` access to `idle_count` read test_proc_b's
+stack (rbp pointing into stack_b at 0x820000+). No progress past
+CP 0x23 because *the wrong stack was being read.*
+
+Fix: push all 15 GPRs. Add 6 callee-saved load/store pairs in
+proc_save_context/restore. Shift hardware-frame offsets +48. Build
+grew 1,232 bytes. `timer_isr[]` buffer hit 63 of 64 bytes — one
+byte headroom; future ISR additions must bump the buffer first.
+
+CLOSED-BETA GATE — ATTEMPT 16
+
+Attempt 16 hit CP 0x11 MAGENTA on iron. Closed-beta gate held. The
+kernel completed: GDT → TSS → IDT → APIC → timer → SMP → keyboard ISR
+→ paging → PMM → KASLR → heap → ACPI → PCI → VFS → SYSCALL → stack
+canary → test procs → scheduler armed → idle loop survived → userland
+exec → kybernet-launch. Three weeks of work hit its milestone gate
+exactly where the spec said it should.
+
+We celebrated for about ten minutes.
+
+THE MEM-ISO RABBIT HOLE — ELEVEN ATTEMPTS, NINE REPAIRS, ALL DELETED
+
+The kernel had a memory-isolation test block in `main.cyr:640-660`
+that exercised the page-table dance for per-process address spaces:
+SMAP brackets, CR3 swap to AS1, write/read round-trip, CR3 swap to
+AS2, repeat, CR3 swap back to kernel. It worked under QEMU. On iron
+it pegged kcp at 0x19 (the first cp_fb call after the block's exit)
+across multiple cold burns.
+
+Attempts 17-27 — eleven iron attempts, repair letters F through N —
+walked a bisector ladder that progressively narrowed the death window
+from "21 lines" to "one function" to "first MMIO write inside cp_fb
+with fb_phys = 0 in hand." Repair (J) stamped PMM allocations to
+CMOS slots 0x56-0x61. Repair (K) added 7 PML4 health stamps at
+[0x62..0x68]. Repair (M) added 4 bisector stamps inside cp_fb itself.
+Repair (N) added 6 more port-IO stamps and a cmos_stamp_fb_phys
+helper. Every stamp fired exactly where it was supposed to. Every
+stamp said the kernel was correct.
+
+The bug looked like a non-deterministic gnoboot↔kernel handoff with
+3-way visual asymmetry (cold-boot-with-USB-switchover, BIOS save-exit,
+fault-reset all produced different states). It wasn't.
+
+The premise was wrong. The mem-iso block was post-MVP work that had
+been added to validate per-process address spaces — a feature not on
+the closed-beta MVP boot path. The bug was real (fb_phys = 0 at the
+moment cp_fb ran because the CR3 dance happened to disrupt the
+boot_info mapping for one instant) but it was guarding a CAPABILITY
+the MVP didn't need.
+
+The fix was Repair (O): delete the 303 lines. The justification was
+sitting on disk the entire time — `agnosticos/docs/development/
+uefi-boot-prior-art.md` had flagged this code path as "post-MVP" in
+the original Path-C scoping, two weeks before the bisector ladder
+even started. We had walked past that justification at least four
+times across the eleven attempts. We just didn't grep for it.
+
+The premise-audit gate codified after this episode: **if a single
+bug consumes 3+ diagnostic rounds without resolving, STOP and grep
+the development docs for prior research on that code path.** The
+mem-iso block deletion was prefigured in writing on disk. We chose
+to instrument instead of grep, eleven times in a row.
+
+A memory pin (`feedback_known_knowledge_first.md`) records the
+discipline now. The next agent who finds themselves on bisector
+round four checks the docs first.
+
+MVP BOOT SPINE ALIVE ON IRON — ATTEMPT 28
+
+Repair (O) plus a one-line follow-up (`sh_cmd_bench()` → `kybernet()`
+at `main.cyr:415` to make the shell dispatch tree reachable) landed
+in Attempt 28. The kernel completed its full init spine end-to-end
+on archaemenid: every CMOS checkpoint painted, every kprintln
+rendered, kybernet launched, shell entered, `arch_halt()` reached
+as designed. Photo recorded — eight months of design and three
+weeks of bring-up, one screen of green text.
+
+The next surprise: the "MVP-to-typeable-shell gap" we'd planned to
+close had two of three items already implemented. `fb_console.cyr`
+had shipped an 8×8 CGA font and `fb_putc`/`fb_print`/`fb_println`
+weeks earlier. `kprint.cyr` had been mirroring all output to serial
++ fb since the start of the cycle. Only the USB-keyboard input gap
+was a real gap. Lesson: before planning a closing-the-gap-to-X arc,
+grep for each gap to verify it's a gap. Two-thirds of a planned arc
+was scaffolding around features that already worked.
+
+REPAIR (P) — NON-ZERO GVAR INIT NOT HONORED
+
+Attempt 29 burned a kernel that had reached kybernet (CMOS kcp=0x15
+MAGENTA, no fault) but rendered the visual ladder with the cp_fb
+cells in rows 1-2 wiped while row-9 yellows survived, and the
+`agnos>` prompt was invisible. Pattern decoded to a single bug at
+three module-scope coordinates:
+
+  var FB_CONSOLE_Y0 = 80;       // read back as 0 at runtime
+  var FB_FG = 0x00FFFFFF;       // read back as 0 at runtime
+  var FB_BG = 0x00000000;       // (already 0, no observable bug)
+
+Non-zero gvar initializers at module scope were not being honored.
+fb_putc was painting text at y=0..55 (over the cp_fb cells) in
+black-on-black. Zero-initialized vars in the same file
+(fb_cur_x, fb_cur_y, fb_console_ready) were unaffected because BSS
+defaults to zero — only the non-zero initializers were silently
+zeroed.
+
+Workaround (Repair P): explicit assignment of all three at the top
+of `fb_console_init()` body before any other code. Three LOC plus an
+explanatory comment. Cyrius repo issue filed at
+`cyrius/docs/development/issues/2026-05-15-cyrius-nonzero-gvar-init-
+not-honored.md`. Per `feedback_cyrius_hands_off`, surfaced but not
+patched in-place; the cyrius cycle handles its own bugs.
+
+THE CLEANUP PASS
+
+With Repair P in hand, the burn rendered the shell prompt on iron
+for the first time. The visual artifact above the shell was the
+cp_fb cell ladder — colored squares at the top of the screen that
+had been load-bearing as the bisector during Attempts 16-29 but
+were now finished work. Same session, we ran the cleanup pass:
+
+  - All 19 cp_fb() call sites stripped from main.cyr. CMOS stamps
+    preserved (still readable via read-boot-log) — the SCREEN
+    ladder was the diagnostic surface; the CMOS stamps are the
+    post-mortem channel and stay.
+  - 85 serial_print / serial_println call sites converted to
+    kprint / kprintln. Mirrors to both channels. Fixes the
+    scrambled-digits issue from the Attempt 29 photo — numbers
+    were already mirroring (via kprint_num) but labels weren't,
+    so on-screen text said "Heap: <addrs>" with the addrs visible
+    but smushed against missing label text.
+  - FB_CONSOLE_Y0 = 80 → 8. Boot-shim canary stripe stays at
+    y=0..7; shell + boot log occupy y=8 downward. Full screen
+    height available.
+  - read-boot-log.cyr verdict text refreshed for the post-cleanup
+    kernel.
+
+Burn-verified ~16:45 PDT 2026-05-15. Full kernel init log rendered
+on framebuffer in coherent text. cp_fb infrastructure preserved in
+fb.cyr — re-adding a visual stamp at a new stage is a one-line
+`cp_fb(<idx>, <color>);` call. The bisector is dormant, not dead.
+
+USB KEYBOARD — MVP GAP #3 FALSIFIED
+
+The keyboard didn't echo. BIOS Legacy USB / XHCI Hand-off toggled
+across available combinations: nothing. Every USB-A port tried:
+nothing. The hypothesis "UEFI legacy SMM emulates PS/2 for USB
+keyboard on archaemenid" was falsified by iron.
+
+Modern firmware doesn't emulate PS/2 over XHCI post-ExitBootServices.
+The Beelink SER (and most NUC-class hardware) has no PS/2 port at
+all. The `kb_buf` ring in the kernel is correct; the producer doesn't
+exist. The real fix is a native XHCI + USB-HID-boot-protocol driver,
+scoped in `agnosticos/docs/development/planning/
+usb-hid-keyboard-driver.md` — 5 phases, ~1.2–2.1k Cyrius LOC,
+in-kernel under `kernel/arch/x86_64/usb/`. Phase 1 (PCIe discovery
++ capability reads) landed in the same session as the cycle close,
+bumping kernel 266,312 → 273,816 bytes and stamping CMOS kcp=0x30
+on success.
+
+The cycle closed at 1.30.0 (cycle date 2026-05-13, iron-validated
+2026-05-15). VERSION bumped to 1.30.1; the next cycle's job is
+Phases 2-5 of the USB-HID driver. The closed-beta gate (CP 0x11)
+is now a stable floor — the kernel reaches it on every burn.
+
+LESSONS
+
+  - QEMU is a liar in BOTH directions. A bug present in QEMU may be
+    absent on iron, and vice versa. Don't insist on fixing a
+    QEMU-visible bug before flashing — sometimes iron is the cleaner
+    environment.
+
+  - When a fix should have worked but the next iron burn hits the
+    same trap, the bug is upstream of where you patched or a parallel
+    hazard the patch didn't address. Static code-walk the
+    should-have-worked path; don't instrument harder. Repair (C) is
+    the canonical example: Repair (A)+(B) were correct as far as
+    they went, but `timer_isr` was leaking 6 callee-saved GPRs that
+    no policy fix could route around.
+
+  - The premise-audit gate is real. Three diagnostic rounds without
+    resolution → STOP and grep the development docs for prior
+    research on the failing path. The mem-iso rabbit hole burned 11
+    iron attempts and 9 repair letters chasing a bug in a code path
+    that prior-art docs had already flagged as "post-MVP." We knew
+    the answer; we hadn't read the answer.
+
+  - Before planning a closing-the-gap arc, list every gap and `grep
+    -r` for each one to verify it's actually a gap. The "MVP-to-
+    typeable-shell gap" had three items; two of them were already
+    implemented. Save the implementation budget for the gaps that
+    survive the audit.
+
+  - Visual diagnostic surfaces (cp_fb cells, canary stripes) are
+    LOAD-BEARING during bring-up and CLUTTER after. Strip them once
+    the cycle closes. Preserve the function definitions (cp_fb in
+    fb.cyr) so re-adding a stamp at a new stage is a one-line call;
+    the bisector is dormant, not dead.
+
+  - kprint mirror to fb is the right post-MVP log channel on a
+    single-machine dev setup. CMOS is the right post-mortem channel
+    (survives reset; readable via Cyrius port-IO when /dev/nvram is
+    dead on the BIOS, which is common). Two channels, two purposes.
+
+  - Cyrius bugs surfaced by iron work go to the cyrius repo's issues
+    folder. The kernel works around in-place. Per
+    `feedback_cyrius_hands_off`, the cyrius cycle handles its own
+    bugs on its own cadence; the kernel can't wait. The non-zero
+    gvar-init bug is a clean example — workaround in the kernel,
+    issue filed upstream, no cross-repo edits.
+
+  - "Iron-boot" is a process. Hardware targets are arcs within that
+    process. We codified the per-target naming after this arc closed
+    — `iron-nuc-zen-log.md` for this target, `iron-bring-up-process.md`
+    for the generic pattern. The next hardware target (Intel NUC,
+    Skytech build, RPi) starts with `iron-bring-up-process.md` and
+    learns from `iron-nuc-zen-log.md`, doesn't reinvent the wheel.
+
+  - Twenty-one attempts past where this story started, on a kernel
+    that compiled, booted in QEMU, and crashed on iron, we have a
+    typeable shell prompt rendered on iron. Eleven of those attempts
+    were chasing a bug that didn't need to exist. Six of the
+    eighteen letters of the alphabet we used were diagnostic-only
+    repairs that got deleted with Repair (O). The arc is closed and
+    the cleanup is in the changelog. Whatever the next hardware
+    target's first wall turns out to be, it won't be in GRUB and
+    it won't be in the mem-iso block.
