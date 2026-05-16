@@ -12,7 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Cyrius pin: 5.9.43 → 5.11.55.** Absorbs the 5.10.x and 5.11.x
-  cycles in one bump.
+  cycles in one bump. Rehydration is now `cyrius update` (copies
+  stdlib from `~/.cyrius/versions/<ver>/lib/` into `lib/` and
+  re-resolves git deps); `cyrius deps` alone only handles
+  `[deps.NAME]` git entries.
+- `cyrius.cyml` `[deps] stdlib` extended with `tls`, `base64`,
+  `fdlopen` — sandhi pulls `TLS_EARLY_DATA_*`, `fdlopen_*`,
+  `base64_encode` via transitives that cyrius v5.10.x SLOT 19
+  doesn't follow through enum/constant references. Mirrors sit's
+  documented gap-list. Other undefined-symbol notes from sandhi
+  (`hashmap_*`, `cyr_munmap`, `dynlib_*`, `clock_now_*`) land in
+  DCE-eliminated paths and don't gate the build.
+- `lib/` and `cyrius.lock` are now build artifacts under the
+  5.11.x model — `lib/` is gitignored; lockfile defaults to empty
+  on resolve.
 
 ## [2.7.0] — 2026-05-08
 
