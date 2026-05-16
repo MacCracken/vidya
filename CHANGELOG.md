@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.1] — 2026-05-16
+
+### Changed
+
+- **Cyrius pin: 5.9.43 → 5.11.55.** Absorbs the 5.10.x and 5.11.x
+  cycles in one bump.
+
 ## [2.7.0] — 2026-05-08
 
 **Minor opens P4 (build systems) — infra bump turn before topic
