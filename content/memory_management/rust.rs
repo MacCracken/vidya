@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Vidya — Memory Management in Rust
 //
 // Rust's ownership system eliminates use-after-free, double-free, and

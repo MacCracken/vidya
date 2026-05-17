@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Vidya — Audio Synthesis — Rust port. Q15 fixed-point.
 //
 // Mirrors naad's API surface (Waveform, EnvelopeState, Adsr,

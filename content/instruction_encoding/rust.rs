@@ -34,6 +34,7 @@ impl Reg64 {
         (self as u8) >= 8
     }
 
+    #[allow(dead_code)]
     fn name(self) -> &'static str {
         match self {
             Self::RAX => "rax", Self::RCX => "rcx", Self::RDX => "rdx", Self::RBX => "rbx",

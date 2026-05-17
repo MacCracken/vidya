@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Boot and Startup — Rust Implementation
 //
 // Demonstrates the boot process concepts that are normally done in assembly

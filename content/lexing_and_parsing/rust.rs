@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Lexing and Parsing — Rust Implementation
 //
 // Demonstrates a complete lexer + Pratt parser for arithmetic expressions.

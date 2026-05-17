@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Filesystems — Rust Implementation
 //
 // Demonstrates filesystem concepts with an in-memory filesystem:

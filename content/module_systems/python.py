@@ -139,12 +139,16 @@ def main():
     # ── Module attributes and introspection ────────────────────────
     # Every module has metadata attributes:
     #   __name__   — module name (or "__main__" for the entry point)
-    #   __file__   — path to the .py file
+    #   __file__   — path to the .py file (absent for built-in / frozen
+    #                C-extension modules like `math`, `sys`, `_thread`)
     #   __doc__    — module docstring
     #   __package__— package name for relative imports
 
     assert math.__name__ == "math"
-    assert hasattr(math, "__file__")
+    # `types` is pure-Python and carries __file__; built-in C
+    # extensions like `math` don't. Assert on the pure-Python module
+    # rather than tripping on the built-in case.
+    assert hasattr(types, "__file__")
 
     # __name__ == "__main__" identifies the entry point script
     # This is why `if __name__ == "__main__":` works

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Linking and Loading — Rust Implementation
 //
 // Demonstrates the core concepts of a linker:

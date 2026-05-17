@@ -5,7 +5,6 @@
 // give callers the ability to match on specific failure modes.
 
 use std::fmt;
-use std::fs;
 use std::io;
 use std::num::ParseIntError;
 
