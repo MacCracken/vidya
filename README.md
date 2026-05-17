@@ -8,90 +8,49 @@ Vidya is a curated, tested, multi-language programming reference for the AGNOS e
 
 1. **Content** (`content/`) — Source files per topic. No compilation needed. Read directly, train AI on it, or browse as documentation.
 
-2. **Crate** (`src/`) — Rust library that makes the content queryable. Types for concepts, search, cross-language comparison, and example validation. `cargo doc` generates a browsable programming reference.
+2. **Cyrius CLI** (`src/main.cyr`) — Compiled to `build/vidya` (~1.1 MB static ELF). Queryable interface for the corpus: `list`, `search`, `info`, `compare`, `code`, `gaps`, `stats`, `languages`, `validate`, `serve`. (Migrated from a Rust crate at v2.0.)
 
 ## Features
 
 - **Best Practices** — The right way to do things, with explanations of *why*
 - **Gotchas** — Common mistakes with bad/good examples. What NOT to do and what to do instead
 - **Performance Notes** — Optimization discoveries with evidence (benchmarks, complexity analysis)
-- **Multi-Language** — Same concept implemented in 10 languages: Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 Assembly, AArch64 Assembly, OpenQASM
-- **Tested** — Every code example compiles and runs. CI validates all implementations
-- **Queryable** — Search, compare across languages, filter by topic or tag
+- **Multi-Language** — Same concept implemented in 11 languages: Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 Assembly, AArch64 Assembly, OpenQASM, Cyrius
+- **Tested** — Every code example compiles and runs. CI validates all implementations via `scripts/validate-content.sh`
+- **Queryable** — CLI commands for search, cross-language compare, gap analysis; HTTP service via `vidya serve` for programmatic consumers (agnoshi, hoosh)
 
 ## Quick Start
 
-```rust
-use std::path::Path;
-use vidya::loader::load_all;
-use vidya::search::search;
-use vidya::{Language, SearchQuery};
+Build the CLI:
 
-// Load all 33 topics from the content directory
-let registry = load_all(Path::new("content")).unwrap();
+```bash
+cyrius update                          # rehydrate lib/ from the toolchain pin
+cyrius build src/main.cyr build/vidya
+```
 
-// Search for concepts
-let results = search(&registry, &SearchQuery::text("quantum"));
+Use it:
 
-// Compare implementations across languages
-let cmp = vidya::compare::compare(
-    &registry,
-    "quantum_computing",
-    &[Language::Rust, Language::Python, Language::OpenQASM],
-).unwrap();
-
-// Browse gotchas
-let concept = registry.get("security").unwrap();
-for gotcha in &concept.gotchas {
-    println!("{}: {}", gotcha.title, gotcha.explanation);
-}
+```bash
+build/vidya stats                          # 74 topics, 814 examples, 11 langs
+build/vidya list                           # browse all topics
+build/vidya search "quantum"               # text search across the corpus
+build/vidya info quantum_computing         # full record: practices, gotchas, perf notes
+build/vidya code quantum_computing rust    # ANSI-colored source via vyakarana
+build/vidya compare strings rust python    # side-by-side cross-language view
+build/vidya gaps                           # coverage gaps (currently none — 814/814)
+build/vidya serve 8080                     # HTTP service: GET /stats, /code/{topic}/{lang}, ...
 ```
 
 ## Content Topics
 
-| Topic | Description |
-|-------|-------------|
-| `strings` | Text handling, encoding, interpolation, slicing |
-| `error_handling` | Result types, exceptions, error propagation |
-| `concurrency` | Threads, async, channels, parallelism |
-| `memory_management` | Ownership, borrowing, GC, allocation |
-| `iterators` | Lazy evaluation, map/filter/fold, generators |
-| `pattern_matching` | Match expressions, destructuring, guards |
-| `type_systems` | Generics, traits, interfaces, type inference |
-| `testing` | Unit tests, property testing, mocking, coverage |
-| `performance` | Profiling, allocation, cache, SIMD, benchmarking |
-| `input_output` | Files, streams, buffering, network I/O |
-| `security` | Input validation, injection, constant-time, secrets |
-| `algorithms` | Search, sort, graphs, dynamic programming, complexity |
-| `kernel_topics` | Page tables, interrupts, MMIO, ABIs, bootloaders |
-| `quantum_computing` | Grover's, Shor's, VQE, noise models, entanglement |
-| `design_patterns` | Builder, strategy, observer, RAII, factory, DI |
-| `compiler_bootstrapping` | Self-hosting, multi-stage compilation, seed compilers |
-| `binary_formats` | ELF headers, segments, entry points, minimal binaries |
-| `lexing_and_parsing` | Tokenizers, recursive descent, Pratt parsing, grammars |
-| `code_generation` | Instruction selection, register allocation, stack codegen |
-| `intermediate_representations` | SSA, CFG, basic blocks, phi nodes, data flow |
-| `optimization_passes` | DCE, constant folding, inlining, strength reduction |
-| `linking_and_loading` | Symbol resolution, relocations, GOT/PLT, dynamic linking |
-| `syscalls_and_abi` | Linux syscalls, System V AMD64 ABI, calling conventions |
-| `instruction_encoding` | x86_64 ModR/M, SIB, REX prefixes, machine code bytes |
-| `elf_and_executable_formats` | Sections, DWARF, symbol tables, relocatable objects |
-| `allocators` | Bump, arena, slab, buddy allocation strategies |
-| `virtual_memory` | Page tables, TLB, mmap, demand paging, huge pages |
-| `interrupt_handling` | IDT, exception handlers, IRQ routing, ISR patterns |
-| `process_and_scheduling` | Task structs, context switching, CFS, runqueues |
-| `filesystems` | VFS, inodes, dentries, block allocation, journaling |
-| `ownership_and_borrowing` | Move semantics, lifetimes, borrow checking algorithms |
-| `trait_and_typeclass_systems` | Monomorphization, vtables, coherence, associated types |
-| `macro_systems` | Hygiene, declarative vs procedural, compile-time codegen |
-| `module_systems` | Namespacing, visibility, separate compilation, imports |
-| `boot_and_startup` | UEFI, multiboot, GDT/IDT setup, long mode transition |
+74 topics, complete across all 11 languages (814 examples). Browse `content/` directly or run `vidya list` to see the index. Roadmap and per-priority breakdown live in [`docs/development/roadmap.md`](docs/development/roadmap.md).
 
 ## Languages
 
 | Language | Extension | Notes |
 |----------|-----------|-------|
-| Rust | `.rs` | Primary language. Complete coverage. |
+| Cyrius | `.cyr` | **Primary**. Vidya itself is written in Cyrius; the corpus is the live reference for Cyrius/AGNOS patterns. |
+| Rust | `.rs` | Full coverage, edition 2024. |
 | Python | `.py` | Full coverage, stdlib only. |
 | C | `.c` | C17 with `_GNU_SOURCE`. |
 | Go | `.go` | Full coverage. |
@@ -102,28 +61,28 @@ for gotcha in &concept.gotchas {
 | AArch64 ASM | `.s` | ARM64, Linux syscalls via `svc`. |
 | OpenQASM | `.qasm` | Quantum assembly (QASM 2.0). |
 
-## Feature Flags
-
-| Feature    | Default | Description |
-|------------|---------|-------------|
-| `std`      | yes     | Standard library support |
-| `logging`  | no      | Tracing subscriber with `VIDYA_LOG` env var |
-| `mcp`      | no      | MCP tools via bote for AI agent integration |
-| `openqasm` | no      | Native QASM validation (no Python dependency) |
-| `full`     | no      | All features enabled |
-
 ## Validation
 
 ```bash
-# Validate all content examples
+# Validate all content examples across every installed toolchain
 ./scripts/validate-content.sh
 
-# Validate via Rust crate (with native QASM support)
-cargo test --features openqasm
+# Run the Cyrius test suite for the CLI itself
+cyrius test
 
 # Run benchmarks
-cargo bench
+cyrius bench
 ```
+
+`scripts/validate-content.sh` skips languages whose toolchain isn't installed (counted separately); CI installs the full set. Per-language commands and the diagnostic contract are documented in the script header.
+
+## Consumers
+
+- **agnoshi** — shell uses vidya for programming help responses
+- **hoosh** — LLM uses vidya corpus for grounded programming advice
+- **Cyrius** — vidya documents compiler patterns being implemented in real-time
+- **sandhi** — vidya's HTTP service runs on sandhi (cyrius stdlib)
+- **sakshi** — vidya uses sakshi for structured tracing
 
 ## License
 

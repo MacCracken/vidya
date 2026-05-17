@@ -4,10 +4,10 @@
 
 **Vidya** (Sanskrit: विद्या — knowledge, learning) — Programming reference library and queryable corpus
 
-- **Type**: Cyrius CLI binary + content directory (no longer a Rust crate; migrated at v2.0)
+- **Type**: Cyrius CLI binary + content directory (no longer a Rust crate; migrated at v2.0 — see [ADR 0001](docs/adr/0001-port-from-rust-to-cyrius.md))
 - **License**: GPL-3.0-only
-- **Cyrius pin**: 5.11.55 (`cyrius.cyml`)
 - **Version**: SemVer; canonical source is `VERSION` (read by `cyrius.cyml` via `${file:VERSION}`)
+- **Current state** (cyrius pin, binary size, in-flight slot, consumer pins): see [`docs/development/state.md`](docs/development/state.md) — refreshed every release. **Do not inline volatile state here.**
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -27,7 +27,7 @@
 Vidya is both a curated programming reference and the Cyrius CLI that serves it:
 
 1. **Content directory** (`content/`) — TOML-per-topic metadata + source files in 11 languages. Humans read it, AI trains on it.
-2. **Cyrius CLI** (`src/main.cyr`) — Queryable interface (`list`, `search`, `info`, `compare`, `gaps`, `stats`, `languages`, `validate`, `serve`). Built with the cyrius toolchain into `build/vidya` (~600KB static ELF).
+2. **Cyrius CLI** (`src/main.cyr`) — Queryable interface (`list`, `search`, `info`, `compare`, `code`, `gaps`, `stats`, `languages`, `validate`, `serve`). Built with the cyrius toolchain into `build/vidya` (size in `docs/development/state.md`).
 
 Every code example in `content/` is a test. CI compiles/runs every implementation in every language.
 
