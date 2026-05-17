@@ -4,14 +4,14 @@
 # Skips languages whose toolchain isn't installed (counted separately).
 #
 # Diagnostics contract:
-#   - Every language test prints `  → <Lang>` BEFORE running, so when CI
-#     truncates the log mid-section we can see which language was last
-#     active. Followed by `  ✓ <Lang>` on success or
-#     `  ✗ <Lang> (exit=N)` + full captured stdout/stderr on failure.
-#   - Failure dumps are inline (not via summary at end) so they survive
-#     log truncation and SIGABRT-from-assert (which loses buffered stdout).
-#   - Output is line-buffered via `stdbuf -oL -eL` where available so CI
-#     log streaming can't drop partial-line output.
+#   - Every test prints `  → <Lang>` BEFORE running, so if a CI step
+#     truncates we can see which language was last active.
+#   - On success: `  ✓ <Lang>`.
+#   - On failure: `  ✗ <Lang> (exit=N)` + the combined stdout+stderr
+#     captured during the run, dumped inline. Combined capture matters:
+#     a program that prints to stdout then aborts loses that stdout
+#     under stderr-only capture (the bug that bit content/module_systems
+#     diagnosis in 2.7.1 CI).
 set -euo pipefail
 
 CONTENT_DIR="${1:-content}"
@@ -19,37 +19,6 @@ PASS=0
 FAIL=0
 SKIP=0
 ERRORS=()
-
-# ── Truncation-survivable status file ────────────────────────────────
-# Per-language results are appended to a state file atomically after
-# every test. At script exit (success OR abort), the EXIT trap dumps
-# the WHOLE file behind distinctive `>>> STATUS_DUMP_*` marker lines.
-# So even if CI streaming drops mid-test output, the final dump in the
-# log shows every result. The user does not have to trust any
-# mid-stream line — search for `STATUS_DUMP_BEGIN` and the truth lives
-# between that marker and `STATUS_DUMP_END`.
-STATUS_FILE="${STATUS_FILE:-/tmp/vidya_status_$$.csv}"
-: > "$STATUS_FILE"
-echo "topic,lang,result,exit_code" >> "$STATUS_FILE"
-
-CURRENT_TOPIC=""
-CURRENT_LANG=""
-on_exit() {
-    local rc=$?
-    echo ""
-    echo ">>> STATUS_DUMP_BEGIN (script rc=$rc)"
-    cat "$STATUS_FILE" 2>/dev/null || echo "(status file unreadable)"
-    echo ">>> STATUS_DUMP_END"
-    if [[ $rc -ne 0 && $rc -ne 1 ]]; then
-        # rc=1 is our intentional "examples failed" exit at the bottom.
-        # Anything else is a script-level abort — surface it loudly.
-        echo ""
-        echo "!! SCRIPT ABORTED unexpectedly (rc=$rc)"
-        echo "!! last topic: '$CURRENT_TOPIC'"
-        echo "!! last lang:  '$CURRENT_LANG'"
-    fi
-}
-trap on_exit EXIT
 
 # ── Detect available toolchains ────────────────────────────────────────
 has_cmd() { command -v "$1" &>/dev/null; }
@@ -85,50 +54,31 @@ echo "  Toolchain: zig=$HAS_ZIG aarch64=$HAS_AARCH64_AS qasm=$QASM_VALIDATOR cyr
 echo ""
 
 # run_lang <label> <topic-rel-file> <command...>
-#   Prints `  → <label>` first, runs the command capturing combined
-#   stdout+stderr to a temp file (while still streaming to console so
-#   long-running output is visible), then prints `  ✓ <label>` or
-#   `  ✗ <label> (exit=N)` + the captured output indented.
-#
-# The `tee` approach gives us BOTH: live streaming for human-on-console
-# debugging AND a captured copy for failure-time inline dump. Without
-# the dump, an assert-driven SIGABRT loses buffered stdout entirely.
+#   Streams the command's combined stdout+stderr live (so long-running
+#   tests show progress) AND captures a copy via tee for the failure
+#   dump. Combined capture matters: stdout-buffered programs that
+#   abort lose their stdout under stderr-only capture.
 run_lang() {
     local label="$1" rel="$2"; shift 2
     local logfile="/tmp/vidya_${$}_log"
-    CURRENT_LANG="$label"
-    # Distinctive START marker — easy to grep, survives truncation. If
-    # the log ever shows a START_TEST without the matching END_TEST,
-    # that's the test that hung or killed the runner.
-    echo ">>> START_TEST topic=$CURRENT_TOPIC lang=$label"
     echo "  → $label"
     set +e
-    LB "$@" >"$logfile" 2>&1
-    local rc=$?
+    LB "$@" 2>&1 | tee "$logfile"
+    local rc=${PIPESTATUS[0]:-99}
     set -e
-    # Always echo the captured output so it appears in the CI stream
-    # (with sentinel markers so it's grep-able):
-    echo ">>> OUTPUT_BEGIN $CURRENT_TOPIC/$label"
-    cat "$logfile" 2>/dev/null || true
-    echo ">>> OUTPUT_END $CURRENT_TOPIC/$label (exit=$rc)"
     if [[ "$rc" = "0" ]]; then
         echo "  ✓ $label"
         PASS=$((PASS + 1))
-        echo "$CURRENT_TOPIC,$label,PASS,$rc" >> "$STATUS_FILE"
     else
         echo "  ✗ $label (exit=$rc)"
         ERRORS+=("$rel (exit=$rc)")
         FAIL=$((FAIL + 1))
-        echo "$CURRENT_TOPIC,$label,FAIL,$rc" >> "$STATUS_FILE"
     fi
-    echo ">>> END_TEST topic=$CURRENT_TOPIC lang=$label rc=$rc"
     rm -f "$logfile"
 }
 
 for topic_dir in "$CONTENT_DIR"/*/; do
     topic=$(basename "$topic_dir")
-    CURRENT_TOPIC="$topic"
-    CURRENT_LANG=""
 
     # Skip directories without concept.toml
     [[ -f "$topic_dir/concept.toml" ]] || continue
