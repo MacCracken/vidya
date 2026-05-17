@@ -1,7 +1,7 @@
 # Cyrius — Tooling & Formats
 # Compiler binaries, CLI driver, dev tools, helper scripts,
 # format files, env vars, flags, plugin/LSP wiring.
-# Refreshed 2026-05-12 at v5.11.28 ship.
+# Refreshed 2026-05-17 at v5.11.59 ship.
 # 15 entries.
 
 [[entries]]
@@ -16,7 +16,7 @@ same 29 KB seed (`bootstrap/asm`) via the bridge chain
 
 == PRIMARY (Linux x86_64 self-host) ==
 
-  `cc5`              — main compiler, ~810 KB at v5.11.28. Reads .cyr
+  `cc5`              — main compiler, ~875 KB at v5.11.59. Reads .cyr
                        source on stdin; writes ELF executable on
                        stdout. Self-hosts byte-identical via
                        two-step + three-step verify.
@@ -24,13 +24,20 @@ same 29 KB seed (`bootstrap/asm`) via the bridge chain
 == CROSSES ==
 
   `cc5_aarch64`      — Linux ARM64 + macOS Mach-O ARM64 cross.
-                       ~412 KB. Built from `src/main_aarch64.cyr`.
-                       Apple Silicon also self-hosts byte-identically
-                       via `src/main_aarch64_native.cyr` since v5.3.13.
-  `cc5_win` (cross)  — Windows PE32+ cross. Native self-host via
-                       `cc5_win.exe` on Windows 11 since v5.5.10
-                       (byte-identical to Linux cross output).
-                       Built from `src/main_win.cyr`.
+                       ~558 KB at v5.11.59 (+51 KB vs prior cycle —
+                       .59 added full DCE bitmap pass to aarch64
+                       fixup.cyr, mirroring the x86 path that
+                       existed since v5.10.x; aarch64 now produces
+                       `note: N unreachable fns (M bytes ...)`
+                       output for the first time). Built from
+                       `src/main_aarch64.cyr`. Apple Silicon also
+                       self-hosts byte-identically via
+                       `src/main_aarch64_native.cyr` since v5.3.13.
+  `cc5_win` (cross)  — Windows PE32+ cross. ~683 KB at v5.11.59.
+                       Native self-host via `cc5_win.exe` on
+                       Windows 11 since v5.5.10 (byte-identical to
+                       Linux cross output). Built from
+                       `src/main_win.cyr`.
   `cc5_macho`        — Mach-O x86_64 cross (Intel Mac).
   `cc5_macho_arm`    — Mach-O aarch64 cross (built when not
                        producing native via cc5_aarch64 on macOS).
@@ -82,17 +89,30 @@ added the auto-prepend for fuzz; check folded in by v5.7.50).
 
 == BUILD VERBS ==
 
-  cyrius build [--aarch64] [--no-deps] [-D NAME] <src> <out>
+  cyrius build [--aarch64] [--no-deps] [--strict-pin] [-D NAME] <src> <out>
   cyrius run [--aarch64] <source.cyr>
   cyrius test [--aarch64] <test.cyr>          — exit 0 = pass
   cyrius bench <bench.cyr>
   cyrius check [--with-deps] <src.cyr>        — syntax-only
   cyrius self                                 — cc5==cc5 byte-identical
   cyrius clean                                — wipe build/
+  cyrius lib sync [--dry-run]                 — copy snapshot lib/*.cyr → ./lib/ (v5.11.58)
 
 `-D NAME` injects `#define NAME` at the top of the bundled
 source (preprocessor-style; useful for feature flags). The
 `-D` family was added during the v5.6.x optimization arc.
+
+`--strict-pin` (v5.11.58) augments the cc5 child's envp with
+`CYRIUS_STRICT_PIN=1`, which v5.11.57's `_check_cyml_pin_drift`
+in lex.cyr reads to upgrade the pin-drift warning to a hard
+exit (code 1). CI gating path for pin-faithful builds — fail
+loudly when cwd's `cyrius.cyml [package].cyrius` pin doesn't
+match cc5's compile-time version.
+
+`lib sync` (v5.11.58) copies `~/.cyrius/versions/<X>/lib/*.cyr`
+into `./lib/`, where `<X>` = cyml pin or wrapper version.
+Third remediation for the shadow-lib warning (besides "delete
+./lib/" and `CYRIUS_NO_WARN_SHADOW_LIB=1`).
 
 == PROJECT VERBS ==
 
@@ -129,11 +149,29 @@ source (preprocessor-style; useful for feature flags). The
 == INFO + LSP ==
 
   cyrius lsp                                  — build + install cyrius-lsp
-  cyrius version                              — toolchain version
+  cyrius version                              — toolchain version (+ manifest-pin line in projects, v5.11.58)
   cyrius version --project                    — project's VERSION file
   cyrius which                                — path to cc5
   cyrius repl                                 — expression REPL
   cyrius help                                 — full verb list
+
+== --version BEHAVIOR (v5.11.58) ==
+
+When `cyrius --version` runs inside a project tree (cwd has
+`cyrius.cyml` with `[package].cyrius = "X.Y.Z"`), the output
+appends a second line:
+
+  cyrius 5.11.57
+  manifest-pin: 5.11.55 (drift — wrapper is 5.11.57)
+
+The `(drift — wrapper is X.Y.Z)` suffix only appears on
+mismatch; clean match prints just `manifest-pin: 5.11.55`. The
+drift surface helps consumers spot toolchain skew the moment
+they check the wrapper, before the cc5 pin-drift warning fires
+during a build.
+
+CROSS-REF: see `compiler_env_vars` for `CYRIUS_STRICT_PIN` +
+`CYRIUS_NO_WARN_PIN_DRIFT` env knobs (cc5-side, v5.11.57).
 
 [[entries]]
 name = "tcyr_test_format"
@@ -465,6 +503,49 @@ slots — see field_notes/compiler/v5_8.
   CYRIUS_PROF=1    Per-fn compile-time profiling
   CYRIUS_STATS=1   Final stats dump (token count, fn count,
                    fixup count, code+data sizes, alloc usage)
+
+== PIN DRIFT (v5.11.57) ==
+
+  CYRIUS_NO_WARN_PIN_DRIFT=1   Suppress the cc5-side warning
+                               that fires when cwd's
+                               `cyrius.cyml [package].cyrius`
+                               pin doesn't match cc5's
+                               compile-time version. Default:
+                               warning enabled.
+
+  CYRIUS_STRICT_PIN=1          Upgrade pin-drift warning to a
+                               hard exit (code 1) with
+                               `error: cyrius.cyml pins X.Y.Z
+                               but cc5 is X.Y.W — toolchain
+                               drift (CYRIUS_STRICT_PIN)`. CI
+                               gating path. `cyrius build
+                               --strict-pin` sets this for the
+                               cc5 child automatically.
+
+  Both detect via the new `_check_cyml_pin_drift()` in
+  `src/frontend/lex.cyr`. Surface drift regardless of wrapper
+  state — the iron-boot papercut filing 2026-05-16 found that
+  `~/.cyrius/bin/cyrius` had been frozen at .25-embedded since
+  2026-05-12 (install.sh `_rebuild_stale` missed
+  `version_str.cyr` transitive dep), and consumers saw `cyrius
+  --version: 5.11.25` even when pinning .55+. cc5 IS current
+  per self-host discipline, so cc5-side detection bypasses the
+  stale wrapper.
+
+== DCE (v5.11.x) ==
+
+  CYRIUS_DCE=1            NOP-fill detected-dead fn bodies (in-
+                          place; binary size unchanged, just
+                          replaced bytes). Off by default; the
+                          dead-fn DETECTION runs always and
+                          produces `note: N unreachable fns (M
+                          bytes — set CYRIUS_DCE=1 to
+                          eliminate, ...)`.
+  CYRIUS_DCE_VERBOSE=1    Per-fn `  dead: <name>` list.
+
+  Both arches (x86 + aarch64) since v5.11.59 — aarch64 gained
+  the DCE pass + filter same slot. See `field_notes/compiler/
+  retros/` for the cross-arch parity arc.
 
 [[entries]]
 name = "compiler_flags"

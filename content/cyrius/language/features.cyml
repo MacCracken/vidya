@@ -1,7 +1,93 @@
 # Cyrius — Language Features
 # How to use specific Cyrius language features: types, syntax, derives, directives.
-# Refreshed 2026-05-11 at v5.11.20 ship.
-# 35 entries.
+# Refreshed 2026-05-17 at v5.11.59 ship.
+# 36 entries.
+
+[[entries]]
+name = "byte_array_literal"
+description = "var foo[N] = { 0x.., ... }; — fixed-size byte-array literal (v5.11.51)"
+category = "cyrius"
+---
+SYNTAX:
+    var bytes[16] = { 0xDE, 0xAD, 0xBE, 0xEF,
+                      0x00, 0x11, 0x22, 0x33,
+                      0x44, 0x55, 0x66, 0x77,
+                      0x88, 0x99, 0xAA, 0xBB };
+
+    # EFI GUIDs, UTF-16LE strings, packed flag arrays — anywhere
+    # a fixed N-byte literal needs to land at a known offset.
+    var guid[16]  = { 0xa1, 0xb2, ..., 0x16-bytes };
+    var utf16[14] = { 'H',0, 'e',0, 'l',0, 'l',0, 'o',0, 0,0, 0,0 };
+
+SEMANTICS:
+    `var name[N] = { ... };` declares a byte array of size N and
+    initializes it with the listed byte values. Element count
+    must equal N (compile-time check). Each value occupies one
+    byte; values must fit in i8 / u8 range. Reads via `load8`,
+    writes via `store8` to the array's base address.
+
+    Equivalent to N consecutive `store8(&name + i, val_i);`
+    statements at the var's gvar-init position, but the literal
+    form is one declaration site instead of N+1.
+
+CODEGEN (pre-v5.11.66 — peephole pinned for later):
+    Each byte init goes through the existing store8(...) expr
+    path: `EVADDR + EADDRA_IMM + EPUSHR + EMOVI + EPOPC +
+    ESTORE8 + EXORAA` (~21 bytes/byte of emit). v5.11.66/.67
+    will collapse this to `mov byte [rcx+disp8], imm8` (4
+    bytes/byte) via a peephole — 5× emit compression for the
+    `gnoboot` UTF-16 strings + EFI GUIDs.
+
+CONSUMER:
+    `gnoboot` (sovereign UEFI bootloader) — primary user. EFI
+    GUIDs (`gEfiLoadedImageProtocolGuid` etc.) and UTF-16LE
+    panic strings sit directly in source rather than living in
+    a separate `.rodata` blob.
+
+CROSS-ARCH: byte-array literal is parser-level; emit per-arch
+(x86 + aarch64 + cx). Shipped same-slot across all three.
+
+[[entries]]
+name = "efi_main_entry_convention"
+description = "fn efi_main(handle, st) — UEFI Application entry convention (v5.11.52)"
+category = "cyrius"
+---
+SYNTAX:
+    fn efi_main(handle, st): i64 {
+        # handle = EFI_HANDLE (UEFI ImageHandle)
+        # st     = *EFI_SYSTEM_TABLE
+        # Return: EFI_STATUS (0 = EFI_SUCCESS).
+        return 0;
+    }
+
+WHEN IT'S USED:
+    Only when `CYRIUS_TARGET_EFI=1` is set AND the program
+    declares a `fn efi_main(handle, st)`. cyrius emits a
+    trampoline that:
+      1. Reads firmware args saved at entry (R14 ← RCX =
+         ImageHandle; R15 ← RDX = SystemTable).
+      2. Allocates the MS x64 shadow space + 8-byte stack
+         alignment.
+      3. Calls efi_main(handle, st) directly.
+      4. Restores stack; EEXIT under EFI mode emits a single
+         `ret` — firmware reads rax as EFI_STATUS.
+
+ERGONOMICS:
+    Pre-v5.11.52, gnoboot had to hand-write the trampoline +
+    grab args from registers manually. Post-.52, the entry
+    convention is implicit: just declare `fn efi_main(handle,
+    st)` and the compiler wires it up.
+
+GOTCHA (resolved at v5.11.53): MR-form `mov r/m64, r64`
+(opcode `89 /r`) puts dst in r/m field, src in reg field. To
+extend dst to r14/r15 needs REX.B; v5.11.52's first cut set
+REX.R instead — gnoboot saw `mov rsi, r9` decoded bytes
+instead of `mov r14, rcx`. v5.11.53 hotfix corrected the REX
+prefix `0x4C → 0x49` in `src/main.cyr:1273` save emit.
+Restore (line ~1369) was correct as-is.
+
+CROSS-REF: see field_notes/kernel.cyml for the full UEFI
+Application emit arc (v5.11.47-.49 + .52-.53).
 
 [[entries]]
 name = "multi_width_types"
