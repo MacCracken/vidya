@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 # Validate all content examples compile and run correctly.
-# Usage: ./scripts/validate-content.sh
+# Usage: ./scripts/validate-content.sh [content-dir]
 # Skips languages whose toolchain isn't installed (counted separately).
+#
+# Diagnostics contract:
+#   - Every language test prints `  → <Lang>` BEFORE running, so when CI
+#     truncates the log mid-section we can see which language was last
+#     active. Followed by `  ✓ <Lang>` on success or
+#     `  ✗ <Lang> (exit=N)` + full captured stdout/stderr on failure.
+#   - Failure dumps are inline (not via summary at end) so they survive
+#     log truncation and SIGABRT-from-assert (which loses buffered stdout).
+#   - Output is line-buffered via `stdbuf -oL -eL` where available so CI
+#     log streaming can't drop partial-line output.
 set -euo pipefail
 
 CONTENT_DIR="${1:-content}"
@@ -30,9 +40,49 @@ else
     fi
 fi
 
+# Line-buffer wrapper: forces external commands to flush per-line so
+# CI log streaming sees output before any abort/crash. Falls back to
+# direct exec when stdbuf isn't available.
+if has_cmd stdbuf; then
+    LB() { stdbuf -oL -eL "$@"; }
+else
+    LB() { "$@"; }
+fi
+
 echo "=== Vidya Content Validation ==="
 echo "  Toolchain: zig=$HAS_ZIG aarch64=$HAS_AARCH64_AS qasm=$QASM_VALIDATOR cyrius=$HAS_CYRIUS"
 echo ""
+
+# run_lang <label> <topic-rel-file> <command...>
+#   Prints `  → <label>` first, runs the command capturing combined
+#   stdout+stderr to a temp file (while still streaming to console so
+#   long-running output is visible), then prints `  ✓ <label>` or
+#   `  ✗ <label> (exit=N)` + the captured output indented.
+#
+# The `tee` approach gives us BOTH: live streaming for human-on-console
+# debugging AND a captured copy for failure-time inline dump. Without
+# the dump, an assert-driven SIGABRT loses buffered stdout entirely.
+run_lang() {
+    local label="$1" rel="$2"; shift 2
+    local logfile="/tmp/vidya_${$}_log"
+    echo "  → $label"
+    set +e
+    LB "$@" 2>&1 | tee "$logfile"
+    local rc=${PIPESTATUS[0]}
+    set -e
+    if [[ $rc -eq 0 ]]; then
+        echo "  ✓ $label"
+        PASS=$((PASS + 1))
+    else
+        echo "  ✗ $label (exit=$rc)"
+        echo "  ── captured output ──"
+        sed 's/^/    /' "$logfile" || true
+        echo "  ─────────────────────"
+        ERRORS+=("$rel (exit=$rc)")
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$logfile"
+}
 
 for topic_dir in "$CONTENT_DIR"/*/; do
     topic=$(basename "$topic_dir")
@@ -44,95 +94,46 @@ for topic_dir in "$CONTENT_DIR"/*/; do
 
     # Rust
     if [[ -f "$topic_dir/rust.rs" ]]; then
-        if rustc --edition 2024 "$topic_dir/rust.rs" -o /tmp/vidya_test_$$ 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
-            echo "  ✓ Rust"
-            PASS=$((PASS + 1))
-        else
-            echo "  ✗ Rust: $(cat /tmp/vidya_err)"
-            ERRORS+=("$topic/rust.rs")
-            FAIL=$((FAIL + 1))
-        fi
-        rm -f /tmp/vidya_test_$$ /tmp/vidya_err
+        bin=/tmp/vidya_test_$$
+        run_lang "Rust" "$topic/rust.rs" bash -c "rustc --edition 2024 '$topic_dir/rust.rs' -o $bin && $bin"
+        rm -f "$bin"
     fi
 
     # Python
     if [[ -f "$topic_dir/python.py" ]]; then
-        if python3 "$topic_dir/python.py" 2>/tmp/vidya_err; then
-            echo "  ✓ Python"
-            PASS=$((PASS + 1))
-        else
-            echo "  ✗ Python: $(cat /tmp/vidya_err)"
-            ERRORS+=("$topic/python.py")
-            FAIL=$((FAIL + 1))
-        fi
-        rm -f /tmp/vidya_err
+        run_lang "Python" "$topic/python.py" env PYTHONUNBUFFERED=1 python3 "$topic_dir/python.py"
     fi
 
     # C
     if [[ -f "$topic_dir/c.c" ]]; then
-        if gcc -std=c17 -Wall -Werror "$topic_dir/c.c" -o /tmp/vidya_test_$$ -lm -lpthread 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
-            echo "  ✓ C"
-            PASS=$((PASS + 1))
-        else
-            echo "  ✗ C: $(cat /tmp/vidya_err)"
-            ERRORS+=("$topic/c.c")
-            FAIL=$((FAIL + 1))
-        fi
-        rm -f /tmp/vidya_test_$$ /tmp/vidya_err
+        bin=/tmp/vidya_test_$$
+        # -fno-stack-protector? No — keep -Wall -Werror semantics. Pipe through tee
+        # gives us the captured output even when assert→abort drops buffered stdout.
+        run_lang "C" "$topic/c.c" bash -c "gcc -std=c17 -Wall -Werror '$topic_dir/c.c' -o $bin -lm -lpthread && $bin"
+        rm -f "$bin"
     fi
 
     # Go
     if [[ -f "$topic_dir/go.go" ]]; then
-        if go run "$topic_dir/go.go" 2>/tmp/vidya_err; then
-            echo "  ✓ Go"
-            PASS=$((PASS + 1))
-        else
-            echo "  ✗ Go: $(cat /tmp/vidya_err)"
-            ERRORS+=("$topic/go.go")
-            FAIL=$((FAIL + 1))
-        fi
-        rm -f /tmp/vidya_err
+        run_lang "Go" "$topic/go.go" go run "$topic_dir/go.go"
     fi
 
     # TypeScript
     if [[ -f "$topic_dir/typescript.ts" ]]; then
-        if npx tsx "$topic_dir/typescript.ts" 2>/tmp/vidya_err; then
-            echo "  ✓ TypeScript"
-            PASS=$((PASS + 1))
-        else
-            echo "  ✗ TypeScript: $(cat /tmp/vidya_err)"
-            ERRORS+=("$topic/typescript.ts")
-            FAIL=$((FAIL + 1))
-        fi
-        rm -f /tmp/vidya_err
+        run_lang "TypeScript" "$topic/typescript.ts" npx tsx "$topic_dir/typescript.ts"
     fi
 
     # Shell
     if [[ -f "$topic_dir/shell.sh" ]]; then
-        if bash "$topic_dir/shell.sh" >/tmp/vidya_out 2>/tmp/vidya_err; then
-            echo "  ✓ Shell"
-            PASS=$((PASS + 1))
-        else
-            echo "  ✗ Shell: $(cat /tmp/vidya_err)"
-            ERRORS+=("$topic/shell.sh")
-            FAIL=$((FAIL + 1))
-        fi
-        rm -f /tmp/vidya_out /tmp/vidya_err
+        run_lang "Shell" "$topic/shell.sh" bash "$topic_dir/shell.sh"
     fi
 
     # OpenQASM
     if [[ -f "$topic_dir/openqasm.qasm" ]]; then
         if [[ "$QASM_VALIDATOR" == "qiskit" ]]; then
-            if $QASM_PYTHON -c "from qiskit import qasm2; qc = qasm2.load('$topic_dir/openqasm.qasm', include_path=['$CONTENT_DIR']); print(f'  ✓ OpenQASM ({qc.num_qubits}q, depth {qc.depth()})')" 2>/tmp/vidya_err; then
-                PASS=$((PASS + 1))
-            else
-                echo "  ✗ OpenQASM: $(cat /tmp/vidya_err)"
-                ERRORS+=("$topic/openqasm.qasm")
-                FAIL=$((FAIL + 1))
-            fi
-            rm -f /tmp/vidya_err
+            run_lang "OpenQASM" "$topic/openqasm.qasm" \
+                $QASM_PYTHON -c "from qiskit import qasm2; qc = qasm2.load('$topic_dir/openqasm.qasm', include_path=['$CONTENT_DIR']); print(f'OpenQASM OK: {qc.num_qubits}q, depth {qc.depth()}')"
         elif [[ "$QASM_VALIDATOR" == "native" ]]; then
-            # Use the Rust-native parser via cargo test (already validated in cargo test --features openqasm)
             echo "  ✓ OpenQASM (native)"
             PASS=$((PASS + 1))
         else
@@ -144,15 +145,9 @@ for topic_dir in "$CONTENT_DIR"/*/; do
     # Zig
     if [[ -f "$topic_dir/zig.zig" ]]; then
         if [[ "$HAS_ZIG" == "true" ]]; then
-            if zig build-exe "$topic_dir/zig.zig" -femit-bin=/tmp/vidya_test_$$ 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
-                echo "  ✓ Zig"
-                PASS=$((PASS + 1))
-            else
-                echo "  ✗ Zig: $(cat /tmp/vidya_err)"
-                ERRORS+=("$topic/zig.zig")
-                FAIL=$((FAIL + 1))
-            fi
-            rm -f /tmp/vidya_test_$$ /tmp/vidya_err
+            bin=/tmp/vidya_test_$$
+            run_lang "Zig" "$topic/zig.zig" bash -c "zig build-exe '$topic_dir/zig.zig' -femit-bin=$bin && $bin"
+            rm -f "$bin"
         else
             echo "  ⊘ Zig (skipped — zig not installed)"
             SKIP=$((SKIP + 1))
@@ -161,29 +156,21 @@ for topic_dir in "$CONTENT_DIR"/*/; do
 
     # x86_64 Assembly
     if [[ -f "$topic_dir/asm_x86_64.s" ]]; then
-        if as --64 "$topic_dir/asm_x86_64.s" -o /tmp/vidya_test_$$.o 2>/tmp/vidya_err && ld /tmp/vidya_test_$$.o -o /tmp/vidya_test_$$ 2>/tmp/vidya_err && /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
-            echo "  ✓ x86_64 Assembly"
-            PASS=$((PASS + 1))
-        else
-            echo "  ✗ x86_64 Assembly: $(cat /tmp/vidya_err)"
-            ERRORS+=("$topic/asm_x86_64.s")
-            FAIL=$((FAIL + 1))
-        fi
-        rm -f /tmp/vidya_test_$$ /tmp/vidya_test_$$.o /tmp/vidya_err
+        bin=/tmp/vidya_test_$$
+        obj=/tmp/vidya_test_$$.o
+        run_lang "x86_64 Assembly" "$topic/asm_x86_64.s" \
+            bash -c "as --64 '$topic_dir/asm_x86_64.s' -o $obj && ld $obj -o $bin && $bin"
+        rm -f "$bin" "$obj"
     fi
 
     # AArch64 Assembly
     if [[ -f "$topic_dir/asm_aarch64.s" ]]; then
         if [[ "$HAS_AARCH64_AS" == "true" && "$HAS_QEMU_AA64" == "true" ]]; then
-            if aarch64-linux-gnu-as "$topic_dir/asm_aarch64.s" -o /tmp/vidya_test_$$.o 2>/tmp/vidya_err && aarch64-linux-gnu-ld /tmp/vidya_test_$$.o -o /tmp/vidya_test_$$ 2>/tmp/vidya_err && qemu-aarch64 /tmp/vidya_test_$$ 2>/tmp/vidya_err; then
-                echo "  ✓ AArch64 Assembly"
-                PASS=$((PASS + 1))
-            else
-                echo "  ✗ AArch64 Assembly: $(cat /tmp/vidya_err)"
-                ERRORS+=("$topic/asm_aarch64.s")
-                FAIL=$((FAIL + 1))
-            fi
-            rm -f /tmp/vidya_test_$$ /tmp/vidya_test_$$.o /tmp/vidya_err
+            bin=/tmp/vidya_test_$$
+            obj=/tmp/vidya_test_$$.o
+            run_lang "AArch64 Assembly" "$topic/asm_aarch64.s" \
+                bash -c "aarch64-linux-gnu-as '$topic_dir/asm_aarch64.s' -o $obj && aarch64-linux-gnu-ld $obj -o $bin && qemu-aarch64 $bin"
+            rm -f "$bin" "$obj"
         else
             echo "  ⊘ AArch64 Assembly (skipped — cross-tools not installed)"
             SKIP=$((SKIP + 1))
@@ -193,19 +180,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
     # Cyrius
     if [[ -f "$topic_dir/cyrius.cyr" ]]; then
         if [[ "$HAS_CYRIUS" == "true" ]]; then
-            # `cyrius run` resolves stdlib includes, compiles, runs.
-            # Cyrius output is verbose (dead-fn / large-static-data warnings on
-            # stdout); the assertion summary is on the last line. Capture both
-            # streams; trust the exit code for pass/fail.
-            if cyrius run "$topic_dir/cyrius.cyr" >/tmp/vidya_err 2>&1; then
-                echo "  ✓ Cyrius"
-                PASS=$((PASS + 1))
-            else
-                echo "  ✗ Cyrius: $(tail -3 /tmp/vidya_err | tr '\n' ' | ')"
-                ERRORS+=("$topic/cyrius.cyr")
-                FAIL=$((FAIL + 1))
-            fi
-            rm -f /tmp/vidya_err
+            run_lang "Cyrius" "$topic/cyrius.cyr" cyrius run "$topic_dir/cyrius.cyr"
         else
             echo "  ⊘ Cyrius (skipped — cyrius not installed)"
             SKIP=$((SKIP + 1))
