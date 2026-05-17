@@ -20,6 +20,37 @@ FAIL=0
 SKIP=0
 ERRORS=()
 
+# ── Truncation-survivable status file ────────────────────────────────
+# Per-language results are appended to a state file atomically after
+# every test. At script exit (success OR abort), the EXIT trap dumps
+# the WHOLE file behind distinctive `>>> STATUS_DUMP_*` marker lines.
+# So even if CI streaming drops mid-test output, the final dump in the
+# log shows every result. The user does not have to trust any
+# mid-stream line — search for `STATUS_DUMP_BEGIN` and the truth lives
+# between that marker and `STATUS_DUMP_END`.
+STATUS_FILE="${STATUS_FILE:-/tmp/vidya_status_$$.csv}"
+: > "$STATUS_FILE"
+echo "topic,lang,result,exit_code" >> "$STATUS_FILE"
+
+CURRENT_TOPIC=""
+CURRENT_LANG=""
+on_exit() {
+    local rc=$?
+    echo ""
+    echo ">>> STATUS_DUMP_BEGIN (script rc=$rc)"
+    cat "$STATUS_FILE" 2>/dev/null || echo "(status file unreadable)"
+    echo ">>> STATUS_DUMP_END"
+    if [[ $rc -ne 0 && $rc -ne 1 ]]; then
+        # rc=1 is our intentional "examples failed" exit at the bottom.
+        # Anything else is a script-level abort — surface it loudly.
+        echo ""
+        echo "!! SCRIPT ABORTED unexpectedly (rc=$rc)"
+        echo "!! last topic: '$CURRENT_TOPIC'"
+        echo "!! last lang:  '$CURRENT_LANG'"
+    fi
+}
+trap on_exit EXIT
+
 # ── Detect available toolchains ────────────────────────────────────────
 has_cmd() { command -v "$1" &>/dev/null; }
 
@@ -65,27 +96,39 @@ echo ""
 run_lang() {
     local label="$1" rel="$2"; shift 2
     local logfile="/tmp/vidya_${$}_log"
+    CURRENT_LANG="$label"
+    # Distinctive START marker — easy to grep, survives truncation. If
+    # the log ever shows a START_TEST without the matching END_TEST,
+    # that's the test that hung or killed the runner.
+    echo ">>> START_TEST topic=$CURRENT_TOPIC lang=$label"
     echo "  → $label"
     set +e
-    LB "$@" 2>&1 | tee "$logfile"
-    local rc=${PIPESTATUS[0]}
+    LB "$@" >"$logfile" 2>&1
+    local rc=$?
     set -e
-    if [[ $rc -eq 0 ]]; then
+    # Always echo the captured output so it appears in the CI stream
+    # (with sentinel markers so it's grep-able):
+    echo ">>> OUTPUT_BEGIN $CURRENT_TOPIC/$label"
+    cat "$logfile" 2>/dev/null || true
+    echo ">>> OUTPUT_END $CURRENT_TOPIC/$label (exit=$rc)"
+    if [[ "$rc" = "0" ]]; then
         echo "  ✓ $label"
         PASS=$((PASS + 1))
+        echo "$CURRENT_TOPIC,$label,PASS,$rc" >> "$STATUS_FILE"
     else
         echo "  ✗ $label (exit=$rc)"
-        echo "  ── captured output ──"
-        sed 's/^/    /' "$logfile" || true
-        echo "  ─────────────────────"
         ERRORS+=("$rel (exit=$rc)")
         FAIL=$((FAIL + 1))
+        echo "$CURRENT_TOPIC,$label,FAIL,$rc" >> "$STATUS_FILE"
     fi
+    echo ">>> END_TEST topic=$CURRENT_TOPIC lang=$label rc=$rc"
     rm -f "$logfile"
 }
 
 for topic_dir in "$CONTENT_DIR"/*/; do
     topic=$(basename "$topic_dir")
+    CURRENT_TOPIC="$topic"
+    CURRENT_LANG=""
 
     # Skip directories without concept.toml
     [[ -f "$topic_dir/concept.toml" ]] || continue
