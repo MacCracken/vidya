@@ -1478,3 +1478,271 @@ cheap and specific) rather than relying on mtime
 comparisons against source. v6.0.0 closeout should
 generalize the .45 contamination gate to cover every
 committed `build/<binary>` artifact, not just cc5.
+
+
+[[entries]]
+name = "gvar_init_order_kmode_static_v51164"
+description = "kmode==1 emit order puts gvar-init AFTER PARSE_PROG which never returns. Top-level `var X = INT_LITERAL ;` declarations got their runtime store CODE-EMITTED but never EXECUTED. agnos's XHCI_CMD_TIMEOUT_SPINS = 10000000 read as 0. v5.11.64 fixed via static-init tables (gvar_initval + gvar_byte_off) baking literal values into file image at FIXUP-time."
+category = "cyrius"
+tags = ["compiler", "kmode", "gvar", "agnos", "kernel", "static-init", "fixup", "v5.11.64"]
+content = """
+== SYMPTOM ==
+
+agnos kernel main body reads a top-level gvar as 0 even
+though source declares `var XHCI_CMD_TIMEOUT_SPINS =
+10000000;`. Helper fn `_xhci_wait_command()` consumes the
+value as a spin-loop iteration count; gets 0; loops never
+execute; xHCI commands time out. 10+ iron-burn debug
+attempts before the compiler-side root cause surfaced.
+
+== ROOT CAUSE ==
+
+In `kmode==1` mode (kernel target), cyrius emit order is:
+
+  [boot-shim asm]
+  → [rest of PARSE_PROG]
+  → [EMIT_GVAR_INITS]   # the runtime stores
+
+The boot-shim asm + PARSE_PROG body produce the kernel
+mainline that NEVER RETURNS (kernel main is an infinite
+event loop). EMIT_GVAR_INITS emits AFTER the mainline.
+The code is in the binary but unreachable.
+
+So the runtime store sequence `mov rax, 10000000; mov
+[gvar_X_addr], rax` is generated correctly — but the CPU
+never executes it. The gvar reads return the BSS-zero
+default instead of the declared literal.
+
+== WHY THIS DIDN'T BITE EARLIER ==
+
+Pre-v5.11.x agnos consumers used compile-time constants
+(enum variants, #define macros) for the kernel-mainline
+parameters. The first agnos slot to declare a top-level
+`var X = N;` for a magic number was the xHCI sub-arc —
+which surfaced the bug.
+
+Userland binaries don't hit this: `main()` RETURNS (to
+exit syscall stub); EMIT_GVAR_INITS lands BEFORE main
+in userland-emit order; gvars get initialized before
+main runs.
+
+== FIX (v5.11.64) ==
+
+PARSE_GVAR_REG detects `= INT_LITERAL ;` shape with
+positive non-zero RHS:
+
+1. Records value in new `gvar_initval` table at
+   0x1EC000 (8192 × 8B; uses freed `fn_ret_sid` slot
+   relocated to 0x15A000 at v5.11.19).
+2. SKIPS gvar_toks registration so EMIT_GVAR_INITS
+   doesn't replay the runtime store.
+
+FIXUP populates per-var byte offsets in stable
+`gvar_byte_off` mirror at 0x1B0000 (8192 × 8B prefix-sum
+mirror, FIXUP-time written / EMIT-time read).
+
+Each EMIT_* path adds `_EMIT_GVAR_STATIC_INITS(S, O, bss_o)`
+after its var-area zero-fill to S64 literal bytes at the
+right offsets. Result: value is in the file image at first
+read; no runtime store needed.
+
+== CROSS-ARCH COVERAGE ==
+
+Every EMIT_* that writes a var area to file:
+- x86 EMITELF_KERNEL + EMITELF64_KERNEL + EMITELF_USER +
+  EMITELF_SHARED + EMITELF_OBJ
+- aarch64 EMITELF + EMITELF_KERNEL
+- MachO x86_64 + ARM64 (ARM64 guarded by has_data == 1)
+- PE EMITPE_EXEC (handles both Windows EXE + EFI Application)
+
+cx bytecode opts OUT via `_TARGET_CX != 1` guard in
+PARSE_GVAR_REG.
+
+== SHADOW-DECLARATION OPT-OUT ==
+
+When FINDVAR finds an existing match for the new var name
+(shadow redecl), fall through to runtime-store. Caught
+during bring-up by `math_constants.tcyr`: mabda's `var
+F64_TWO = 0` shadowed by math's `var F64_TWO =
+0x4000_0000_0000_0000` hit EMIT_GVAR_INITS's FINDVAR-last-
+match semantics — mabda's runtime-store-of-zero targeted
+math's address, clobbering the new static-init bytes.
+
+== cc5 SIZE DELTA ==
+
+cc5 SHRANK 875,336 → 872,952 B (-2,384 B) from eliminating
+runtime stores for cc5's own TS_TOK_* literal gvars in
+src/frontend/ts/. Static-init eliminates the per-gvar
+`mov rax, imm64; mov [addr], rax` sequence (~11 bytes per
+gvar) and replaces with file-image bytes (8 bytes per gvar
+in the .data section). Net savings depends on gvar count
+in the compiler's own source.
+
+== LESSON ==
+
+Any compiler-emit ordering that places initialization
+AFTER an unreachable code path is a silent-fail. The fix
+shape "bake value into file image at FIXUP-time" is the
+right pattern for kmode-shaped consumers (kernels, EFI
+apps, anything where main never returns). The pattern is
+also CHEAPER (smaller binary) than runtime stores.
+
+For agents debugging "gvar reads 0 in kernel mode":
+1. `objdump -d` the binary; find the gvar's address.
+2. Check whether EMIT_GVAR_INITS sequence appears BEFORE
+   or AFTER kernel main's entry. If after, static-init
+   wasn't applied — confirm `gvar_initval[]` was populated.
+3. Common cause: shadow-redecl where FINDVAR returned a
+   different gvar's slot. Check both source files for
+   the same var name at module scope.
+"""
+
+[[entries]]
+name = "cve_05_tok_names_mangle_magic_budget_v51165"
+description = "NPOS_GUARD(S, 256) was a magic-pessimistic budget that source-identifier byte-copy loops could SILENTLY exceed. tok_names region (256 KB @ 0x60000) could overflow into adjacent regions if source identifier + separator + dest identifier > 256 bytes. Worse: 4 of 6 main_*.cyr variants had NO tok_names guard at all on the use-alias mangle path. v5.11.65 replaced magic-256 with compute-source-length-then-NPOS_GUARD across 11 sites."
+category = "cyrius"
+tags = ["compiler", "tok_names", "mangle-path", "cve-05", "security", "cross-arch", "v5.11.65"]
+content = """
+== SYMPTOM ==
+
+`docs/audit/2026-04-13-security-audit.md` § CVE-05 flagged
+"Heap region overlap — no guard pages" as a P1: write-side
+checks for str_data / tok_names / codebuf were the fix
+direction. CVE-06 covered str_data at v5.x; codebuf was
+covered by EB() on both arches. The remaining gap was
+tok_names.
+
+== ROOT CAUSE ==
+
+`NPOS_GUARD(S, need)` in `src/frontend/lex.cyr` checks
+`np + need >= 261872` and exits cleanly on overflow. The
+`need` argument is supposed to be a pessimistic byte count
+for the pending write. 11 mangle-path call sites used
+`NPOS_GUARD(S, 256)` as a MAGIC PESSIMISTIC BUDGET:
+
+  fn BUILD_METHOD_NAME(S, si, mnoff): i64 {
+      NPOS_GUARD(S, 256);                       // LIES: budget is 256
+      var scratch = GNPOS(S);
+      var wp = scratch;
+      var snoff = L64(S + 0x18E630 + si * 8);
+      var ri = 0;
+      var rc = load8(S + 0x60000 + snoff + ri);
+      while (rc != 0) {                         // unbounded copy
+          store8(S + 0x60000 + wp, rc);
+          wp = wp + 1; ri = ri + 1;
+          rc = load8(S + 0x60000 + snoff + ri);
+      }
+      // ... separator + method name + null ...
+  }
+
+If `struct_name_len + 1 + method_name_len + 1 > 256`, the
+write loop exceeds the guard's promise. Source identifiers
+can be up to tok_names region cap (262144 bytes), so the
+guard's pessimistic budget didn't actually cover the
+realistic shape.
+
+In practice the bug rarely bit because typical identifiers
+are < 256 bytes. But it's a SILENT overflow — corruption
+would land in adjacent regions (struct_*, fn_*, etc.) and
+cause downstream miscompile / parse error with no
+diagnostic.
+
+== WORSE PRE-EXISTING GAP ==
+
+The 4 non-x86 main_*.cyr variants (aarch64,
+aarch64_macho, aarch64_native, cx) had **no prior
+tok_names guard at all** on the use-alias path:
+
+  // main_aarch64.cyr — pre-v5.11.65
+  S64(S + 0x18FFD0 + uc * 8, ufn);
+  var apos = GNPOS(S);                          // NO NPOS_GUARD CALL
+  var ri = 0;
+  var rc = load8(S + 0x60000 + umod + ri);
+  while (rc != 0) { ... }
+
+The parallel x86 main.cyr had the magic-256 NPOS_GUARD
+that the cross-arch variants never gained — caught at the
+audit-at-slot-entry sweep, not in the original v5.11.18
+NPOS_GUARD introduction.
+
+== FIX (v5.11.65) ==
+
+Pre-walk source identifier strlen(s); pass actual sum to
+NPOS_GUARD:
+
+  fn BUILD_METHOD_NAME(S, si, mnoff): i64 {
+      var snoff = L64(S + 0x18E630 + si * 8);
+      var _snlen = 0;
+      while (load8(S + 0x60000 + snoff + _snlen) != 0) {
+          _snlen = _snlen + 1;
+      }
+      var _mnlen = 0;
+      while (load8(S + 0x60000 + mnoff + _mnlen) != 0) {
+          _mnlen = _mnlen + 1;
+      }
+      NPOS_GUARD(S, _snlen + 1 + _mnlen + 1);   // ACTUAL write size
+      // ... rest unchanged ...
+  }
+
+NPOS_GUARD's existing region cap check (`np + need >=
+261872`) now bounds the ACTUAL write surface, not a lying
+magic budget.
+
+== 11 SITES FIXED ==
+
+- parse_decl.cyr — BUILD_METHOD_NAME (struct + method)
+- parse_expr.cyr — BUILD_OP_NAME (struct + op_str)
+- parse_fn.cyr — PARSE_FN_DEF module-mangle (mmod + noff)
+- parse_types.cyr — variant-ctor mangle × 2 (pass 1 + 2)
+- main.cyr — use-alias mangle (umod + ufn)
+- main_aarch64.cyr — use-alias mangle (added guard from
+  scratch)
+- main_aarch64_macho.cyr — use-alias mangle (added guard
+  from scratch)
+- main_aarch64_native.cyr — use-alias mangle (added guard
+  from scratch)
+- main_cx.cyr — use-alias mangle (added guard from scratch)
+- main_win.cyr — use-alias mangle
+
+== STRUCTURAL GATE ==
+
+`programs/check.cyr::_cve05_guard_gate()` greps the 10
+affected source files for `NPOS_GUARD(S, 256)` and fails
+fast on any reappearance. Negative-tested at slot bring-up
+(manual sed-inject of the magic-256 pattern → gate FAIL;
+restore → gate PASS). check.sh 75 → 76.
+
+== EXISTING PRECEDENT ==
+
+`parse_expr.cyr::EMIT_OVF_CALL` was already doing the
+correct pattern at v5.6.x:
+
+  fn EMIT_OVF_CALL(S, fname_str): i64 {
+      var flen = 0;
+      while (load8(fname_str + flen) != 0) { flen = flen + 1; }
+      NPOS_GUARD(S, flen + 1);                  // compute then guard
+      // ... rest ...
+  }
+
+The .65 fix propagated this pattern to the 11 other call
+sites that hadn't adopted it.
+
+== LESSON ==
+
+Any "pessimistic budget" passed to a bounds-check helper
+where the actual write size depends on input data is a
+LATENT silent overflow. The fix shape — strlen the input
+first, then call the guard with the actual size — adds
+~5 LoC per site but eliminates the silent-overflow class.
+
+For agents writing future tok_names-writing code:
+1. Walk source identifier(s) with `while load8 != 0`.
+2. Sum: `len_a + 1 + len_b + 1 + ...` for each component
+   (separator + null terminator counts).
+3. Call `NPOS_GUARD(S, actual_sum)`.
+
+DO NOT use `NPOS_GUARD(S, MAGIC_CONSTANT)` for any write
+shape where the input length depends on parser state.
+The gate at `_cve05_guard_gate()` catches the magic-256
+specifically; generalize the principle.
+"""

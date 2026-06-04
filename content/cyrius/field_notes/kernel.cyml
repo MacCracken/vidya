@@ -665,3 +665,1218 @@ LESSONS
     the cleanup is in the changelog. Whatever the next hardware
     target's first wall turns out to be, it won't be in GRUB and
     it won't be in the mem-iso block.
+
+[[entries]]
+name = "the_mvp_gate_at_attempt_68"
+description = "Attempts 30 through 68: thirty-eight iron burns chasing an xHCI 'silent absorb' phantom that turned out to be a Cyrius gvar-init-order issue in two lines of kernel banner code — and the MVP gate that fell when we stopped instrumenting and read the prior art"
+category = "cyrius"
+---
+THE MVP GATE AT ATTEMPT 68
+
+Shell-on-iron closed at Attempt 29 with a rendered framebuffer shell
+and no keyboard input. The MVP gate — kybernet PID 1 launches agnoshi,
+the user types `help` and sees a response — was four iron attempts
+away by the same naive estimate that had said the same thing at
+Attempts 13, 17, 22, and 25. It was forty iron attempts away.
+
+The MVP gate fell on 2026-05-18 at Attempt 68, kernel v1.30.9. The
+distance from Attempt 29 to Attempt 68 has two distinct phases. The
+first is a thirty-eight-attempt repair-letter ladder chasing a phantom.
+The second is the eight-line fix that should have been the first thing
+we tried. The lesson on the way out is the third phase.
+
+THE LETTER LADDER — F THROUGH N
+
+Attempt 30 onward, the kernel reached the shell prompt rendered on
+the framebuffer, but kybernet's startup print said `kybernet: 0
+processes`. agnoshi was supposed to be one of those processes. It
+wasn't there. The shell prompt that appeared was kybernet's fallback
+panic prompt, not agnoshi's prompt. The user could not type into it
+because the keyboard handler was hooked behind a process that hadn't
+launched.
+
+The first diagnostic letter — Repair (F), Attempt 33 — guessed xHCI
+USB controller initialization. USB Legacy Support was claimed by BIOS
+on this NUC at boot; the kernel's xhci_init() needed to wrestle ownership
+back via USBLEGSUP at offset 0x60 of the xECP capability block. F
+added that handshake. Boot output: identical. Attempt 33 = silent
+absorb. Whatever F was claiming wasn't getting through.
+
+G added port reset. H added port enable. I added device descriptor
+fetch. J added configuration descriptor. K and L were memory-isolation
+diagnostics — CMOS stamps at fifty-some slots dumping every page table
+walk, descriptor pointer, and ring buffer offset. M was a chip-revision
+quirk guard. N reworked Port Reset entirely around a Linux xhci-hub.c
+event-drain pattern.
+
+Every letter compiled clean. Every letter booted clean in QEMU. Every
+letter shipped to iron with confidence and came back from iron showing
+the same boot log: `kybernet: 0 processes`. The CMOS slots told us
+nothing — they were all written with values they should have, in the
+right order, on the right tick. The xHCI controller was fine. The
+ports were enumerated. The keyboard descriptor was readable. The HID
+driver was loading.
+
+Nothing was wrong with USB. Nothing had been wrong with USB the whole
+time.
+
+THE BUG THAT DIDN'T NEED TO EXIST
+
+Attempt 67 was Repair (O). Repair (O) was a cleanup pass — six of the
+fourteen letters between F and N had been diagnostic-only with no
+behavioral change; O deleted them. While writing the deletion, the
+diff showed something. The xhci dispatch path checked
+`_AGNOS_VERSION == "1.30.x"` to gate two minor compatibility branches.
+On iron, `_AGNOS_VERSION` was reading as an empty string. The dispatch
+took the wrong branch. Kybernet's process table — populated through
+that dispatch — got built against the wrong layout. Zero entries.
+
+`_AGNOS_VERSION` is a module-global var in `kernel/version.cyr`:
+
+  var _AGNOS_VERSION = "1.32.0";
+
+Cyrius's kmode emit order, by design, runs the kernel program body
+BEFORE the gvar initializers. The reason is sound: the boot path
+needs to be deterministic from a known entry point. But the consequence
+is that any top-level `var = "literal"` is uninitialized for the
+duration of the program body. The kernel banner print that read
+`_AGNOS_VERSION` had been reading an empty string since the very first
+build that included the variable. In QEMU it worked anyway — the
+dispatch's fallback branch happened to be correct for QEMU's USB
+topology. On iron, it wasn't.
+
+The xHCI silent-absorb wasn't xHCI. It wasn't even hardware. It was a
+two-line empty-string read three modules upstream of the print
+statement we'd been chasing.
+
+THE FIX, AND THE PATTERN BEHIND IT
+
+The fix landed in `kernel/version.cyr` as a design pattern note. The
+version literals get wrapped in functions:
+
+  fn print_agnos_kernel_banner() {
+      kprintln("AGNOS kernel v1.32.0", 20);
+  }
+
+  fn print_agnos_shell_banner() {
+      kprintln("AGNOS shell v1.32.0 (type 'help')", 33);
+  }
+
+Function bodies bake the literal's rodata pointer into the compiled
+`mov` instruction at compile time. Cyrius's userland (standard ELF
+startup) doesn't have this constraint — initializers run before main.
+The kernel inverts that order; the workaround is to make sure no
+top-level code path depends on a gvar that hasn't run yet.
+
+The `_AGNOS_VERSION` global is kept as a bare string for consumers
+that run AFTER kernel program-body completion (kybernet, userspace,
+agnoshi). The kernel program body itself uses the function-wrapped
+banners exclusively. A comment in `version.cyr` explains the rule so
+the next person who adds a banner doesn't trip the same wire.
+
+Attempt 68 was Repair (P). P was the cyrius gvar-init workaround
+above. Build size: 248,432 B. The boot log printed:
+
+  AGNOS kernel v1.30.9
+  ...
+  kybernet: 3 processes
+  kybernet: launching shell
+  AGNOS shell v1.30.9 (type 'help')
+  agnos> _
+
+The cursor blinked. The keyboard worked. The user typed `help`. The
+shell answered.
+
+The MVP gate fell.
+
+WHAT WE TOOK FORWARD
+
+  - Eleven attempts (33 through 47) chased a phantom. Six of the
+    eighteen repair letters were diagnostic-only. The information
+    cost of those eleven burns was zero — the CMOS slots, the boot
+    logs, the bisection results were all internally consistent and
+    all wrong about what to look at. The constraint that broke the
+    ladder was outside the search space we'd defined.
+
+  - The lesson became `feedback_stop_letter_laddering` in the agent
+    memory: when a repair-letter ladder is five-or-six attempts deep
+    on the same root symptom, write the escape plan BEFORE the next
+    letter, not after the next letter falsifies. The next time a
+    repair ladder formed (the xHCI port-reset silent-absorb in late
+    Attempt 50 territory), the escape plan was written at attempt
+    three of the new ladder. It saved nine days.
+
+  - The kprint mirror to FB is the right diagnostic channel on iron;
+    CMOS extended bank (0x80+ via port 0x72/0x73) is the right
+    post-mortem channel. We learned the AMD FCH 1022:1639's CMOS
+    map empirically during this arc — slots 0x50-0x7F are virgin
+    scratch on archaemenid; 0x42/0x43/0x44 are BIOS-clobbered every
+    cold boot; the standard nvram driver refuses /dev/nvram with
+    -EIO because of a checksum-layout mismatch we now bypass via
+    iopl(3) + direct port I/O in `scripts/read-boot-log.cyr`.
+
+  - The cyrius gvar-init bug is filed upstream as a planned cyrius
+    issue. The kernel workaround stays in place because the kernel's
+    cadence can't wait for cyrius's. This is the canonical instance
+    of `feedback_cyrius_hands_off` plus `feedback_monolithic_by_design`:
+    two subsystems, two cycles, two repos, one ABI contract — and
+    when the contract has a sharp edge, the consumer codifies the
+    workaround durably rather than blocking on the producer.
+
+  - "MVP gate" in the AGNOS roadmap means kernel + kybernet + agnoshi
+    typeable on iron. Not booting. Not rendering. Not "shell prompt
+    visible." Typeable, end-to-end, with the keyboard reaching a
+    process that responds. That gate fell at Attempt 68 / agnos
+    v1.30.9 and stayed green through every subsequent burn (currently
+    Attempt 93 / v1.32.0 — twenty-five attempts of green MVP gate
+    while we ship storage, filesystem, and networking on top of it).
+
+  - The closed-beta gate is one step past MVP: same surface, but with
+    persistent storage and at least one real LAN packet. The gate
+    posture going into 1.32.x networking was the same as going into
+    1.31.x storage — the MVP gate carries forward at every cut, and
+    every new subsystem cycle has to maintain the byte-clean shell
+    prompt without regression. Twenty-five burns later: no regression.
+
+  - Most importantly: the bug had been in the codebase for at least
+    two months before the MVP gate cared. It was the right combination
+    of "on iron only" + "behind the launch path" + "downstream of a
+    silent print" that hid it. The lesson on iron-boot bring-up is
+    that the bugs you find AREN'T the bugs that have been in the code
+    longest — they're the bugs that the iron-side execution order
+    finally exposes. Every iron burn after MVP looks at things QEMU
+    can't even see.
+
+[[entries]]
+name = "the_storage_trio_iron_debut"
+description = "agnos 1.31.x storage cycle — NVMe, AHCI/SATA, USB Mass Storage, RAM-disk, VirtIO-modern, ext2/ext4 read-only and 64BIT — twelve iron attempts (80-91), three iron debuts, one eight-bug repair stack, and the multi-source convergent audit pattern that made it shippable"
+category = "cyrius"
+---
+THE STORAGE TRIO IRON DEBUT
+
+The MVP gate gave us a kernel that boots, launches kybernet, and lets
+the user type. What it didn't give us was anywhere to put files. The
+agnos `/` was an initrd: read-only, 64 KB, baked into the kernel
+image at compile time. The 1.31.x cycle's job was to make `/` real —
+to teach the kernel about disks, partitions, and filesystems, on
+hardware, byte-validated against real Linux ext4 partitions written
+by `mkfs.ext4` on a real laptop.
+
+Twelve iron attempts later (80 through 91, 2026-05-20 through 2026-
+05-22), the kernel mounts a 64BIT-enabled ext4 partition on an
+internal 2 TB Crucial P3 NVMe, walks its directory tree from `/`,
+reads `/hello.txt` byte-exact against the seed content, and traverses
+`cd lost+found` into the mke2fs-reserved subdirectory. Storage trio
+(NVMe + AHCI + USB Mass Storage) all enumerate cleanly in the same
+boot. GPT parses the partition table. ext4 extents resolve through
+Phase 5 BGDT-stride code. The trio is real on real silicon.
+
+Three iron debuts happened during this cycle. Each had a different
+shape, and the difference taught us how to ship subsequent storage
+drivers without re-deriving the same lessons.
+
+DEBUT ONE — NVMe ON CRUCIAL P3 (ATTEMPT 80, 1.31.0)
+
+NVMe is the easiest of the three storage classes to debut on iron.
+The spec is current, the silicon is reliable, the PCIe interface is
+the simplest queue model in the storage world (one admin queue, N
+I/O queues, simple submission/completion ring). The Crucial P3 2 TB
+NVMe in archaemenid's M.2 slot was the test article.
+
+Attempt 80 was clean on the first try. Phase 1-5 of the NVMe driver
+(controller init + admin queue + identify + I/O queue + LBA0 read)
+all printed their expected lines:
+
+  nvme: found at 0xFCD00000
+  nvme: controller info: VID=0xC0A9 model=CT2000P3SSD8 fw=P9CR40A
+  nvme: I/O queue 1 up
+  nvme: LBA0 first 8 bytes: 0xEB 0x58 0x90 0x4D 0x4B 0x46 0x53 0x20 (FAT)
+  nvme: registered as primary block_dev (LBA0..3907029167)
+
+Multi-source convergent: the driver was ported simultaneously from
+Linux `drivers/nvme/host/pci.c`, FreeBSD `sys/dev/nvme/nvme.c`, and
+the NVMe Express 1.4c specification. Convergence on the admin queue
+shape across all three sources gave us high confidence; the iron debut
+mostly validated that confidence. One byte of bug-zero.
+
+DEBUT TWO — SATA/AHCI ON WD BLUE SA510 (ATTEMPT 81, 1.31.1) → CARRY-FORWARD TRIPLET (ATTEMPT 82, 1.31.2)
+
+AHCI is more complex than NVMe. The spec is older. The silicon
+behaviors vary by manufacturer in ways the spec doesn't fully describe.
+And on the WD Blue SA510 2 TB SATA SSD attached to the AMD FCH SATA
+controller, three real driver bugs surfaced in the first burn:
+
+  1. Post-RW IDENTIFY hung the controller (`PxCI stuck` — port
+     command-issue register stayed set after the second IDENTIFY).
+     Root cause: missing pre-issue quiescence gate. Linux's
+     `ata_qc_issue` polls PxTFD.STS.BSY=0 + DRQ=0 + PxCI=0 + PxSACT=0
+     before issuing; AGNOS issued without polling. Added
+     `ahci_port_wait_idle` per Linux's pattern.
+
+  2. ATA model/serial string had a trailing-space drag. The IDENTIFY
+     response stores strings padded with 0x20 to fill 8 or 20-byte
+     fields, with a byte-swap inside each 16-bit word. Our print
+     routine reproduced the byte-swap correctly but didn't trim the
+     trailing spaces, so the model name printed as `'WD Blue SA510
+     2.5 2TB                                  '`. Linux's
+     `ata_id_c_string` scans backwards from the printed-char sequence
+     end to the last non-0x20 byte; we matched that.
+
+  3. The `ahci_rw_demo` was always-on. It wrote a sentinel byte to
+     LBA 5 on every boot to validate the write path. On iron, that's
+     a real write to the boot disk. Compile-gate behind `AHCI_RW_DEMO=1`.
+
+All three were caught at Attempt 81 (PARTIAL PASS). All three landed
+in 1.31.2 `[Unreleased]`. Attempt 82 (re-burn with the triplet)
+cleared the full success rubric — both IDENTIFY calls returned, model
+string printed flush, no sentinel write. Iron debut closed in a
+two-attempt cycle.
+
+DEBUT THREE — USB MASS STORAGE ON SILICON MOTION STICK (ATTEMPT 83-87)
+
+USB Mass Storage debuted hardest. The SCSI command set runs over
+USB Bulk-Only Transport (BBB), which itself runs over xHCI's bulk
+endpoint protocol. Three layered protocols, each with its own
+recovery semantics. Four iron attempts (83-86) all failed.
+
+Attempt 83: INQUIRY succeeded, TEST UNIT READY failed with `CSW
+signature mismatch`. Phase 2.5 (Reset Recovery) added a Bulk-Only
+Mass Storage Reset class request on TUR failure.
+
+Attempt 84: Reset Recovery executed three times in a row. Each TUR
+retry still failed with `CSW signature mismatch`. The Reset Recovery
+was clearing the device endpoint state on the device side but the
+controller-side endpoint state (xHCI Endpoint Context's TR Dequeue
+Pointer) stayed pointed at a stale TRB. Phase 2.6 added xHCI Reset
+Endpoint + Set TR Dequeue Pointer commands.
+
+Attempt 85: Reset Endpoint command itself returned a failure
+completion code. xHCI 1.2 spec § 4.6.8: Reset Endpoint requires the
+endpoint be in Halted state, but our endpoint was in Stopped state
+after the Stop Endpoint command we'd issued first. Phase 2.7 reworked
+the sequence to honor the state-machine requirement.
+
+Attempt 86: Phase 2.7's Reset Recovery executed correctly on iron —
+the `Reset Recovery OK` line printed three times, no `Reset Endpoint
+failed`. But every post-recovery TUR retry STILL failed with `CSW
+signature mismatch`. The device's bulk-IN buffer had the prior CSW's
+bytes from before the recovery, and the recovery didn't drain them.
+Eight separate bugs surfaced in the post-mortem.
+
+Phase 2.8 bundled all eight into one repair stack:
+
+  1. Bulk-timeout extension (`XHCI_BULK_TIMEOUT_SPINS=200M` from 50M
+     because the 200ms Reset Recovery delay overran the smaller
+     budget).
+  2. Strict TRB pointer matching on completion events (we'd been
+     matching on slot + endpoint only, accepting stale completions).
+  3. SHORT_PACKET residue check (the BBB protocol uses SHORT_PACKET
+     to indicate short reads; we were treating it as an error).
+  4. `msc_scsi_exec` unified retry-recover wrapper (eliminated four
+     copies of similar but slightly-different recovery code).
+  5. Drain reposition (drain the controller-side bulk-IN buffer
+     BEFORE issuing Reset Recovery, not after — the device-side
+     reset doesn't help if controller has stale bytes queued).
+  6. Reset Endpoint Context State Error tolerance (CSE is an
+     acceptable outcome if the endpoint was in a state that
+     wouldn't be reset; treat as success).
+  7. 64-bit `param_hi` for Set TR Dequeue Pointer (we'd been
+     truncating the dequeue pointer to 32 bits, which worked in
+     QEMU's < 4 GB physical address space and failed on iron with
+     buffers above 4 GB).
+  8. Drain repositioning fix follow-up (the order is: stop endpoint,
+     wait, drain controller buffer, issue device-side Reset Recovery,
+     wait, reset endpoint, set TR dequeue).
+
+Attempt 87 (2026-05-21): full INQUIRY / TUR / READ CAPACITY (10)
+chain on the Silicon Motion `USB Flash Disk` (vendor='General',
+product='USB Flash Disk', rev='1100', 123072 MiB), byte-clean. The
+USB Mass Storage iron debut closed on the fifth iron burn after
+four failures. Total LOC delta across Phase 2.8: ~200, distributed
+across eight named bugs. Total convergent audit prose:
+`usb-ms-iron-burn-audit.md` at ~600 lines covering the prior-art
+walk through Linux usb-storage, FreeBSD umass, OpenBSD umass,
+Haiku, and the USB Mass Storage Class Bulk-Only Transport spec.
+
+ATTEMPTS 88-91 — NO-REGRESSION + EXT2/EXT4 + 64BIT
+
+Attempts 88 and 89 were no-regression burns for cycle cuts that
+shipped QEMU-only features (RAM-disk + VirtIO modern at 1.31.4;
+ext2/ext4 read-only Phase 1-4 at 1.31.5). The kernel reached the
+shell prompt with the storage trio re-enumerating byte-identically;
+no new fixes needed. The cycle-discipline of "every cut gets at
+least one iron burn even if the new code path isn't iron-validatable"
+is `feedback_iron_burns_block_other_work` working in reverse — the
+cost of NOT burning is letting a no-regression window stack up
+unverified until a real regression hides in the slush.
+
+Attempt 90 (2026-05-22, 1.31.6): the cleanup cycle landed ext2
+multi-backend probe + partition-aware mount. The kernel mounted an
+ext4 partition the user had created on archaemenid's NVMe with
+`mkfs.ext4 -F -L agnos-fs $PART`. The agnos `> ls /` command
+returned `./  ../  lost+found/  hello.txt` byte-exact from real
+Linux ext4 dirent table read off iron NAND through the kernel's
+own ext4 extent walker. First end-to-end real-filesystem read on
+iron, full stop.
+
+Attempt 91 (2026-05-22, 1.31.7): the user re-carved the partition
+with default `mkfs.ext4` (no `-O ^64bit` flag, so the on-disk
+`s_feature_incompat` set bit 0x80 = 64BIT). Phase 5 of the ext4
+driver — the BGDT (block group descriptor table) stride adjustment
+for 64-byte descriptors — was the only code change needed. `agnos>
+cat hello.txt` returned `agnos 1.31.7 iron Attempt 91   ext4 64BIT
+validated   2026-05-22` byte-exact. The seed file the user had
+written from Linux earlier that day appeared on AGNOS verbatim.
+
+WHAT WE TOOK FORWARD
+
+  - Multi-source convergent prior art is the right pattern for
+    every storage class. Linux is one source of many — FreeBSD,
+    OpenBSD, NetBSD, Haiku, plus the relevant spec, plus vendor
+    datasheets where they exist. The audit doc that lands BEFORE
+    the iron burn (`nvme-iron-burn-audit.md`, `ahci-iron-burn-audit.md`,
+    `usb-ms-iron-burn-audit.md`, `ext2-iron-burn-audit.md`, each
+    cited from `feedback_redesign_dont_reinvent`) ranks hypotheses,
+    proposes mitigations, defines a success rubric, and gives the
+    user an iron-burn checklist. The audit is shippable artifact.
+    Iron burns produce receipts that close or extend the audit.
+
+  - Iron burns block other work on a single-machine dev setup. The
+    user is on archaemenid for everything; an iron burn means a
+    USB write + reboot + boot + photo capture. Every iron burn
+    proposal has to come with a written line-by-line audit FIRST
+    per `feedback_iron_burns_block_other_work`. The cost of a
+    failed iron burn isn't just the burn — it's the disruption
+    to whatever else the user was doing on archaemenid that hour.
+
+  - The eight-bug Phase 2.8 stack for USB Mass Storage is the
+    canonical "don't bundle instrumentation alone" instance. Five
+    of the eight bugs would have been individually invisible — they
+    only surfaced because the other three were getting in the way.
+    Stacking all eight into one burn meant Attempt 87 either passed
+    (it did) or revealed a deeper layer than any single bug would
+    have. Iron burn budget is small; stack what's known.
+
+  - Real filesystem read on iron is qualitatively different from
+    QEMU. The QEMU smoke tests (`scripts/ext2-smoke.sh` at 5/5
+    PASS through 1.31.7) validate the parsing logic against
+    synthetic ext2/ext4 images. The iron read validates the same
+    logic against real Linux-written filesystem metadata, including
+    every minor variation `mkfs.ext4` introduces by default
+    (64BIT-enabled, large_dir, inline_data, large blocks, the
+    journal even though we don't replay it). Attempt 90 was the
+    first time we knew the parsing logic was right against the
+    surface area the real world uses.
+
+  - The 1.31.x cycle was driven by user workload: archaemenid's
+    primary disk is NVMe (Crucial P3, hosts Linux), secondary is
+    SATA (WD Blue SA510, dev surface), tertiary is the USB stick
+    (boot device). Every storage class iron-debuted on a device
+    the user actually had. The kernel grew per the AGNOS-empire-
+    rule `project_agnos_kernel_growth_rules`: organically per
+    NATIVE workload, never to chase Linux or BSD ABIs. The
+    1.31.x cycle is the first big test of that rule. It held.
+
+[[entries]]
+name = "the_unicast_that_couldnt_arrive"
+description = "agnos 1.32.x networking cycle — how a ~14-burn chase of a phantom L2 accept-filter bug on the RTL8168H/8111H NIC ended at a 16-to-64 RX descriptor ring deepening, and the audit-re-derive lesson that hid a confidently-wrong comment behind nine iron burns"
+category = "cyrius"
+---
+THE UNICAST THAT COULDN'T ARRIVE
+
+AGNOS could talk. It just couldn't listen.
+
+By 1.32.0 the kernel egressed broadcast ARP byte-correct on iron, the
+gateway replied to us, and a Cyrius AF_PACKET probe harness on Linux
+proved AGNOS's eth/IP/UDP/DHCP frame construction wire-faithful and
+proved a byte-identical SYN drew a SYN+ACK from 1.1.1.1. Every outbound
+path was clean. But the RTL8168H/8111H NIC on archaemenid dropped every
+inbound UNICAST frame addressed to its own MAC — the DHCP OFFER, the
+DHCP ACK, the TCP SYN+ACK. The shell printed `dhcp: OFFER timeout`,
+later `net: L3+TCP FAIL -- SYN sent but no SYN+ACK`, and that symptom
+drove a roughly fourteen-burn chase (Attempts 92-104 plus bites) that
+localized the bug — wrongly — at the chip's L2 receive accept-filter.
+
+The arc opened 2026-05-22 at 1.32.0 and the unicast-RX bug fell at
+1.32.7 on 2026-05-25 (tag commit 16:22:56 -0700), with 1.32.8 cleanup
+and 1.32.9 closing the loop the same evening by re-enabling DHCP and
+pulling a real lease on iron. The whole solve, when it came, was one
+constant: an RX descriptor ring that was 16 deep and should have been
+64. Everything before that was the wrong layer.
+
+THE GATE THAT KEYED ON THE WRONG NIC
+
+The first wall wasn't in the NIC at all. Attempt 92 printed all six
+r8169 lines plus storage plus a byte-clean ext4 mount — and then
+nothing. No `dhcp:` lines. The `main.cyr` DHCP gate predicate keyed on
+`vnet_active`, the virtio-net-only flag, which is permanently 0 on iron
+with r8169 active. `dhcp_init()` was never reached. The fix was a generic
+abstraction at the call site, not a second flag:
+
+  if (vnet_active != 0 || nic_ready() != 0)
+
+Attempt 93 iron-validated it — `dhcp: DISCOVER` egressed — and handed
+us a fresh failure mode: `dhcp: OFFER timeout`. Build 600,520 ->
+601,392 B. This wrong-flag-predicate bug recurred across the whole arc:
+the same class showed up again as FIX #1 (every egress site reading the
+virtio-only `vnet_mac`, all-zeros on iron, so frames went out with src
+MAC 00:00:00:00:00:00) and a third time in the 1.32.8 shell net commands.
+The durable fix every time was the generic accessor — `nic_ready()`,
+`nic_mac()` — not the case-specific flag.
+
+THE FILTER THAT WAS NEVER GUILTY
+
+Then the long chase. The OFFER timeout meant the unicast OFFER wasn't
+arriving, so we audited the L2 accept layer: the RX_CONFIG accept nibble,
+AAP (accept-all-physical), CPlusCmd Normal_mode, IDR physical-match
+write-ordering. Across 1.32.1 through 1.32.6 the driver was rebuilt
+nearly cover-to-cover. 1.32.1 carried a six-FIX bundle. 1.32.2 found four
+more bugs (IDR reprogram after reset, undersized UDP/DHCP buffers,
+DISCOVER/REQUEST retransmit, PHY autoneg restart only on link-down).
+1.32.3 rewrote the driver from iPXE realtek.c and FreeBSD if_re.c. The
+"RX silent" symptom alone survived seven falsified burns (Attempts 97,
+98, 99, 103, 104, and two bites).
+
+1.32.5 broke a real wall: broadcast and multicast RX PROVEN on iron, via
+a post-CR.RE accept-filter re-assert (re-write the accept nibble AFTER
+`CR.RE`, not only before). The FB read `net: L2 RX ALIVE rx=10 arp_in=7
+arp_ans=1`, retiring a four-day "the framebuffer lied" defect where a
+partial-RX NIC read identically to a dead one. 1.32.6 proved gateway L2
+reachability through an RFC-826 ARP sender-snoop — the gateway MAC
+`d4:6a:91:ce:70:60` learned with ZERO unicast RX, purely from the
+gateway's own broadcast who-has. CPlusCmd `Normal_mode` (0x2061) was
+restored from a live `ethtool -d` dump of working Linux on the exact
+chip — and FALSIFIED as the unicast gate.
+
+Every one of those was the same mistake at a finer grain: we kept
+auditing the filter because broadcast and multicast RX exercised the
+MAR multicast-hash path, never the IDR physical-match path the unicast
+frames actually needed.
+
+READING THE SILICON SETTLED IT IN ONE BURN
+
+1.32.7 came in five bites. bite-1 (IDR re-assert post-CR.RE) and bite-2
+(an on-LAN unicast-TCP discriminator) both burned and FALSIFIED the
+filter hypothesis again. Then bite-3 stopped inferring and read the
+chip's own counters. The r8169 has a hardware tally counter that reports,
+among other things, frames the MAC physically accepted by unicast
+address-match. We wired it in — an already-written, never-called
+accessor — and the FB printed:
+
+  r8169: tx_ok=5 rx_ok=140 ... missed=158 ... rx_uc=2 rx_bc=82 rx_mc=64
+
+`rx_uc=2`. Greater than zero. The MAC was ACCEPTING unicast frames. The
+entire accept/filter layer we'd chased for the whole arc was innocent —
+the silicon said so directly. And `missed=158` indicted the ring: RxMissed
+is FIFO-overflow, frames dropped for no free descriptor.
+
+bite-4 tested the obvious next theory — that `net_poll` pulling one frame
+per call let the ring back up between hlt-spaced polls — with a whole-ring
+drain loop, budget 64. It made things WORSE: `missed` rose 158 -> 176. That
+falsification was the clean signal. A drain budget cannot exceed the
+descriptors that physically exist, and only 16 existed. The constraint was
+capacity, not servicing rate. Critically, the bite-4 rubric had
+PRE-COMMITTED the deepen-the-ring lever for exactly this falsification
+branch — the escape was written before the burn, not after.
+
+bite-5 deepened the RX ring 16 -> 64. `R8169_RX_RING_SIZE` 16 to 64
+(4x burst headroom; 64x16 = 1024 B fits one 4 KB page), the shared
+`R8169_RING_MASK` 0x0F split into `R8169_RX_RING_MASK` (0x3F) +
+`R8169_TX_RING_MASK` (0x0F), `r8169_rx_bufs[16]` to [64]. TX never
+overflowed (tx_err=0) and stayed 16. Build 624,056 -> 624,488 B, +432 B.
+
+The burn (photo `1327_CONNECTED`):
+
+  net: LAN-TCP OK
+  net: L3+TCP OK
+  r8169: tx_ok=21 rx_ok=103 tx_err=0 rx_err=0 missed=0 align=0 rx_uc=10 rx_bc=47 rx_mc=46
+  AGNOS shell v1.32.7
+
+`missed` collapsed 176 -> 0. The on-LAN MBP-peer SYN+ACK arrived; the
+off-LAN 1.1.1.1 handshake arrived through the gateway. Both unicast TCP
+handshakes read on iron. The clean SYN+ACK had been dying in a 16-deep
+ring overflowed by ~74 broadcast + 65 multicast frames of LAN chatter
+between polls. 16 was the single value in the whole driver that diverged
+from all prior art — Linux NUM_RX_DESC=256, FreeBSD and OpenBSD 256.
+
+1.32.9 re-enabled DHCP that same evening and closed the arc for real
+(the thesis "1.32.0-1.32.8" undercounts by one). The 1.32.3 static-IP
+bypass was removed, `dhcp_init()` re-attempted, and the iron burn
+(photo `1329_DHCP`) pulled a REAL lease `192.168.1.142` via
+DISCOVER -> OFFER -> REQUEST -> ACK — not the `.222` static fallback.
+That proved the 1.32.3 OFFER-timeout had been the ring-depth drop all
+along, never a DHCP-protocol bug. Production 623,816 B. The full arc:
+L2 (1.32.5) -> gateway reachability (1.32.6) -> unicast TCP (1.32.7) ->
+DHCP lease (1.32.9).
+
+THE COMMENT THAT HID A BUG FOR NINE BURNS
+
+There's an honest correction owed here, because it carries the most
+transferable lesson. The thesis going in was that a confidently-wrong
+in-source comment — claiming AGNOS "doesn't use C+ mode" and that the
+CPlusCmd CPRX|CPTX bits weren't needed — had hidden a CPlusCmd
+divergence behind a trusted claim for roughly nine iron burns
+(Attempts 92-100). The comment claim WAS the bug-hiding mechanism, and
+that part is real: every "multi-source convergent" audit treated the
+existing comment as established context and audited only the deltas the
+latest burn surfaced, instead of re-deriving the right answer from the
+cited sources first. The 16-byte descriptor layout AGNOS uses IS the C+
+ring; the comment's deviation-justification was the audit's primary
+target and was never re-verified.
+
+But CPRX|CPTX was NOT the actual receive fix. CPlusCmd was iron-burned
+BOTH ways during the 1.32.5-era pcap bites — 0x000B WITH the bits
+(Attempt 104 plus a 1.32.5-era pcap bite, both falsified) and 0x0008
+WITHOUT them (falsified) — and the value that finally landed at 1.32.6
+was neither: 0x2061 (Normal_mode), matched verbatim to the working Linux
+`ethtool -d` dump. The bug the comment "hid" turned out not to be the
+one that broke receive. The real fix was the RX ring size. The
+process-failure story is true; the specific hypothesis it was first
+attached to was not the cure. The durable takeaway is the process one,
+not the register one.
+
+LESSONS
+
+  - Audit re-derive, don't validate comments. A "multi-source
+    convergent" audit must write the convergent shape from the prior-art
+    sources FIRST, before reading the AGNOS code, then diff. Validating
+    against the existing code's comment claims about those sources is how
+    a confidently-wrong "we don't use C+ mode" hid behind a trusted
+    in-source claim for roughly nine iron burns. Treat any comment that
+    JUSTIFIES a deviation from canonical prior art as a claim requiring
+    re-verification — the deviation is the audit's primary target, not
+    its premise.
+
+  - Read the chip's own silicon before inferring. A whole arc of
+    L2-filter inference was settled in one burn (bite-3) by wiring in
+    an already-written, never-called hardware tally counter. `rx_uc=2`
+    exonerated the entire accept/filter layer definitively. When a
+    filter-versus-delivery question has resisted inference-only burns,
+    the chip's own counters resolve it — broadcast/multicast "RX works"
+    only ever exercised the MAR hash path, never the IDR physical-match
+    path the failing frames needed.
+
+  - An outlier-vs-prior-art constant is a red flag worth checking before
+    chasing register semantics. The 16-deep RX ring was the one value
+    that diverged from all prior art (Linux/FreeBSD/OpenBSD all 256). A
+    quantitative capacity shortfall masqueraded as a qualitative filter
+    defect for the entire arc.
+
+  - Distinguish servicing-rate from capacity. The bite-4 drain-loop
+    intuition was correct servicing logic but couldn't help — a drain
+    budget cannot exceed the descriptors that physically exist. The
+    falsification (`missed` rose 158 -> 176) was the clean signal that
+    isolated the constraint to capacity, and the bite-4 rubric had
+    PRE-COMMITTED the deepen-the-ring lever for exactly that branch.
+    Pre-committing the falsification-branch escape before the burn is
+    what kept the ladder from going deeper.
+
+  - Wrong-flag predicate bugs recur across an arc. The same class —
+    gating on the virtio-only `vnet_active` instead of the generic
+    `nic_ready()` — appeared three times: the 1.32.0 DHCP gate, the
+    FIX #1 `vnet_mac` egress sites, and the 1.32.8 shell net commands.
+    The durable fix is the generic abstraction at the call site
+    (`nic_ready()`/`nic_mac()`), never a case-specific flag.
+
+  - A diagnostic that lies is its own defect. The "FB lied for four
+    days" episode — a partial-RX NIC reading identically to a dead one —
+    was retired only by an HONEST L2 self-test that reports what RX
+    actually delivered (`rx=N arp_in=M arp_ans=K`) instead of a flat
+    pass/fail. Instrument the gradient, not the binary verdict.
+
+  - Isolate the bug to a layer with zero-burn Linux probes before
+    spending iron. AF_PACKET harnesses that built AGNOS's frames
+    verbatim and sent them on the real wire proved construction
+    wire-correct, proved the gateway replies to us, and proved a
+    byte-faithful SYN drew a SYN+ACK from 1.1.1.1 — collapsing the
+    suspect surface to "unicast-class RX delivery on iron" without
+    burning a single iron cycle. Iron burns cost re-cabling and reboot;
+    spend them only on the residual the software probes can't reach.
+
+[[entries]]
+name = "learning_to_write"
+description = "The two write arcs — 1.33.x ext2 indirect-write demo→base exit (iron-validated 2026-05-25) and the 1.41.x FS-syscall + VFS_SEC_WFILE FAT/exFAT write path (software-complete, iron burn pending) — and the lifecycle lessons that fall out of writing back to disk under an alloc-only heap"
+category = "cyrius"
+---
+LEARNING TO WRITE
+
+Reading a filesystem and writing one are two different kernels wearing the
+same struct definitions. The AGNOS kernel had been reading real `mkfs.ext4`
+partitions off iron NAND since the 1.31.x storage cycle — NVMe, AHCI, USB-MS,
+GPT, ext4 extents, all byte-exact against Linux-written metadata. None of that
+prepared it to put a byte back. Writing is where a read-only theory meets the
+invariants it had been allowed to ignore: free-block and free-inode counts,
+the 64-bit BGDT `_hi` half-fields, six classes of metadata checksum, and the
+brute question of what survives a power-cycle. Two separate arcs taught the
+kernel to write. The first crossed the demo→base maturity boundary on real
+silicon. The second moved the write surface up into the syscall ABI so a
+ring-3 program — not the in-kernel shell — could be the one mutating the disk.
+Only the first has touched iron. Keep that distinction; the corpus depends
+on it.
+
+THE DEMO→BASE EXIT — 1.33.x EXT2 INDIRECT WRITE, NO JOURNAL
+
+The 1.33.x WRITE arc opened 2026-05-25 (1.33.0) as the demo→base maturity
+exit. The premise was narrow and that narrowness was the point: the
+block-device write primitives were already iron-validated (USB-MS Attempt 87,
+the storage trio's hardest debut), so this arc did zero driver work. It was
+pure ext2 metadata-mutation — indirect-mapped inode growth, dirent insertion,
+allocator bookkeeping — with crash-consistency provided not by a journal but
+by ORDERED WRITES. Explicitly no jbd2. The 1.33.3 cut even shipped an honest
+no-journal story: `s_state` goes dirty-on-write and clean-on-`sync`, with a
+`sync` shell verb to make the barrier visible. That honesty matters because
+it is easy to read "write arc" and assume journaling came with it. It did not.
+Extent allocation, jbd2, and generic VFS-write are three separate later arcs
+(1.37.x, 1.38.x, 1.39.x) — the base-CLOSE road, not the demo→base exit. 1.33.x
+is indirect ext2 write and nothing more.
+
+The arc was audit-first, per the multi-source convergent prior-art doc
+(FreeBSD ext2fs as primary, Linux ext2, OpenBSD, the ext4 spec, e2fsprogs).
+Five phased sub-cuts walked the write surface up under QEMU `e2fsck -fn` gates:
+W1 write primitives at 629,568 B (+5,752 vs 1.32.9), W2 allocators plus the
+write-safety gate at 640,848 B, W3 file-data write / sparse / truncate at
+648,016 B, W4a dirent mutation with create/unlink at 654,384 B, W5 mkdir/rmdir
+closing the FS-layer write surface at 659,408 B. All five were QEMU-clean. None
+had seen iron.
+
+Then 1.33.0 took its first iron exposure, and it failed — correctly. Photo
+`1330_failed_writes`: every shell verb refused with `ext2w: read-only FS --
+write checks skipped`. The W2 safety gate was doing exactly its job. The
+default `mkfs.ext4` agnos-fs partition sets `metadata_csum` and `64bit`, and
+the gate refused both by design, because a correct writer to that partition
+has to maintain 64-bit BGDT `_hi` fields and CRC32c metadata checksums it
+couldn't yet compute. The QEMU smoke had only ever passed because it targeted
+a feature-stripped `-O ^metadata_csum,^64bit,^uninit_bg` image. The default
+partition — the one a real user actually has — demanded more.
+
+1.33.1 paid that demand across seven bites, and the surprise was how little
+of it was new stores. The 64-bit BGDT write needed ZERO store changes: a
+multi-source re-derivation showed the `_hi` half-fields are genuinely zero on
+any filesystem under 16 TB, so the fix was to lift the `incompat & 0x80` gate,
+not to write anything new. The substance was CRC32c — Castagnoli, polynomial
+`0x82F63B78` — computed across six metadata classes: superblock, group
+descriptor, block bitmap, inode bitmap, inode, and dir-leaf tail. The bite
+that actually cleared the whole `e2fsck` cascade, though, was the
+`bg_itable_unused` high-water-mark accounting fix. Build climbed bite over
+bite — 667,128 → 667,440 → 669,072 → 671,552 → 672,992 → 674,640 → 675,152 B
+— and bite 7, the `bg_itable_unused` fix, was the arc headline at 675,152 B.
+
+Then the W5 iron burn. PASS, 2026-05-25, photo `1331_After_Reboot`: `echo >
+/persist.txt` survived a power-cycle on the UNMODIFIED default `mkfs.ext4`
+agnos-fs partition, `e2fsck`-clean afterward. The demo→base maturity boundary
+fell on real NAND. That is the central iron-proven claim of this entry: AGNOS
+can create, write, and delete files on a stock Linux-formatted ext4 partition
+and have them survive the power going out. Everything after 1.33.1 in this arc
+(1.33.2 lockup-hardening, 1.33.3 rename/hardlink/symlink + the no-journal
+story, 1.33.4 the HID xfer-ring Link-TRB interactive-lockup fix folded in with
+uninit_bg materialization, 1.33.5 the fsync/FLUSH-CACHE durability barrier via
+a new `blk_flush()` dispatch hooked into `ext2_sync()`) was QEMU-gated; iron
+exposure in the whole arc was the single W5 burn. One burn, the right one.
+
+THE SECOND ARC — WRITE MOVES INTO THE SYSCALL ABI
+
+The 1.41.x shell-separation arc is a different layer of the same verb. By
+1.40.x the kernel could exec from disk (the exec arc iron-validated 2026-05-31,
+ring-3 exec with FAT verbs over ext2 at `/`, clean boot past the scheduler to
+kybernet). The 1.41.x arc's job was to evict the interactive shell from the
+kernel entirely — PID 1 execs `/bin/agnsh` in ring 3, and the in-kernel
+`shell()` becomes a recovery REPL fallback. For that to mean anything, the
+filesystem-mutation verbs had to become syscalls a userland program could call,
+against a frozen ABI. This is software-complete and QEMU-validated. It has NOT
+booted on iron. The first full hardware burn is staged at 1.41.11 behind the
+`#tracker-141x-cycle` A1–A4 rubric and is user-driven; as of this writing it
+has not run. Do not read iron success into anything in this section.
+
+1.41.3 landed the FS syscall group: nine syscalls against the frozen
+`agnos-userland-abi.md`. `open`(7) re-routed from initrd-only to mount-routed
+with flags; `mkdir`(9), `rmdir`(10), and `sync`(12) promoted from stubs to
+real; and five new — `getdents`(29), `unlink`(30), `rename`(31), `link`(32),
+`stat`(33). The two-pointer calls forced an ABI extension: `a4=r10` (decision
+O2), three args to four, where `r10` is preserved into `r9` by the entry stub
+into the SysV sixth-arg slot and read off the `ksyscall_a4` global by `rename`
+and `link` only. The dispatch surface now spans 0–33 — 34 calls, highest
+`num == 33`. fssys: ALL PASS, sweep 7/7. Two of those syscalls deliberately
+refuse work: cross-filesystem rename returns an error, and `link` returns -1
+on FAT/exFAT (decision O4 — those backends have no inodes, no hard links).
+Those refusals are not gaps; they are the ABI being honest about backend
+capability, and knowing what a syscall deliberately won't do is as load-bearing
+as knowing what it does.
+
+1.41.4 booted to `/bin/agnsh` on disk for the first time — kybernet execs it
+in ring 3 from the ext2 root, unblocked by the cyrius 6.0.56 toolchain leap
+that landed the `CYRIUS_TARGET_AGNOS` stdlib peer. agnsh-smoke PASS ×3 in QEMU,
+no #UD, no fallback, build at 1,061,944 B. Then two security sweeps: 1.41.5's
+six-dimension adversarial audit surfaced 26 findings (10 high / 3 medium /
+13 low, 0 refuted) and fixed 15, the headline being fd type-confusion where
+epoll/timerfd fds never checked their `ktag` — an arbitrary kernel read/write
+primitive, closed with VFS_* tag checks. 1.41.6 took the deferred half plus a
+new SYSCALL_HARDEN_SELFTEST (shsys: ALL PASS) as a standing net.
+
+THE INSTRUCTIVE BUG — KMALLOC IS A TRAP WHEN THERE IS NO FREE
+
+1.41.7 is the cut worth reading slowly. It added FAT/exFAT content-write
+through the syscall ABI — the first time a userland program could write a
+filesystem that isn't ext2. A write-access `open(7)` on a FAT or exFAT mount
+returns a new write-fd, VFS_SEC_WFILE (type 9), that buffers the whole file's
+content and flushes it via `vfs_write_on` on close. The first design gave each
+fd its own ~8 KB `kmalloc`. It FAILED LATE in the selftest — the kernel ran
+out of heap.
+
+The size wasn't the bug. The lifecycle was. The AGNOS kernel heap is
+ALLOC-ONLY — there is no `kfree`. A per-fd `kmalloc` under an alloc-only heap
+both leaks AND exhausts: every open/close cycle consumes heap that never comes
+back, and the failure surfaces only late, once enough write-fds have churned
+through to drain it. The correct shape under an alloc-only heap is not a
+smaller allocation — it is a STATIC bounded pool with explicit free-on-close.
+The fix is a 4-slot pool: `var sec_wfile_buf[2180]` (module-scope, so u64
+units — 17,440 bytes total, four 4360-byte blocks, each block 8 namelen + 256
+name + 4096 content) plus `var sec_wfile_inuse[4]` flags. Slots are claimed by
+`vfs_sec_wfile_alloc_slot()` and freed on close when `vfs_sec_wfile_flush`
+clears the in-use flag. Four concurrent write-fds is ample for the
+single-foreground run-to-completion model.
+
+But a bounded static resource introduces a NEW failure class the heap version
+never had: leak-on-abnormal-exit. The 1.41.10 write-path audit — three
+dimensions, four findings (3 medium / 1 low, 0 refuted), three fixed — found
+that the very pool that fixed the exhaustion bug was now a ring-3 DoS. A
+program could `open(AO_WRONLY)` four FAT/exFAT files, then `exit()` without
+closing, and every later write-open returned -1 until reboot, because process
+exit and `proc_reap` never walked the fd table. The fix: `proc_reap` now
+sweeps fds 3–31 of the exiting process and `vfs_close`s any still open (POSIX
+exit() semantics; `vfs_close` is idempotent). Two more from the same audit: a
+conforming writer (`while (off < total) off += write(...)`) would spin forever
+the moment a file crossed the 4 KB whole-file cap, because the cap returned 0
+on a count>0 write — the universal "no progress, retry" signal — now fixed to
+return -1; and a write-open whose path resolved to a directory corrupted the
+filesystem, because the flush cleared the dirent and freed the cluster chain —
+both backends now refuse `attr & 0x10`. Build moved 1,070,288 → 1,070,720 B,
++432 B for all three.
+
+REJECT THE UNSOUND FIX, EVEN WHEN IT'S THE HEADLINE
+
+1.41.11 closed the arc software-side on the last residual low: `vfs_close` of
+a write-fd had always returned 0, silently dropping data when the backend
+write failed (ENOSPC, write-protected volume). It now returns the flush rc,
+slot still reclaimed on failure. What's instructive is what was NOT taken. The
+audit's PRIMARY proposed fix — reject the write-open when `vfs_create_on`
+fails — was rejected as unsound. `fatfs_create` returns -1 on a name
+collision, which is the normal overwrite case, so that "fix" would have broken
+overwriting any existing file. An audit finding is a hypothesis; its proposed
+remediation is a second hypothesis that still has to be re-derived against the
+real code semantics. The sound secondary fix shipped; the headline didn't.
+
+Between 1.41.8 and 1.41.9 the kernel↔userland shell boundary got locked in
+permanently. 1.41.8 migrated the FS-write test harness off in-kernel shell
+verbs onto syscalls (`sc_touch`/`sc_echo`/`sc_mkdir`/`sc_rmdir` instead of
+`sh_exec`), so the verbs became undriven; 1.41.9 then deleted them.
+`kernel/user/shell.cyr` dropped 1149 → 813 LOC (−336), the production kernel
+1,084,312 → 1,070,288 B (−14 KB), leaving a recovery-only REPL:
+help/cd/pwd/ls/cat/run/mv/rm/sync/reboot plus non-write diagnostics. The
+interactive shell now lives in userland; the kernel keeps only the rescue set.
+
+The whole 1.41.x write path validates clean in QEMU — sweep.sh 7/7, fssys:
+ALL PASS, shsys: ALL PASS, agnsh-smoke PASS, check.sh 11/11 — and that is the
+extent of what is proven. The iron burn is staged, not run.
+
+LESSONS
+
+  - Write is where a read-only filesystem theory meets the invariants it was
+    allowed to ignore. The read path never needed the free-block/inode counts,
+    the 64-bit `_hi` fields, or the metadata checksums; mutation forces all of
+    them. 1.33.0 W1 even surfaced that the superblock free-count accessors had
+    never existed. The entire 1.33.1 bite ladder — six CRC32c classes plus
+    `bg_itable_unused` — exists purely because writing back to a stock
+    `mkfs.ext4` partition demands maintaining invariants reading could skip.
+
+  - Buffer LIFECYCLE is a first-class design choice under an alloc-only kernel
+    heap. The VFS_SEC_WFILE first cut used a per-fd ~8 KB kmalloc and failed
+    late in the selftest — not because the size was wrong, but because a heap
+    with no kfree makes every per-fd allocation both leak and exhaust. The
+    correct shape is a static bounded pool with explicit free-on-close, sized
+    to the concurrency model (4 slots for single-foreground run-to-completion).
+    `kmalloc` is a trap when there is no free.
+
+  - A bounded static resource relocates the lifecycle problem; it doesn't
+    remove it. The pool that fixed heap-exhaustion created a leak-on-abnormal-
+    exit DoS — open four write-fds, exit without closing, the pool is dead
+    until reboot. The cleanup half (`proc_reap` sweeping fds 3–31) is the
+    obligation a static pool always implies. The problem just moved from the
+    allocator to process teardown.
+
+  - Audit the surface, not the calendar. The 1.41.5 security sweep ran before
+    1.41.7 added the write-fd, so that surface went un-audited until 1.41.10
+    explicitly went back for it. "We already swept this arc" silently excludes
+    everything added after the sweep ran. A whole cut (1.41.10) existed only to
+    audit a path a prior sweep predated.
+
+  - Reject the unsound fix even when it's the audit's headline. At 1.41.11 the
+    audit's primary proposed fix would have broken overwriting any existing
+    file, because `fatfs_create` returns -1 on the normal name-collision case.
+    A finding is a hypothesis; its remediation is a second hypothesis. Re-derive
+    it against the real semantics before you ship it.
+
+  - Iron-validation is per-arc and does not transfer. 1.33.1's indirect ext2
+    write was iron-proven 2026-05-25 — and that says nothing about extent
+    allocation (separate 1.37.x burn, 2026-05-28), jbd2 (separate 1.38.x burn,
+    2026-05-28), or the 1.41.x FAT/exFAT write-fd (iron burn still pending).
+    Each write path is a distinct on-disk-layout contract that earns its own
+    burn. A default `mkfs.ext4` sets EXTENTS_FL — a different write path than
+    the indirect one 1.33.x proved — which is the canonical example of why
+    conflation poisons grounded answers.
+
+  - 1.33.x is "ext2 indirect write, no journal," full stop. Crash-consistency
+    came from ordered writes, not jbd2 — the 1.33.3 cut shipped an explicit
+    no-journal story. The journal (1.38.x), extents (1.37.x), and generic
+    VFS-write (1.39.x) are the base-CLOSE road, three later own-cycle arcs.
+    Folding them into 1.33.x misstates which boundary the arc actually crossed.
+
+  - Deliberate scope refusals are not omissions. The 1.41.3 group refuses
+    cross-filesystem rename and returns -1 for FAT/exFAT `link` (no inodes, no
+    hard links). Knowing what a syscall is built to refuse is as load-bearing
+    as knowing what it does — those returns are the ABI's honesty about backend
+    capability, not bugs to be filed.
+
+[[entries]]
+name = "exec_from_disk_the_four_in_one_burn"
+description = "agnos 1.40.x exec-from-disk cycle — teaching the kernel to load a static ELF64 off the ext2 root and enter ring 3, the chain of iron-only faults it unmasked (gnoboot's ≥4 GB boot_info read, the scheduler dead-proc reset, the boot-stack rodata stomp, the mount-routing lie), the single 14013 burn that iron-validated four cuts at once, and the teardown closeout that shipped QEMU-only"
+category = "cyrius"
+---
+EXEC IS THE HINGE
+
+The storage trio gave the kernel somewhere to put files. The 1.40.x cycle
+gave it a way to RUN them. From 1.40.0 (cycle-open 2026-05-28) to 1.40.14
+(closeout 2026-05-31) — four days — AGNOS learned to read a static ELF64 off
+the ext2 root, map each PT_LOAD segment into physical pages, and iretq into
+ring 3 with a working SYSCALL path. `/bin/prog2` returns `run: exit 42`.
+`/bin/argv Z` returns `run: exit 90`. The box prints `exec: selftest done`.
+
+That sentence is the whole arc, and it took eleven cuts past the loader to
+make it true on real silicon. Exec is the hinge between kernel and userland,
+and it surfaces an entire latent class of QEMU-vs-iron divergence — code paths
+the KTEST always bypassed, now exercised for the first time, each with its own
+way of being wrong only on hardware. Here is the shape.
+
+THE LOADER WAS THE EASY PART
+
+The first four bites were almost boring. 1.40.1 added `vfs_read_file` — a
+whole-file read past the old 4 KB memfile cap, FS-resolved across ext2/FAT/exFAT
+(build 1,014,528 → 1,024,256 B). The finding that shaped everything downstream:
+there is no large-contiguous allocator. `kmalloc` and `pmm_alloc` both cap at
+one 4 KB page, so the load path can't buffer a binary — it has to STREAM.
+1.40.2's `elf_load_from_file` reads each segment's bytes directly into physical
+pages through the kernel identity map: no single buffer, no CR3 switch during
+load.
+
+Then 1.40.3 turned on ring 3 for the first time ever, and ten distinct first-run
+bugs fell out of one bite. The core blocker was a single mis-encoded byte:
+`mov cr3, r10` in the SYSCALL entry stub assembled as `44 0F 22 DA` (REX.R →
+nonexistent cr11 → #UD) instead of `41 0F 22 DA` (REX.B → r10). Around it:
+LSTAR programmed via NX-stack bytecode so wrmsr never ran; EFER.SCE not in
+effect at first SYSCALL; a KPTI dual-CR3 mismatch; a hardcoded syscall kstack
+overlapping the kernel image; SMAP blocking the kernel from reading the user
+write() buffer (no STAC/CLAC); a TSS rsp0 read after the CR3 switch. Ten bugs,
++8 bytes of binary (1,033,296 → 1,033,304 B), and the entire ring-3 + SYSCALL
+spine ran end-to-end in QEMU for the first time. exec-smoke 6/6.
+
+By 1.40.8 the arc was declared iron-ready. The 1.40.5 setjmp/longjmp
+`exec_and_wait` returned cleanly, the 1.40.6 multi-run fix handled two execs
+per boot, argv/env passed through. The kernel had never been more confident.
+
+THE A3 RESET — AND THE BUG THAT HID THE BUG
+
+The 1408 burn (2026-05-30) passed 3 of 4 first try. Storage trio, ext2-write
+suite, jbd2-clean, shtest, the ENOEXEC refusal — all green. Then A3, the
+`/bin/prog2` ring-3 run, SPONTANEOUSLY RESET the box. No panic. No
+`EXEC-DISK-OK`. QEMU `-cpu max` ran the identical binary 7/7.
+
+The reset was itself a bug, and it had to be fixed before anything underneath
+it could be diagnosed. `idt_init` had pointed all 256 vectors at a 2-byte bare
+`iretq` stub — so any error-code fault during the ring-3 transition popped the
+wrong frame, mis-returned, re-faulted, escalated #DF → #TF → silent CPU reset.
+The fault erased its own cause. 1.40.9's `exc_handlers_init` installed real
+handlers on the seven vectors a broken transition can raise (#UD/#DF/#TS/#NP/
+#SS/#GP/#PF), each one stamping its vector to `CMOS[0x54]` plus magic `0xE5` to
+`CMOS[0x55]` then `cli; hlt`. Pure port I/O — CR3-independent, no memory deref,
+robust at fault time. On serial-less iron, CMOS port-I/O stamps are the
+diagnostic of record.
+
+The re-burn HALTED instead of resetting: `CMOS[0x54]=0x0E` = #PF, vector 14.
+But the error code was `0x00` — not-present, read, SUPERVISOR, data. A
+KERNEL-mode read of an unmapped address, not the user fault the textbook
+predicted. CR2 low-24 came back `0x6190`, which the static audit proved was
+mapped — so the real address had to be ≥4 GB, and `(k<<24)|0x6190` reads back
+identically for every k. So the next burn stamped the full 48-bit CR2 plus the
+faulting RIP: `CR2 = 0x000140006190`, `RIP(low32) = 0x00104fc8`. objdump put
+that RIP inside `fb_fb_phys()`, on the instruction `load64(bi + 0x48)` — where
+`bi` is the dereferenced `boot_info_ptr`.
+
+ROOT CAUSE: gnoboot is a UEFI PE app the firmware loads at an arbitrary base,
+and on RAM-rich Zen that base is ≥4 GB — `boot_info_ptr ≈ 0x140006148`, about
+5 GB. The kernel read the boot_info struct IN PLACE at that address. That works
+for the entire boot because Path C inherits UEFI's all-RAM identity map
+(`pt_init` does `mov cr3, cr3` — a TLB flush of the live UEFI CR3, not a switch).
+But `exec_and_wait` switches to the per-process CR3, which maps only 0–4 GB. The
+program's first `write(1,…)` → console → `fb_fb_phys` → load64 at ≥4 GB →
+unmapped → #PF. QEMU/OVMF loads gnoboot below 4 GB, so the bug cannot reproduce
+there. It is the same CLASS as the 1.40.6 NVMe-BAR fault, for an address no
+kernel page table ever held.
+
+The fix: `boot_info_capture_rdi` memcpy's the 120-byte struct into a low
+(<4 GB) kernel buffer `boot_info_copy[16]` at the top-level capture — while
+UEFI's map is still live — and repoints `boot_info_ptr` at the copy. Every
+later `fb_fb_phys`/`pitch`/`width`/`height` read is now CR3-independent. The
+final re-burn (`1409_final_pass_test_reset_back`): EXEC-FROM-DISK PASSES ON
+IRON. `/bin/prog2` exit 42, `/bin/argv` exit 90, `exec: selftest done`, rubric
+A1–A7 green. The user tagged 1.40.9.
+
+FIXING ONE IRON FAULT UNMASKS THE NEXT
+
+The same photo's last line: the box reset right after `Activating scheduler...`
+→ `dhcp: DISCOVER`. DHCP was innocent — the user said so ("nothing got changed
+there") and was right. The now-WORKING exec selftest was the first thing in the
+project's history to leave live process-table state before `sched_active=1`:
+`proc_count ≥ 2`, `proc_current` on a dead (state=0) exec proc. The first timer
+tick after activation — the DHCP `arch_wait` hlt — cleared
+`do_context_switch`'s `proc_count < 2` early-return (the guard that had kept
+DHCP working since 1.32.9), `sched_next` found no `state==1` proc, fell back to
+`return 0` (a dead exec proc), `cr3_load`'d its stale per-process CR3 and iretq'd
+into a ring-3 RIP under CS=0x08 → triple-fault → silent reset. QEMU never saw
+it because SLIRP answers DISCOVER before a timer tick ever lands in the hlt.
+
+A passing dispositive bar is not the end of the burn. The arc is a chain of
+unmaskings, and you budget for it. 1.40.10's fix registered proc 0 = the kernel
+main thread and proc 1 = a hlt idle thread (`kernel_idle_loop` + a module-scope
+`var kernel_idle_stack[512]` = 4096 B), BOTH carrying boot CR3 `0x1000`, before
+`sched_active=1`. All schedulable procs now share one CR3, so the
+`new_cr3 != old_cr3` guard never fires, `cr3_load` is never invoked, and
+preemption becomes pure register save/restore in one address space — a
+kernel-threads model. Per-process-AS preemption is the future multi-threading
+arc. QEMU could only validate no-regression here (no NIC, so the DHCP block is
+skipped — exactly why it never caught the reset).
+
+A RED SUCCESS MESSAGE THAT WASN'T A BROKEN FEATURE
+
+1.40.12 caught a memory-safety bug that had been corrupting the kernel near the
+2 MB line for the whole arc. `boot_shim.cyr` set `rsp = 0x200000` — fine when
+the image was small, but the kernel image CROSSED 2 MB during 1.40.x, pushing
+.rodata up to ~0x1faee8–0x1fff4c, immediately below the stack base. Every
+push/call/spill wrote into the string-literal pool, and because the whole image
+links as ONE RWE segment, those rodata writes succeeded silently.
+
+It surfaced as a red exFAT-read `upcase-checksum` smoke row. The exFAT read path
+was correct all along — its success literal `exfatu: upcase-checksum OK` just
+happened to be one of the bytes the stack stomped. A success message being red
+doesn't mean the feature is broken; it can mean its string got overwritten.
+Caught precisely with a QEMU GDB hardware watchpoint on the corrupted byte —
+writer was `push %rax` at `rsp=0x1ffbf8`. Fix: relocate the boot stack to
+0x380000 (all three boot_shim sites), sitting in PMM-reserved region 1 between
+the image top (~0x210000) and the fixed 0x3F0000 syscall kstack. Byte-size
+unchanged (only immediate operands moved). sweep.sh went 6/7 → 7/7.
+
+THE MOUNT-ROUTING LIE — QEMU PASSING FOR THE WRONG REASON
+
+1.40.13 exposed the most insidious failure of the arc. On iron, raw `fatw:`
+backend tests all PASSED but every shell-routed FAT verb FAILED with
+`no such directory` / `no such parent` / `no such path` — strings that come
+ONLY from the ext2 branch. Shell verbs routed by the `ext2_active` flag, not by
+mount. On any box where ext2 is mounted — which is every real boot, because ext2
+carries the exec arc's `/bin` — every verb took the ext2 branch and FAT/exFAT
+were unreachable through the shell. The QEMU smokes hid it by booting with NO
+ext2 partition, so every verb hit the secondary fallthrough. The smokes passed
+for the wrong reason. This was the load-bearing routing half of the 1.39.x VFS
+lift, deferred behind a `// non-goal §5` comment and wrongly papered over as
+"functionally COMPLETE."
+
+The fix: a `{prefix→backend}` mount registry plus a longest-prefix resolver —
+ext2 at `/`, FAT at `/mnt/fat`, exFAT at `/mnt/exfat`, all live at once, every
+verb resolving its absolute path to the owning backend. `fatfs_init` also went
+two-pass to prefer a non-ESP FAT data partition over the boot ESP. Eight dead
+`vfs_*_secondary` helpers came out: 117 → 109 functions, 1,052,824 → 1,050,200 B.
+
+THE 14013 BURN — FOUR CUTS, ONE BOOT
+
+On 2026-05-31 the `14013_final*` burn validated the WHOLE ARC at once. One
+bug-capture boot (`14013_boot_cmd_fails`, the routing failure) then a
+routing-fixed re-burn in three shots. pt1: ext2 at `/` (journal seq=4) plus
+FAT32 mounted, FAT-through-shell while ext2 owns `/` — `SUBDIR-FAT-OK`. pt2/pt3:
+a clean boot riding through `Activating scheduler...` → `dhcp: DISCOVER` →
+`ACK ip=192.168.1.157` → `net: L2 OK` → `Launching kybernet...`, NO RESET. One
+boot confirmed 1.40.9 exec, 1.40.10 scheduler, 1.40.12 boot-stack, and 1.40.13
+routing simultaneously. Base maturity — FS-crash-safe plus exec-from-disk plus
+scheduler-past-activation — closed on hardware. Test the real topology (ext2 at
+`/` AND a secondary FS mounted), not the convenient one.
+
+THE CLOSEOUT — AND THE LINE WE WON'T CROSS
+
+1.40.14 is the part of this entry that did NOT boot on iron, and the honesty bar
+demands the distinction. Resource reclaim is PART of exec, not an afterthought.
+Without `proc_reap`/`proc_free_address_space`, the FOURTH sequential `run`
+exhausts the 2 MB allocator — it serves only 6 usable regions (1–7, region 1
+reserved), 2 consumed per run — a HARDER wall than the 16-slot proc-table limit.
+The exec arc wasn't done when prog2 ran; it was done when the box could run
+prog2 repeatedly. Teardown is the inverse of the loader.
+
+`proc_free_address_space` walks the per-process PD and frees every user huge
+page — identified by the U/S bit (present `0x01` AND user `0x04`), NOT a
+divergence-from-kernel scan. The scan is unreliable because the first
+`pmm_alloc_2mb` commonly returns region 2 = `0x400000`, which equals the code
+segment's own identity vaddr — a physical coincidence that defeats divergence
+detection. The semantic bit (it's a user page) survives the coincidence; the
+heuristic doesn't. `proc_reap` marks the slot dead FIRST (scheduler-safe:
+`sched_next` only selects state==1), detaches the stale CR3, frees the AS, LIFO
+proc_count--. The closeout also removed the dead `u_pml4`/`u_pdpt`/`u_pd` KPTI
+allocation — a silent 3-page-per-exec leak orphaned since the 1.40.3 KPTI
+collapse — and AS construction now allocs exactly 3 reachable, reapable PT pages.
+
+It validated QEMU-only: exec-smoke 7/7, sweep functional 6/6, check 11/11, and
+two grep-visible reap-stability assertions (`reap: slot reclaim OK (pc stable)`
+and `reap: 6x AS+page cycle, free stable OK`). EXEC-selftest build 1,054,936 B;
+production build 1,050,392 B per the CHANGELOG. Its IRON RE-BURN was explicitly
+PENDING, slated to ride the next Track-B FAT/exFAT burn. So as of 2026-05-31 the
+pmm_alloc_2mb exhaustion FIX (which capped interactive `run` at ~3 invocations)
+is QEMU-validated, NOT yet iron-proven. The 1.40.14 teardown has not booted on
+hardware.
+
+One footnote worth carrying: the exFAT-write "mkfs 1.3.2 format drift" that
+shadowed several cuts was a MISDIAGNOSIS, corrected at 1.40.11. There was no
+drift — the smoke had run against a leftover exec-iron build lacking
+`EXFAT_WRITE_SELFTEST=1`, so AGNOS never wrote and `fsck.exfat -n` saw a pristine
+image. A wrong-build guard now exits 2 with an actionable message. Don't
+propagate it as a real backend bug.
+
+LESSONS
+
+  - Resource reclaim is PART of exec, not an afterthought. The FOURTH run
+    exhausts the 2 MB allocator (6 usable regions, 2 per run) — harder than the
+    16-slot proc-table limit — capping interactive `run` at ~3 invocations. The
+    loader and its inverse ship together, or the feature only works a few times.
+
+  - Identify user pages by the U/S bit (present 0x01 AND user 0x04), never by a
+    divergence-from-kernel-map scan. The first pmm_alloc_2mb commonly returns
+    region 2 = 0x400000 = the code segment's own identity vaddr; a
+    physical-address coincidence defeats divergence detection. The semantic bit
+    survives the coincidence; the heuristic doesn't.
+
+  - A silent reset is itself a bug to fix before the underlying fault can be
+    diagnosed. The bare-iretq IDT turned every transition fault into a
+    triple-fault. Real handlers that CMOS-stamp the vector — then CR2, error
+    code, the high CR2 bytes, RIP — converted an un-debuggable reboot into a
+    precise localization: fb_fb_phys reading boot_info+0x48 at ≥4 GB. On
+    serial-less iron, CMOS port-I/O stamps are the diagnostic of record.
+
+  - Fixing one iron fault routinely UNMASKS the next. exec-from-disk passing
+    (1.40.9) was the first thing to leave live process-table state before
+    sched_active=1, exposing the latent scheduler dead-proc reset (1.40.10). A
+    passing dispositive bar is not the end of the burn — budget for the chain.
+
+  - A success message being red doesn't mean the feature is broken — its string
+    literal may have been stomped. The exFAT-read path was correct; its
+    `upcase-checksum OK` literal just sat in the top ~600 B of .rodata the boot
+    stack overran once the image crossed 2 MB. A single RWE segment lets such
+    corruption succeed silently. Suspect memory-safety near segment boundaries
+    before suspecting the feature.
+
+  - QEMU smokes can pass for the WRONG reason. The mount-routing bug was hidden
+    because the smokes booted with no ext2 partition, so every verb hit the
+    secondary fallthrough; on iron, ext2 owns `/` and every verb wrongly routed
+    to ext2. Test the real topology, and beware a "functionally COMPLETE" label
+    parked behind a `// non-goal` comment.
+
+  - Three iron-only faults in one arc — the gnoboot ≥4 GB boot_info read, the
+    scheduler dead-proc reset, the boot-stack rodata stomp — were all invisible
+    in QEMU because OVMF loads gnoboot low, SLIRP answers DHCP fast, and the
+    image hadn't crossed 2 MB. The 14013 burn validated all four fixes plus
+    routing in a single boot. The teardown closeout (1.40.14) shipped
+    QEMU-only; its iron re-burn was still pending. Iron-validated and
+    software-complete are different claims — keep them apart.
+
+[[entries]]
+name = "the_shell_leaves_the_kernel"
+description = "agnos 1.37.5 + 1.41.0-1.41.11 — extracting the console font to the kashi library, then walking the interactive shell out of ring 0 into a userland agnsh while a recovery REPL stays behind: a kernel-slimming arc that GREW the binary first, an audit that aged out from under a new write path, and a sovereign-syscall boundary that no cross-repo gate could shortcut"
+category = "cyrius"
+---
+THE SHELL LEAVES THE KERNEL
+
+The shortest description of this arc is a boundary that became permanent: the interactive shell stopped living in ring 0. PID 1 kybernet now execs a userland `/bin/agnsh` in ring 3 from the ext2 root, and the in-kernel shell shrinks to a recovery REPL — a fallback, not the home. That boundary is locked as a contract at agnos 1.41.9 and hardened through 1.41.11. Before any of it could happen, a smaller arc had to land first: the console font had to leave the kernel too, extracted at 1.37.5 into the `kashi` library and vendored back through a build-time prepend.
+
+Two slimming moves, two surprises. The first slimming move GREW the binary. The second exposed an audit that had already aged out from under a path that didn't exist yet. And the whole shell-separation half is SOFTWARE-COMPLETE and QEMU-green — it has not booted on iron. The iron burn is staged at 1.41.11 and pending on archaemenid; do not read this entry as proof the userland shell ran on real hardware. The only iron-validated thing underneath it is the 1.40.x exec-from-disk foundation (burned 2026-05-31, `14013_final*`), which is exactly why the arc was viable at all.
+
+THE FONT LEAVES FIRST — AND THE KERNEL GROWS
+
+Console-font work was slated for the 1.40.x slot. The user pulled it forward to the close of the 1.37.x arc (2026-05-27) so a PARALLEL agent could own the new repo: agnos sessions touch only the extraction-and-consumption boundary, never `kashi` internals. kashi 0.1.0 was set up by extracting agnos's own glyph tables byte-for-byte out of `kernel/arch/x86_64/fb_console.cyr` — the 8x16 VGA core from HEAD, the 8x8 CGA core recovered from git `75914e9^` — into a freestanding, zero-dependency `src/font_data.cyr`. The audit recorded 0 mismatches. Glyph rendering after extraction is byte-identical to 1.37.4 by construction.
+
+The hand-off landed at agnos 1.37.5 (2026-05-28). `fb_console.cyr` retired its inline glyph machinery: `var fb_font[1536]` (the 96-glyph BSS), the `fset16` packing helper (24 lines), and a 96-line literal-load block that called `fset16(0x20..0x7F)` glyph by glyph. All of it collapsed to one `kashi_font_init()` call plus a `kashi_glyph_ptr(KASHI_FONT_VGA_8X16, ch)` lookup with a null guard. `cyrius.cyml` gained `[deps.kashi]`. The vendored core is 763 lines / 43,052 bytes.
+
+And the production build went from 843,776 to 945,360 bytes — it added 101,584 bytes. A move whose entire purpose was to shed inline font tables made the kernel bigger. The reason is honest and worth internalizing: the extracted library is more general than what agnos consumed. kashi vendors the full CP437 range — 224 glyphs, 0x20–0xFF — for VGA 8x16 AND CGA 8x8, plus a derived `KASHI_FONT_VGA_9X16` variant and accessors, against agnos's prior 96-glyph (0x20–0x7F) single-font slice. Cyrius dead-code elimination is off by default; `CYRIUS_DCE=1` flags 141 unreachable functions / 48,203 bytes, roughly half the delta. DCE was left off deliberately to keep build behavior identical across the swap.
+
+The real byte win came later, at the shell shrink — but the lesson here is that "slimming" is measured at the OWNERSHIP boundary first, not the byte count. `fb_console.cyr` stopped owning glyph tables. That was the win, even as the number went the wrong way.
+
+THE PREPEND FOOTGUN
+
+Extracting the font created a build-time coupling that every kernel-build entry point now has to honor. `kashi`'s font core isn't pulled through the language's dep resolver for the kernel build — it's prepended, literally `cat ../kashi/src/font_data.cyr` ahead of `cyrius build --no-deps`, so the freestanding glyph symbols are in scope when `fb_console.cyr` references `kashi_font_init`, `kashi_glyph_ptr`, and `KASHI_FONT_VGA_8X16`. 1.37.5 mirrored that prepend into `build.sh` and `test.sh`. The pin sits at `KASHI_REF=1.0.0` — kashi's v1 API freeze, dated the same day as the cut, 2026-05-28 (the 1.37.5 note names kashi 0.6.0 as the version actually vendored at cut-time; kashi reached 1.0.0 that day).
+
+`scripts/bench.sh` was never updated. Confirmed by direct code inspection at the current head (agnos VERSION=1.41.11): `bench.sh` has zero `kashi` / `font_data` / `KASHI` references and still invokes `cyrius build -D ARCH_X86_64 agnos.cyr` with no prepend, while `fb_console.cyr` calls symbols defined ONLY in kashi's `font_data.cyr`. That path emits undefined symbols when it runs. It is a real, latent break.
+
+It needs to be flagged precisely, because nothing logged it: no CHANGELOG, state.md, or iron-log entry records `bench.sh` failing. "It silently broke at 1.37.5" is a code-grounded inference, not an attested incident — and as of 1.41.11 the omission is unfixed. Whether `bench.sh` has even been RUN since 1.37.5 is unknown; the break may be purely latent. Either way the shape of the lesson is fixed: a build-time vendoring mechanism is a cross-cutting invariant. Enumerate every entry point and patch each one, or add a guard. A missed prepend is invisible until that one path runs.
+
+THE SHELL-SEPARATION ARC OPENS
+
+1.41.0 (2026-05-31) was staging only, no kernel code: an inventory of the 35 in-kernel shell verbs against the 28-entry syscall table, and surfacing the gating prerequisite — `CYRIUS_TARGET_AGNOS`, a cyrius-side deliverable. The cycle-open bumped 1.40.14 → 1.41.0; production byte-behavior was unchanged but for banner strings. The dependency framing here is the whole arc in miniature: agnos owned every kernel bite, but `agnsh` literally could not run until cyrius shipped an agnos-target stdlib peer. The correct framing was "add a Cyrius target," NOT "make agnos answer Linux syscalls" — the latter would have collapsed the sovereign 28-syscall surface.
+
+1.41.1 wired the first interactive ring-3 syscall: `read(fd=0)` now blocks on the keyboard and returns typed chars to a userland process (ABI decision O1, RAW). Build 1,050,824 B. No automated test is possible — a seeded stdin test hangs headless QEMU — so this bite's only validation is an iron burn, still pending. (1.41.2 was a PARALLEL boot_info side-bite — canary + ACPI RSDP fallback, the agnos half of gnoboot v0.5.0 — not shell separation; it shifted the bite numbering down one.)
+
+1.41.3 made the filesystem real over the syscall ABI: 9 syscalls wired to the 1.40.13 mount-routed VFS against the frozen `agnos-userland-abi.md` — `open(7)` re-routed with flags; `mkdir(9)`, `rmdir(10)`, `sync(12)` made real; new `getdents(29)`, `unlink(30)`, `rename(31)`, `link(32)`, `stat(33)`; plus the a4=r10 ABI extension (decision O2). `chdir`/`getcwd` were deliberately NOT made syscalls — CWD is userland-owned. fssys: ALL PASS, sweep 7/7.
+
+THE #UD AT THE PROMPT, AND THE CROSS-REPO GATE
+
+1.41.4 (2026-06-03) was first boot-to-agnsh-on-disk: PID 1 kybernet execs `/bin/agnsh` — the agnos-target build of agnoshi, ~5 K LOC / 295 KB static — in ring 3 from the ext2 root, with the in-kernel `shell()` demoted to a fallback. It was blocked, hard, on a cross-repo gate. `agnsh` is OS-agnostic and had only ever built against the Linux syscall ABI, because that was the only Cyrius target available. On AGNOS it died at startup with a #UD — illegal instruction — and never reached its prompt. The specific crash was `args_init()` with no init-stack capture in the cyrius agnos-stdlib peer; `lib/io.cyr` also carried an agnos file-op ABI miscompile, and there was no real exec.
+
+None of that was an agnos fix. It was driven entirely by the cyrius agent: cyrius 6.0.55 added `args_agnos.cyr` plus the init-stack capture (closing the `args_init` #UD) and fixed the `io.cyr` miscompile; 6.0.56 added `process_agnos.cyr`, giving a real `sys_spawn`-based exec. agnos moved its toolchain pin 6.0.14 → 6.0.56 and rebuilt byte-clean on the new codegen (1,061,944 B at the rebuild note). Then `agnsh` reached its ring-3 prompt with no #UD and no emergency fallback — QEMU agnsh-smoke PASS ×3, deterministic. Iron pending. The transferable point: a cross-repo gating prerequisite can stall an OS arc even when every line of the OS-side code is done. Sequence both halves of an ABI together, and respect the sovereign boundary while you do it.
+
+PUT AN UNTRUSTED CALLER ON THE FAR SIDE AND THE FD TABLE BECOMES A WEAPON
+
+Once a real userland shell sat on the far side of the syscall boundary, the boundary became an attack surface. 1.41.5 ran a 6-dimension multi-agent adversarial audit over the now-live ring-3→ring-0 ingress: 26 findings (10 high / 3 medium / 13 low, 0 refuted), 15 fixed this cut — all 10 high, plus 2 medium and 3 low.
+
+The headline was fd type-confusion. `epoll_ctl`, `epoll_wait`, and `timerfd_settime` never checked the fd's ktag. A ring-3 caller could pass any other fd type whose `payload[2]` is a kernel heap pointer — a pipe or memfile fd — or a small integer, like an ext2 fd's inode number; the handler's `store64`/`load64` then wrote or read arbitrary kernel memory. The fix was a VFS_* tag check per handler, mirroring the `getdents` precedent rather than reinventing it, plus a bound on the watched fd so it can't index `vfs_table` out of range. The same cut added the 1 GB user-VA ceiling in `is_user_range`/`is_user_ptr`, capped ext2 basename overflow at 255, validated the spawn ELF buffer and `p_vaddr` bound, capped an mmap length-overflow, and guarded a FAT-chain cycle. Type-confusion across an fd table IS an arbitrary read/write primitive the moment untrusted callers reach it — a tag check per handler, plus a bound on any fd used as an index, is the floor.
+
+1.41.6 (2026-06-04) took the deferred exec-hardening half: a new `SYSCALL_HARDEN_SELFTEST` safety net (shsys: ALL PASS — first regression coverage for epoll/timerfd/signalfd), and the #11 ELF-leak fix, where `elf_load`/`elf_load_from_file` now validate every PT_LOAD in a pre-pass BEFORE allocating, so a malformed ELF is rejected with zero allocations to leak. It also deduped a shared `sc_path_ok` preamble (#22) and renumbered the FS syscall group (#21). One audit proposal was REJECTED on purpose: #23, a single-tail canary rewrite, would have meant rewriting ~25 early-returns in the security-critical dispatcher for a non-vuln cosmetic. A finding is a question, not a patch.
+
+THE WRITE PATH THE SWEEP PREDATED
+
+1.41.7 (2026-06-04) surfaced a gap while planning the shell-shrink: `vfs_write` was ext2/pipe/device-only, so FAT/exFAT content-write was reachable ONLY through the in-kernel shell's `echo>` (`vfs_write_secondary`). That couldn't survive once the in-kernel shell was demoted. So 1.41.7 added a new VFS_SEC_WFILE write-fd: `open(7)` with write access on a FAT/exFAT mount buffers content and flushes the whole file on close, backed by a STATIC 4-slot pool freed on close — not `kmalloc`, because the alloc-only heap leaks. A new syscall-driven `syswr` selftest covered FAT and exFAT. Known limit: a 4 KB whole-file cap per fd, no append, no streaming.
+
+This is the trap that aged out from under the audit. The 1.41.5 ingress sweep had run BEFORE 1.41.7 existed, so the entire open-routing / write / flush / pool surface was never swept. A security audit is DATED; anything landed after it is unaudited until re-swept. The 1.41.10 arc-close pass exists precisely to "audit the path the sweep predated," and it found real teeth: a 3-dimension adversarial audit, 4 real findings (3 medium / 1 low, 0 refuted), 3 fixed. The worst — a write-open of a directory PATH on a FAT/exFAT mount flushed through the backend and freed the directory's cluster chain, on-disk filesystem corruption; both backends now refuse to overwrite a directory via an attr-0x10 guard. Plus the 4-slot pool leaking on process exit (a ring-3 DoS), fixed by an fd-reclaim sweep in `proc_reap` that closes fds 3-31 with an idempotent `vfs_close`; and `vfs_sec_wfile_write` returning 0 at the 4 KB cap, which spun a conforming write loop forever — now an error.
+
+MIGRATE, THEN DELETE
+
+The shell-shrink itself was done in the safe order. The FAT/exFAT/ext2 write selftests had driven the in-kernel shell's write VERBS through `sh_exec("touch …")`. 1.41.8 re-pointed those tests at SYSCALLS — the same path `agnsh` uses — so the verbs became undriven. Only then, at 1.41.9, were they deleted. Never delete a surface a green test still exercises; move the test to the surface that survives first.
+
+1.41.9 is where the boundary locked. The in-kernel shell shed its non-recovery verbs — `touch`, `echo>` redirect, `mkdir`, `rmdir`, `ln`, `bench` (+`bench_report`), `ps`, `free`, `jbd2`, and the now-dead `sh_write_selftest`. `shell.cyr` went 1,149 → 813 LOC (−336); the production kernel went 1,084,312 → 1,070,288 B — the real −14,024-byte (~−14 KB) slim, the one the font extraction never delivered. The deletion was done by a subagent from the 1.41.8 spec and independently re-verified: grep confirmed zero dangling references, all recovery verbs present, clean build.
+
+What stayed is the point. The recovery REPL keeps `help`/`cd`/`pwd`/`ls`/`cat`/`run`/`mv`/`rm`/`sync`/`reboot` and the read-only management verbs (`uptime`, `lspci`, `cpus`, `net`, `parts`, and the rest); `echo` shrinks to a bare print. The in-kernel shell is deliberately KEPT as the boot fallback for when `/bin/agnsh` is absent or corrupt — slimming the kernel does not mean removing the emergency path, it means demoting it to recovery-only. (Honesty footnote: the CHANGELOG's "recovery REPL" framing is right — every WRITE/management verb is gone — but the kept set is broad. "Minimal" would overstate it; the shrunk shell still carries a substantial read-only verb list.)
+
+CLEAN, AND STAGED FOR IRON
+
+1.41.10 closed the audit gap above. 1.41.11 is clean-and-iron-prep — the arc is SOFTWARE-COMPLETE. It took only the residual 1.41.10 low fix: `vfs_close` now surfaces the write-fd flush rc instead of swallowing it, so a failed FAT/exFAT backend write reports the error to `close()`. The audit's PRIMARY proposed fix for that finding was REJECTED — again — because it was unsound: it would have broken overwrite, since `fatfs_create` returns -1 on the normal name-collision. Only the sound secondary fix was taken. Twice in this arc the audit's headline remedy had to be turned down (the 1.41.6 canary rewrite and this one); both times the proposal failed to preserve documented behavior. Verify the remedy, not just the finding. Build moved 1,070,288 → 1,070,720 B (+432).
+
+Then the iron tracker was staged: `#tracker-141x-cycle`, with an A1–A4 dispositive rubric — boot-to-agnsh in ring 3; recovery-shell fallback; FAT/exFAT write fsck-clean; no exec/storage/net regression. All of QEMU is green: agnsh-smoke PASS ×3, sweep 7/7, fssys ALL PASS, shsys ALL PASS, check.sh 11/11. None of it has booted on archaemenid. As of 2026-06-04 there are no fresh top-level iron photos in git status, and the burn is user-driven and pending. The 1.40.x exec-from-disk + VFS-routing foundation this whole arc rides on IS iron-validated (2026-05-31), and that foundation — exited processes finally reclaiming their address space via `proc_reap`, after 1.40.x had been exhausting `pmm_alloc_2mb` on the 4th sequential `run` — is exactly the "why now" that made a long-lived ring-3 `agnsh` viable. But the shell-separation arc itself is a QEMU verdict awaiting an iron verdict. Do not claim agnsh ran on real hardware.
+
+LESSONS
+
+  - Factoring a vendored dependency into the source through a build-time mechanism — a prepend ahead of `cyrius build --no-deps`, not the language's dep resolver — makes that mechanism a cross-cutting invariant. 1.37.5 mirrored the kashi font prepend into `build.sh` and `test.sh` but not `bench.sh`; `bench.sh` still has zero kashi references at 1.41.11 and emits undefined symbols (`KASHI_FONT_VGA_8X16`, `kashi_glyph_ptr`, `kashi_font_init`) when it runs. A missed prepend is invisible until that path runs. Enumerate and patch every build entry point, or add a guard. (This one is a code-grounded inference — no source logs it as a discovered incident, and it is unfixed.)
+
+  - A "kernel-slimming" move can legitimately GROW the binary first. 1.37.5 ADDED +101,584 B while shedding the inline font tables, because the extracted library is more general (full CP437 × two faces + a derived variant) than what agnos consumed, and DCE was left off to keep behavior identical. Measure slimming at the SOURCE/ownership boundary — `fb_console.cyr` stops owning glyph tables — not always at the byte count. The byte win came later: −14 KB at the shell shrink (1.41.9).
+
+  - Migrate-then-delete is the safe order for removing a subsystem that tests depend on. The write selftests drove the in-kernel shell's verbs via `sh_exec("touch …")`; 1.41.8 re-pointed them at syscalls (the surface that survives), so 1.41.9 could delete the verbs with zero coverage loss, verified by a subagent plus an independent grep for dangling refs. Never delete a surface a green test still exercises.
+
+  - A security audit is dated. Any privileged feature landed after the sweep is unaudited until re-swept. The 1.41.5 ingress audit predated the 1.41.7 VFS_SEC_WFILE write-fd, which then harbored a directory-overwrite FS-corruption bug, a pool-leak DoS, and an infinite-spin-at-cap bug — all caught only by the explicit 1.41.10 "audit the path the sweep predated" pass. Track what the last sweep did NOT cover.
+
+  - Type-confusion across an fd table is an arbitrary-read/write primitive the moment untrusted callers reach the syscall boundary. `epoll_ctl`/`epoll_wait`/`timerfd_settime` trusted `payload` without checking the ktag; a ring-3 caller could pass a pipe/memfile fd (kernel heap ptr) or an ext2 fd (inode number) and turn `store64`/`load64` into kernel write/read. Fix: a tag check per handler plus a bound on any fd used as a table index — mirror the established precedent (`getdents`), don't reinvent it per call site.
+
+  - Lock the boundary as a PERMANENT contract and keep the kernel side as a non-collapsing fallback. The shell-separation payoff is the permanent kernel↔userland shell boundary: kernel shell = recovery only, `agnsh` = full interactive. The in-kernel REPL is deliberately kept as the boot fallback for when `/bin/agnsh` is absent or corrupt (the A2 rubric item burns exactly that). Demote the emergency path; don't delete it.
+
+  - Reject the audit's proposed fix when it isn't behavior-sound, and document why. Twice this arc the adversarial audit's PRIMARY remedy was turned down — 1.41.6 #23 (a single-tail canary rewrite touching ~25 early-returns in the security-critical dispatcher for a non-vuln cosmetic) and 1.41.11 #4 (the proposed fix would break overwrite, because `fatfs_create` returns -1 on the normal name-collision). Only the sound secondary fixes were taken. A finding is a question, not a patch; verify the remedy preserves documented behavior before applying it.
+
+  - A cross-repo gating prerequisite can stall an OS arc even when every line of OS-side code is done. The 1.41.x arc was gated on a CYRIUS-side deliverable (`CYRIUS_TARGET_AGNOS` — an agnos-target stdlib peer emitting agnos syscall numbers). agnos owned the kernel bites — stdin, FS syscalls, exec — but `agnsh` couldn't run until cyrius 6.0.55/6.0.56 landed `args`/`io`/`process` for the agnos target (the pin moved 6.0.14 → 6.0.56). The correct framing was "add a Cyrius target," NOT "make agnos answer Linux syscalls," which would have broken the sovereign 28-syscall surface. Sequence both halves of an ABI together, and respect the sovereign boundary.
+
+  - And the honesty discipline that outlasts the arc: the entire 1.41.x shell-separation half is QEMU-green and software-complete — agnsh-smoke PASS ×3, sweep 7/7, fssys/shsys ALL PASS, check.sh 11/11 — and has NOT booted on iron. The iron burn is staged at 1.41.11 with an A1–A4 rubric, pending, user-driven on archaemenid. Only the 1.40.x exec foundation beneath it is iron-validated (2026-05-31). A QEMU verdict is a hypothesis until iron answers.

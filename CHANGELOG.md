@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Kernel field notes brought current through agnos 1.41.x** —
+  `content/cyrius/field_notes/kernel.cyml` grew from 5 to 9 entries,
+  closing the gap from the 1.31.x storage trio (where it had stalled)
+  through the shell-separation arc. Each entry was mined from the agnos
+  CHANGELOG + agnosticos iron-nuc-zen-log + kernel source, then
+  adversarially fact-checked against those sources (every version
+  number, byte-size, date, and the QEMU-vs-iron honesty bar
+  re-derived, not taken from the draft):
+  - `the_unicast_that_couldnt_arrive` — agnos 1.32.x networking. The
+    ~14-burn chase of a phantom RTL8168H/8111H L2 accept-filter that
+    ended at an RX descriptor ring 16→64 deepening; the
+    audit-re-derive-don't-validate-comments lesson. Iron-validated
+    2026-05-25.
+  - `learning_to_write` — the two write arcs: 1.33.x ext2 indirect
+    write (demo→base exit, iron-proven 2026-05-25) and the 1.41.x
+    `VFS_SEC_WFILE` FAT/exFAT write-fd (software-complete, iron burn
+    pending). Buffer lifecycle under an alloc-only heap; why
+    iron-validation is per-arc and never transfers.
+  - `exec_from_disk_the_four_in_one_burn` — agnos 1.40.x exec-from-disk.
+    Loading a static ELF64 off ext2 into ring 3; the iron-only fault
+    chain (gnoboot's ≥4 GB `boot_info` read, the scheduler dead-proc
+    reset, the boot-stack `.rodata` stomp, the mount-routing lie) and
+    the single `14013` burn that iron-validated four cuts at once
+    (2026-05-31). The 1.40.14 teardown closeout shipped QEMU-only.
+  - `the_shell_leaves_the_kernel` — agnos 1.37.5 + 1.41.x. The console
+    font extracted to the `kashi` library (and the build-prepend
+    footgun that left `bench.sh` latently broken), then the interactive
+    shell walked out of ring 0 into a userland `agnsh` while a recovery
+    REPL stays behind — the permanent kernel↔userland boundary.
+    Software-complete and QEMU-green; **iron burn pending** (staged at
+    1.41.11 behind the `#tracker-141x-cycle` A1–A4 rubric).
+
+### Fixed
+
+- `content/cyrius/field_notes/index.cyml` Kernel section was stale —
+  it claimed "3 entries," listed only 2, and the file already held 5.
+  Now lists all 9 (registering the previously-unlisted
+  `the_mvp_gate_at_attempt_68` and `the_storage_trio_iron_debut`) with
+  the count and subtitle corrected.
+
 ## [2.7.1] — 2026-05-16
 
 ### Changed
