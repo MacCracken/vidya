@@ -1,0 +1,166 @@
+# Cyrius Field Notes — v6.1.x cycle retrospective (RUNNING)
+# Written incrementally across the v6.1.x minor. Extended through
+# v6.1.11 (2026-06-08). Companion to v60x.cyml (the v6.0.x minor that
+# opened the 6.x cycle) and foldin_arc_v57_v59.cyml.
+#
+# v6.1.x — "Backend Codegen Multi-Arc". A multi-arc minor themed on
+# position-independent codegen + dynamic-link cleanup + the v6.0.x
+# carry-ins, capped by Phase D: the TS/TSX → JS frontend emitter. The
+# cycle's defining lesson lives in v61x_ts_ast_allocator_corruption: a
+# parser that only validates can ship a structurally-corrupt AST for
+# nine minors, because the first thing to actually WALK it is the first
+# thing to find the bug.
+
+[[entries]]
+name = "v61x_cycle_overview_through_11"
+description = "v6.1.x overview through .11: Phase A housekeeping (back-compat symlink drop .1, aarch64 EADDRA_IMM >4095 fix .2, POSIX *at() family + the aarch64 ESYSXLAT collision fix that repaired native-aarch64 sys_stat .3), Phase B backend prep (_TARGET_*/_emit_fmt + DCE consolidation to common/runtime.cyr .4-.5), Phase C codegen (PIE x86_64 .6 + aarch64 .8 via --pie/CYRIUS_PIE=1, Windows DXGI .rdata fix + kernel-PIE wrapper .7, .gnu.hash dynamic-link migration .9), and Phase D the TS/TSX→JS emitter (the AST children-list allocator-fix prereq .10 + the cycc --emit-js emitter .11). cycc 1,036,848 B; check.sh 87; self_compile ~570 ms."
+category = "cyrius"
+tags = ["retrospective", "v6.1.x", "pie", "gnu-hash", "ts-js-emit", "backend-codegen", "running"]
+content = """
+v6.1.x opened with a clean cut (roadmap split into active-minor /
+whole-cycle / future tiers; benchmark-every-release made a hard
+gate) and ran as a multi-arc minor in four phases.
+
+PHASE A — HOUSEKEEPING (.1–.3)
+Dropped the v6.0.0 rename back-compat symlinks (cc5/cyrc); fixed a
+latent aarch64 `EADDRA_IMM` 12-bit-mask bug (byte-array literal
+>4096 silently corrupted); shipped the POSIX `*at()` family — and
+the aarch64 ESYSXLAT collision it forced: native `newfstatat`(79)/
+`utimensat`(88) collide with x86 `getcwd`/`symlink`, so stdlib now
+emits the x86 numbers (262/280) and ESYSXLAT renumbers LAST. That
+repaired `sys_stat`, silently broken on native aarch64 since
+v6.0.41 — another found-by-ports rot.
+
+PHASE B — BACKEND PREP (.4–.5)
+Hoisted `_TARGET_*` decls + `_emit_fmt` and the DCE mark-and-sweep
+probes into `src/backend/common/runtime.cyr` (logic-preserving,
+verified byte-identical via old-vs-new corpus + DCE-torture). Prep
+for the PIE fixup-table work that follows.
+
+PHASE C — PIE + DYNLINK (.6–.9)
+Position-independent codegen on BOTH arches: x86_64 (.6, RIP-
+relative `lea`) and aarch64 (.8, `adrp`/`add`) under `--pie` /
+`CYRIUS_PIE=1`, producing ET_DYN userland executables (validated by
+running the full tcyr corpus as ASLR'd PIE binaries on real ARM).
+.7 packed a Windows COM/DXGI `.rdata` corruption fix (a consumer
+GPU bug, diagnosed debugger-free via exit-code probes on real cass)
++ the kernel-PIE ELF wrapper. .9 migrated `.so` emission from SysV
+`.hash` to `.gnu.hash` (the long-deferred v5.6.38 pin) — the native
+loader already read only DT_GNU_HASH, so cyrius `.so`s had been
+resolving via a linear `.dynsym` fallback over a dead SysV table.
+
+PHASE D — TS/TSX → JS EMITTER (.10–.11)
+The headline. `cycc --emit-js` turns a typed `.tsx` into runnable
+browser JS — Cyrius can now BUILD a TS frontend, not just validate
+one. But premise-check at slot entry found the parser built a
+CORRUPT AST for every nested list (see
+v61x_ts_ast_allocator_corruption), so Phase D became a mini-arc:
+.10 fixed the allocator + added a self-validating walk gate, .11
+shipped the emitter on the corrected AST (type-strip, JSX → an
+`h()` pragma + standalone runtime prelude, ESM passthrough with
+type-only export pruning). The consumer's real app.tsx emits valid
+JS — proven by node --check + --parse-ts round-trip + a stub-DOM
+run.
+
+OPEN / CARRIED: Phase E (bayan/ganita stdlib carve) is next;
+kernel-PIE gnoboot-boot validation + aarch64 kernel-PIE wait on an
+AGNOS --pie harness; x86-macho cycc self-compile stays HELD (Apple
+Intel EOL).
+"""
+
+[[entries]]
+name = "v61x_ts_ast_allocator_corruption"
+description = "THE v6.1.x lesson (v6.1.10): the TS/TSX parser silently built a CORRUPT AST for every nested list (call args, block stmts, object props, JSX attrs/children, ...) because TS_AST_CHILDREN_RESERVE returned the children-pool cursor WITHOUT advancing it — so a list reserved before its elements were parsed got stomped by those elements' own sub-lists. --parse-ts passed for years because nothing ever READ the lists back: parse success only checks for parse errors, not list integrity. The TS→JS emitter was the first AST consumer and the first to find it. Fix: deferred construction — builders push fully-parsed element indices onto a scratch stack (TS_CST_PUSH), then FLUSH one contiguous, non-overlapping block once every subtree is allocated (TS_CST_FLUSH)."
+category = "cyrius"
+tags = ["ts-frontend", "parser", "ast", "children-list", "allocator", "found-by-consumer", "validate-only-trap", "v6.1.10", "TS_CST_PUSH", "TS_CST_FLUSH"]
+content = """
+If you are about to touch `src/frontend/ts/parse.cyr` list building,
+read this first.
+
+THE BUG
+`TS_AST_CHILDREN_RESERVE(ts_base, n)` returned the current pool
+`used` cursor but did NOT advance it (only COMMIT advanced). Every
+builder did `off = RESERVE(N)` and THEN parsed its elements — and
+each element's own sub-lists allocated at the SAME `used` offset,
+stomping the parent region (and vice versa). Verified empirically:
+`function f(x){ return g(x,1); }` had the call's args list and the
+block's stmt list both land at children-offset 3; the block
+clobbered g's arguments. The AST was garbage for any nesting.
+
+WHY IT SURVIVED SO LONG
+`--parse-ts` exited 0 the whole time because **nothing read the
+lists back.** Parse "success" means no parse ERROR was raised — it
+says nothing about whether the retained AST is walkable. The TS
+frontend had a full parser and a rich AST format but ZERO
+consumers; the emitter (v6.1.11) was the first thing to walk it,
+and so the first thing to discover years of latent corruption.
+This is the validate-only trap: a frontend that only validates can
+ship a structurally-broken AST indefinitely. The premise "the
+parser exists, emit is just codegen on top" did not survive slot
+entry.
+
+THE FIX (deferred children construction)
+Builders now PUSH each fully-parsed element's node index onto a
+scratch stack (`_ts_cst`, via `TS_CST_PUSH`) — an element is pushed
+only AFTER its whole subtree is parsed, so a builder's run is
+contiguous on the stack even across nested builders (each saves
+`TS_CST_TOP()` on entry and flushes back to it). `TS_CST_FLUSH`
+then lays the run down as one contiguous, non-overlapping children
+block, by which point every element subtree is already allocated.
+The template builder (two interleaved quasi/expr lists) uses local
+arrays + `TS_AST_CHILDREN_WRITE` instead. KEY INSIGHT that bounded
+the work: only VALUE-walked builders needed converting — type-only
+builders (kept on the old path) can't corrupt value lists, because
+once value lists FLUSH-advance the cursor, the old type builders
+only ever allocate at/above it.
+
+THE GATE THAT PROVES IT
+`cycc --emit-js` self-validates: it walks the tree and exits
+non-zero if any node is reached twice (overlapping lists share a
+child slot) or a list entry is out of range. Proven NOT a placebo
+by deliberately re-breaking the allocator (FLUSH not advancing) →
+clean non-zero + "AST walk error". check.sh `_ts_walk_gate` runs
+emit + a --parse-ts round-trip of the output.
+
+THE GENERALIZATION
+A retained data structure is only as correct as its first real
+reader. "It parses" / "tests are green" can both be true while the
+structure is corrupt, if the green path never traverses it. When
+you build a producer with no consumer, the integrity is unproven —
+write the walk (or a walk-validator) before trusting the bytes.
+Same family as the v6.0.x macho-rot lesson (a checkmark is only
+worth the work it runs).
+"""
+
+[[entries]]
+name = "v61x_pie_was_80pct_prebuilt"
+description = "v6.1.6/.8 premise correction: PIE (position-independent codegen) looked like greenfield but was ~80% already built and proven. x86_64 PIE reused the dlopen-proven shared/object `_IS_OBJ` RIP-relative path; aarch64 PIE reused the byte-proven Mach-O adrp/add PIC machinery (the six address-emit sites + three fixup branches already gated on _TARGET_MACHO==2 just also fire for _pie_mode). The feared fn-ptr/vtable 'awkward case' was a non-issue. So both PIE slots widened an existing gate + fixed one ungated site rather than writing new codegen — premise-check the actual code before scoping."
+category = "cyrius"
+tags = ["pie", "codegen", "premise-check", "adrp-add", "rip-relative", "_IS_OBJ", "v6.1.6", "v6.1.8"]
+content = """
+Both PIE slots were scoped as significant new codegen and turned
+out to be mostly reuse — a recurring v6.1.x pattern worth
+internalizing.
+
+x86_64 (.6): the `shared`/object (`_IS_OBJ`) emit path already
+produced RIP-relative `lea [rip+disp32]` throughout and was proven
+via dlopen. PIE for executables was the same machinery with one
+ungated site (`EVADDR_X1`); the slot widened the gate + the
+check.sh PIE-exec gate (run the 169-tcyr corpus as ASLR'd PIE)
+rather than building anything new.
+
+aarch64 (.8): the Mach-O backend already emitted `adrp`/`add` PIC
+pairs (the only way to address on Darwin), byte-proven on ecb. The
+six address-emit sites and three fixup branches were gated on
+`_TARGET_MACHO == 2`; making them ALSO fire for `_pie_mode` gave
+ELF PIE for free, with `FIXUP_ADRP_ADD` generalized from the
+hardcoded Mach-O base to `_entry_base(S)` (cancels in the adrp
+page-diff, so Mach-O stays byte-identical and ELF PIE is
+load-bias-correct).
+
+THE LESSON: when a feature feels like greenfield, grep for an
+existing path that already does the hard part for a neighboring
+target. The fn-ptr/vtable "awkward case" everyone feared never
+materialized because the object/shared path had already solved it.
+Premise-check the code, not the roadmap's framing.
+"""

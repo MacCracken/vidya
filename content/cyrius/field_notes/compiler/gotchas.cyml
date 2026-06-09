@@ -12,7 +12,56 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
-# 20 entries.
+# 40 entries (.88-.90 added: x86-Mach-O can't compile byte-array literals — a
+# parser miscompile INVISIBLE to self-host since cycc uses no byte arrays (verify
+# pre-existing by stashing to the released tag's source on the target); the
+# byte-array peephole must hoist &var via the obj-aware _EVRCX, NOT absolute-only
+# EVADDR_X1, or obj/PIE byte arrays regress; _emit_fmt must test Mach-O before PE
+# to match the old EMITELF ladder for the unguarded CYRIUS_MACHO+CYRIUS_TARGET_WIN
+# combo. Plus the zsh-no-word-split test-harness trap.)
+# 37 entries (.87 added: getenv on agnos walks the exec-stack envp from
+# _agnos_init_rsp (no /proc); the agnos kernel is LOCALLY TESTABLE — rebuild
+# with agnos/scripts/build.sh + boot under QEMU via agnsh-smoke.sh/exec-smoke.sh
+# and run a ring-3 cyrius binary. Don't claim "no agnos to test on".)
+# 36 entries (.86 added: callptr callee-spill frame slot can ALIAS a &-taken
+# local — v6.0.70 spilled the indirect-call target to a GFLC frame slot; a COM
+# out-param `&local` could land on the same slot → frame/regalloc corruption →
+# AV (DXGI GetDesc1 on cass). Fix: PE callptr callee on the STACK + `call rax`,
+# no frame slot. Found with cdb on cass (C:\dbg\cdb.exe).
+# 35 entries (.85 added: Windows install pillar — no /proc env on Windows (read
+# via GetEnvironmentVariableA PE reroute 0xF015); wrapper compile()/run_binary
+# are POSIX fork/execve, Windows needs cmd.exe-redirect spawn via CreateProcessW
+# (cmd /s /c strips only the outer quote pair); .ps1 must be ASCII (PS 5.1
+# mis-decodes UTF-8 em-dashes); the macho-arm/x86 dual-number trap applies to PE
+# reroute numbers too. cyrius build now works on Windows.
+# 34 entries (.84 added: macOS owns the thread-pointer register — Darwin
+# saves/restores TPIDR_EL0 (arm64) / %fs (x86) as thread state and overwrites
+# any userspace install on the FIRST preemption, so cyrius can't durably own it
+# for thread-local storage (sigil crypto-scratch crash); use a process-global
+# on macOS. + socketpair dual-number: arm-macho=199 (aarch64-Linux enum),
+# x86-macho=53 — and 53 is fchmodat on the arm enum, so don't reuse it.
+# 33 entries (.70 added: callptr/IR_CALL_INDIRECT — compiler-emitted indirect
+# calls; the callee-survival crux (frame-slot spill, NOT pop-after-ECALLPOPS
+# which the Win64 shadow buries); aarch64 uses x6; top-level/cx = loud error;
+# open real-Win64-COM-callee corruption → .71.
+# 32 entries (.69 added: PE multi-DLL imports — generalize the single-kernel32
+# import descriptor to N DLLs (shell32/dxgi); the flat ftype=4 fixup forces an
+# imp_idx→physical-slot remap; design byte-identical at one DLL; x86-only PE
+# emit fns need aarch64 no-op stubs (FATAL under --strict).
+# .68 added: aarch64-Linux ESYSXLAT gaps — stat/rename/symlink
+# literals hit the wrong aarch64 syscall (§D1 deps + build + pulsar); the
+# native entry file diverged from the cross (missing auto-call-main); and the
+# CI gate tested the cross binary not the shipped native one (placebo).
+# .67 added: param_load(reg,idx) asm pseudo + the bootstrap-coupling
+# lesson — migrating bootstrap-critical libs to a new compiler feature.
+# .66 added: cyrius test on Apple Silicon — qemu mis-route (127)
+# + unsigned AMFI SIGKILL (137); exec native + _macho_codesign in run_binary.
+# .65 added: portable sleep — no raw nanosleep(35) off Linux;
+# poll-as-sleep + Windows Sleep reroute; macho 35 collides with unlinkat.
+# .64 added: aarch64 atomic-on-global needs 8-aligned
+# var base; aarch64 atomic_cas is not a full barrier — fence the lock.
+# .63 added: macho syscall dual-definition 61-vs-217;
+# Mach-O output-basename breaks reproducible cmp).
 
 [[entries]]
 name = "slice_fn_local_layout_flip"
@@ -465,7 +514,7 @@ overwrite your edit with the prior snapshot.
 
 You make an Edit. You verify the change. You run `check.sh`.
 Tests pass. But the next time you read the file, your edit is
-GONE. cc5 is also gone — the snapshot's version was pulled back
+GONE. cycc is also gone — the snapshot's version was pulled back
 in along with the lib file, AND the snapshot's lib is what's
 actually in `~/.cyrius/lib`.
 
@@ -527,7 +576,7 @@ add lib/<name>.cyr` commits the symlink. Git records mode 120000
 a non-existent path → file effectively missing.
 
 **Surfaces as**: tcyrs that `include "lib/<name>.cyr"` fail to
-compile with "file not found" → cc5 exits non-zero → under
+compile with "file not found" → cycc exits non-zero → under
 `bash -e` (GHA's default shell mode), the test loop terminates
 silently mid-loop. No `FAIL:` print, no summary, just exit 1.
 Easy to misdiagnose as "test crashed the runner."
@@ -655,7 +704,7 @@ liability. v5.8.59 took Option B to ship NFKC/NFKD via the
 str_data bump (placed at `0x4E8C000`); v5.8.61 reverted to
 monotonic once the var_enum_id..preprocess_out gap was sized
 right (str_data now at `0x21A000`). Two-step bootstrap
-required at both: cc5 (old layout) compiles cc5b (new layout);
+required at both: cycc (old layout) compiles cc5b (new layout);
 cc5b compiles cc5b'; cc5b == cc5b' byte-identical at the new
 size.
 
@@ -741,15 +790,15 @@ WHAT BREAKS
 After `sh scripts/version-bump.sh 5.10.X`, expected end state:
 - `cat ~/.cyrius/current` → 5.10.X
 - `readlink ~/.cyrius/bin` → ~/.cyrius/versions/5.10.X/bin
-- `~/.cyrius/bin/cc5 --version` → cc5 5.10.X
+- `~/.cyrius/bin/cycc --version` → cycc 5.10.X
 
 Observed (multi-bump streak in v5.10.x cycle):
 - ~/.cyrius/current → stale (5.10.34 e.g.)
 - readlink ~/.cyrius/bin → stale version's bin
-- cc5 --version → stale 5.10.34
+- cycc --version → stale 5.10.34
 
 User-visible symptom: `cyrius-prompt-info tool` (which reads
-through ~/.cyrius/bin/cc5) shows wrong toolchain version on
+through ~/.cyrius/bin/cycc) shows wrong toolchain version on
 the user's starship prompt. Easy to mis-read as "starship.toml
 corruption" — actual config bytes are intact, but the cyrius
 prompt segments render with stale data.
@@ -837,7 +886,7 @@ the tail and hard-fail if not consistent. Silent partial-
 success is unrecoverable from the user's perspective. The
 two version-discovery paths (`cyrius --version` reading
 VERSION file directly vs `cyrius-prompt-info tool` reading
-through ~/.cyrius/bin/cc5) diverged for multiple version
+through ~/.cyrius/bin/cycc) diverged for multiple version
 bumps before anyone noticed.
 """
 
@@ -1745,4 +1794,791 @@ DO NOT use `NPOS_GUARD(S, MAGIC_CONSTANT)` for any write
 shape where the input length depends on parser state.
 The gate at `_cve05_guard_gate()` catches the magic-256
 specifically; generalize the principle.
+"""
+
+[[entries]]
+name = "macho_syscall_number_dual_definition_61_vs_217"
+description = "SYS_GETDENTS64 is defined as 217 (x86/macos) AND 61 (aarch64-Linux) in different stdlib files; the wrapper binds 61 by include order, and the macho ESYSXLAT translated only 217→344, missing 61→344 — so arm64-macOS dir-walk silently EBADF'd. 'Works in a probe, fails in the wrapper' = a duplicate global bound differently by include order, NOT codegen."
+category = "cyrius"
+tags = ["macho", "aarch64", "esysxlat", "syscall", "getdirentries", "include-order", "v6.0.63"]
+content = """
+**The trap**: `cyrius lib sync` (and any dir-walk — is_dir,
+dir_list) returned EBADF on arm64 macOS and reported "snapshot
+lib not found" on a directory that demonstrably exists. The .60
+fix had already added a macho ESYSXLAT entry translating x86
+getdents64 217 → Darwin getdirentries 344, and a standalone
+probe calling dir_list WORKED — so it looked fixed and was
+mis-filed as an "arm64 arg-corruption codegen bug."
+
+**Why the probe lied**: `SYS_GETDENTS64` is defined in MULTIPLE
+files with DIFFERENT values:
+  lib/fs.cyr                    : var SYS_GETDENTS64 = 217;  (x86)
+  lib/syscalls_macos.cyr        : 217
+  lib/syscalls_aarch64_linux.cyr: 61   (the aarch64 number)
+cyrius is "last definition wins". The wrapper (cbt/cyrius.cyr)
+includes fs.cyr (217) THEN syscalls.cyr (→ aarch64 → 61), so it
+binds **61**. A small probe with a different include order bound
+217. Same source line, opposite value.
+
+**Why 61 failed**: the macho ESYSXLAT chain translated x86
+217→344 but had NO 61→344 entry — even though the wrapper/tools
+pull the aarch64 stdlib (61). Untranslated 61 ran with a stale
+x16 → garbage syscall → EBADF (-9). Instrumenting is_dir in the
+wrapper showed `fd=3` (open OK) but `var sg = SYS_GETDENTS64`
+loaded **61**, not 217.
+
+**Fix** (src/backend/aarch64/emit.cyr, `_TARGET_MACHO==2`
+ESYSXLAT block): add `cmp x8,#61; b.ne; movz x16,#344`
+(0xF100F51F / 0x54000041 / 0xD2802B10, llvm-mc-verified) beside
+the 217→344 entry. Both numbers now translate, robust to
+include order.
+
+**Recognize it again**: "works in a minimal probe, fails in the
+wrapper/tools" → DON'T reach for a codegen hypothesis. Print the
+actual VALUE of any global the failing path reads
+(`var x = THE_GLOBAL;` + write it). A duplicate global bound
+differently by include order is far more likely than
+context-sensitive codegen. The WRAPPER (full include set), not a
+probe, is the real test. See retros/v60x.cyml + the .63 CHANGELOG.
+"""
+
+[[entries]]
+name = "macho_output_basename_breaks_reproducible_cmp"
+description = "Mach-O embeds the output binary's basename (the ad-hoc code-signature identifier), so compiling the same source to two DIFFERENT names (fib vs fib2) yields binaries that differ by exactly the name bytes — a false 'non-reproducible'. ELF doesn't embed the name, so Linux passes and hides it. Corollary: never codesign-compare; codesign is non-deterministic."
+category = "cyrius"
+tags = ["macho", "reproducibility", "codesign", "v6.0.63", "v6.0.44"]
+content = """
+**The trap**: a reproducible-build check compiled the same
+source twice — to `build/fib` and `build/fib2` — then compared
+hashes. They differed on macOS but matched on Linux. It looked
+like macOS compiler non-determinism.
+
+**Root cause**: the Mach-O embeds the OUTPUT BASENAME (it's the
+ad-hoc code-signature identifier / a build id). Two different
+output names → the binaries differ by exactly those name bytes.
+`cmp -l` showed a SINGLE differing byte, at the offset of the
+embedded name (`1` vs `2` in the "…fib1"/"…fib2" string). ELF
+does NOT embed the output name, so the same check passed on
+Linux and hid the issue for the whole platform.
+
+**Confirm in 30s**: build the same source to the SAME output
+name twice → byte-identical. Build to different names → differ
+by the name. The compiler is deterministic; the test was wrong.
+
+**Two rules for any Mach-O reproducibility / self-host check**:
+1. Rebuild to the SAME output name, never name1/name2.
+2. Hash/compare the UNSIGNED output, never the codesigned
+   artifact — `codesign` is non-deterministic (the v6.0.44
+   lesson: a codesign-compare produced a false "non-reproducible"
+   retraction). To RUN a Mach-O on macOS you MUST codesign it
+   (AMFI), so `cp` the unsigned bytes aside BEFORE signing and
+   compare those. This bit the .63 functional gate AND the macho
+   self-host check in the same session (a signed r1 vs unsigned
+   r2 differs by ~20 KB of signature).
+"""
+
+[[entries]]
+name = "aarch64_atomic_on_global_needs_8_aligned_var_base"
+description = "aarch64 ldxr/stxr (what atomic_cas/atomic_fetch_add compile to) MANDATORILY fault with SIGBUS on a non-8-aligned address, even where plain access is permitted. cyrius globals were only 4-byte aligned because the aarch64 ELF var-area base inherited the 4-alignment of the code size — so atomic_cas on a GLOBAL SIGBUS'd. x86 already rounds code to 8; aarch64 rounded to 4. Fix: round code size to 8 in src/backend/aarch64/fixup.cyr."
+category = "cyrius"
+tags = ["aarch64", "atomic", "alignment", "ldxr", "sigbus", "fixup", "var-base", "v6.0.64"]
+content = """
+**The trap**: `atomic_cas(&someGlobal, ...)` SIGBUSes on
+aarch64 (exit 135), while the SAME call on a heap pointer
+(alloc returns 8-aligned) or a stack local works fine. The
+v6.0.64 thread-safe allocator's `var _alloc_lock = 0;` was
+the FIRST-ever atomic op on a global, so it was the first to
+trip this — every prior `atomic_cas` user (thread.cyr mutex,
+atomics.tcyr) used heap/stack cells.
+
+**Why**: aarch64 `ldxr`/`stxr` (load/store-EXCLUSIVE — what
+`atomic_cas` / `atomic_fetch_add` in lib/atomic.cyr compile
+to) require natural (8-byte) alignment of the address and
+fault on a misaligned one EVEN when SCTLR.A=0 lets ordinary
+loads be unaligned. Exclusive accesses are special-cased by
+the architecture; there is no unaligned `ldxr`.
+
+**Root cause (the layout, NOT atomic.cyr)**: cyrius globals
+live in the ELF var area whose RUNTIME base is
+`0x400000 + 120 + cp` (`EMITELF`) / `entry + preamble + acp`
+(the fixup `dbase`), where `cp` = code size. aarch64
+instructions are 4 bytes, so `cp` is only 4-aligned; when
+`cp ≡ 4 (mod 8)` the whole var area is 4-aligned and EVERY
+global lands at a 4-aligned address. x86's fixup rounds code
+to 8 (`cp = (cp+7)&~7`) precisely so its data base is
+8-aligned; aarch64's fixup rounded to 4 (`(cp+3)&~4`).
+
+**The tell**: `&g mod 8 == 4` on aarch64 but `== 0` on x86
+for the SAME source. The layout is NOT arch-shared — the
+byte OFFSET of a global is identical (shared frontend) but
+the BASE alignment differs between backends.
+
+**Fix** (v6.0.64, one line, `src/backend/aarch64/fixup.cyr`):
+change the post-emit `cp = (cp + 3) & (0 - 4); SCP(S, cp);`
+to `(cp + 7) & (0 - 8)`. `SCP` stores it, so `EMITELF`,
+`EMITELF_KERNEL`, `EMITMACHO_ARM64`, and the `dbase` global
+fixups all read one consistent size via `GCP` — no
+inconsistency between where a global is addressed and where
+it's written. ≤4 extra zero pad bytes in `.text` (never
+executed). Mach-O is unaffected (its `__DATA` is page-aligned,
+independent of `cp`). This makes atomic-on-ANY-global work on
+aarch64, matching x86 — not just the allocator lock.
+
+**Recognize it again**: any new aarch64 SIGBUS (exit 135) in
+a program that does an atomic on a `var`-declared global, or
+a "self-host failed on pi (rc=135)" when a stale
+`build/cycc_aarch64` cross-compiler emits the old 4-aligned
+base. Rebuild `build/cycc_aarch64` after the fixup change.
+"""
+
+[[entries]]
+name = "aarch64_atomic_cas_is_not_a_full_barrier"
+description = "lib/atomic.cyr's atomic_cas is documented as 'a full barrier on both arches' — TRUE on x86 (lock cmpxchg) but FALSE on aarch64, where it's plain ldxr/stxr with NO dmb. A spinlock/mutex built on it needs an EXPLICIT post-CAS atomic_fence() for the acquire barrier (thread.cyr mutex_lock has it; the v6.0.64 alloc lock initially forgot it)."
+category = "cyrius"
+tags = ["aarch64", "atomic", "memory-ordering", "acquire-barrier", "spinlock", "weak-memory", "v6.0.64"]
+content = """
+**The trap**: building a lock as `while (atomic_cas(m,0,1)==0){}`
+and assuming the CAS gives you the acquire barrier. It does on
+x86 (`lock cmpxchg` is a full barrier) but NOT on aarch64:
+lib/atomic.cyr's aarch64 `atomic_cas` is plain `ldxr`/`stxr`
+with NO `dmb ish` (not the `ldaxr`/`stlxr` acquire/release
+forms). So critical-section loads (e.g. `_heap_ptr`) can be
+observed BEFORE the lock is actually held → stale read →
+corruption that only manifests under real contention on a weak
+memory model (invisible on x86, invisible single-threaded).
+
+**The canonical pattern** (lib/thread.cyr `mutex_lock`):
+spin-CAS to acquire, THEN `atomic_fence()` — the comment there
+notes the fence is "a cheap no-op on x86" (cmpxchg already a
+barrier) but REQUIRED on aarch64. Release mirrors `mutex_unlock`:
+`atomic_fence(); atomic_store(m, 0);`.
+
+**What bit us** (v6.0.64): `_alloc_lock_acquire` trusted
+atomic.cyr's "full barrier on both arches" comment and omitted
+the post-CAS fence. The release side was correct (it copied
+mutex_unlock). Adversarial review caught the missing acquire
+fence before ship; a 4-thread contended run on real aarch64
+(pi) validated the fix. atomic.cyr's "full barrier" doc is
+aspirational for aarch64 — treat `atomic_cas`/`atomic_fetch_add`
+as ATOMIC but UNORDERED there, and fence explicitly.
+"""
+
+[[entries]]
+name = "portable_sleep_no_raw_nanosleep_off_linux"
+description = "Raw syscall(35) nanosleep faults off Linux: Darwin has NO plain nanosleep BSD syscall (and on aarch64 macho, 35 COLLIDES with unlinkat), and PE never routed 35. Portable sleep = poll(NULL,0,ms) on Linux+macOS (poll 7→230 is routed on both Mach-O backends) + a kernel32 Sleep reroute on Windows. WaitForSingleObject on a process/thread pseudo-handle does NOT block as a sleep."
+category = "cyrius"
+tags = ["macho", "windows", "syscall", "nanosleep", "poll", "sleep", "esysxlat", "v6.0.65"]
+content = """
+**The trap**: `syscall(35, &timespec, 0)` (Linux nanosleep) in a
+stdlib/consumer sleep helper works on Linux and faults or
+misbehaves on every other target:
+- **macOS**: XNU has no plain `nanosleep` BSD syscall (libsystem
+  builds it over semaphore primitives). Worse, on aarch64-macho
+  the number 35 COLLIDES — ESYSXLAT maps aarch64 `35` to
+  `unlinkat`→`unlink`, so `syscall(35, ts, 0)` tries to unlink a
+  garbage path. (The x86-nanosleep-35 vs aarch64-unlinkat-35
+  clash is the same multiply-defined-number swamp as the .63
+  getdents 61-vs-217 bug.)
+- **Windows (PE)**: 35 is not a routed reroute → fault.
+
+**The portable fix** (v6.0.65, `lib/chrono.cyr` `sleep_ms`):
+- Linux + macOS: `poll(NULL, 0, ms)` — `poll` (x86 7 → Darwin 230)
+  is ALREADY routed on both Mach-O backends (the .59 socket port),
+  and `poll` with 0 fds + a timeout is the portable ms-granular
+  sleep. Verified ≈ms-accurate on Linux + ecb + ach (the constant
+  ~300ms "overhead" the first time on macOS is one-shot
+  codesign/AMFI launch, not poll — baseline-subtract to confirm).
+- Windows: a real kernel32 `Sleep(ms)` reroute (0xF00F), 1-arg,
+  mirroring the SRWLock reroutes.
+- agnos/cx: no-op (no sleep syscall / single-threaded VM).
+
+**Windows dead-end worth knowing**: `WaitForSingleObject(handle,
+ms)` on the current-PROCESS (-1) or current-THREAD (-2)
+pseudo-handle returns IMMEDIATELY — it does NOT block for the
+timeout (verified on cass: 0 ms). It only blocks on a genuinely
+non-signaled object. So there's no "sleep via the already-routed
+WaitForSingleObject" shortcut; you need a real `Sleep` reroute.
+
+**Measurement gotcha (cmd.exe)**: `cmd /c "echo %TIME% & prog &
+echo %TIME%"` prints the SAME time twice — `%TIME%` expands at
+parse time (once), the `%errorlevel%` gotcha applied to TIME. Use
+`cmd /v:on /c "... !TIME! ..."` or PowerShell `Measure-Command`.
+
+**Recognize again**: any consumer doing raw `syscall(35)` for a
+sleep on macOS/Windows; or a new "syscall not routed on Mach-O"
+warning naming 35. The fix is always: route through
+`lib/chrono.cyr sleep_ms`, never hardcode nanosleep.
+"""
+
+[[entries]]
+name = "cyrius_test_apple_silicon_qemu_and_codesign"
+description = "cyrius test/run/bench/fuzz/doctest failed on arm64 macOS via two stacked cbt bugs: (1) run_binary took the qemu-aarch64 cross-run branch on a NATIVE Apple-Silicon host (find_tools forces _arch=AARCH64) → no qemu → execve-fail → exit 127; (2) the compiled /tmp binary ran UNsigned → AMFI SIGKILL → exit 137. A compile-and-run command on macho must exec natively (never qemu) AND ad-hoc codesign first."
+category = "cyrius"
+tags = ["cbt", "macho", "apple-silicon", "codesign", "qemu", "run_binary", "cyrius-test", "v6.0.66"]
+content = """
+**The trap**: `cyrius test` (and run/bench/fuzz/doctest) fail on
+arm64 macOS with a bare **exit 127** and zero test output — only on
+the macOS runner, unchanged by any compiler fix. Two cbt bugs stack:
+
+**Bug 1 (the 127) — qemu mis-route.** `cbt/build.cyr run_binary`
+had an `if (_arch == ARCH_AARCH64) { exec /usr/bin/qemu-aarch64 }`
+branch — the x86-Linux-host path for cross-running aarch64 test
+binaries under qemu-user. But `find_tools()` (cbt/core.cyr) forces
+`_arch=AARCH64` on arm64-macOS so current_cc picks the native macho
+cycc — which made run_binary ALSO take the qemu branch on a NATIVE
+Apple-Silicon host, where there is no `/usr/bin/qemu-aarch64` →
+execve fails → `sys_exit(127)`. The binary never runs (zero output;
+the literal 127). Fix (v6.0.66): gate the qemu branch
+`#ifndef CYRIUS_TARGET_MACOS` — a native Mach-O host execs directly.
+
+**Bug 2 (the next domino, 137) — unsigned AMFI SIGKILL.** Even with
+Bug 1 fixed, the freshly-compiled `/tmp/cyrius_test_bin` is UNsigned,
+and arm64 macOS AMFI SIGKILLs unsigned binaries (128+9=137). Only
+`cmd_build` ad-hoc-codesigned (v6.0.38); test/run/bench/fuzz/doctest
+compiled to /tmp and ran via run_binary without signing. Fix: hoist
+the codesign into a shared `_macho_codesign()` and call it INSIDE
+run_binary so every run path signs (cmd_build DRY'd to it). No-op off
+macOS; harmless on x86-macOS (codesign -s - rejects but unsigned runs
+there anyway).
+
+**Why it masked on ecb but not the hosted runner**: ecb (the dev
+Apple-Silicon box) had qemu-user installed, and qemu happily runs a
+native-arch binary too (AMFI-bypassed) — so run_binary's qemu branch
+"worked" there. The hosted macos-15-arm64 runner has neither qemu nor
+(post-fix-1) a signature → it exposes both bugs. Classic ecb-vs-runner
+split: "run it on the ACTUAL CI target, not just the dev box."
+
+**Recognize again**: any cbt compile-and-run command exiting 127
+(qemu/exec-fail, zero output) or 137 (AMFI SIGKILL) on Apple Silicon.
+The rule: on macho, exec natively (never qemu) and `_macho_codesign`
+the binary before exec.
+"""
+
+[[entries]]
+name = "callptr_indirect_call_frame_slot_spill_survives_win64_shadow"
+description = "v6.0.70: compiler-emitted indirect calls (callptr → IR_CALL_INDIRECT, x86 `call [rbp-disp]` / aarch64 `ldr x6;blr x6`). The crux is callee-survival across ECALLPOPS: the obvious 'push callee, pop after ECALLPOPS' is WRONG on Win64 (ECALLPOPS does `sub rsp,0x20` for the shadow home → buries a stack-pushed callee) and on SysV n>6. The correct general fix is to spill the callee to a FRESH frame local before the args (rbp-relative → unaffected by ECALLPOPS's rsp moves, re-entrant for nested callptr, any arg count). aarch64 must load into x6 (x0-x5 are arg regs, x9 is the >6-arg shuffle scratch). Open caveat: a real Win64 COM callee still corrupts the caller frame (callptr to a trivial callee works) — .71."
+category = "cyrius"
+tags = ["callptr", "indirect-call", "ir_call_indirect", "com", "vtable", "win64", "shadow-space", "frame-slot", "ffi", "v6.0.70"]
+content = """
+**Compiler-emitted indirect call (callptr/IR_CALL_INDIRECT) — the
+callee-survival problem is the whole game.** To call through a computed
+pointer (a COM vtable method, a fn-ptr value), the callee value must be
+LIVE in a register at the `call`/`blr` — but it has to survive (a) the
+arg evaluation (which uses the rax/x0 accumulator) and (b) ECALLPOPS
+(which marshals the pushed args into arg regs and, on Win64, `sub rsp,0x20`
+for the shadow home).
+
+**The wrong design (the understand-workflow proposed it, it's WRONG for
+Win64):** push the callee FIRST (deepest), push args, ECALLPOPS, then POP
+the callee into rax and `call rax`. This only works on SysV n<=6. On Win64,
+ECALLPOPS does `sub rsp,0x20` AFTER draining the args, so the callee
+(pushed before the args) is now BURIED 0x20 below rsp — popping gets the
+shadow, not the callee. SysV n>6 also shuffles/drops slots. Verify against
+ECALLPOPS (src/backend/x86/emit.cyr) before trusting any callee-survival
+scheme — the shadow `sub rsp` is the trap.
+
+**The right design (frame-slot spill):** in the callptr parser arm,
+allocate a FRESH frame local (`GFLC` → `EFLSTORE` → `SFLC+1`), spill the
+evaluated callee there BEFORE pushing args, then after ECALLPOPS emit
+ECALLIND = `call [rbp-disp]` (x86, FF /2 mod=10 rm=101) / `ldr x6,[x29-disp]
+; blr x6` (aarch64). rbp/x29-relative → immune to ECALLPOPS's rsp moves;
+re-entrant (nested callptr → distinct slots, since each grabs the next GFLC
+slot); works for any arg count + ABI. The frame auto-grows (EPATCHFRAME
+sizes from GFLC at fn-end). IR_CALL_INDIRECT carries the spill idx (arg1);
+its DCE predicates: clobbers_rax (return), def_rcx_any (caller-save),
+uses_rax conservatively (matches the call cohort).
+
+**aarch64 register: x6, not x0.** ECALLPOPS loads arg0 into x0 and uses x9
+as the >6-arg memory shuffle. x6 is outside the 6 arg regs (x0-x5) and
+isn't x9 → it survives ECALLPOPS for any argc. (lib/fnptr.cyr's asm uses
+x9, but that's the boilerplate being replaced — don't copy x9.)
+
+**callptr needs a function frame.** The spill is a frame local, so callptr
+at TOP LEVEL is a loud compile error (top-level vars are globals → no rbp
+frame; `_cur_fn_ix < 0` detects it). cx has no indirect-call bytecode op →
+loud error there too. Both fail loud, never silent-wrong.
+
+**Open gotcha (v6.0.71):** callptr to a TRIVIAL cyrius callee works on all
+4 hosts (incl. Win64, loaded-callee 2/3-arg). But callptr to a REAL Win64
+COM callee (a DXGI vtable method) corrupts the cyrius caller frame on cass
+(RC=5 / access-violation) even when the COM call returns S_OK — NOT a slot
+error (slot 7 and 12 both fail) and NOT the primitive (verified). A subtle
+real-Win64-callee interaction; needs windbg on cass to pin. See
+issues/2026-06-05-windows-com-vtable-real-callee-frame-corruption.md.
+"""
+
+[[entries]]
+name = "pe_multi_dll_imports_byte_identical_refactor_and_cross_arch_stubs"
+description = "v6.0.69: generalized the PE backend from ONE hardcoded kernel32 import descriptor to N DLLs (shell32, then dxgi). Three reusable lessons: (1) the flat ftype=4 IAT fixup assumed imp_idx==IAT-slot, so grouping imports by DLL into per-descriptor null-terminated IAT/ILT runs forced an imp_idx→physical-slot remap (_pe_iat_slot); (2) design the generalization to be BYTE-IDENTICAL at one DLL so it's a provable no-op before adding the 2nd; (3) PE-reroute emit fns live in x86/emit.cyr but parse_expr.cyr calls them inside a runtime `if (_TARGET_PE==1)` block that compiles on EVERY backend → aarch64/emit.cyr needs no-op stubs or it's FATAL under --strict."
+category = "cyrius"
+tags = ["pe", "windows", "imports", "iat", "ffi", "shell32", "byte-identical", "cross-arch-stub", "utf16", "v6.0.69"]
+content = """
+**Generalizing the PE import table from 1 DLL to N (the Windows FFI
+foundation).** Pre-v6.0.69 the PE backend hardcoded a single kernel32
+import descriptor: `_pe_imp_dir_size = 20*2` (one descriptor + null),
+literal `"kernel32.dll"`, and a FLAT IAT/ILT where imp_idx directly
+indexed the thunk slot. shell32 (CommandLineToArgvW) + dxgi
+(CreateDXGIFactory1) both need a non-kernel32 descriptor.
+
+**(1) The flat ftype=4 fixup is the constraint.** `src/backend/x86/fixup.cyr`
+resolves a PE IAT call as `iat_rva = idata + iat_off + imp_idx*8` — imp_idx
+IS the physical slot. But a multi-DLL IAT must group each DLL's thunks into
+a contiguous, per-descriptor null-terminated run (the loader walks each
+descriptor's ILT to a null and fills the matching IAT run). Grouping breaks
+imp_idx==slot. Fix: tag each import with a DLL id (`_pe_imp_dll`), in
+`_pe_layout` walk DLL ids ascending (kernel32=0 FIRST so ExitProcess stays
+at slot 0), assign physical slots per group with a null after each, and
+record `_pe_iat_pos[imp_idx]` → consumed by the fixup via `_pe_iat_slot(idx)`.
+The fixup FORMAT is unchanged (still a flat imp_idx); only the resolution
+gains a lookup.
+
+**(2) Byte-identical-at-N=1 is the safety proof.** Design every size/offset
+so one DLL reproduces the old layout exactly: `(dll_count+1)*20` == `20*2`,
+grouped order == imp_idx order, `_pe_iat_pos[i]==i`, one trailing null. Then
+VERIFY before adding DLL #2: compile the same Windows program with the old
+and new compiler → identical bytes (got an identical 2560-byte PE). A PE-
+layout refactor that's a proven no-op at N=1 can't have regressed the 25
+existing kernel32 imports; only the genuinely-new 2nd-DLL path is untested,
+and the cass run covers that. This pattern (prove the generalization is
+inert on the existing case, THEN extend) beats trying to eyeball RVA math.
+
+**(3) Cross-arch stubs for x86-only emit fns.** The PE-reroute emitters
+(`ECMDTOARGV_PE`, `ELOCALFREE_PE`, `ESLEEP_PE`, …) live in
+`src/backend/x86/emit.cyr`. `src/frontend/parse_expr.cyr` calls them inside
+a RUNTIME `if (_TARGET_PE == 1)` block (not `#ifdef`), so that code COMPILES
+on the aarch64/macho/cx backends too — where the symbols don't exist. Each
+needs a `fn EXXX_PE(S) { return 0; }` no-op stub in
+`src/backend/aarch64/emit.cyr` (the dead `_TARGET_PE` branch never runs
+there). WITHOUT the stub it's a warning on a normal build but **FATAL under
+--strict** — and cross-os pi surfaces the `undefined function` warning
+loud. When you add ANY new PE-reroute fn, add its aarch64 stub in the SAME
+slot (cross-arch-propagation-mandatory). cx has no stubs and tolerates the
+warning (mirrors ESLEEP_PE) — match whatever the existing cohort does.
+
+**Bonus — Windows argv is UTF-16.** GetCommandLineW / CommandLineToArgvW
+return UTF-16LE. The v6.0.54 tokenizer down-converted ASCII-only (drop the
+high byte) → non-ASCII paths corrupted silently. `_args_w2u8` (lib/args.cyr,
+host-testable) does real UTF-16→UTF-8 incl. surrogate-pair decode (high
+0xD800-0xDBFF + low 0xDC00-0xDFFF → one U+10000+ code point → 4-byte UTF-8).
+"""
+
+[[entries]]
+name = "aarch64_linux_esysxlat_gaps_native_divergence_placebo_gate"
+description = "v6.0.68: the aarch64-Linux ESYSXLAT (src/backend/aarch64/emit.cyr, non-macho branch) was missing x86→aarch64 translations for literal syscalls cbt issues — stat 4 (ran as io_getevents → _file_size=-1 → `cyrius deps` include-scan short-circuited → transitive stdlib silently dropped = §D1), rename 82 (=fsync → `cyrius build` never renamed its .tmp output), symlink 88 (pulsar). PLUS: main_aarch64_native.cyr (the SHIPPED native cycc) silently diverged from main_aarch64.cyr — never got the v5.9.37 auto-call-main port → bare `fn main()` builds exited 0. PLUS: the CI gate tested the cross binary, not the shipped native one (placebo)."
+category = "cyrius"
+tags = ["aarch64", "esysxlat", "syscall", "deps", "rename", "symlink", "stat", "auto-call-main", "native-vs-cross", "placebo-gate", "found-by-ports", "v6.0.68"]
+content = """
+**Three bugs, one goal (make the aarch64-native funcgate HARD), all in
+the aarch64-Linux NATIVE toolchain. Found because §D1's deps fix let the
+soft funcgate finally reach its later steps — a classic mask-chain.**
+
+**(1) ESYSXLAT is x86-numbered everywhere; a literal `syscall(N)` in cbt
+needs an aarch64 translation or it hits the WRONG aarch64 syscall.**
+The aarch64 backend translates x86 syscall numbers → aarch64 via the
+ESYSXLAT cmp/b.ne/movz chain (`src/backend/aarch64/emit.cyr`, non-macho
+branch, after the `_TARGET_MACHO==2` return). It was INCOMPLETE relative
+to the macho branch. `cbt` issues several syscalls as bare literals:
+- `stat 4`  → aarch64 4 is `io_getevents`. `_file_size` (cbt/deps.cyr)
+  → -1 → the deps transitive-include scan does `if (sz<=0) return 0`
+  → peers (`syscalls_aarch64_linux.cyr`, `alloc_*`, `atomic`) silently
+  dropped. THIS is §D1 ("cyrius deps silently fails on aarch64").
+- `rename 82` → aarch64 82 is `fsync`. `cyrius build` builds to
+  `out.tmp.<pid>` then renames; rename no-op'd → the final binary never
+  appeared (rc=0, no output, no error).
+- `symlink 88` → aarch64 has no symlink(2). `cyrius pulsar` install
+  symlinks failed.
+Fix: add `stat 4→fstatat 79`, `rename 82→renameat 38`, `symlink
+88→symlinkat 36`, each with the AT_FDCWD arg-shift (mirror the existing
+`openat 2→56` reroute). **Ordering gotcha:** put `stat 4→79` AFTER
+`getcwd 79→17`, else the `x8=79` it sets is re-caught by `cmp x8,#79`
+and double-translated to getcwd. (`fcntl 72` is macho-only F_GETPATH;
+aarch64-Linux uses the getcwd `#else` path, so it needs no entry.)
+Assembler-verify every hand-rolled encoding (`as` + `objdump -d` on the
+target, `cmp` the bytes) — the renameat/symlinkat arg-shifts are easy to
+get subtly wrong.
+
+**(2) main_aarch64_native.cyr can silently diverge from
+main_aarch64.cyr.** There are TWO aarch64 entry files — the CROSS
+(`main_aarch64.cyr`, x86-host) and the NATIVE (`main_aarch64_native.cyr`,
+aarch64-host → the SHIPPED `build/cycc-native-aarch64`). They share the
+backend but each carries its OWN copy of the entry/epilogue logic,
+including the v5.9.37 auto-call-`main` trampoline (walks the fn table for
+"main\\0", emits ECALLTO). The cross had it; macho got it v6.0.37, win
+v6.0.54 — the NATIVE never did. So `cycc-native-aarch64` never invoked a
+bare `fn main()` → every such `cyrius build` on real ARM exited with junk
+(0). It still SELF-HOSTS byte-identical because the compiler's own source
+`sys_exit`s explicitly (no bare `fn main`). **When you port an
+entry-level emit fix, grep ALL `main_*.cyr` — the per-target forks rot
+independently, and the bug shows on USER programs, never on self-host.**
+
+**(3) A gate that tests the wrong binary is a placebo.** The CI
+`aarch64-native` job built/self-hosted/funcgated `cycc_a64` =
+`main_aarch64.cyr` piped through the cross — NOT the shipped
+`main_aarch64_native.cyr` binary. So bug (2) stayed green for the gate's
+whole life (the cross had auto-call-main). Same disease as the macOS-rot
+incident: **the gate must build + run the artifact users INSTALL** (here:
+`main_aarch64_native.cyr → cycc_native_a64`, self-hosted from its OWN
+source). Test what ships, not a same-arch lookalike.
+"""
+
+[[entries]]
+name = "param_load_pseudo_and_bootstrap_coupling"
+description = "asm-block param_load(reg, idx) (v6.0.67) emits a param load at the prologue-correct disp = -(idx+1+_cur_fn_regalloc)*8 — byte-identical to the hand-rolled [rbp-N]/[x29,#-N] literals (disp8 mov / ldur). BUT: migrating a BOOTSTRAP-CRITICAL lib (atomic.cyr is in cycc via the .64 alloc lock) to a NEW compiler feature couples that lib to the feature — a pre-feature cycc can't compile it (the smoke gate catches a stale install)."
+category = "cyrius"
+tags = ["asm", "param_load", "prologue", "bootstrap", "atomic", "regalloc", "v6.0.67"]
+content = """
+**The feature**: `param_load(reg, idx)` inside an `asm { }` block
+emits a load of the idx-th parameter from its ACTUAL prologue slot,
+so inline asm stops hardcoding `[rbp-N]` / `[x29,#-N]` byte literals
+that silently break when the prologue layout shifts (the recurring
+sigil AES-NI / cyrius atomic.cyr coupling bug). Implementation
+(src/backend/{x86,aarch64}/emit.cyr): match "param_load" in
+ASM_MNEMONIC (first-8 L64 `0x6F6C5F6D61726170` + verify trailing
+"ad"), parse `(reg, idx)`, map reg name → number
+(`_asm_{x86,aarch64}_reg`), emit at disp = -(idx+1+_cur_fn_regalloc)*8.
+x86 → `48 8B (0x45|rl<<3) disp8` (mod=01, rm=rbp); aarch64 →
+`0xF8400000 | ((disp&0x1FF)<<12) | (29<<5) | reg` (ldur). Tokens:
+LPAREN=10, RPAREN=11, COMMA=31 (NOT 28 — that's LBRACKET).
+
+**Byte-identical check**: param_load with regalloc=0 emits EXACTLY
+the old hand-rolled literals (`param_load(rdi,0)` → `48 8B 7D F8`;
+`param_load(x0,0)` → `A0 83 5F F8`). Migrating atomic.cyr produced a
+byte-identical cycc — the cleanest possible correctness proof (atomic.cyr
+is compiled INTO cycc via the v6.0.64 alloc lock).
+
+**The bootstrap-coupling gotcha (the real lesson)**: migrating a
+BOOTSTRAP-CRITICAL lib to a NEW compiler feature couples that lib to
+the feature. atomic.cyr/thread.cyr are in cycc's own source → after
+migration they REQUIRE a param_load-capable (≥6.0.67) cycc. A stale
+installed cycc (or a frozen pre-feature stage) can't compile them —
+the `cyrius smoke` gate (which uses the INSTALLED cycc on a .smcyr that
+includes atomic.cyr) caught exactly this with a 6.0.66 install. Safe
+because: consumers get lib+cycc together via `cyrius deps`; the bootstrap
+propagates param_load from the CURRENT backend (cybs does NOT compile
+main.cyr directly — `cat main.cyr | cybs` fails pre-existing, so cybs is
+not the main.cyr compiler); pulsar's self-host chain carries it forward.
+Smoke passes once .67 is installed. **Before migrating any bootstrap-
+critical lib to a new feature, weigh this coupling** — for a consumer-
+only feature you can ship it WITHOUT migrating cyrius's own libs.
+"""
+
+[[entries]]
+name = "macos_owns_thread_pointer_register"
+description = "macOS owns TPIDR_EL0 (arm64) / %fs (x86) — Darwin saves+restores it as thread state and overwrites any userspace `msr TPIDR_EL0` / arch_prctl on the FIRST preemption, so cyrius cannot durably own the thread-pointer register for thread-local storage on macOS."
+detail = """
+v6.0.84. Symptom: sigil's crypto-scratch bank (`cbank()` → `thread_local_get`,
+lib/thread_local.cyr) SIGSEGV'd on real ecb (Apple Silicon) AFTER an ECDSA
+sign — but every ingredient (sha256, hmac, fl_alloc, the secret vars, the
+rfc6979 reject loop) ran clean in isolation. The .76 issue chased it to a
+`&_fl_heads` freelist codegen bug via an early lldb; THAT DIAGNOSIS WAS WRONG —
+the `&global` adrp+add path is provably correct (EVADDR emits a fresh
+adrp+add per site, FIXUP_ADRP_ADD masks 0x9F00001F so it can't corrupt the
+opcode, var-address resolution is deterministic per index).
+
+Real cause: thread_local.cyr installs a per-thread block via `msr TPIDR_EL0`
+(arm64) and reads it back via `mrs TPIDR_EL0`. On Linux the kernel lets EL0
+own TPIDR_EL0. On Darwin the kernel uses it for its own thread self-data and
+RESTORES it on every context switch. Decisive repro on ecb: install the
+block (TPIDR=0x1xxxxxxxx), run a 2-billion-iteration pure-compute loop with
+ZERO syscalls, read TPIDR again → 0x200d (a Darwin thread value). Pure
+preemption, no syscall, clobbers it. `cbank()` lazy-inits ONCE
+(`_crypto_tls_inited` guard), so the first preemption during crypto poisons
+every later `thread_local_get`. This is why it looked "context-dependent,
+after a preceding svc" — it's preemption, and a long crypto op always gets
+preempted.
+
+How to recognize: lldb shows the fault at `ldr xN, [x1, x0, lsl #3]` right
+after `mrs x1, TPIDR_EL0`, with x1 a tiny value (~0x2010), NOT a heap addr.
+
+Fix: a macOS process-global slot array (no TPIDR), like the Windows TlsAlloc
+path. Safe because cyrius threads don't run on macOS at all — thread.cyr is
+clone(2)-only (no Darwin bsdthread path) — so crypto-scratch is
+single-threaded. Since preemption (not a syscall) is the trigger, NO
+"re-msr before access" scheme is reliable; you must not use the register.
+"""
+
+[[entries]]
+name = "macho_socketpair_dual_number_199_vs_53"
+description = "socketpair's syscall number differs by macho arch: arm-macho pulls syscalls_aarch64_linux.cyr → 199; x86-macho pulls syscalls_macos.cyr → 53. The ESYSXLAT must map BOTH to Darwin 135 (in their respective backends). And on the arm enum, 53 is fchmodat (already mapped) — reusing 53 there collides."
+detail = """
+v6.0.84 (cf. the v6.0.63 getdents64 61-vs-217 dual-number trap). There is no
+syscalls_aarch64_macos.cyr: lib/syscalls.cyr routes arm-macho to
+syscalls_aarch64_linux.cyr (aarch64-Linux numbers) and x86-macho to
+syscalls_macos.cyr (x86 numbers). So a socket added only as the x86 number is
+DEAD on arm-macho. socketpair was the last untranslated one (the .59 socket
+surface added socket/connect/accept/bind/listen but not socketpair): the
+fork+socketpair TLS e2e (tls12_handshake.tcyr) ran svc with a stale x16 →
+garbage fds → TLS_ERR_IO on every read/write. Symptom of a totally
+untranslated number on Darwin: SIGSYS (exit 140 = 128+12).
+
+Fix: aarch64-macho ESYSXLAT `cmp x8,#199; movz x16,#135` (NOT 53 — 53 is
+fchmodat on the aarch64-Linux enum, already mapped to chmod with an arg-shift,
+so a 53 entry both misses real socketpair AND corrupts fchmodat). x86-macho
+EMACHO_SYSXLAT `_msx(S, 53, 0x2000087)` (53 is socketpair on the x86 enum,
+no collision). Keep `_macho_arm_routes` in lockstep (it whitelists the
+unrouted-syscall warning). Encodings: `as -arch arm64` on ecb.
+
+STILL LATENT (v6.0.84): the socket FAMILY (socket/connect/accept/bind/listen)
+is mapped ONLY as x86 numbers (41-50) in the aarch64-macho ESYSXLAT, so
+real-network sockets are likely broken on arm-macho (the .81 live-Cloudflare
+proof was on Linux). The socketpair e2e doesn't need them.
+"""
+
+[[entries]]
+name = "windows_install_pillar_env_spawn_exe"
+description = "Making `cyrius build` work on Windows took three wrapper layers, each invisible until run on real cass: (1) no /proc env-read on Windows; (2) the wrapper looked for `cycc` not `cycc.exe` and defaulted _home=/root; (3) compile()/run_binary use POSIX fork/dup2/execve which Win32 lacks."
+detail = """
+v6.0.85. The cross-OS gate had cycc.exe SELF-HOSTING green for a long time, but
+`cyrius` (the wrapper) could neither find nor run it on Windows - so a real
+install was unusable. Each layer surfaced only by running on cass (do NOT trust
+the self-host verdict for the install pillar; see the methodology notes).
+
+1. ENV READ. cbt/core.cyr + lib/io.cyr + _read_env all read /proc/self/environ
+   (Linux) or _macho_fill_environ (macOS). Windows has NEITHER, so CYRIUS_HOME /
+   USERPROFILE were invisible and _home defaulted to "/root". Fix: a new PE
+   reroute syscall(0xF015) -> kernel32!GetEnvironmentVariableA (3 args:
+   name->rcx, buf->rdx, size->r8; needs a 3-arg 16-byte-aligned caller
+   _pe_call_3arg_aligned). Register the import in pe/emit.cyr
+   (_pe_register_kernel32), emit in x86/emit.cyr, dispatch in parse_expr.cyr,
+   aarch64 no-op stub (FATAL under --strict otherwise).
+
+2. .EXE SUFFIX. current_cc() (cbt/core.cyr) resolved <home>/bin/cycc. Windows
+   binaries are cycc.exe - guard the name with #ifdef CYRIUS_TARGET_WIN.
+
+3. SPAWN. compile() (cbt/build.cyr) and run_binary() invoke cycc via sys_fork +
+   sys_dup2 + sys_execve - all POSIX, absent on Win32. Also SYS_RENAME(82) and
+   getpid(39) are NOT PE reroutes, so the atomic tmp+rename block can't run on
+   Windows. Fix: a #ifdef CYRIUS_TARGET_WIN branch that spawns
+   `cycc < source > output` via cmd.exe + CreateProcessW (lib/process_win.cyr
+   _win_compile_spawn), writing directly to `output`. cmd does the redirect.
+   The quoting that works: `cmd /s /c "<inner>"` - /s strips ONLY the outermost
+   quote pair, so per-path quotes + the < > operators reach cycc intact:
+   cmd /s /c ""C:\...\cycc.exe" < "src.cyr" > "out.exe""
+
+4. .ps1 ASCII. Windows PowerShell 5.1 reads scripts as the system ANSI
+   codepage, so a UTF-8 em-dash (or any multi-byte char) breaks the parser
+   ("Unexpected token"). Keep install.ps1 / cass-install-gate.ps1 ASCII-only.
+
+5. deps --lock hash: no /bin/sh or sha256sum on Windows; use
+   `certutil -hashfile <p> SHA256` and parse line 2 (the 64-hex digest;
+   certutil prints a header line first, \r\n endings). cbt/deps.cyr.
+
+The install pillar is gated by scripts/cass-install-gate.{sh,ps1} (cyrius audit):
+real install.ps1 -> cyrius build fn main(){return 42} -> assert exit 42 - the
+Windows analog of the ecb install gate. The release tarball (build-windows-
+tarball.sh, single source of truth) now ships cyrius.exe + install.ps1; it
+previously shipped neither, so even a "successful" download had no wrapper.
+"""
+
+[[entries]]
+name = "callptr_callee_spill_aliases_addr_taken_local"
+description = "The callptr indirect-call callee-spill frame slot (v6.0.70) can ALIAS a `&`-taken local. When a function passes `&local` as a COM/FFI out-param and the callptr spills its callee to a GFLC frame slot, the two can land on the SAME rbp offset → the out-param write and the spilled callee fight → frame/regalloc corruption → AV on the NEXT indirect dispatch."
+detail = """
+v6.0.86. Symptom: lib/dxgi.cyr dxgi_vram_bytes() AV'd (0xC0000005) on real DXGI
+hardware (cass) — factory + EnumAdapters1 worked, then the GetDesc1 dispatch
+crashed. Looked GPU-specific + windbg-needed; it was neither.
+
+cdb on cass (C:\\dbg\\cdb.exe — the debugger was present; a Program-Files-only +
+minimal-ssh-PATH `where` search wrongly reported it absent) gave the fault:
+  mov eax,0x50 ; pop rcx ; add rax,rcx ; mov rax,[rax]   with rcx(avtbl)=0
+i.e. load64(avtbl + 10*8) [GetDesc1] with avtbl=0. avtbl = load64(pAdapter);
+pAdapter pointed at zeroed mem. llvm-objdump of the PE showed the smoking gun:
+  0x1843  mov [rbp-0x50], rax    ; EnumAdapters1 callptr callee-spill (cp_idx)
+  0x1855  lea rax, [rbp-0x50]    ; &pAdapter (EnumAdapters1's out-param)
+SAME slot. The v6.0.70 callptr spills the callee to `cp_idx = GFLC` and calls
+`[rbp+disp(cp_idx)]`; here GFLC handed it the slot a `&`-taken local already
+owned. The collision corrupted the frame/regalloc enough that a later
+regalloc'd var (avtbl in r12) read stale 0.
+
+Why it hid: frame-LAYOUT-dependent (which callptr collides shifts as you add/
+remove locals — adding one local moved the AV from GetDesc1 to EnumAdapters1);
+real-Win64-callee-only (a cyrius callee writes near rbp, a system DLL writes
+near rsp + uses the out-param pointer hard); and INVISIBLE to self-host because
+cycc has no callptr (callptr is a consumer/FFI feature) — so the bug shipped
+green through every self-host gate. The v6.0.71 ECALLPTR_PE force-16-align was a
+SEPARATE, real fix (SSE-spill alignment), not this.
+
+Fix: on PE, don't spill the callee to a frame slot at all — push it on the
+STACK (parser pushes it FIRST, below the args), then in ECALLPTR_PE pop the args
+into rcx/rdx/r8/r9, `pop rax` (the callee, now on top), align + 32B shadow,
+`call rax`. No frame slot → nothing can alias it. The non-PE path keeps the
+frame-slot spill + ECALLIND (its ECALLPOPS shadow would bury a stack callee) —
+unchanged, byte-identical. Verified: dxgi_vram_bytes()=128MB on cass UHD 600 +
+callptr_real_win64 kernel32 regression=42 + 4-host self-host byte-identical.
+
+Lesson echo: don't take a "needs a debugger we don't have / needs special
+hardware" verdict as gospel — the debugger was on the box and the integrated GPU
+reproduced it fine. See methodology / the hardware-directly field note.
+"""
+
+[[entries]]
+name = "getenv_on_agnos_and_local_kernel_testability"
+description = "getenv() on agnos walks the exec-stack envp from _agnos_init_rsp (agnos has no /proc); and the agnos kernel is locally testable under QEMU — rebuild + boot it and run a ring-3 cyrius binary, don't claim 'no agnos to test on'."
+detail = """
+v6.0.87. Two linked notes.
+
+(1) getenv() on agnos. agnos has no /proc/self/environ (the Linux source). The
+agnos kernel (1.43.2) stages a default envp (HOME=/, PWD=/) on the SysV exec
+init stack. cyrius getenv() delegates under CYRIUS_TARGET_AGNOS to _agnos_getenv
+in lib/args_agnos.cyr, which reads the envp from the entry init-rsp captured at
+startup (the same _agnos_init_rsp that argc/argv use):
+    envp[j] = load64(_agnos_init_rsp + 8 + (argc+1+j)*8)   # NUL-terminated
+and matches "KEY=". The delegation lives in args_agnos.cyr (not io.cyr) because
+io precedes args in the stdlib include order, so io.cyr calling _agnos_getenv is
+a forward FUNCTION ref (REGFN resolves it) — a forward GLOBAL ref to
+_agnos_init_rsp from io.cyr would not resolve. Every agnos program already links
+args_agnos (the cycc entry emits `call _agnos_capture_rsp` for _TARGET_AGNOS), so
+the global is always present.
+
+(2) The agnos kernel is LOCALLY TESTABLE — do not claim "no agnos to run on."
+   - rebuild current:  cd agnos && sh scripts/build.sh   (-> build/agnos, 1.43.2)
+   - boot + run a ring-3 program under QEMU: agnos/scripts/agnsh-smoke.sh boots a
+     production kernel with an ext2 rootfs whose /bin/agnsh it execs in ring 3;
+     AGNSH_BIN=<your.agnos> overrides that program. exec-smoke.sh is the
+     EXEC_SELFTEST disk-exec path. Both capture the serial output.
+   - I verified cyrius getenv on the real kernel this way: built a probe
+     (cyrius build --agnos) that prints getenv("HOME"/"PWD"/"NOPE"), ran it as
+     AGNSH_BIN -> serial showed HOME=/ PWD=/ NOPE=(null). Requires
+     qemu-system-x86_64 + OVMF + gnoboot built at ../gnoboot/build/.
+   The kernel needs to be CURRENT (rebuild from source) — an older build/agnos
+   predates the 1.43.2 envp staging and getenv would read an empty envp.
+"""
+
+[[entries]]
+name = "x86_macho_byte_array_literal_self_host_invisible"
+description = "The x86-macOS (Mach-O) cycc cannot compile byte-array literals (`var foo[N] = { ... };`) — a parser miscompile that is INVISIBLE to self-host because cycc's own source uses no byte-array literals, so the PARSE_GVAR_ARR path is never exercised when cycc compiles itself. The target self-hosts byte-identical while carrying a latent miscompile of a path it never runs on itself."
+detail = """
+v6.0.88 (surfaced by the cross-OS lib-test on ach when byte_array_literal.tcyr was
+the glob). On ach the native Mach-O cycc aborts compiling the test with
+`error:2358: expected ';', got '='` (line is inside the prepended stdlib includes,
+not the test's byte-array lines → general parse-state corruption, x86-Mach-O only).
+A trivial `syscall(60,42)` compiles+runs fine, so Mach-O execution is healthy — the
+break is at parse/compile time on this build.
+
+WHY SELF-HOST NEVER CAUGHT IT: cycc has zero `var x[N] = {...}` literals, so
+PARSE_GVAR_ARR is dead during cycc's own compile. The x86-Mach-O cycc self-hosts
+byte-identical (green every slot) yet miscompiles a parser path it never self-uses.
+Exact "green checkmark over untested codegen" class — cf. the macOS-rot incident
+(macho_syscall_number_dual_definition…) and feedback_macos_windows_ci_gate_mandatory.
+
+VERIFY-IT-IS-PRE-EXISTING TRICK: stash the working tree to the released tag's source
+on the target and rebuild the native cycc there — the released .87 fails identically,
+proving a given slot's emit-layer change didn't cause a *parse* error (a codegen
+change cannot). Gated behind the x86-macOS-self-compile HELD decision (Intel/EOL);
+filed issues/2026-06-07-x86-macho-byte-array-literal-no-compile.md.
+"""
+
+[[entries]]
+name = "byte_array_peephole_obj_aware_evrcx_not_evaddr_x1"
+description = "When hoisting `&var` once for the byte-array-literal peephole, use the OBJ-AWARE base loader (_EVRCX: rip-relative LEA when _IS_OBJ, else absolute mov), NOT EVADDR_X1 (absolute-mov only). EVADDR_X1 would silently regress byte arrays compiled to relocatable objects (`-c`) / PIE on x86. aarch64/cx alias _EVRCX to their already-correct EVADDR_X1 (aarch64's has the Mach-O adrp/add branch)."
+detail = """
+v6.0.88. The peephole replaces the ~7-op per-byte EVADDR/EADDRA_IMM/PUSH/MOVI/POPC/
+STORE8/XORAA chain with: hoist base into rcx/x1/r1 ONCE + one direct store per byte
+(x86 `mov byte [rcx+disp],imm8` C6/0 disp8|disp32; aarch64 `strb w0,[x1,#imm12]`
+with a >=4096 legacy fallback; cx `store8 [r1(+disp)],r0`). ~5x emit compression +
+one fixup per array.
+
+THE TRAP: the obvious "load &var into rcx" primitive EVADDR_X1 emits `mov rcx,imm64`
+unconditionally — fine for a non-PIE executable, WRONG for an object/PIE target that
+needs rip-relative + a relocation. The old per-byte code used EVADDR (rax) which HAS
+the _IS_OBJ rip-relative branch; the naive peephole port to EVADDR_X1 drops it.
+_EVRCX is the rcx-twin of EVADDR's obj-aware logic — already present in x86 emit.cyr,
+used by struct-global field stores. cycc has no byte arrays → self-host byte-identical
+regardless; the bug only shows in obj-mode CONSUMER codegen.
+
+IR mode (CYRIUS_IR=1|2, opt-in) keeps the legacy IR-aware per-byte sequence so the
+IR stream is unchanged; the peephole is the IR-off (default / every real build) path.
+"""
+
+[[entries]]
+name = "emit_fmt_macho_before_pe_precedence"
+description = "When deriving an output-format selector (`_emit_fmt`) from the _TARGET_* flags, test Mach-O BEFORE PE — matching the pre-existing EMITELF ladder's order. _TARGET_MACHO and _TARGET_PE come from INDEPENDENT, unguarded env vars (CYRIUS_MACHO / CYRIUS_TARGET_WIN; main.cyr has no mutual-exclusion guard), so the combined state is reachable. The old code let Mach-O win; flip the order and you silently change the conflicting-combo output (Mach-O → PE)."
+detail = """
+v6.0.89 (the _TARGET_* consolidation first bite: collapse the format fan-out +
+entry-base ladder, duplicated in BOTH x86/fixup.cyr and aarch64/fixup.cyr, into
+_emit_fmt(S)→{0=ELF,1=Mach-O-x86,2=Mach-O-ARM,3=PE} + _entry_base(S)).
+
+An adversarial-review workflow caught a DRAFT _emit_fmt that checked `_TARGET_PE==1`
+first: for `CYRIUS_MACHO=1 CYRIUS_TARGET_WIN=1` the old EMITELF (macho-first) emitted
+Mach-O 8192B, the draft emitted PE 1536B — a real divergence, not a false alarm,
+even though no sane build sets both. Fix: `if(_TARGET_MACHO==1)…;if(_TARGET_MACHO==2)
+…;if(_TARGET_PE==1)…` so Mach-O wins, byte-identical for that combo too.
+
+VERIFICATION SHAPE (this is the most fixup-fragile code — entry feeds every absolute
+fixup): build .PREV-vs-.NEW compilers and diff EMITTED binaries across EVERY mode —
+ELF-user, kernel ELF32+ELF64, shared, object, EFI (real source), AGNOS, PE, Mach-O
+x86, Mach-O ARM, AND the Mach-O+PE conflict. A single-format self-host run only
+exercises ELF; the macho/pe/kernel paths need the explicit matrix + ecb/ach/cass.
+TEST-HARNESS TRAP that wasted a cycle: zsh does NOT word-split an unquoted `$var`, so
+`env $combo sh -c …` with combo="A=1 B=1" set ONE malformed var and silently tested
+the no-flags case — the output's ELF magic (not Mach-O) gave it away. Use literal
+`env A=1 B=1 …`, and ALWAYS check the actual output bytes, not just the exit code.
+"""
+
+[[entries]]
+name = "ts_children_list_reserve_then_fill_corrupts"
+description = "TS parser children-list building: NEVER `off = TS_AST_CHILDREN_RESERVE(...)` then parse the elements into `off+i`. RESERVE does not advance the pool cursor, so each element's own sub-lists allocate at the SAME offset and stomp the parent (and vice versa) — a corrupt AST for any nested list. Use the deferred path: `base = TS_CST_TOP()`; parse each element and `TS_CST_PUSH(idx)` AFTER it's fully parsed; then `off = TS_CST_FLUSH(ts_base, base)`. The corruption was invisible for years because --parse-ts never reads lists back. v6.1.10."
+category = "cyrius"
+tags = ["ts-frontend", "parser", "children-list", "ast", "TS_CST_PUSH", "TS_CST_FLUSH", "v6.1.10"]
+content = """
+**The trap**: every `src/frontend/ts/parse.cyr` list builder used
+to do `off = TS_AST_CHILDREN_RESERVE(ts_base, N)` and then parse
+its elements, writing each to `off + i`. But RESERVE only *peeks*
+the pool cursor — it does NOT advance `used` (only COMMIT does). So
+when an element is parsed, that element's own sub-lists allocate at
+the SAME `used` (= off) and overwrite the parent's slots, and the
+parent's later SETs overwrite the child's. Any nested list (call
+args, block stmts, object props, JSX attrs/children, var bindings,
+switch cases, ...) came out garbage.
+
+**Why you won't see it in a quick check**: `cycc --parse-ts <f>`
+exits 0 — but parse "success" only means no parse ERROR fired. It
+never walks the retained AST, so the corruption is invisible until
+something reads the lists. For years nothing did.
+
+**The fix / the rule** (v6.1.10): deferred construction. Builders
+push fully-parsed element indices onto the `_ts_cst` scratch stack
+and flush one contiguous block at the end:
+
+    var base = TS_CST_TOP();
+    while (...) { var e = parse_element(); ...; TS_CST_PUSH(e); }
+    var off = TS_CST_FLUSH(ts_base, base);   # contiguous, advances cursor
+    if (off < 0) { return 0 - 1; }
+
+An element is pushed only AFTER its subtree is parsed, so a run
+stays contiguous on the stack even when nested builders push/flush
+in between (each saves TS_CST_TOP() and flushes back to it). Two
+interleaved lists at once (the template quasi/expr pair) collect
+into locals + `TS_AST_CHILDREN_WRITE`. Only VALUE-walked builders
+need this; type-only builders can stay on the old path (they can't
+corrupt a value list once value FLUSHes advance the cursor past
+them). Verify with `cycc --emit-js` (self-validates: non-zero on
+any node revisited / out-of-range). Full backstory:
+retros/v61x.cyml (v61x_ts_ast_allocator_corruption).
+"""
+
+[[entries]]
+name = "ts_trailing_comma_generic_params_tsx"
+description = "TS_PARSE_TYPE_PARAMS must accept a trailing comma before `>`: the TSX disambiguation form `const f = async <T,>(x) => x` writes `<T,>` (the comma stops the parser reading `<T>` as a JSX open tag). Pre-v6.1.10 the param loop demanded another IDENT after a comma, so every `.tsx` generic arrow failed to parse — including the consumer's real app.tsx. After consuming the comma, re-check for a `>`-family closer and stop. v6.1.10."
+category = "cyrius"
+tags = ["ts-frontend", "parser", "tsx", "generics", "type-params", "v6.1.10"]
+content = """
+**The trap**: in `.tsx`, a bare `<T>(x) => x` is ambiguous with a
+JSX element, so TypeScript's disambiguation is the trailing comma:
+`<T,>(x) => x`. Cyrius's `TS_PARSE_TYPE_PARAMS` consumed the comma
+and then unconditionally expected another type-param IDENT, so it
+errored on the `>` — every generic arrow in a `.tsx` file failed
+to parse, which is why the consumer's real `web/app.tsx` wouldn't
+parse at all (`async <T,>(...)` twice).
+
+**The fix** (v6.1.10): after `TS_PARSE_EXPECT(COMMA)` in the
+param loop, peek for a closing token (`TS_TOK_GT` / `GT_GT` /
+`GT_GT_GT` / `GT_EQ` / ...). If found, it's a trailing comma —
+set done and stop instead of demanding another param. `<T>`
+(no comma) already worked; this just makes `<T,>` work too.
+
+Recognize it: a `.tsx` consumer reports "parses fine in tsc but
+cyrius --parse-ts errors near a generic arrow." The bare `.ts`
+equivalent (no JSX ambiguity, written `<T>`) parses, so it looks
+JSX-specific — it's the trailing comma, not the JSX.
 """

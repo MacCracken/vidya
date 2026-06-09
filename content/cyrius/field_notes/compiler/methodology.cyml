@@ -7,7 +7,7 @@
 # For design / convention patterns see patterns.cyml.
 # For non-obvious internal traps see gotchas.cyml.
 #
-# 9 entries.
+# 10 entries (.63 added: real-flow gate vs self-host placebo).
 
 [[entries]]
 name = "premise_check_at_slot_entry"
@@ -190,11 +190,11 @@ fi
 # Don't sed source at all — generate src/version_str.cyr from
 # the bump script and have src/main.cyr include it.
 cat > src/version_str.cyr <<EOF
-var _VERSION_STR = "cc5 ${NEW}\\n";
+var _VERSION_STR = "cycc ${NEW}\\n";
 var _VERSION_LEN = $((${#NEW} + 5));
 EOF
 # Then verify by running the binary:
-if [ "$(./build/cc5 --version)" != "cc5 $NEW" ]; then
+if [ "$(./build/cycc --version)" != "cycc $NEW" ]; then
     echo "ERROR: --version output mismatch" >&2
     exit 1
 fi
@@ -236,12 +236,12 @@ investigating Mach-O LC_DYLD_INFO_ONLY emission and PE
 
 ```sh
 # Reproduce on the platform:
-./build/cc5_macho_arm < failing_test.cyr > /tmp/fail
+./build/cycc_macho_arm < failing_test.cyr > /tmp/fail
 otool -tv /tmp/fail   # disassemble the fail
 xxd /tmp/fail | head  # inspect the bytes
 
 # Compare to a passing test:
-./build/cc5_macho_arm < passing_test.cyr > /tmp/pass
+./build/cycc_macho_arm < passing_test.cyr > /tmp/pass
 otool -tv /tmp/pass
 diff <(otool -tv /tmp/fail) <(otool -tv /tmp/pass)
 ```
@@ -475,8 +475,8 @@ account for it in the budget.
 **The "orphaned path" inventory** (paths that get silent drift
 without a gate):
 
-- Each backend (`src/main_*.cyr`): cc5 / cc5_aarch64 /
-  cc5_win / cc5_macho_arm / cc5_cx. Each needs its own
+- Each backend (`src/main_*.cyr`): cycc / cycc_aarch64 /
+  cycc_win / cycc_macho_arm / cycc_cx. Each needs its own
   build-gate.
 - Each cross-compiler output type: ELF, Mach-O, PE32+,
   cyrius-x bytecode. Each needs an output-gate (`xxd | grep`
@@ -681,4 +681,58 @@ incidents tells you the discipline transfer doesn't happen
 automatically — it has to be EXPLICIT in vidya so an agent
 searching "before deleting from sigil" hits it before the
 first grep.
+"""
+
+[[entries]]
+name = "real_flow_gate_vs_selfhost_placebo"
+description = "Self-host (cycc==cycc) is a PLACEBO for whole classes of breakage — it reads source by path and never walks a dir, spawns a process, or resolves a dep. The actual test is a real consumer-flow gate (init → lib sync → deps → build → run) on real hardware. arm64-macOS lib sync rotted GREEN for 10+ releases behind self-host + hello-world smoke until a consumer hit it."
+category = "cyrius"
+tags = ["process", "verification", "gate", "macho", "self-host", "found-by-ports", "v6.0.63"]
+content = """
+**The lesson**: a green self-host checkmark proves the compiler
+reproduces ITS OWN bytes — nothing more. Self-host reads every
+source by an explicit path; it NEVER:
+  - walks a directory (getdents/getdirentries),
+  - spawns a child process (fork/execve/waitpid),
+  - resolves a dependency,
+  - mkdir/unlink/chmod's the filesystem.
+So an entire class of toolchain breakage ships GREEN behind it.
+arm64-macOS `cyrius lib sync` (dir-walk) was broken for 10+
+releases behind a green self-host + hello-world/exit-code smoke
+— found by a consumer (yantra CI), the exact "found by ports"
+failure CLAUDE.md forbids. The placebo wasn't ONE bad job; it
+was trusting a checkmark whose mechanics can't reach the bug.
+
+**The fix is a GATE, not a smarter checkmark**: run the flow a
+consumer runs — `init → lib sync → deps → build an ALLOCATING
+program → run/assert → reproducible` — go RED at the first
+broken step, on real hardware, every release. The acceptance
+test for the gate itself: the FIRST time it runs it must turn
+the currently-broken platform red. If it's green on a
+known-broken platform, the gate is lipstick, not a gate.
+(scripts/funcgate-posix.sh + funcgate-win.ps1 + funcgate-stage.sh;
+Windows can't run the wrapper at all — fork/execve/mkdir
+undefined for PE — so its gate exercises cycc.exe compiling +
+running allocating programs instead.)
+
+**Three debugging corollaries, all earned in .63**:
+1. "Works in a minimal probe, fails in the wrapper" → the
+   WRAPPER (full include set) is the real test. Suspect a
+   duplicate global bound by include order, not codegen — print
+   the actual value of the global the failing path reads. (See
+   gotchas: macho_syscall_number_dual_definition_61_vs_217.)
+2. Verify on a host with NO ambient install. The gate first ran
+   GREEN locally only because the machine's ~/.cyrius masked an
+   init-detection miss; a clean host (pi) exposed it. An ambient
+   install is a false-green generator — it answers the questions
+   the gate is supposed to be asking.
+3. A bug fix that turns a gate green can immediately surface the
+   NEXT bug the broken step was hiding. Fixing macOS dir-walk got
+   lib sync/deps/build/run green and THEN the reproducible step
+   reded — a real, separate gate-harness bug (output-name
+   embedding). Read each new red as progress, not regression.
+
+Cross-ref: gotchas.cyml (macho_syscall_number_dual_definition_61_vs_217,
+macho_output_basename_breaks_reproducible_cmp); retros/v60x.cyml;
+CLAUDE.md Closeout 3b ("hello-world smoke is a placebo").
 """

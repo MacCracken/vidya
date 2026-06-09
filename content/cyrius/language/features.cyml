@@ -1,6 +1,7 @@
 # Cyrius — Language Features
 # How to use specific Cyrius language features: types, syntax, derives, directives.
-# Refreshed 2026-05-17 at v5.11.59 ship.
+# Last full refresh 2026-05-17 at v5.11.59; v6.0.x feature additions (callptr,
+# multi-DLL imports, full CommandLineToArgvW, etc.) pending the v6.x vidya pass.
 # 36 entries.
 
 [[entries]]
@@ -1112,7 +1113,7 @@ v5.9.40 closed the three Phase 2c sites that v5.9.26 +
 v5.9.27 narrowed but didn't fix in the cyrius-x (cx)
 bytecode backend. End-to-end: a cyrius source exercising
 struct-by-value return, sub-8-byte struct field loads, and
-7+-arg fn calls now round-trips cleanly through cc5_cx →
+7+-arg fn calls now round-trips cleanly through cycc_cx →
 .cyx bytecode → cxvm interpreter.
 
 THREE COORDINATED CHANGES:
@@ -1153,7 +1154,7 @@ CX-SIDE ABI COMPLETION (required to make the chain compile):
     - `EFLADDR(S, lli)` — was stub returning 0
     - `EFLADDR_X1(S, lli)` — didn't exist
     - `ESTOREREGPARM(S, pidx, disp)` — didn't exist
-    Without them, cc5_cx SIGILL'd at compile-time on any
+    Without them, cycc_cx SIGILL'd at compile-time on any
     sub-byte struct-field store or `fn f(): S` declaration.
     All three got real impls this slot mirroring the existing
     `ESTOREPARM` r-to-frame body shape.
@@ -2159,10 +2160,10 @@ because they're already saved).
 
 [[entries]]
 name = "cyrius_dce_verbose_env_v51145"
-description = "v5.11.45 — CYRIUS_DCE_VERBOSE=1 env var gates the per-fn name list in cc5's 'note: N unreachable fns ...' stderr output. Default-off: 38 lines collapse to 1 line per compile. Verbose mode opt-in for actual cleanup work"
+description = "v5.11.45 — CYRIUS_DCE_VERBOSE=1 env var gates the per-fn name list in cycc's 'note: N unreachable fns ...' stderr output. Default-off: 38 lines collapse to 1 line per compile. Verbose mode opt-in for actual cleanup work"
 category = "cyrius"
 ---
-Pre-v5.11.45 cc5 always emitted the full list of
+Pre-v5.11.45 cycc always emitted the full list of
 unreachable fn names to stderr during compile:
 
     note: 37 unreachable fns (22871 bytes — set CYRIUS_DCE=1 to eliminate)
@@ -2189,7 +2190,7 @@ byte estimate).
 
 [[entries]]
 name = "cyrius_vet_restored_v51145"
-description = "v5.11.45 — cyrius vet restored as a real audit tool. build/cyrc had been silently replaced with the 12 KB bootstrap binary (no vet/deny dispatch); install.sh _rebuild_stale skipped because mtime was newer than source. Fixed via explicit syscall(60) exit in cyrc.cyr + scan-buffer cap raise 16 KB → 256 KB. cyrc 12,344 B → 44,672 B"
+description = "v5.11.45 — cyrius vet restored as a real audit tool. build/cybs had been silently replaced with the 12 KB bootstrap binary (no vet/deny dispatch); install.sh _rebuild_stale skipped because mtime was newer than source. Fixed via explicit syscall(60) exit in cybs.cyr + scan-buffer cap raise 16 KB → 256 KB. cybs 12,344 B → 44,672 B"
 category = "cyrius"
 ---
 `cyrius vet` walks an entry .cyr source's include
@@ -2198,54 +2199,54 @@ lists policy violations.
 
 At v5.11.45 entry, `cyrius vet src/main.cyr` was
 silently returning "no dependencies" — incorrect:
-main.cyr has 14 includes. Root cause: `build/cyrc`
+main.cyr has 14 includes. Root cause: `build/cybs`
 had been replaced with the 12 KB bootstrap binary
 (which has no vet/deny dispatch). `install.sh
 --refresh-only` carried the bad binary into
-`~/.cyrius/bin/cyrc`; the `_rebuild_stale` check
+`~/.cyrius/bin/cybs`; the `_rebuild_stale` check
 skipped rebuild because the bad binary's mtime was
 newer than the source — same shape of silent slip
 as build/cc5's mabda contamination.
 
 FIXES IN v5.11.45 P(-1) BUNDLE:
 
-  programs/cyrc.cyr — added explicit `syscall(60, r);`
+  programs/cybs.cyr — added explicit `syscall(60, r);`
     exit (vet was running twice; the second run was
     being preempted by the runtime fall-through path)
-  programs/cyrc.cyr — scan-buffer cap 16 KB → 256 KB
+  programs/cybs.cyr — scan-buffer cap 16 KB → 256 KB
     (was truncating reads on src/main.cyr's 86 KB
     source and falsely reporting "no dependencies")
 
 Post-fix: `cyrius vet src/main.cyr` correctly lists
 14 includes, exit 0; `cyrius deny` lists 0 violations.
-cyrc 12,344 B (bootstrap) → 44,672 B (real audit tool).
+cybs 12,344 B (bootstrap) → 44,672 B (real audit tool).
 
 [[entries]]
 name = "cyrius_lsp_argv0_self_resolution_v51144"
-description = "v5.11.44 — cyrius-lsp uses /proc/self/exe to resolve its install dir and find cc5 via <install-dir>/cc5 BEFORE the 3 existing fallback paths. Editors with minimal-env LSP launchers (Claude Code et al.) no longer silently disable diagnostics"
+description = "v5.11.44 — cyrius-lsp uses /proc/self/exe to resolve its install dir and find cycc via <install-dir>/cycc BEFORE the 3 existing fallback paths. Editors with minimal-env LSP launchers (Claude Code et al.) no longer silently disable diagnostics"
 category = "cyrius"
 ---
 cyrius-lsp's `find_cc5()` previously tried 3 fallback
-paths to locate the cc5 binary:
+paths to locate the cycc binary:
 
-  1. $CYRIUS_HOME/bin/cc5
-  2. ~/.cyrius/bin/cc5
-  3. /usr/local/bin/cc5
+  1. $CYRIUS_HOME/bin/cycc
+  2. ~/.cyrius/bin/cycc
+  3. /usr/local/bin/cycc
 
 In editors that launch LSP servers with a minimal env
 (no $HOME, no $CYRIUS_HOME) — Claude Code is the
 canonical example — all 3 fallbacks miss and the LSP
 silently returns "diagnostics disabled, can't find
-cc5". User sees no syntax errors / type errors /
+cycc". User sees no syntax errors / type errors /
 unresolved-name warnings on edit; manual `cyrius
 build` is the only way to surface them.
 
 v5.11.44 added a 4th, FIRST-tried path:
-`<install-dir>/cc5` where install-dir is resolved via
+`<install-dir>/cycc` where install-dir is resolved via
 `/proc/self/exe → realpath → dirname`. The cyrius-lsp
 binary is shipped at `~/.cyrius/bin/cyrius-lsp`
-alongside `~/.cyrius/bin/cc5`, so the self-resolution
-finds cc5 immediately regardless of caller env.
+alongside `~/.cyrius/bin/cycc`, so the self-resolution
+finds cycc immediately regardless of caller env.
 
 IMPLEMENTATION SHAPE (mirrors v5.11.39
 programs/cyrius-init.cyr::_resolve_templates_dir):
@@ -2261,7 +2262,7 @@ fn _resolve_install_dir(): Str {
 }
 ```
 
-Startup log line `[cyrius-lsp] found cc5:
+Startup log line `[cyrius-lsp] found cycc:
 <resolved-path>` makes the resolution path debuggable.
 
 Reference: docs/development/proposals/archived/cyrius-lsp-argv0-self-resolution.md

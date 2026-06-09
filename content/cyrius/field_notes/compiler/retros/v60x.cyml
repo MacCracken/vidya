@@ -1,0 +1,210 @@
+# Cyrius Field Notes — v6.0.x cycle retrospective (CLOSED at v6.0.91)
+# Written incrementally across the v6.0.x cycle (2026-05-19 → 2026-06-07,
+# 91 patches). Extended through .63 during the cycle; the cycle-close
+# entry (v60x_cycle_close_64_through_91) covers .64–.91. Companion to
+# v511x.cyml (the v5.11.x cleanup minor that closed the 5.x line),
+# foldin_arc_v57_v59.cyml, and the successor v61x.cyml (the v6.1.x
+# Backend-Codegen-Multi-Arc minor).
+#
+# v6.0.x is the FIRST minor of the 6.x cycle and carries the
+# binary-rename ceremony (v6.0.0), the native TLS 1.3 stack, the
+# AGNOS userspace target, and — the cycle's defining thread — the
+# cross-OS verification reckoning that turned a placebo checkmark
+# into a real consumer-flow gate.
+
+[[entries]]
+name = "v60x_cycle_overview_through_63"
+description = "v6.0.x overview through .63: the cybs/cycc rename ceremony (v6.0.0, names forever), the native TLS 1.3 client+server stack with OpenSSL interop, the CYRIUS_TARGET_AGNOS ring-3 userspace target, and the macOS/Windows hardening slate that exposed Linux-centric stdlib assumptions on real hardware. Throughline: verification discipline evolving from hello-world placebo → real self-host gate → real consumer-flow functional gate."
+category = "cyrius"
+tags = ["retrospective", "v6.0.x", "rename", "tls-1.3", "agnos", "macho", "windows", "cross-os", "functional-gate", "running"]
+content = """
+v6.0.x opened the 6.x cycle and is the most cross-OS-heavy
+stretch in the project's history. Four arcs run through it, with
+a fifth — verification discipline — woven across all of them.
+
+ARC 1: THE RENAME CEREMONY (v6.0.0)
+
+Both compiler binaries renamed at cycle-open: the bootstrap
+compiler `cyrc` → **cybs** (Cyrius Bootstrap), the top compiler
+`cc5` → **cycc** (Cyrius Computer Compiler). Bootstrap chain is
+now seed → cybs → cycc. These names are FOREVER — no `cycc7` at
+v7.0.0, no version digit ever appended to a binary name. The
+cc3→cc5 (v5.0.0) then cyrc→cybs / cc5→cycc (v6.0.0) sequence was
+the LAST name-change penalty the project pays; `VERSION` file +
+`--version` output are the only version sources of truth. v6.0.1
+cleaned up a rename leftover (lex.cyr "cycc " skip-prefix
+off-by-one → corrupted stdlib fallback → gnoboot ud2 emit).
+
+ARC 2: NATIVE TLS 1.3 (.11–.28)
+
+A full native TLS 1.3 stack — server first (.15–.23, interops
+with OpenSSL 3.6.2, CONNECTED), then client (.24+). Built on
+native AES-NI + HKDF + the record layer. Gotchas earned along
+the way are now language field-notes: `secret` is a reserved
+keyword (zeroise attribute) so it can't be a param name;
+`var x[N]` allocates N BYTES not N slots (phantom-zero IV bytes);
+helper fns must stay ≤6 args (register-ABI ceiling). Sigil
+folded its CT primitives in. 1.2 backport + consumer wiring
+remain pinned later in the cycle.
+
+ARC 3: CYRIUS_TARGET_AGNOS (.29–.33)
+
+A new ring-3 target speaking the AGNOS syscall ABI, so agnoshi
+and the AGNOS userland rebuild for agnos rather than Linux. The
+gating prereq for AGNOS shell-separation. Userspace only (NOT
+the v6.2.0 bare-metal target). ABI contract filed upstream;
+agnoshi cross-build is the gate.
+
+ARC 4: macOS / WINDOWS HARDENING SLATE (.32, .45, .57–.63)
+
+The cycle's reality check. Testing on REAL hardware — ecb
+(macOS arm64), ach (macOS x86), cass (Windows), pi (Linux arm64)
+— surfaced a whole family of Linux-centric stdlib assumptions:
+- .32: macOS install + arm64 Mach-O runtime fix.
+- .45: a real publish-blocking self-host gate + corrected
+  platform ground truth (and the retraction of a .44 false
+  "x86-macOS broken" claim that was a codesign-comparison
+  artifact — never codesign-cmp a Mach-O).
+- .59: lib/net.cyr Darwin socket syscalls (Linux numbers
+  unported → all networking failed on macOS).
+- .60: getdirentries dir-listing + `cyrius init` scaffolding.
+- .61: real Windows threading + thread-local storage
+  (CreateThread / SRWLOCK / TlsAlloc, 8 syscall reroutes).
+- .62: QoL/language smalls + a macOS install hotfix.
+- .63: the real consumer-flow functional gate + the arm64
+  macOS dir-walk fix it surfaced (see
+  v60x_verification_discipline_evolution).
+
+STATE THROUGH .63: check.sh 85/85; self-host byte-identical on
+x86_64 + aarch64-linux + macho-arm; cross-OS verified on
+ecb/ach/cass/pi. Hard functional gates on x86 Linux, Windows
+(codegen), and arm64 macOS (full flow). One open platform hole
+tracked: `cyrius deps` silently fails on aarch64 Linux (blocks
+that gate from going hard); the cyrius CLI wrapper isn't ported
+to Windows (fork/execve/mkdir undefined for PE).
+"""
+
+[[entries]]
+name = "v60x_verification_discipline_evolution"
+description = "The defining v6.0.x thread: how cyrius verification evolved from a hello-world placebo (the macOS-rot incident — a 'Mach-O ARM64 Native ✓' job that ran toy programs for 9 minors while the compiler never self-hosted on the target) through a real on-target self-host gate (.45) to a real consumer-flow functional gate (.63) that runs init→lib sync→deps→build→run on real hardware. Each step caught what the prior couldn't, and each fix surfaced the next hidden bug."
+category = "cyrius"
+tags = ["retrospective", "verification", "self-host", "functional-gate", "macho", "found-by-ports", "placebo", "v6.0.45", "v6.0.63"]
+content = """
+The single most important thing v6.0.x taught the project:
+**a green checkmark is only as good as the work it actually
+runs.** The arc, in three acts.
+
+ACT 1 — THE PLACEBO (the macOS-rot incident)
+
+The macOS arm64 compiler self-host rotted SILENTLY for ~9 minors
+(v5.3.13 → v6.0.31, 400+ patches) behind a CI job named
+"Mach-O ARM64 Native ✓" that only ran hello-world / exit-code
+programs and NEVER once built or self-hosted cycc. It surfaced
+only when a human installed on a Mac and got a broken toolchain
+— the exact "found by ports" failure. Lesson burned into
+CLAUDE.md Closeout 3b: hello-world smoke is a placebo; the
+compiler self-hosting ON the target IS the test.
+
+ACT 2 — THE REAL SELF-HOST GATE (.45)
+
+The macho-arm64-native / windows-native CI jobs were rebuilt to
+actually compile cycc THROUGH the cross-emitter and self-host it
+byte-identical on the real runner — not run toy binaries. This
+caught real breakage (a .44 codesign-comparison artifact was
+corrected; x86-macOS was confirmed to self-host). But self-host
+has its OWN blind spot: it reads every source by an explicit
+path. It never walks a directory, spawns a process, or resolves
+a dependency.
+
+ACT 3 — THE FUNCTIONAL GATE (.63)
+
+A consumer (yantra CI) hit `cyrius lib sync` broken on arm64
+macOS — green self-host, broken toolchain, found by ports AGAIN.
+Root cause: the self-host gate CAN'T walk a directory, so a
+broken `getdirentries` path was invisible to it. The fix was a
+new kind of gate: `scripts/funcgate-posix.sh` (+ funcgate-win.ps1
+for Windows, which can't run the wrapper at all) runs the flow a
+consumer runs — init → lib sync (dir-walk) → deps → build an
+ALLOCATING program → run/assert → reproducible-build → hashmap —
+on real hardware, RED at the first broken step. Wired into CI as
+hard gates where green, honest-red (continue-on-error, tracked)
+where not.
+
+THE DOMINO EFFECT (why each act mattered)
+
+Fixing the arm64 macOS dir-walk for the funcgate took the whole
+session and taught its own lessons:
+- The bug was MIS-DIAGNOSED as an "arm64 arg-corruption codegen
+  bug." It wasn't codegen at all: `SYS_GETDENTS64` is
+  multiply-defined (217 x86/macos, 61 aarch64-Linux), the wrapper
+  binds 61 by include order, and the macho ESYSXLAT translated
+  only 217→344 — missing 61→344. A one-line backend fix. A
+  standalone probe bound 217 and worked, masking it for releases.
+  → The wrapper, not a probe, is the test.
+- The gate first ran GREEN locally only because the dev machine's
+  ambient ~/.cyrius masked an init-detection miss. A clean host
+  (pi) exposed it. → Verify where there is NO ambient install.
+- The moment dir-walk was fixed and lib sync/deps/build/run went
+  green, the reproducible step reded — a SEPARATE gate-harness
+  bug (Mach-O embeds the output basename, so building fib vs fib2
+  always differs; codesign is non-deterministic). → Each fix
+  surfaces the next bug the broken step was hiding; a new red is
+  progress.
+
+THE GENERALIZATION
+
+Verification has to actually exercise the surface it claims to
+cover. Self-host covers "compiler reproduces its bytes."
+Hello-world covers "a binary loads." Neither covers "the
+toolchain works." Only running the consumer flow does. The
+funcgate's acceptance test for ITSELF: the first time it runs it
+must turn the currently-broken platform red — a gate that's green
+on a known-broken platform is lipstick. See methodology.cyml
+(real_flow_gate_vs_selfhost_placebo) + gotchas.cyml
+(macho_syscall_number_dual_definition_61_vs_217,
+macho_output_basename_breaks_reproducible_cmp).
+"""
+
+[[entries]]
+name = "v60x_cycle_close_64_through_91"
+description = "v6.0.x close (.64–.91, shipped 2026-06-07): the native TLS arc completed (full 1.2 + 1.3, client + server, over sigil primitives, Cloudflare + OpenSSL interop; lib/tls.cyr re-backed behind CYRIUS_TLS_NATIVE with libssl still default), the CYRIUS_TARGET_AGNOS userspace target booted to prompt on the real agnos 1.43.x kernel under QEMU, the macOS-rot remediation FINISHED (macOS arm64+x86 and Windows cycc now self-host AND install to a working toolchain on real hardware, not hello-world smoke), Windows gained multi-DLL PE FFI + COM/DXGI GPU enum, and the cycle closed at v6.0.91 (91 patches) → v6.1.0."
+category = "cyrius"
+tags = ["retrospective", "v6.0.x", "tls", "agnos", "windows", "macho", "cross-os", "closed", "v6.0.91"]
+content = """
+The back half of v6.0.x (.64–.91) finished the three big arcs the
+.63 snapshot left open and closed the minor at v6.0.91.
+
+NATIVE TLS — COMPLETED (.72–.83)
+The TLS stack went from "server interops" to a complete sovereign
+client+server: TLS 1.2 backport (AEAD record layer, PRF + key
+derivation) alongside the 1.3 stack; ECDSA P-256/P-384 + RSA
+PSS/PKCS#1 + Ed25519; AES-128/256-GCM + ChaCha20-Poly1305; EMS,
+ALPN, OS trust-store + SNI verification; server-flight reassembly.
+Live-Cloudflare + OpenSSL-interop proven. `lib/tls.cyr` re-backed
+onto `lib/tls_native.cyr` behind `CYRIUS_TLS_NATIVE` (libssl stays
+the default so consumers don't break); sandhi rewired off raw
+libssl onto typed verbs.
+
+WINDOWS PILLAR (.85–.86) + AGNOS BOOT (.87)
+.85 made `cyrius build` actually work on Windows (the wrapper, not
+just `cycc`); .86 added DXGI GPU enumeration via COM vtable
+dispatch (verified on real cass) and closed the Windows arc. .87
+got AGNOS getenv/envp + the agnoshi cross-build gate verified on
+the real agnos kernel under QEMU — boot-to-prompt, the userspace
+target proven end to end.
+
+CLOSEOUT (.88–.91)
+Heap-map audit, dead-code floor, the judgment-pass refactor
+carry-ins, and the doc/vidya sweep. The macOS-rot lesson is now
+permanently encoded (CLAUDE.md Closeout 3b + the funcgate). Items
+carried OUT to v6.1.x: bayan/ganita stdlib carve, x86-macho cycc
+self-compile (HELD — Apple Intel EOL), TS/TSX → JS emit, and the
+closeout judgment-pass carry-ins (aarch64 EADDRA_IMM 12-bit mask,
+the `_emit_fmt`/`_entry_base` hoist, DCE consolidation) — all
+landed in v6.1.x (see v61x.cyml).
+
+THE CYCLE IN ONE LINE: v6.0.x renamed the binaries forever, made
+Cyrius speak TLS and AGNOS on its own, and — most durably — taught
+the project that a green checkmark is only worth the work it
+actually runs.
+"""
