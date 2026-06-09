@@ -12,6 +12,26 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
+# 43 entries (6.1.18 added: adding a PUBLIC stdlib fn (a top-level `module::fn` in
+# lib/) makes check.sh's api-surface gate fail cryptically — `case-FAIL: test3
+# addition count not reported as 1` — because docs/api-surface.snapshot is now
+# stale; regenerate it: rebuild build/cyrius_api_surface from source then
+# `build/cyrius_api_surface --update`. Underscore-private fns + src/backend
+# internals are NOT tracked, so only intended public-surface adds show. Also: a
+# new lib/<x>_win.cyr should be SELF-CONTAINED (own widen/narrow) — coupling it to
+# _args_w2u8/_w_append_cstr forces every Windows consumer of the parent module to
+# include args.cyr/process.cyr, FATAL under --strict.)
+# 42 entries (6.1.17 added: a NEW PE syscall-reroute emitter `E*_PE` must get an
+# aarch64 `return 0` stub in backend/aarch64/emit.cyr — parse_expr.cyr references
+# it unconditionally inside the statically-dead `_TARGET_PE==1` block, and a
+# missing stub fires "undefined function" which is FATAL under `--strict` on
+# aarch64 (cx tolerates the whole cohort un-stubbed, aarch64 does NOT). The build
+# passes WITHOUT the stub if you forget `--strict` — the warning is the only tell.)
+# 41 entries (6.1.12 added: a large fn-local `var[]` lands in `.bss` static, NOT
+# the stack — and a `var[]` in a statically-dead region after a `#ifdef`-gated
+# return STILL reserves its `.bss`; diagnose via `objdump -h` section deltas, not
+# `sub rsp` scanning. The agnos getenv #PF was `.bss`-image/loader-mapping, not
+# stack overflow as the issue assumed.)
 # 40 entries (.88-.90 added: x86-Mach-O can't compile byte-array literals — a
 # parser miscompile INVISIBLE to self-host since cycc uses no byte arrays (verify
 # pre-existing by stashing to the released tag's source on the target); the
@@ -62,6 +82,50 @@
 # var base; aarch64 atomic_cas is not a full barrier — fence the lock.
 # .63 added: macho syscall dual-definition 61-vs-217;
 # Mach-O output-basename breaks reproducible cmp).
+
+[[entries]]
+name = "large_fn_local_var_array_is_bss_not_stack"
+description = "A large function-local `var buf[N]` in cycc is allocated in `.bss` static storage, NOT the stack frame — and a `var[]` sitting in a statically-dead region (e.g. after a `#ifdef`-gated early `return`) STILL reserves its `.bss` even on the path that never reaches it. Diagnose via section deltas, not `sub rsp` scanning."
+category = "cyrius"
+tags = ["layout", "bss", "var-array", "agnos", "stack", "v6.1.12"]
+content = """
+**The trap**: `lib/io.cyr` `getenv()` had an 8 KB `var buf[8192]`
+*after* a `#ifdef CYRIUS_TARGET_AGNOS` early `return`. The agnos
+build never touches `buf`, but the agnoshi consumer #PF'd and the
+filed issue blamed an "8 KB stack frame reserved past the early
+return." Plausible — but WRONG about the mechanism.
+
+**What actually happens**: in cycc a function-local `var[]` of
+this size is emitted into **`.bss`** (static storage), not as a
+stack-frame allocation. Verified on the real `--agnos` build by
+diffing section sizes before/after guarding the buffer behind
+`#ifndef CYRIUS_TARGET_AGNOS`:
+
+  .bss   0x2f18 -> 0xf08   (-8208 B = buf + align)
+  .text  -928 B            (the now-dead environ reader)
+  max stack frame: unchanged at 0xd0 — no `sub rsp, 0x2000`
+  ever existed.
+
+So scanning the disassembly for a big `sub rsp` finds nothing and
+can make you think "the buffer isn't there" — it IS, just in
+`.bss`. Always check `llvm-objdump -h` section deltas, not just
+prologue `sub rsp`, when chasing a "phantom buffer" on a
+constrained target.
+
+**Why it still faulted on agnos** (mechanism the issue got wrong):
+an oversized `.bss` grows the PT_LOAD memsz the loader must
+zero-map; the agnos #PF is `.bss`-image / loader-mapping related,
+NOT init-stack overflow. A "widen the ring-3 init stack" fix
+aims a layer off.
+
+**The fix**: guard the whole reader (buffer + parse loop) behind
+`#ifndef CYRIUS_TARGET_AGNOS` so the dead region contributes
+nothing to the agnos image. The broader compiler-side want —
+elide storage for a `var[]` that's provably never live on the
+taken path — stays a (low-priority) follow-on; the preprocessor
+guard fully resolves the case. Related: the v6.0.79 `cyml.cyr`
+oversized-`var[]`-on-constrained-target overflow.
+"""
 
 [[entries]]
 name = "slice_fn_local_layout_flip"
@@ -2581,4 +2645,40 @@ Recognize it: a `.tsx` consumer reports "parses fine in tsc but
 cyrius --parse-ts errors near a generic arrow." The bare `.ts`
 equivalent (no JSX ambiguity, written `<T>`) parses, so it looks
 JSX-specific — it's the trailing comma, not the JSX.
+"""
+
+[[entries]]
+name = "new_pe_emitter_needs_aarch64_strict_stub"
+description = "Any NEW PE syscall-reroute emitter `E*_PE` (added to backend/x86/emit.cyr) must also get a `fn E*_PE(S) { return 0; }` stub in backend/aarch64/emit.cyr. parse_expr.cyr references the emitter unconditionally inside its statically-dead `if (_TARGET_PE == 1)` block, so cycc's symbol resolution needs the symbol to exist when the aarch64 backend builds — a missing stub fires `warning: undefined function 'E*_PE'`, which is FATAL under `--strict`. v6.1.17."
+category = "cyrius"
+tags = ["pe", "aarch64", "stub", "symbol-resolution", "strict", "syscall-reroute", "v6.1.17"]
+content = """
+**The trap**: v6.1.17 added `ENANOSLEEP_PE` to `backend/x86/emit.cyr`
+(routes `nanosleep(35)` → `kernel32!Sleep`) and wired it into
+`parse_expr.cyr`'s `_TARGET_PE == 1` block — both the literal
+`sc_num == 35` case and the `EPE_SYSCALL_DYNAMIC` argc==3 candidate.
+The x86 build + local self-host + cass all passed. But the
+**aarch64** cross-build fired `warning: undefined function
+'ENANOSLEEP_PE'` (twice). It only *warns* (non-fatal) on a plain
+build — so a forgotten stub sails through unless you build `--strict`
+(CI / `cyrius build --strict`), where it's a hard error.
+
+**Why**: `parse_expr.cyr` calls every `E*_PE` emitter unconditionally
+inside `if (_TARGET_PE == 1)`. On aarch64 `_TARGET_PE` is always 0 so
+the branch is statically dead at runtime, but cycc resolves symbols
+before that's known, so the fn must exist. `backend/aarch64/emit.cyr`
+therefore carries a `return 0` stub for the ENTIRE PE cohort
+(EWRITE_PE, EGETTICKS_PE, ECREATEDIR_PE, EPE_SYSCALL_DYNAMIC, …). A
+new emitter is the one piece you forget.
+
+**The fix**: add `fn ENANOSLEEP_PE(S): i64 { return 0; }` to the
+aarch64 cohort. (The `cx` backend does NOT stub these — it already
+emits the undefined-fn warning for the whole cohort and builds anyway,
+because it isn't a `--strict` target; matching that means you leave cx
+alone, you don't stub only your one new fn there.)
+
+Recognize it: a new `E*_PE` lands, x86 + Windows are green, then a
+`--strict` aarch64/macOS build (or CI) breaks on "undefined function."
+Grep `backend/aarch64/emit.cyr` for the existing `_PE) { return 0; }`
+cohort and add yours next to `EPE_SYSCALL_DYNAMIC`.
 """

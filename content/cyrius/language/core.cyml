@@ -1,0 +1,545 @@
+# Cyrius — Core Reference
+# Overview, syntax, compiler architecture, dev loop, current limitations,
+# porting guide, stdlib catalog.
+# 7 entries.
+
+[[entries]]
+name = "overview"
+description = "What Cyrius is — sovereign self-hosting systems language. Assembly up."
+category = "cyrius"
+---
+Cyrius is a self-hosting compiler that bootstraps from a 29 KB
+binary seed. No Rust, no LLVM, no Python. Just sh + Linux.
+
+Default integer type is i64. Multi-width types via annotation:
+`var x: i8 = 42;` `var y: i16 = 1000;` `var z: i32 = 0;` produce
+width-correct loads (movzx) and stores. `sizeof(Type)` operator.
+Type annotations enable width-correct codegen; untyped variables
+remain i64. f64 supported as bit patterns via 28+ f64_* builtins
+(SSE2/SSE4.1/x87 + 10 SIMD packed-double primitives via
+SSE2 / NEON `.2D` — `f64v_add/sub/mul/div/sqrt/abs/fmadd`
+since v1.9.0, `f64v_dot/scale/axpy` added at v5.10.17 for
+hisab gap-close).
+
+THE COMPILER BINARY:
+- `cycc` is the current generation (renamed from cc3 at v5.0.0,
+  renamed to `cycc` at v6.0.0 — the FINAL binary name forever
+  per the "Version lives in `VERSION` + `--version`, never in
+  binary names" rule).
+- Self-hosts byte-identical (two-step + three-step verify).
+- Cross-compiles to aarch64 via `src/main_aarch64.cyr`.
+- Apple Silicon Mach-O self-hosts byte-identically.
+- Windows PE32+ self-hosts natively byte-identical (`cycc_win.exe`
+  on Windows 11 produces output matching Linux cross-build
+  byte-for-byte).
+- 11 modules (frontend/lex + frontend/parse + frontend/ts/* +
+  backend/x86/* + backend/aarch64/* + backend/cx + backend/macho
+  + backend/pe + backend/js + common/ir + cc compatibility layer).
+
+BUILD / COMPILE / TEST:
+- Bootstrap:   `sh bootstrap/bootstrap.sh` (~40ms)
+- Compile:     `cyrius build src/main.cyr build/myapp`
+                (auto-resolves deps from cyrius.cyml)
+- Test:        `cyrius test src/test.cyr`
+- Audit:       `sh scripts/check.sh` (self-host + heap + tcyr
+                + fmt + lint)
+- Version:     `cycc --version`
+
+OPTIONAL COMPILER MODES:
+- `cycc --strict` — undefined-fn warnings become hard errors (CI).
+- Regalloc: default-ON since v5.6.24. Every x86 fn (no inline asm
+  in body) gets Poletto-Sarkar linear-scan picker pinning up to 5
+  hot locals to rbx/r12-r15. Override via env: CYRIUS_REGALLOC_AUTO_CAP=0
+  (disable) or =N (cap at first N fns, bisection).
+- IR pipeline: CYRIUS_IR=1 records IR + emits x86; CYRIUS_IR=3
+  also runs the optimization passes (LASE + const-fold + bitmap
+  liveness DCE + DSE + fixed-point driver).
+- Profiling: CYRIUS_PROF=1 (clock_gettime wall-clock; cross-platform
+  via __got on Mach-O / kernel32 on PE).
+
+IMPORTANT — use `cyrius build` not raw `cat file | cycc` for projects:
+`cyrius build` resolves deps from `cyrius.cyml` and auto-prepends
+includes. Raw cycc misses namespaced deps (lib/{depname}_{basename})
+and produces undefined-variable errors. Raw cycc is only correct
+for: compiler self-hosting, one-liner tests, the bootstrap chain.
+
+LANGUAGE FEATURES SHIPPED (not exhaustive):
+- Multi-width types (i8/i16/i32/i64/u128), sizeof, unions,
+  bitfield builtins, defer (all exit paths, per-flag).
+- Struct field widths, expression type propagation, narrowing
+  warnings. Struct initializer syntax, native multi-return,
+  short-circuit && / ||, expression-position comparisons.
+- Slices: `slice<T>` / `[T]` first-class type with bounds-aware
+  `s[i]` indexing and `s.ptr` / `s.len` dot-syntax field access.
+- Compound assignment (+=, -=, *=, %=, etc.), negative literals.
+- `#regalloc` directive (per-fn opt-in).
+- `#ifplat PLAT` / `#endplat` (sugar for `#ifdef CYRIUS_ARCH_*`).
+- `#pe_import("kernel32.dll", "Symbol")` (PE IAT registration).
+- `#derive(accessors / Serialize)` with single-pass JSON
+  deserializer.
+- `secret var` (constant-time comparison helper for sigil PQC).
+- Per-arch asm dispatch via `#ifdef CYRIUS_ARCH_{X86,AARCH64}`;
+  new consumers should prefer `#ifplat` syntax.
+- Inline small fns (token replay).
+- PIC codegen for `object;` mode (LEA + R_X86_64_PC32, no
+  DT_TEXTREL — glibc 2.38+ dlopen-safe).
+- `_cyrius_init` export wraps top-level code as a callable
+  function in `object;` mode.
+- TS/TSX → JS emitter: `cycc --emit-js file.tsx` (+ `cyrius build
+  --target=js`) — type-strips + lowers JSX to `h(...)`, emits
+  runnable JS (v6.1.11/.12; `backend/js`).
+- Numeric preprocessor: `#if NAME >= VALUE` (`== != < > <= >=`)
+  over `#define NAME VALUE` ints (v5.6.x; e.g. sakshi `SAKSHI_LEVEL`).
+- PIE codegen: `--pie` / `CYRIUS_PIE=1` → ET_DYN position-
+  independent executables (x86_64 v6.1.6 + aarch64 v6.1.8).
+- `.gnu.hash` dynamic linking for shared objects (v6.1.9; drops the
+  legacy SysV `.hash`).
+- Windows directory listing: `dir_list` / `is_dir` / `dir_walk`
+  route to FindFirstFileW on PE (v6.1.18; `lib/fs_win.cyr`) —
+  completing the Windows file surface (process / thread / TLS / env
+  / file-I/O / directory-enumeration, v6.1.16–.18).
+
+OPTIMIZATIONS LANDED:
+- Constant folding (parse-time + IR-level).
+- Tail-call optimization.
+- DCE (bitmap O(T+N) for unreachable fns; bitmap-liveness in IR).
+- Jump tables (dense switches).
+- Dead-store elimination.
+- Return-by-value small structs (ret2/rethi).
+
+[[entries]]
+name = "syntax"
+description = "Complete Cyrius language syntax reference"
+category = "cyrius"
+---
+VARIABLES:
+    var x = 42;            # scalar (8 bytes)
+    var x: i64 = 42;       # with type annotation
+    var buf[256];          # array (256 BYTES, not elements)
+    x = x + 1;             # reassignment
+
+FUNCTIONS:
+    fn add(a, b) { return a + b; }
+    var r = add(20, 22);
+    # Up to 6 register params, 7+ on stack
+    # Forward calls work (call functions defined later)
+
+CONTROL FLOW:
+    if (x == 1) { ... } elif (x == 2) { ... } else { ... }
+    while (cond) { ... }
+    for (var i = 0; i < 10; i = i + 1) { ... }
+    break;    # exit loop
+    continue; # skip to next iteration
+
+OPERATORS:
+    + - * / %              # arithmetic
+    == != < > <= >=        # comparison
+    & | ^ ~ << >>          # bitwise
+    && ||                  # logical (short-circuit, chainable)
+    += -= *= /= %= &= |= ^= <<= >>=   # compound assignment
+
+OVERFLOW-EXPLICIT (lib/overflow.cyr):
+    +% -% *%               # wrapping
+    +| -| *|               # saturating
+    +? -? *?               # checked (panic on overflow)
+
+MEMORY:
+    store8(&buf, 65);  load8(&buf);     # byte
+    store16/32/64      load16/32/64     # 16/32/64-bit
+
+POINTERS:
+    var p = &x;        # address-of
+    var v = *p;        # dereference
+    *p = 99;           # write through pointer
+    var p: *i64 = &buf; *(p + 1);  # typed (scales by element size)
+
+STRUCTS:
+    struct Point { x; y; }
+    var p = Point { 10, 20 };
+    p.x = 42;
+    struct Rect { tl: Point; br: Point; }  # nested
+    var r = Rect { 0, 0, 10, 5 };
+    r.br.x;  # chained dot access
+
+SLICES:
+    var s: [u8] = 0;            # or: var s: slice<u8> = 0;
+    slice_set(&s, &buf, 5);
+    var b = s[0];               # bounds-checked u8 load
+    var p = s.ptr;              # field access
+    var n = s.len;
+
+STRINGS:
+    "hello\n"  # null-terminated; UTF-8 bytes pass through verbatim
+    # Escapes: \n \r \t \0 \\ \" \' \a \b \f \v
+    #          \x##         (1 byte, two hex digits)
+    #          \u####       (UTF-8 codepoint, 4 hex digits)
+    #          \u{1..6 hex} (UTF-8 codepoint, up to U+10FFFF)
+    #          surrogates D800-DFFF rejected at lex time
+    syscall(1, 1, "hello", 5);
+    syscall(1, 1, "\x1b[?1049h", 8);   # ANSI alt-screen
+    var grin = "\u{1F600}";              # 4 UTF-8 bytes
+
+SYSCALLS:
+    syscall(1, 1, buf, len);   # write
+    syscall(0, 0, buf, len);   # read
+    syscall(60, code);         # exit
+
+INCLUDES:
+    include "lib/string.cyr"   # textual inclusion (relative to cwd)
+
+INLINE ASM:
+    asm { 0x90; }              # raw bytes
+    asm { cli; sti; hlt; }     # mnemonics
+    asm { mov cr3, rax; }      # privileged
+    asm { lgdt [rax]; }        # descriptor tables
+
+KERNEL MODE:
+    kernel;                    # emit bare-metal multiboot1 ELF
+
+OBJECT MODE:
+    object;                    # emit ELF .o relocatable (PIC)
+
+[[entries]]
+name = "compiler_architecture"
+description = "How the cycc compiler is structured: modules, passes, layout (high-level)"
+category = "cyrius"
+---
+MODULES (included by src/main.cyr):
+    common/util.cyr  — state accessors, helpers
+    common/ir.cyr    — IR opcode definitions and walker
+    backend/x86/*    — x86_64 emit, jump, fixup
+    backend/aarch64/*— AArch64 emit, jump, fixup
+    backend/macho/*  — Mach-O object/exec emission
+    backend/pe/*     — Windows PE/COFF emission
+    backend/cx/*     — cyrius-x bytecode backend
+    frontend/lex.cyr — tokenizer
+    frontend/parse/* — parser + codegen (split: types/expr/decl/ctrl/fn)
+    frontend/ts/*    — TypeScript-syntax accept layer
+
+COMPILATION FLOW:
+    1. Read source (stdin or file) into input buffer
+    2. PREPROCESS: expand include directives, ifdef, derive, macros
+    3. LEX: tokenize into tok_types/tok_values arrays
+    4. Pass 1: scan struct/fn/var declarations (register names,
+       skip fn bodies)
+    5. Pass 2: parse fn bodies (all globals already registered)
+    6. Emit jmp over fn bodies → parse fn defs → patch jmp
+    7. EMIT_GVAR_INITS: replay deferred global var initializations
+    8. PARSE_PROG: parse main code statements
+    9. FIXUP: patch variable / string / function addresses
+    10. EMITELF: write ELF binary to stdout (or .o, or PE, or Mach-O)
+
+CODEGEN MODEL:
+    - Expression evaluation: first nesting uses R12 spill, deeper
+      levels push/pop
+    - rax = result register, rcx = scratch, r12 = first spill register
+    - Prologue: push rbx; push r12; push rbp; mov rbp, rsp
+                (stack params at +32)
+    - Epilogue: leave; pop r12; pop rbx; ret
+    - Variables at fixed addresses in data section
+      (EVLOAD/EVSTORE + fixup)
+    - Function calls via rel32 fixup (type 2)
+    - String addresses via abs64 fixup (type 1)
+
+OPTIMIZATION PIPELINE (CYRIUS_IR=3):
+    - apply_lase (load-after-store elimination)
+    - ir_const_fold (constant folding at IR level)
+    - ir_dce (dead-code elimination via bitmap liveness)
+    - DSE (dead-store elimination)
+    - Fixed-point driver (re-runs passes until no further changes)
+
+HEAP REGIONS ARE FIXED — NOT MMAP'D ON DEMAND. cycc reserves a
+multi-MB heap at brk; every region (preprocess_out, codebuf,
+tok_*, fn_*, etc.) is at a hardcoded offset within it. There's
+no allocator at the compiler level. If a project crosses a cap
+(preprocessor output, codebuf, output_buf, fn table), the
+compile errors out with a clear message and a tip.
+
+[[entries]]
+name = "development_loop"
+description = "The proven development process for adding features to a Cyrius project"
+category = "cyrius"
+---
+1. RESEARCH  — Check vidya for existing patterns. If covered, skip to 3.
+2. VIDYA     — Document patterns, gotchas, codegen BEFORE coding.
+3. BUILD     — ONE change at a time. Before compiling, check:
+               - Duplicate var scan (no var x in two branches of same fn)
+               - Brace balance
+               - Bridge compiler supports syntax used in source
+               - Heap offset map (no collisions if compiler-level work)
+4. TEST      — After EACH change:
+               - Basic: `echo 'var x = 42;' | ./build/cycc > t && chmod +x t && ./t`
+               - Feature-specific test
+               - Self-hosting: cycc==cc5b byte-identical (compiler work only)
+               - Full suite only after basic passes
+5. IF BROKEN — Revert to last known good. Apply ONE change. Test. Repeat.
+               If 3 attempts fail: defer, document root cause, ASK USER.
+6. AUDIT     — Full chain: bootstrap, all suites, self-hosting (compiler).
+7. VIDYA+DOCS — Document findings. Update CHANGELOG, roadmap, benchmarks.
+8. ALIGN     — After major events: sync ALL docs to current state.
+               README, CLAUDE.md, roadmap, architecture docs, CHANGELOG.
+
+KEY LESSONS:
+- Programs are the best compiler fuzzers — build real things early
+- Bridge compiler determines what syntax source files can use
+- Test after EVERY change, not after the feature is "done"
+- Capacity expansions (codebuf, tokens, input) must be separate commits
+
+[[entries]]
+name = "known_limitations"
+description = "Current Cyrius language limitations and gotchas you'll hit"
+category = "cyrius"
+---
+CURRENT LIMITATIONS (active — work around these):
+
+1. MIXED &&/|| REQUIRES EXPLICIT PARENS: `a > 0 && b > 0 || c > 0`
+   fails to parse — no precedence-based disambiguation. Write
+   `a > 0 && (b > 0 || c > 0)` or `(a > 0 && b > 0) || c > 0`
+   instead. All parenthesized forms work.
+
+2. NO `i++` / `++i`: Increment/decrement operators aren't in the
+   grammar. Use `i += 1` or `i = i + 1`. FOR-loop step accepts any
+   assignment expression: `for (var i = 0; i < n; i += 1)`.
+
+3. EXIT CODE TRUNCATION: Linux exit codes wrap at 256. Use
+   print_num for values > 255.
+
+4. INLINE ASM REGISTER STATE: asm blocks operate on the register
+   state at that point. The compiler may have values in rax/rcx.
+   Use push/pop to save state if needed. CAUTION: `[rbp-N]`
+   offsets depend on param count and local index — count
+   carefully and match against PARSE_FN_DEF's (idx+1)*8 formula.
+   `#regalloc` fns shift locals by an extra -8 to reserve [rbp-8]
+   for the saved rbx; asm blocks inside them must compensate or
+   disable routing.
+
+5. NO CLOSURES CAPTURING VARIABLES: Pure fn pointers only —
+   `&fn_name` works (fncall0–fncall8 from fnptr.cyr), but
+   lexical capture does not. Use named functions + globals for
+   shared state.
+
+6. LARGE `var buf[N]` EXHAUSTS OUTPUT BUFFER: Anything over ~4 KB
+   in binary data should be alloc()'d at runtime, not declared as
+   `var buf[N]` (which writes N zeros into the ELF). Use
+   `var buf = 0; fn init() { buf = alloc(N); }`.
+
+7. ENUM INIT ORDERING: Enum init runs BEFORE gvar init in
+   main.cyr. If you modify the compiler, do NOT reorder these —
+   gvar init may call functions that reference enum values.
+
+8. `var buf[N]` IS BYTES: `var buf[N]` allocates N BYTES, not N
+   i64 elements. `var buf[8]` = 8 bytes (1 i64). `var buf[120]`
+   = 120 bytes (15 i64s). Easy mistake — bites repeatedly.
+
+9. ~~`var x: u128` AT FN SCOPE~~ — RESOLVED at v5.8.16 §8.
+   Pre-v5.8.16, scalar_type=16 fn-locals only reserved one 8-byte
+   slot; two adjacent slice/u128 fn-locals silently shared a slot
+   and `&x + 8` overflowed into saved-rbp territory. v5.8.16
+   layout-flip allocates BOTH slots with the canonical (named)
+   slot at the LOWER stack address so `&x + 8` correctly
+   addresses the high half. `var x: u128 = 0;` is now fully
+   load-bearing. The pre-v5.8.16 workaround (`var buf[16]; pass
+   as pointer`) still works but is no longer needed. Same fix
+   covers fn-local slices — see features.cyml's slice_type_v58x
+   entry.
+
+10. INCLUDE IN KERNEL MODE: Not supported. `kernel;` mode blocks
+    require single-file source or external concatenation.
+
+11. PREPROCESSOR OUTPUT CAP: Expanded source hard-capped (current
+    cap surfaces as a clear error message). The right fix is
+    almost always to grow the cap, not trim the program.
+
+12. ELF / OBJECT OUTPUT CAP: Generated binary hard-capped via
+    `EMITELF_USER` / `EMITELF_SHARED` / `EMITELF_OBJ` filesz
+    checks. Same grow-the-cap rule applies.
+
+13. CODEBUF CAP: Generated machine code hard-capped. If a future
+    consumer crosses this, it gets the standard heap-reshuffle
+    treatment.
+
+14. CYRIUS `/` AND `%` ARE SIGNED: The `/` operator lowers to
+    `idiv`, not `div`. For u64 operations where the top bit is
+    meaningful (cryptographic mulmod, hashing, high-entropy
+    counters), prefer the stdlib's `u64_mulmod` / `u64_powmod`
+    / `u128_divmod` — they handle unsigned semantics internally.
+
+GOTCHAS (expected behavior, not bugs):
+
+15. DYNAMIC LOOP BOUNDS: `for (var i = 0; i < GLOBAL; i = i + 1)`
+    re-evaluates GLOBAL each iteration. If the loop body modifies
+    GLOBAL, the loop count changes dynamically. FIX: snapshot to
+    a local first.
+
+16. OPERATOR OVERLOADING + ALLOC: `Type_add(a, b)` works for value
+    types. For pointer-based types (Str), the function receives
+    the pointer value. For stack-allocated structs (Point), it
+    receives the first field value.
+
+17. SUB-µs BENCHMARKS: `bench_start`/`end` has ~120ns
+    clock_gettime overhead + 6ns fncall dispatch. For operations
+    under 1µs, use `bench_batch_start` / `bench_batch_stop` with
+    `batch_size >= 1000`.
+
+18. OBJECT-MODE GLOBALS: In `object;` mode, top-level code (enum
+    values, global var inits) is wrapped in a callable
+    `_cyrius_init()` function. C launchers MUST call
+    `_cyrius_init()` before `alloc_init()` before any application
+    function, or enum-value globals will be zero.
+
+[[entries]]
+name = "porting_guide"
+description = "How to port Cyrius to a new architecture (aarch64 example)"
+category = "cyrius"
+---
+The compiler is factored into arch-independent frontend and
+arch-specific backend.
+
+FRONTEND (shared, no changes needed):
+    common/util.cyr     — state accessors
+    common/ir.cyr       — IR opcodes
+    frontend/lex.cyr    — tokenizer
+    frontend/parse/*    — parser (calls emit/jump functions by name)
+    src/main.cyr        — main loop
+
+BACKEND (per-architecture):
+    backend/<ARCH>/emit.cyr    — instruction emission (~50 functions)
+    backend/<ARCH>/jump.cyr    — branch/patch (~4 functions)
+    backend/<ARCH>/fixup.cyr   — address patching + ELF emission
+
+TO PORT:
+1. Create `backend/<ARCH>/emit.cyr` with same function signatures
+   as x86_64
+2. Create `backend/<ARCH>/jump.cyr` — branch encoding differs per
+   arch
+3. Create `backend/<ARCH>/fixup.cyr` — ELF header + address
+   patching
+4. Create `src/main_<ARCH>.cyr` that includes the new backend
+   instead of x86_64
+5. Build cross-compiler: `cat src/main_<ARCH>.cyr | ./build/cycc
+   > build/cycc_<ARCH>`
+
+KEY MAPPINGS (x86_64 → aarch64 example):
+    EMOVI(imm64)  → MOVZ/MOVK sequence (up to 4 instructions)
+    EPUSHR/EPOPR  → STR/LDR with SP pre/post-index
+    EADDR/ESUBR   → ADD/SUB register-register
+    EIMUL/EIDIV   → MUL/SDIV
+    ELODC/ESTOC   → LDR/STR [x1]
+    ESYSCALL      → SVC #0 (x8=syscall number, x0-x5=args)
+    EJCC(cc)      → B.cond (map x86 cc to ARM condition codes)
+    EJMP/EJMP0    → B imm26
+    FIXUP var     → patch MOVZ/MOVK immediate fields
+    FIXUP fn call → patch BL offset
+
+TESTING:
+    qemu-system-aarch64 for kernel; qemu-aarch64 for userspace
+    (Linux); native aarch64 hardware (Pi 4) for direct verify.
+
+[[entries]]
+name = "stdlib"
+description = "Cyrius standard library catalog — modules, key APIs, dep bundles"
+category = "cyrius"
+---
+CORE LIBRARIES (lib/) — first-party stdlib modules + per-arch/OS
+variants + dep bundles. All ship in the toolchain.
+
+string.cyr      — strlen, streq, memeq, memcpy, memset, memchr, strchr, strstr, print_num, println
+alloc.cyr       — alloc_init, alloc, alloc_reset, alloc_used (bump from brk; routes to alloc_macos.cyr mmap on macOS, alloc_windows.cyr VirtualAlloc on Windows)
+str.cyr         — Str struct (data+len): str_from, str_len, str_eq, str_cat, str_sub, str_contains, str_split, str_trim
+vec.cyr         — Dynamic array: vec_new, vec_push, vec_pop, vec_get, vec_set, vec_len, vec_find, vec_remove
+io.cyr          — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists, plus flock(2) wrappers (file_lock, file_trylock, file_lock_shared, file_append_locked)
+fmt.cyr         — Formatting: fmt_int, fmt_hex, fmt_hex0x, fmt_bool, fmt_byte, fmt_pad, fmt_int_buf, sprintf, fmt_float
+args.cyr        — CLI args: args_init, argc, argv (Linux: /proc/self/cmdline)
+fnptr.cyr       — Function pointers: fncall0–fncall8 (see "fncall_ceiling" entry for ABI rules)
+tagged.cyr      — Tagged unions: packed Result (Ok/Err via bit 63), heap Option (Some/None)
+hashmap.cyr     — map_new (cstr keys) + map_new_str (Str keys, content-hashed) + map_u64_new (u64 keys, SplitMix64, zero-alloc hot path)
+fs.cyr          — Filesystem: is_dir, dir_list, sys_mkdir, sys_unlink, sys_chmod
+process.cyr     — Subprocess: run, run_capture, spawn, exec_vec, exec_env, exec_capture
+syscalls.cyr    — Per-arch dispatch (x86_64_linux, aarch64_linux, macos, windows)
+net.cyr         — TCP socket wrappers
+http.cyr        — HTTP/1.0 client (GET, URL parser, response extraction; CRLF-injection hardened)
+http_server.cyr — Minimal HTTP/1.0 server (used by `vidya serve`, `cyrius doc --serve`)
+ws.cyr          — WebSocket client (RFC 6455 — handshake, framing, masking, ping/pong)
+ws_server.cyr   — WebSocket server
+tls.cyr         — TLS 1.3 client (RFC 8446; libssl.so.3 via dynlib bridge). Pair with fdlopen.cyr.
+json.cyr        — Minimal JSON: json_parse, json_get, json_get_int, json_build, json_v_pointer (RFC 6901), pretty/streaming variants
+toml.cyr        — TOML parser
+cyml.cyr        — CYML parser (TOML header + markdown body)
+csv.cyr         — RFC 4180 CSV parse/write (quoted fields, escaped quotes, commas-in-quotes)
+base64.cyr      — Base64 encode/decode
+bigint.cyr      — 256-bit unsigned integers (4-limb, for cryptography)
+u128.cyr        — 128-bit integers with hardware fast-path (~12× on Miller-Rabin)
+math.cyr        — Extended math (f64_atan and friends, transcendentals)
+matrix.cyr      — Matrix operations
+linalg.cyr      — Linear algebra primitives
+regex.cyr       — Pattern matching
+trait.cyr       — Manual vtable dispatch
+assert.cyr      — Test assertions: assert_eq, assert_ne, assert, assert_summary, test_group
+bench.cyr       — Benchmarking: bench_start/end/report + bench_batch_start/stop (sub-µs)
+bounds.cyr      — Array bounds checking
+callback.cyr    — Callback patterns: fork_with_pre_exec
+thread.cyr      — Threads (clone+mmap), mutex (futex), MPSC channels
+async.cyr       — Async primitives
+freelist.cyr    — Freelist allocator (O(1) alloc/free)
+chrono.cyr      — Time: ISO-8601 format/parse, epoch↔date, leap year, sleep_ms, monotonic clocks
+log.cyr         — Structured logging wrapper over sakshi (ISO-8601 timestamps, level filtering)
+audio.cyr       — ALSA PCM audio via direct ioctls (no libasound, no C FFI)
+mmap.cyr        — Memory-mapped I/O: cyr_mmap, cyr_munmap, cyr_mprotect, mmap_file_ro/rw/anon
+dynlib.cyr      — Pure-cyrius ELF .so loader via mmap (GNU hash table, no libc, no dlopen)
+keccak.cyr      — Keccak-f[1600] + SHAKE-128/256 (NIST-verified)
+sha1.cyr        — SHA-1 (NIST FIPS 180-4 vectors)
+ct.cyr          — Constant-time primitives backing `secret var` (sigil PQC helper)
+cffi.cyr        — C FFI shim surface (struct-by-value / variadic / >6-arg helpers; see docs/ffi/)
+fdlopen.cyr     — Foreign-dlopen primitives (x86_64 Linux). Required by lib/tls.cyr.
+overflow.cyr    — Saturating + checked arithmetic helpers (+|, -|, *|, +?, -?, *?)
+random.cyr      — Kernel-entropy reader
+security.cyr    — Landlock policy enums
+test.cyr        — Table-driven test framework (test_each)
+sandhi.cyr      — Service-boundary stdlib (HTTP/TLS/discovery)
+vidya.cyr       — Vidya knowledge-base access
+
+IDENTITY (NSS-free quartet — musl-pattern /etc/* readers, bypass glibc NSS):
+pwd.cyr         — pwd_getpwuid / pwd_getpwnam
+grp.cyr         — grp_getgrgid / grp_getgrnam / grp_getgrouplist
+shadow.cyr      — shadow_getspnam (root-only)
+pam.cyr         — pam_unix_authenticate (forks /usr/sbin/unix_chkpwd for non-root)
+
+PER-ARCH / PER-OS VARIANTS (auto-selected via _TARGET_* predefines):
+syscalls_x86_64_linux.cyr / syscalls_aarch64_linux.cyr
+syscalls_macos.cyr / syscalls_windows.cyr
+alloc_macos.cyr (mmap) / alloc_windows.cyr (VirtualAlloc)
+args_macos.cyr (x28 entry-prologue argc/argv reader)
+
+DEP BUNDLES (fetched via `cyrius deps` from cyrius.cyml):
+sakshi   — Tracing/logging (slim + full profiles)
+patra    — SQL database (B-tree, WAL, transactions; bundle via `cyrius distlib`)
+sigil    — Ed25519, SHA-256/512, HMAC, HKDF, SHAKE-128/256, AES-NI
+yukti    — Device abstraction (USB, optical, block, GPU via /sys/class/drm, network, udev)
+mabda    — GPU foundation via wgpu-native C shim
+sankoch  — Lossless compression (LZ4, DEFLATE, zlib, gzip)
+
+USAGE PATTERN:
+    include "lib/alloc.cyr"
+    include "lib/vec.cyr"
+    alloc_init();
+    var v = vec_new();
+    vec_push(v, 42);
+
+INCLUDE ORDER FOR FULL STACK (dependency-safe):
+    include "lib/string.cyr"
+    include "lib/fmt.cyr"
+    include "lib/alloc.cyr"
+    include "lib/vec.cyr"
+    include "lib/str.cyr"
+    include "lib/tagged.cyr"
+    include "lib/syscalls.cyr"
+    include "lib/io.cyr"
+    include "lib/hashmap.cyr"
+    include "lib/process.cyr"
+    include "lib/fs.cyr"
+
+IMPORTANT — `var buf[N]` allocates N BYTES, not N elements:
+    var buf[120];     # 120 bytes (enough for sysinfo struct)
+    var uts[392];     # 392 bytes (enough for utsname struct: 6 × 65 + padding)
+    store64(&buf, 42);          # write 8 bytes at offset 0
+    store64(&buf + 8, 43);      # write 8 bytes at offset 8

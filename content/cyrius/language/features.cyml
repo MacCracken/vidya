@@ -1,8 +1,9 @@
 # Cyrius — Language Features
 # How to use specific Cyrius language features: types, syntax, derives, directives.
-# Last full refresh 2026-05-17 at v5.11.59; v6.0.x feature additions (callptr,
-# multi-DLL imports, full CommandLineToArgvW, etc.) pending the v6.x vidya pass.
-# 36 entries.
+# Last full refresh 2026-06-09 at v6.1.18; v6.1.x feature additions (TS/TSX→JS
+# emitter, --target=js, #if NAME>=VALUE numeric preprocessor, PIE/.gnu.hash,
+# Windows directory-listing) documented below.
+# 53 entries.
 
 [[entries]]
 name = "byte_array_literal"
@@ -2267,3 +2268,110 @@ Startup log line `[cyrius-lsp] found cycc:
 
 Reference: docs/development/proposals/archived/cyrius-lsp-argv0-self-resolution.md
 (filed 2026-05-02, closed 2026-05-13).
+
+[[entries]]
+name = "ts_tsx_to_js_emitter"
+description = "cycc --emit-js <file.tsx> — emit runnable browser JavaScript from TypeScript/TSX (v6.1.11)"
+category = "cyrius"
+---
+Cyrius has a TypeScript/TSX frontend (`src/frontend/ts/*`) and a JS
+backend (`src/backend/js/emit.cyr`). `cycc --emit-js file.tsx`
+type-strips and lowers TS/TSX to real, runnable JavaScript:
+
+- Strips interfaces / type aliases / annotations / `as` / `!` /
+  generics (`<T>`).
+- Lowers JSX to `h(tag, props, ...kids)` calls — the pragma is
+  configurable via `CYRIUS_JSX_PRAGMA` (default `h`), with a
+  standalone `h` runtime prelude emitted.
+- ESM passthrough with type-only export pruning; verbatim
+  string / template literals.
+- AST-driven (built on the v6.1.10 children-list allocator fix);
+  emits indented output (v6.1.12). `for` / `for-of` / `for-in`
+  headers fixed at v6.1.12.
+
+The emitted JS passes `node --check` + a `--parse-ts` round-trip.
+This is x86-Linux-only (the TS frontend is not in the cross
+binaries). See also `build_target_js`.
+
+[[entries]]
+name = "build_target_js"
+description = "cyrius build --target=js — CLI wrapper over cycc --emit-js (v6.1.12)"
+category = "cyrius"
+---
+`cyrius build --target=js <file.tsx>` is the wrapper-level entry
+point for the TS/TSX → JS emitter (`ts_tsx_to_js_emitter`). It
+resolves the source, invokes `cycc --emit-js`, and writes the
+JavaScript output — the consumer-facing way to compile a `.tsx`
+to browser JS without calling `cycc` directly. v6.1.12.
+
+[[entries]]
+name = "preprocessor_if_numeric"
+description = "#if NAME >= VALUE — numeric preprocessor comparison (==, !=, <, >, <=, >=) (v5.6.x)"
+category = "cyrius"
+---
+Beyond `#ifdef` / `#ifndef` (defined-ness), the preprocessor
+evaluates NUMERIC comparison directives:
+
+```
+#define LEVEL 3
+#if LEVEL >= 2
+  ... compiled in ...
+#endif
+#if LEVEL >= 4
+  ... compiled out ...
+#endif
+```
+
+Operators: `==` `!=` `<` `>` `<=` `>=`. The LHS is a `#define
+NAME VALUE` integer (a bare `#define NAME` carries presence only,
+no value — and `cyrius build -D NAME` likewise sets presence, NOT
+a value, so a threshold knob must be set in source). Implemented in
+`src/frontend/lex_pp.cyr` (`PP_EVAL_IF`) since the v5.6.x
+preprocessor work; works at top level AND inside fn bodies.
+
+Production use: sakshi's `#define SAKSHI_LEVEL <0..5>` compile-time
+log-level threshold (`#if SAKSHI_LEVEL >= n` per level) — every
+level above the threshold costs zero bytes and zero cycles.
+
+[[entries]]
+name = "pie_codegen"
+description = "--pie / CYRIUS_PIE=1 — position-independent (ET_DYN) executables (x86_64 v6.1.6, aarch64 v6.1.8)"
+category = "cyrius"
+---
+`--pie` (or env `CYRIUS_PIE=1`) emits a position-independent
+executable: `ET_DYN` ELF with `p_vaddr=0` and RIP-relative (x86_64)
+/ `adrp`+`add` (aarch64) addressing, so the loader can ASLR the
+whole image. Userland PIE shipped x86_64 at v6.1.6 and aarch64 at
+v6.1.8 (the full `.tcyr` corpus runs as ASLR'd PIE binaries). It
+reuses the proven `shared` / object-emit (`_IS_OBJ`) machinery;
+non-PIE output stays byte-identical. A kernel-PIE ELF wrapper
+(`EMITELF64_KERNEL`, AGNOS KASLR) exists under `--pie` for the
+`kernel;` form but awaits an AGNOS boot harness.
+
+[[entries]]
+name = "gnu_hash_dynamic_link"
+description = ".gnu.hash dynamic-linking — O(1) Bloom-filter symbol lookup, drops SysV .hash (v6.1.9)"
+category = "cyrius"
+---
+Cyrius shared objects (`EMITELF_SHARED`) emit a single-bucket
+`.gnu.hash` section + `DT_GNU_HASH` instead of the legacy SysV
+`.hash` / `DT_HASH`. The native loader (`lib/dynlib.cyr`) was
+already gnu-hash-only, so this flips `.so` symbol resolution onto
+the O(1) Bloom-filter path instead of a linear `.dynsym` fallback.
+x86-only (aarch64 has no `.so` path). v6.1.9.
+
+[[entries]]
+name = "windows_directory_listing"
+description = "dir_list / is_dir / dir_walk on Windows via FindFirstFileW (v6.1.18)"
+category = "cyrius"
+---
+On Windows (PE), `lib/fs.cyr`'s directory primitives now work —
+they were no-ops (returning `-38`) before v6.1.18 because
+`getdents64` has no Windows route. `lib/fs_win.cyr` (included under
+`#ifdef CYRIUS_TARGET_WIN`) routes `dir_list` to
+FindFirstFileW / FindNextFileW / FindClose and `is_dir` to
+GetFileAttributesW, via four new `0xF016`-`0xF019` kernel32
+reroutes. `dir_walk` / `dir_list_full` / `find_files` work
+transitively. This completes the Windows file surface (process /
+thread / TLS-via-args / env / file-I/O / directory enumeration all
+work as of v6.1.16–v6.1.18). v6.1.18.
