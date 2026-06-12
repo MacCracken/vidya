@@ -19,7 +19,7 @@
 | sakshi | 2.2.10 | Cycle-counter timestamps via `rdtsc` / `cntvct_el0`; aarch64 portability |
 | vyakarana | 2.2.3 | Streaming API (ADR 0017 on vyakarana side); migration landed in [ADR 0002](../adr/0002-vyakarana-2x-streaming-api.md) |
 
-Stdlib modules used (see `cyrius.cyml` `[deps] stdlib`): `syscalls, string, alloc, str, fmt, vec, hashmap, io, fs, tagged, json, fnptr, args, toml, regex, net, tls, base64, fdlopen, sandhi`. `tls`/`base64`/`fdlopen` are explicit until the cyrius v5.10.x SLOT 19 transitive-stdlib arc closes — see roadmap "2.7.x dep-track follow-ups".
+Stdlib modules used (see `cyrius.cyml` `[deps] stdlib`): `syscalls, string, alloc, str, fmt, vec, hashmap, io, fs, tagged, bayan, fnptr, args, regex, net, tls, fdlopen, sandhi`. **6.1.x consolidated the former standalone `json` / `toml` / `base64` modules into the bundled `bayan` distlib** — those `lib/{json,toml,base64}.cyr` no longer ship, so `src/main.cyr`, `tests/vidya.tcyr`, and `tests/vidya.bcyr` now `include "lib/bayan.cyr"`. `tls`/`fdlopen` stay explicit until the cyrius transitive-stdlib arc closes — see roadmap "2.7.x dep-track follow-ups".
 
 ## Cycle posture
 

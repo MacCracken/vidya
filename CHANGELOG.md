@@ -22,7 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`CYRIUS_HOME=~/.cyrius/versions/6.1.41 cyrius build --strict-pin …`)
   so cycc matches the pin; the default wrapper is 6.2.0 and
   `--strict-pin` rejects that drift. `cyrius.lock` is now populated
-  (105 deps locked) where it had been empty.
+  (89 deps locked) where it had been empty.
+- **Stdlib `json` + `toml` + `base64` → bundled `bayan` module.** 6.1.x
+  stopped shipping the standalone `lib/{json,toml,base64}.cyr`; they now
+  live in the `bayan` distlib (matching sit / hoosh on 6.1.x). Updated
+  `cyrius.cyml` `[deps] stdlib` and the `include "lib/…"` lines in
+  `src/main.cyr`, `tests/vidya.tcyr`, `tests/vidya.bcyr` (deduped — one
+  `bayan` include replaces the separate json/toml includes). Without
+  this, a clean `cyrius lib sync` (no stale standalone copies) fails
+  with `cannot read ./lib/json.cyr` (and toml/base64) — the dirty mixed
+  `lib/` only masked it.
 - **sakshi: 2.2.4 → 2.2.10.** Latest tracing release.
 - **vyakarana: 2.2.1 → 2.2.3.** Latest streaming-tokenizer release.
 - **Binary size: ~1.1 MB → ~2.1 MB static ELF.** The 6.1.x stdlib is
