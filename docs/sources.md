@@ -8,14 +8,14 @@ References for language specifications, algorithms, and standards used across vi
 
 | Language | Spec / Reference | Version / Edition |
 |----------|-----------------|-------------------|
-| Cyrius | [Cyrius language guide](https://github.com/MacCracken/cyrius/blob/main/docs/cyrius-guide.md) | Pinned at 5.11.55 (see `cyrius.cyml`) |
+| Cyrius | [Cyrius language guide](https://github.com/MacCracken/cyrius/blob/main/docs/cyrius-guide.md) | Pinned at 6.1.41 (see `cyrius.cyml`) |
 | Rust | [The Rust Reference](https://doc.rust-lang.org/reference/) | Edition 2024 |
 | Python | [Python Documentation](https://docs.python.org/3/) | 3.x |
 | C | ISO/IEC 9899:2018 (C17) | C17 |
 | Go | [The Go Specification](https://go.dev/ref/spec) | Go 1.x |
 | TypeScript | [ECMAScript Language Specification](https://tc39.es/ecma262/) / [TypeScript Handbook](https://www.typescriptlang.org/docs/handbook/) | ES2024 / TS 5.x |
 | Shell | [POSIX Shell Command Language](https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html) | POSIX.1-2017 |
-| Zig | [Zig Language Reference](https://ziglang.org/documentation/master/) | 0.15 (CI pinned to 0.15.2) |
+| Zig | [Zig Language Reference](https://ziglang.org/documentation/master/) | 0.16 (CI pinned to 0.16.0) |
 | x86_64 ASM | Intel 64 and IA-32 Architectures Software Developer Manuals | Vol 1–4 |
 | AArch64 ASM | Arm Architecture Reference Manual (Arm ARM) | ARMv8-A / ARMv9-A |
 | OpenQASM | [Open Quantum Assembly Language](https://arxiv.org/abs/1707.03429) | 2.0 |

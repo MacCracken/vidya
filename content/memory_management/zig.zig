@@ -11,7 +11,7 @@ const expect = std.testing.expect;
 pub fn main() !void {
     // ── Allocators: explicit, swappable ────────────────────────────
     // Every allocation takes an allocator — no global heap
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit(); // detect leaks in debug mode
     const allocator = gpa.allocator();
 

@@ -87,15 +87,15 @@ fn astar(allocator: std.mem.Allocator, grid: *const [GN]u8,
     var closed = [_]bool{false} ** GN;
     g_score[start] = 0;
 
-    var open = PriorityQueue(Item, void, itemLess).init(allocator, {});
-    defer open.deinit();
+    var open: PriorityQueue(Item, void, itemLess) = .empty;
+    defer open.deinit(allocator);
 
     const h0 = manhattan(@as(i64, @intCast(sx)), @as(i64, @intCast(sy)),
                          @as(i64, @intCast(gx)), @as(i64, @intCast(gy)));
-    try open.add(.{ .f = h0, .cell = start });
+    try open.push(allocator, .{ .f = h0, .cell = start });
 
     var nb: [4]usize = undefined;
-    while (open.removeOrNull()) |it| {
+    while (open.pop()) |it| {
         const curr = it.cell;
         if (curr == goal) return g_score[goal];
         if (closed[curr]) continue;
@@ -112,7 +112,7 @@ fn astar(allocator: std.mem.Allocator, grid: *const [GN]u8,
                 const ny = @as(i64, @intCast(n / GW));
                 const f = tg + manhattan(nx, ny,
                     @as(i64, @intCast(gx)), @as(i64, @intCast(gy)));
-                try open.add(.{ .f = f, .cell = n });
+                try open.push(allocator, .{ .f = f, .cell = n });
             }
         }
     }
@@ -120,7 +120,7 @@ fn astar(allocator: std.mem.Allocator, grid: *const [GN]u8,
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 

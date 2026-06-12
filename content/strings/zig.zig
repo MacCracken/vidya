@@ -36,7 +36,7 @@ pub fn main() !void {
     try expect(mem.eql(u8, dashes, "-----"));
 
     // ── Runtime concatenation needs an allocator ───────────────────
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

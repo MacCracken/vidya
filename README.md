@@ -56,7 +56,7 @@ build/vidya serve 8080                     # HTTP service: GET /stats, /code/{to
 | Go | `.go` | Full coverage. |
 | TypeScript | `.ts` | Node.js runtime via `tsx`. |
 | Shell | `.sh` | Bash with `set -euo pipefail`. |
-| Zig | `.zig` | Zig 0.15. |
+| Zig | `.zig` | Zig 0.16. |
 | x86_64 ASM | `.s` | Intel syntax, Linux syscalls. |
 | AArch64 ASM | `.s` | ARM64, Linux syscalls via `svc`. |
 | OpenQASM | `.qasm` | Quantum assembly (QASM 2.0). |

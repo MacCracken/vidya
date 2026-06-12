@@ -40,77 +40,81 @@ fn hdrLoad(buf: []const u8) Header {
     };
 }
 
-fn pageRead(f: std.fs.File, num: u64, buf: []u8) !void {
-    try f.seekTo(pageOffset(num));
-    _ = try f.readAll(buf);
+fn pageRead(io: std.Io, f: std.Io.File, num: u64, buf: []u8) !void {
+    // 0.16: positional reads replace seekTo + readAll (threadsafe, no shared cursor).
+    _ = try f.readPositionalAll(io, buf, pageOffset(num));
 }
 
-fn pageWrite(f: std.fs.File, num: u64, buf: []const u8) !void {
-    try f.seekTo(pageOffset(num));
-    try f.writeAll(buf);
+fn pageWrite(io: std.Io, f: std.Io.File, num: u64, buf: []const u8) !void {
+    try f.writePositionalAll(io, buf, pageOffset(num));
 }
 
-fn pageAlloc(f: std.fs.File, h: *Header) !u64 {
+fn pageAlloc(io: std.Io, f: std.Io.File, h: *Header) !u64 {
     if (h.freehead != 0) {
         const fh = h.freehead;
         var buf: [PAGE_SZ]u8 = undefined;
-        try pageRead(f, fh, &buf);
+        try pageRead(io, f, fh, &buf);
         h.freehead = std.mem.readInt(u64, buf[FP_NEXT..][0..8], .little);
         return fh;
     }
     const num = h.page_count;
     h.page_count += 1;
     const zero = [_]u8{0} ** PAGE_SZ;
-    try pageWrite(f, num, &zero);
+    try pageWrite(io, f, num, &zero);
     return num;
 }
 
-fn pageFree(f: std.fs.File, h: *Header, num: u64) !void {
+fn pageFree(io: std.Io, f: std.Io.File, h: *Header, num: u64) !void {
     var buf = [_]u8{0} ** PAGE_SZ;
     std.mem.writeInt(u64, buf[FP_NEXT..][0..8], h.freehead, .little);
-    try pageWrite(f, num, &buf);
+    try pageWrite(io, f, num, &buf);
     h.freehead = num;
 }
 
 pub fn main() !void {
+    // 0.16: filesystem syscalls go through an explicit `Io` instance.
+    var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     const path = "/tmp/vidya_page_zig.bin";
-    std.fs.cwd().deleteFile(path) catch {};
-    const f = try std.fs.cwd().createFile(path, .{ .read = true });
+    const cwd = std.Io.Dir.cwd();
+    cwd.deleteFile(io, path) catch {};
+    const f = try cwd.createFile(io, path, .{ .read = true });
 
     var h: Header = .{ .page_count = 1, .freehead = 0 };
     var hbuf: [PAGE_SZ]u8 = undefined;
     hdrToBytes(h, &hbuf);
-    try f.writeAll(&hbuf);
+    try f.writePositionalAll(io, &hbuf, 0);
 
     // 1-2. header
-    try f.seekTo(0);
     var rh: [PAGE_SZ]u8 = undefined;
-    _ = try f.readAll(&rh);
+    _ = try f.readPositionalAll(io, &rh, 0);
     if (!hdrVerify(&rh)) return error.BadMagic;
     const loaded = hdrLoad(&rh);
     if (loaded.page_count != 1) return error.BadCount;
 
     // 3-4. alloc
-    const p1 = try pageAlloc(f, &h);
+    const p1 = try pageAlloc(io, f, &h);
     if (p1 != 1) return error.BadAlloc1;
-    const p2 = try pageAlloc(f, &h);
+    const p2 = try pageAlloc(io, f, &h);
     if (p2 != 2) return error.BadAlloc2;
 
     // 5. roundtrip
     var buf: [PAGE_SZ]u8 = [_]u8{0} ** PAGE_SZ;
     std.mem.writeInt(u64, buf[0..8], 42, .little);
-    try pageWrite(f, p1, &buf);
+    try pageWrite(io, f, p1, &buf);
     var rb: [PAGE_SZ]u8 = undefined;
-    try pageRead(f, p1, &rb);
+    try pageRead(io, f, p1, &rb);
     const got = std.mem.readInt(u64, rb[0..8], .little);
     if (got != 42) return error.BadRead;
 
     // 6. free + reuse
-    try pageFree(f, &h, p2);
-    const p3 = try pageAlloc(f, &h);
+    try pageFree(io, f, &h, p2);
+    const p3 = try pageAlloc(io, f, &h);
     if (p3 != 2) return error.BadReuse;
 
-    f.close();
-    std.fs.cwd().deleteFile(path) catch {};
+    f.close(io);
+    cwd.deleteFile(io, path) catch {};
     std.debug.print("page_management: 6/6 ok\n", .{});
 }

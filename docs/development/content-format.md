@@ -116,7 +116,7 @@ Requirements:
 | Go | `go run` | |
 | TypeScript | `npx tsx` | |
 | Shell | `bash` | `set -euo pipefail` |
-| Zig | `zig build-exe` or `zig run` | Zig 0.15 |
+| Zig | `zig build-exe` or `zig run` | Zig 0.16 |
 | x86_64 ASM | `as --64` + `ld` | Intel syntax (`.intel_syntax noprefix`) |
 | AArch64 ASM | `aarch64-linux-gnu-as` + `ld` | Cross-compiled, run via `qemu-aarch64` |
 | OpenQASM | Native Rust parser or `qiskit` | `OPENQASM 2.0; include "qelib1.inc";` |

@@ -94,7 +94,7 @@ churn. Ordered by trigger condition, not by patch slot.
 |---|---|---|
 | **Zugot recipe SHA backfill** | first 2.7.1 release tarball builds on GitHub Actions | Compute `sha256sum vidya-2.7.1-src.tar.gz` from the release artifact; fill the `sha256 = ""` placeholder in `zugot/marketplace/vidya.cyml`. |
 | **Content-validation matrix** | observed CI wallclock for the new `scripts/validate-content.sh` step | If the 814-example sweep exceeds ~15 min, split the content job per-language (matrix strategy) for parallelism. The script's per-language stages are independent. |
-| **Zig pin maintenance** | observed failures on `content/*/zig.zig` examples | Track zig's release cadence; bump the CI install pin (`0.15.2` today, matching `docs/sources.md` / `README.md`) when content needs newer language features. |
+| **Zig pin maintenance** | observed failures on `content/*/zig.zig` examples | Track zig's release cadence; bump the CI install pin (`0.16.0` today, matching `docs/sources.md` / `README.md`) when content needs newer language features. The 0.15→0.16 bump at v2.7.2 migrated all 14 zig examples to `std.Io` (Threaded backend, Writer "Writergate", `DebugAllocator`). |
 | **`scripts/bench-history.sh` audit** | next benchmark cycle (P4 work) | Pre-2.0 era script; haven't verified it works against the 5.11.x toolchain layout. Skim before relying on it for the build_systems benchmarks. |
 
 ---

@@ -262,8 +262,8 @@ int main(void) {
         count++;
     }
     assert(bmp.allocated == BMP_NUM_PAGES);
-    printf("   Filled all %d pages, next alloc = -1: %s\n",
-           BMP_NUM_PAGES, bmp_alloc(&bmp) == -1 ? "true" : "false");
+    printf("   Filled all %d pages (%d in fill loop), next alloc = -1: %s\n",
+           BMP_NUM_PAGES, count, bmp_alloc(&bmp) == -1 ? "true" : "false");
 
     printf("\nAll tests passed.\n");
     return 0;

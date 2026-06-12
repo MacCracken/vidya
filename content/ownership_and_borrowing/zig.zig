@@ -23,7 +23,7 @@ pub fn main() !void {
     // Zig: you pass the allocator explicitly. No hidden allocations.
     print("1. Explicit allocators:\n", .{});
     {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        var gpa = std.heap.DebugAllocator(.{}){};
         defer {
             const check = gpa.deinit();
             // In debug mode, deinit returns .leak if memory was leaked
@@ -200,7 +200,7 @@ pub fn main() !void {
     //       request-scoped or parse-tree-scoped allocations.
     print("\n9. Arena allocator — batch lifetime:\n", .{});
     {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        var gpa = std.heap.DebugAllocator(.{}){};
         defer _ = gpa.deinit();
 
         var arena = std.heap.ArenaAllocator.init(gpa.allocator());

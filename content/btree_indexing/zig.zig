@@ -149,7 +149,7 @@ fn btInsert(allocator: std.mem.Allocator, root: *Node, key: i64, val: i64) !*Nod
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 

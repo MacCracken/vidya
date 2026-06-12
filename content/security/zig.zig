@@ -10,13 +10,19 @@ const expect = std.testing.expect;
 const mem = std.mem;
 
 pub fn main() !void {
+    // Zig 0.16 moved randomness behind the std.Io interface — construct a
+    // Threaded I/O instance to obtain a CSPRNG seeded from OS entropy.
+    var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     try testInputValidation();
     try testConstantTimeComparison();
     try testSecureZeroing();
     try testBoundsChecking();
     try testIntegerOverflow();
     try testPathTraversalPrevention();
-    try testSecureRandom();
+    try testSecureRandom(io);
     try testAllowlistValidation();
 
     std.debug.print("All security examples passed.\n", .{});
@@ -159,12 +165,13 @@ fn testPathTraversalPrevention() !void {
 }
 
 // ── Secure random generation ──────────────────────────────────────────
-fn testSecureRandom() !void {
-    // Zig's std.crypto.random uses OS entropy (getrandom/urandom)
+fn testSecureRandom(io: std.Io) !void {
+    // Zig 0.16: randomness is obtained via the std.Io interface. io.random
+    // fills the buffer from a CSPRNG seeded with OS entropy (getrandom).
     var token1: [32]u8 = undefined;
     var token2: [32]u8 = undefined;
-    std.crypto.random.bytes(&token1);
-    std.crypto.random.bytes(&token2);
+    io.random(&token1);
+    io.random(&token2);
 
     // Two random tokens should differ
     try expect(!mem.eql(u8, &token1, &token2));

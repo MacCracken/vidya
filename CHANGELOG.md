@@ -28,7 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Binary size: ~1.1 MB → ~2.1 MB static ELF.** The 6.1.x stdlib is
   larger; the build flags ~1934 unreachable fns (DCE-eliminable via
   `CYRIUS_DCE=1`). `cyrius test` green (41 passed, 0 failed); corpus
-  unchanged at 74 topics × 11 languages = 814 examples.
+  holds at 74 topics × 11 languages = 814 examples.
+- **Zig content pin: 0.15.2 → 0.16.0** (latest language release; CI
+  `ZIG_VER`, `docs/sources.md`, `README.md`, `content-format.md`,
+  `getting-started.md`, roadmap all follow). All 14 `content/*/zig.zig`
+  examples migrated to the 0.16 API — `std.heap.GeneralPurposeAllocator`
+  → `std.heap.DebugAllocator`, and the 0.16 `std.Io` interface
+  (`std.Io.Threaded` backend) now threads through the filesystem
+  (`std.Io.Dir.cwd`, positional `read/writePositionalAll`), `std.Io.Mutex`,
+  `io.random`, and the rewritten `std.Io.Writer` ("Writergate":
+  `std.Io.Writer.Allocating`, `.fixed`, `PriorityQueue` unmanaged
+  `push`/`pop`). Each rebuilt + run green under Zig 0.16.
 
 ### Added
 
@@ -66,6 +76,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **4 Cyrius examples broke under the 6.x toolchain** (surfaced by the
+  pin bump; `scripts/validate-content.sh` is the gate):
+  - `type_systems`, `design_patterns` — Cyrius 6.x dropped struct
+    *field-access sugar* (`v.x` read/write silently resolved to 0).
+    `Struct { … }` value-literals and `v.method()` dispatch still work;
+    field access is now explicit pointer ops — `load64(&v + off)` /
+    `store64(&v + off, …)` for inline value structs, `load64(ptr + off)`
+    for heap records — the idiom vidya's own `Concept` type already used.
+  - `distributed_systems` — single-letter uppercase globals `W`/`R`
+    collided with reserved identifiers in 6.x (`W` silently read as 0,
+    breaking the quorum gate); renamed to `W_QUORUM`/`R_QUORUM`.
+  - `tracing` — `include "sakshi.cyr"` → `include "lib/sakshi.cyr"`
+    (sakshi now vendors into `lib/`).
+- `content/allocators/c.c` — unused-but-set `count` under gcc 16's
+  stricter `-Werror`; folded into the fill-loop status print.
 - `content/cyrius/field_notes/index.cyml` Kernel section was stale —
   it claimed "3 entries," listed only 2, and the file already held 5.
   Now lists all 9 (registering the previously-unlisted

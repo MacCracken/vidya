@@ -142,8 +142,10 @@ assert_eq "$(( RT_PRIO_MAX - RT_PRIO_MIN + 1 ))" "99" "99 RT priority levels"
 # ── Background jobs and wait ──────────────────────────────────────────
 # Shell demonstrates fork+exec naturally through & and wait.
 
-# Launch a background job
-sleep 0.01 &
+# Launch a background job. The sleep must outlive the /proc visibility
+# check below — a sub-10ms sleep can exit before line `[[ -d /proc/$bg_pid ]]`
+# runs under a loaded host, racing the check. It is reaped by `wait`.
+sleep 1 &
 bg_pid=$!
 
 # $! gives the PID of the last background job

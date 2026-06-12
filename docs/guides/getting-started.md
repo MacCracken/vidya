@@ -57,7 +57,7 @@ Vidya validates every code example by compiling and running it in its native too
 ./scripts/validate-content.sh
 ```
 
-The script gracefully skips languages whose toolchain isn't installed. CI (`.github/workflows/ci.yml`) installs the full set — zig 0.15.2, aarch64 binutils, qemu-user-static, tsx, qiskit, cyrius, plus what ubuntu-latest already ships (rustc / python3 / gcc / go / node / bash).
+The script gracefully skips languages whose toolchain isn't installed. CI (`.github/workflows/ci.yml`) installs the full set — zig 0.16.0, aarch64 binutils, qemu-user-static, tsx, qiskit, cyrius, plus what ubuntu-latest already ships (rustc / python3 / gcc / go / node / bash).
 
 ## Adding Content
 

@@ -39,11 +39,12 @@ const AtomicCounter = struct {
 
 const SharedList = struct {
     items: std.ArrayListUnmanaged(i32) = .empty,
-    mutex: Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     allocator: std.mem.Allocator,
+    io: std.Io,
 
-    fn init(allocator: std.mem.Allocator) SharedList {
-        return .{ .allocator = allocator };
+    fn init(allocator: std.mem.Allocator, io: std.Io) SharedList {
+        return .{ .allocator = allocator, .io = io };
     }
 
     fn deinit(self: *SharedList) void {
@@ -51,22 +52,28 @@ const SharedList = struct {
     }
 
     fn append(self: *SharedList, value: i32) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         try self.items.append(self.allocator, value);
     }
 
     fn len(self: *SharedList) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return self.items.items.len;
     }
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    // std.Io.Mutex/Condition replaced Thread.Mutex in 0.16: they block via
+    // an Io implementation. Threaded is the OS-thread-backed Io.
+    var io_threaded: std.Io.Threaded = .init(allocator, .{});
+    defer io_threaded.deinit();
+    const io = io_threaded.io();
 
     // ── Spawn and join threads ─────────────────────────────────────
     var r1: usize = 0;
@@ -110,7 +117,7 @@ pub fn main() !void {
     try expect(failed.? == 99); // actual value returned
 
     // ── Mutex-protected shared data ────────────────────────────────
-    var list = SharedList.init(allocator);
+    var list = SharedList.init(allocator, io);
     defer list.deinit();
 
     var list_threads: [4]Thread = undefined;
@@ -126,19 +133,19 @@ pub fn main() !void {
     }
     try expect(list.len() == 4);
 
-    // ── Thread.Mutex: basic locking ────────────────────────────────
-    var mutex = Thread.Mutex{};
+    // ── std.Io.Mutex: basic locking ────────────────────────────────
+    var mutex: std.Io.Mutex = .init;
     var protected: u32 = 0;
 
-    mutex.lock();
+    mutex.lockUncancelable(io);
     protected += 1;
-    mutex.unlock();
+    mutex.unlock(io);
     try expect(protected == 1);
 
     // defer pattern for lock
     {
-        mutex.lock();
-        defer mutex.unlock();
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
         protected += 1;
     }
     try expect(protected == 2);
