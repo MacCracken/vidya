@@ -1,12 +1,12 @@
 # Vidya — Development Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-05-16
+> **Status**: Active | **Last Updated**: 2026-06-12
 >
-> **Version**: 2.7.1 | **Cyrius**: 5.11.55
-> **Topics**: 74 (74 fully covered) — **P0 → P3 complete** 🎉
+> **Version**: 2.7.2 | **Cyrius**: 6.1.41 (Zig content pin: 0.16.0)
+> **Topics**: 75 (75 fully covered) — **P0 → P3 complete; P4 build_systems landed (Unreleased)** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 814 source files; concept files: 74
-> **Validator**: 814/814 green
+> **Examples**: 825 source files; concept files: 75
+> **Validator**: 825/825 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -30,10 +30,11 @@ This table is one row per minor for navigation only.
 
 ## Current State
 
-**74 topics fully covered (11/11 languages) — P0 → P3 complete.**
+**75 topics fully covered (11/11 languages) — P0 → P3 complete; P4
+`build_systems` landed (Unreleased).**
 
-`vidya stats` reports `Topics: 74, Complete: 74 (all 11 languages),
-Examples: 814`; validator 814/814 green. No partial topics.
+`vidya stats` reports `Topics: 75, Complete: 75 (all 11 languages),
+Examples: 825`; validator 825/825 green. No partial topics.
 
 ---
 
@@ -52,8 +53,8 @@ patch slots will be filled as the topics ship.
 
 | Topic | Status | Plan |
 |---|---|---|
-| **build_systems** | next content slot | DAG of build targets + dirty-tracking via mtime/hash + topological build order + ninja-style incremental rebuild. Cyrius/zugot are the natural reference points. |
-| **package_resolution** | follows build_systems | Semver constraint matching + dependency-graph build + cycle detection + version selection (pubgrub or naive backtracking). cyrius.cyml's resolver is the reference. |
+| **build_systems** | ✅ **landed (Unreleased)** — 11/11, 825/825 | DAG of build targets + content-signature dirty-tracking + Kahn topological order + ninja-style incremental rebuild + cycle detection. Cyrius reference designed first, then 10 ports. |
+| **package_resolution** | **next content slot** | Semver constraint matching + dependency-graph build + cycle detection + version selection (pubgrub or naive backtracking). cyrius.cyml's resolver is the reference. |
 | **reproducible_builds** | closes P4 | Deterministic timestamps (SOURCE_DATE_EPOCH) + sorted file iteration + content-addressable artifact paths + verifying byte-identical rebuilds. The cyrius compiler self-host check is the reference. |
 
 After P4 closes, next minor (2.8.x) opens **P5 functional /

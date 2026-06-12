@@ -1,0 +1,56 @@
+id = "build_systems"
+title = "Build Systems and Incremental Rebuild"
+topic = "BuildSystems"
+description = "A build system turns a declarative description of how artifacts derive from sources into the minimal sequence of commands that brings the outputs up to date. The core is a directed acyclic graph (DAG) of targets: each edge says 'this output depends on that input,' and a topological sort yields a legal build order where every dependency is produced before the target that consumes it. Incrementality comes from dirty-tracking — a target needs rebuilding only when one of its inputs changed since it was last built. The two dominant change signals are mtime (make: rebuild if any prerequisite is newer than the target) and content hashing (ninja, bazel: rebuild if the hash of inputs differs from the recorded hash). Content hashing also enables the killer optimization: if a dependency is rebuilt but produces a byte-identical output, its consumers can be skipped — the change didn't propagate. A correct build system must also reject dependency cycles (an unbuildable configuration) and rebuild transitively: editing a header invalidates every object that includes it and the final link. Modern systems (bazel, buck, ninja) add content-addressed caching so an artifact built once on any machine can be reused everywhere, turning a clean build into a series of cache hits."
+tags = ["build", "dag", "topological-sort", "incremental", "dirty-tracking", "content-hash", "mtime", "ninja", "make", "bazel", "cycle-detection", "dependency-graph"]
+related_topics = ["package_resolution", "reproducible_builds", "compiler_bootstrapping", "linking_and_loading", "filesystems"]
+
+[[best_practices]]
+title = "Compute a topological order; never trust declaration order"
+explanation = "Targets are declared in whatever order a human found convenient, but the only legal build order is one where every dependency is built before its dependents. Run a topological sort (Kahn's algorithm or a DFS post-order) over the dependency DAG and build in that order. This also gives you the parallelism schedule for free: targets with no unbuilt dependencies can run concurrently. Relying on file or declaration order works until someone reorders a list and the build starts linking against a stale object."
+
+[[best_practices]]
+title = "Hash inputs by content, and fold the recipe into the signature"
+explanation = "An mtime check ('is any prerequisite newer than the output?') is cheap but lies: restoring a file from backup, a git checkout, or clock skew on a network filesystem all move mtimes without changing content, causing spurious rebuilds — or worse, missed ones. Hash the actual bytes of every input AND the command line / compiler flags that produce the output. Folding the recipe into the signature is what makes `-O2` → `-O0` trigger a rebuild even though no source file changed. ninja and bazel both key on a hash that includes the command."
+
+[[best_practices]]
+title = "Invalidate transitively, and make outputs content-addressed"
+explanation = "When a target rebuilds, its dependents must reconsider — a target's input signature must include the OUTPUT signatures of its dependencies, not just its own source. That single rule propagates a header edit through every object and into the final link. Make the output itself content-addressed (output signature = hash of inputs) so the propagation can also STOP: if a dependency rebuilds to a byte-identical output, dependents see no change in their input signature and are correctly skipped. This 'early cutoff' is why a whitespace-only edit to a widely-included header doesn't relink the world under bazel."
+
+[[best_practices]]
+title = "Detect dependency cycles and fail loudly before building anything"
+explanation = "A cycle in the dependency graph (A needs B, B needs A) has no valid topological order — there is no first target to build. A naive recursive builder will either loop forever or overflow the stack. Detect it up front: if a Kahn-style sort can't place every node (some always have an unplaced dependency), or a DFS finds a back edge, report the cycle as a configuration error and refuse to build. Surfacing the cycle path in the error message saves hours versus a hung build."
+
+[[gotchas]]
+title = "Trusting mtime alone — touch and checkouts cause wrong rebuilds"
+explanation = "mtime-only change detection is fooled by anything that changes a timestamp without changing content (git checkout, rsync, `touch`) and by anything that changes content while keeping the timestamp (a fast edit within the filesystem's mtime resolution, or a restored backup with a preserved older mtime). The first causes wasteful rebuilds; the second causes a stale, incorrect output to be kept. Content hashing is immune to both."
+bad_example = "// rebuild if newest_input_mtime > output_mtime — a `touch header.h` rebuilds the world; a backup-restore with old mtime keeps a stale object"
+good_example = "// rebuild if hash(input_bytes) != recorded_hash — only actual content changes trigger a rebuild, regardless of timestamps"
+
+[[gotchas]]
+title = "Leaving the compiler command out of the signature"
+explanation = "If the dirty check only hashes source files, then changing the compiler, its flags, or the build mode leaves every output looking up-to-date — so a `-DNDEBUG` or `-O2`→`-O0` switch silently reuses objects built the old way, producing a binary that's a mix of two configurations. The fix is to include the full command line (compiler path, flags, env that affects output) in each target's signature, so changing how a target is built dirties it exactly like changing what it's built from."
+bad_example = "// sig = hash(source_files) — switching CFLAGS reuses stale objects, mixed-config binary"
+good_example = "// sig = hash(source_files + command_line + relevant_env) — flag changes rebuild correctly"
+
+[[gotchas]]
+title = "Forgetting transitive invalidation — the final link goes stale"
+explanation = "A common homegrown bug: a target's dirtiness is computed only from its own direct sources, so editing util.c rebuilds util.o but the final executable (which depends on util.o, not util.c) doesn't notice util.o changed and is never relinked. The dependency that matters is on the dependency's OUTPUT. Each target's signature must incorporate its dependencies' output signatures so a rebuild ripples all the way to the root."
+bad_example = "// app dirty iff hash(app's own sources) changed — util.o rebuilt, app never relinked"
+good_example = "// app sig = mix(app sources, util.o output sig, main.o output sig) — util.o rebuild dirties app"
+
+[[gotchas]]
+title = "No cycle check — the builder hangs or overflows on a dependency loop"
+explanation = "If a misconfigured graph contains A→B→A, a recursive 'build my dependencies first' walk recurses forever (stack overflow) and a worklist loop never drains. Users see a hang, not an error. Always verify the graph is acyclic before building: a Kahn sort that cannot place all nodes, or a DFS that finds a back edge, means a cycle — report it instead of attempting the impossible build."
+bad_example = "fn build(t) { for d in deps(t) { build(d); } run(t); }  // A→B→A recurses until the stack dies"
+good_example = "if (topo_sort(graph) placed < node_count) { error(\"dependency cycle\"); }  // refuse to build"
+
+[[performance_notes]]
+title = "Incremental rebuild is O(changed + affected), not O(graph)"
+explanation = "The whole point of dirty-tracking is that a no-op build does almost no work: you stat or hash the inputs, compare to recorded signatures, find nothing dirty, and run zero commands. Cost scales with the number of changed inputs plus the targets transitively downstream of them — not with the total graph size. ninja is engineered around this: its null build (everything up to date) for a graph of tens of thousands of targets completes in tens of milliseconds because it is just signature comparisons, no process spawns."
+evidence = "ninja's design goal (Martin, 'The Performance of Open Source Software', 2011) is a sub-second null build on Chromium-scale graphs (~30k targets); measured null builds are ~10-100ms, dominated by stat() of inputs. A from-scratch Chromium build is tens of minutes — the ratio is the value of incrementality."
+
+[[performance_notes]]
+title = "Content-addressed caching turns clean builds into cache hits"
+explanation = "When the output is keyed by a hash of all its inputs (sources + command + dependency outputs), an artifact built once can be reused by anyone with the same inputs — across machines, across CI runs, across developers. A 'clean' build becomes a series of cache lookups: compile only the targets whose input hash is not already in the cache. ccache does this for single-file compiles; bazel and buck extend it to a shared remote cache for the whole graph, so a green CI run can warm the cache for every developer."
+evidence = "ccache reports 5-20x speedups on rebuilds with high hit rates (e.g. switching branches). Bazel remote caching at scale (Google, 'Build in the Cloud', 2011) reports the majority of actions served from cache on incremental CI, cutting build latency from minutes to seconds when the cache is warm."

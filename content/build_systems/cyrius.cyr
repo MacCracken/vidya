@@ -1,0 +1,208 @@
+# Build Systems — Cyrius reference (runnable)
+#
+# A minimal build-system core: a DAG of targets, topological build
+# order, content-signature dirty-tracking, and ninja-style incremental
+# rebuild (only dirty targets run), plus cycle detection.
+#
+# No real files or compilers: each target carries a source "content
+# signature" (an integer). A target's INPUT signature mixes its own
+# source with the OUTPUT signatures of its dependencies; if that differs
+# from the signature it was last built against, the target is dirty and
+# rebuilds. Editing a source changes its signature, which transitively
+# re-dirties everything downstream — exactly how mtime/hash-based tools
+# (make, ninja, bazel) decide what to redo.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+# --- Capacity / signature params ---
+var MAXD = 8;            # max deps per target
+var HB = 131;           # signature polynomial base
+var HM = 1000003;       # signature modulus (prime; keeps values < 2^53)
+
+# --- Target table (parallel arrays; [N] is N BYTES, 8 per i64 slot) ---
+var t_src[128];         # source content signature   (16 targets)
+var t_depcnt[128];      # number of dependencies
+var t_deps[1024];       # flat deps: t_deps[t*MAXD + k]  (16*8 slots)
+var t_built[128];       # signature last built against (-1 = never)
+var t_out[128];         # current output signature
+var t_order[128];       # topological order (target ids)
+var t_placed[128];      # topo scratch: placed flag
+var n_targets = 0;
+
+# --- Construction ---
+fn bs_reset(n) {
+    n_targets = n;
+    var i = 0;
+    while (i < n) {
+        store64(&t_src + i * 8, 0);
+        store64(&t_depcnt + i * 8, 0);
+        store64(&t_built + i * 8, 0 - 1);    # never built
+        store64(&t_out + i * 8, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn bs_set_src(t, sig) { store64(&t_src + t * 8, sig); return 0; }
+
+fn bs_add_dep(t, d) {
+    var c = load64(&t_depcnt + t * 8);
+    store64(&t_deps + (t * MAXD + c) * 8, d);
+    store64(&t_depcnt + t * 8, c + 1);
+    return 0;
+}
+
+# --- Topological sort (Kahn-style ready-scan). Writes target ids into
+#     t_order and returns how many were ordered; < n_targets ⇒ a cycle
+#     left some targets unreachable. ---
+fn bs_topo() {
+    var i = 0;
+    while (i < n_targets) { store64(&t_placed + i * 8, 0); i = i + 1; }
+    var placed = 0;
+    while (placed < n_targets) {
+        var progress = 0;
+        var t = 0;
+        while (t < n_targets) {
+            if (load64(&t_placed + t * 8) == 0) {
+                # ready iff every dependency is already placed
+                var ready = 1;
+                var k = 0;
+                var dc = load64(&t_depcnt + t * 8);
+                while (k < dc) {
+                    var d = load64(&t_deps + (t * MAXD + k) * 8);
+                    if (load64(&t_placed + d * 8) == 0) { ready = 0; }
+                    k = k + 1;
+                }
+                if (ready == 1) {
+                    store64(&t_order + placed * 8, t);
+                    store64(&t_placed + t * 8, 1);
+                    placed = placed + 1;
+                    progress = 1;
+                }
+            }
+            t = t + 1;
+        }
+        if (progress == 0) { return placed; }   # stuck ⇒ cycle
+    }
+    return placed;
+}
+
+# --- Input signature: mix this target's source with deps' outputs. ---
+fn bs_sig(t) {
+    var sig = load64(&t_src + t * 8) % HM;
+    var k = 0;
+    var dc = load64(&t_depcnt + t * 8);
+    while (k < dc) {
+        var d = load64(&t_deps + (t * MAXD + k) * 8);
+        sig = (sig * HB + load64(&t_out + d * 8)) % HM;
+        k = k + 1;
+    }
+    return sig;
+}
+
+# --- Incremental build: walk topo order, rebuild only dirty targets.
+#     Output is content-addressed (out == input signature), so a target
+#     whose inputs are unchanged keeps its output and its dependents
+#     stay clean. Returns the number of targets rebuilt. ---
+fn bs_build() {
+    var ordered = bs_topo();
+    var rebuilt = 0;
+    var i = 0;
+    while (i < ordered) {
+        var t = load64(&t_order + i * 8);
+        var sig = bs_sig(t);
+        if (sig != load64(&t_built + t * 8)) {
+            store64(&t_out + t * 8, sig);      # produce output
+            store64(&t_built + t * 8, sig);    # remember what we built
+            rebuilt = rebuilt + 1;
+        }
+        i = i + 1;
+    }
+    return rebuilt;
+}
+
+# === Tests ===
+
+# Classic C build graph:  app(2) <- util.o(0), main.o(1)
+fn build_graph() {
+    bs_reset(3);
+    bs_set_src(0, 1001);     # util.c
+    bs_set_src(1, 2002);     # main.c
+    bs_set_src(2, 3003);     # link recipe
+    bs_add_dep(2, 0);
+    bs_add_dep(2, 1);
+    return 0;
+}
+
+fn order_pos(target) {
+    var i = 0;
+    while (i < n_targets) {
+        if (load64(&t_order + i * 8) == target) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn test_topo_order() {
+    build_graph();
+    assert_eq(bs_topo(), 3, "topo orders all 3 targets");
+    assert_eq(order_pos(2) > order_pos(0), 1, "app built after util.o");
+    assert_eq(order_pos(2) > order_pos(1), 1, "app built after main.o");
+    return 0;
+}
+
+fn test_cold_build_rebuilds_all() {
+    build_graph();
+    assert_eq(bs_build(), 3, "cold build rebuilds all 3");
+    return 0;
+}
+
+fn test_noop_build_rebuilds_none() {
+    build_graph();
+    bs_build();                       # cold
+    assert_eq(bs_build(), 0, "second build (no edits) rebuilds nothing");
+    return 0;
+}
+
+fn test_edit_leaf_rebuilds_transitively() {
+    build_graph();
+    bs_build();                       # cold: all up to date
+    bs_set_src(1, 2999);              # edit main.c
+    assert_eq(bs_build(), 2, "edit main.c rebuilds main.o + app");
+    return 0;
+}
+
+fn test_edit_other_leaf_skips_sibling() {
+    build_graph();
+    bs_build();
+    var main_built = load64(&t_built + 1 * 8);
+    bs_set_src(0, 1999);              # edit util.c
+    assert_eq(bs_build(), 2, "edit util.c rebuilds util.o + app");
+    assert_eq(load64(&t_built + 1 * 8), main_built, "main.o left untouched");
+    return 0;
+}
+
+fn test_cycle_detected() {
+    bs_reset(2);
+    bs_add_dep(0, 1);
+    bs_add_dep(1, 0);                 # 0 <-> 1 cycle
+    assert_eq(bs_topo() < 2, 1, "cycle leaves targets unordered");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_topo_order();
+    test_cold_build_rebuilds_all();
+    test_noop_build_rebuilds_none();
+    test_edit_leaf_rebuilds_transitively();
+    test_edit_other_leaf_skips_sibling();
+    test_cycle_detected();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

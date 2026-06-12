@@ -12,6 +12,16 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
+# 48 entries (6.2.0 added, Phase-0 growable pressure tables: the GROW / REHASH /
+# RELOCATION paths (fn-table 16-table realloc + fn_name_hash rehash; codebuf
+# off-heap relocate) are SELF-HOST-INVISIBLE — cycc's 6486 fns / ~1 MB codebuf
+# never reach the 8192 / 3 MB caps, so self-host + check.sh never exercise them;
+# only a forced-grow test (shrink _fnt_cap/_codebuf_cap to 64/8192, self-compile,
+# cmp vs the no-grow reference) catches relocation/rehash bugs. Also: the 8192
+# fn-cap was a magic number scattered across 6 subsystems + colliding TEXTUALLY
+# with 5 unrelated 8192-capped tables — the migration needed surgical per-context
+# swaps (& 8191 → mask, probe/clear bounds → cap, live[1024] DCE bitmap → [4096]),
+# never a global replace. See the two phase0_growable_* entries.)
 # 44 entries (6.1.40 added, CVE-24: the four per-fn local tables
 # (fn_local_names/depths/types/slice) are indexed by SFLC, which counts stack-frame
 # SLOTS not vars — a `stack var buf[N]` registers N/8 fillers — so frames >~2 KB
@@ -2744,4 +2754,94 @@ state / heap" shape, or a consumer whose fn has a multi-KB
 count is `frame_bytes / 8`, not the var count. Related:
 `large_fn_local_var_array_is_bss_not_stack` (the dual — big
 fn-local arrays land in `.bss`, not the stack frame).
+"""
+
+[[entries]]
+name = "phase0_growable_grow_path_self_host_invisible"
+description = "The v6.2.0 growable pressure tables (fixup_tbl, fn-tables, codebuf) never grow during cycc's own self-compile — cycc is at 6486/8192 fns and ~1 MB of a 3 MB codebuf, so the realloc / rehash / relocation code is dead on the self-host path AND on every check.sh test. A bug in the grow/rehash logic is therefore invisible to byte-identical self-host. The ONLY thing that catches it is a forced-grow test: shrink the initial cap, self-compile, and cmp against the no-grow reference."
+category = "cyrius"
+tags = ["growable", "self-host-invisible", "fn-tables", "codebuf", "fixup", "testing", "v6.2.0"]
+content = """
+**The trap**: Phase 0 (v6.2.0) made three fixed tables growable —
+`fixup_tbl` (`_fixup_grow`), the 16 fn-tables + 2 hashes
+(`_fnt_grow`, with a name-hash rehash), and `codebuf`
+(`_codebuf_grow`, off-heap relocate). All three GROW paths are
+**cold on every path the test suite walks**: cycc self-compiles
+with ~6486 functions (the cap starts at 8192) and ~1 MB of
+generated code (the codebuf cap starts at 3 MB), so neither
+`_fnt_grow` nor `_codebuf_grow` ever fires. A subtle bug — a wrong
+copy length, a stale base pointer after relocation, a botched
+rehash — produces a **byte-identical self-host and a green
+check.sh** while silently corrupting any real consumer that does
+cross the cap.
+
+**The only test that exercises it**: artificially shrink the
+initial cap so a NORMAL self-compile is forced through many
+grows, then prove the output is unchanged:
+
+  # fn-tables: set `_fnt_cap = 64` / `_fnt_hash_mask = 63` in the driver,
+  # build cycc_small, then:
+  cat src/main.cyr | ./cycc_small > out      # forces ~7 grows + rehashes
+  cat src/main.cyr | ./build/cycc > ref      # no-grow reference (cap 8192)
+  cmp out ref                                # MUST be identical
+
+  # codebuf: `_codebuf_cap = 8192` → ~7 relocations; same cmp.
+
+Run the forced-grow test on **both** x86 AND aarch64 — the
+aarch64 start-hash build + `live[]` bitmap are mirrored code; the
+x86 forced-grow does not cover them. The aarch64 variant: shrink
+the cap in `main_aarch64.cyr` and run `cross-os-selfhost.sh pi`
+(it self-hosts on real ARM, which forces the grow there).
+
+**Recognize again**: ANY migration of a fixed cap/table to
+growable, where the compiler's own usage stays under the cap.
+"Self-host is byte-identical" proves the RELOCATION-equivalent
+(no-grow) path; it says nothing about the grow path. Mandatory
+forced-grow + differential-corpus before trusting it. Sibling
+trap: `phase0_growable_relocation_and_scattered_cap`.
+"""
+
+[[entries]]
+name = "phase0_growable_relocation_and_scattered_cap"
+description = "Two mechanics that bite when migrating cycc's fixed tables to growable: (1) a relocating buffer (codebuf) is only safe if every access re-derives from the base gvar and never holds a captured pointer across an EB — and the disp32 patch sites do an 8-byte read-modify-write that bypasses EB's cap-check, so the grow needs a guard band; (2) the 8192 fn-cap was a magic literal scattered across 6 subsystems and textually colliding with 5 UNRELATED 8192-capped tables, so the swap had to be surgical per-context, never a global replace."
+category = "cyrius"
+tags = ["growable", "codebuf", "fn-tables", "relocation", "magic-number", "v6.2.0"]
+content = """
+**Relocation safety (codebuf)**: `_codebuf_grow` `alloc()`s a new
+buffer and repoints `_codebuf_base`. That is only correct because
+EVERY codebuf access re-derives `_codebuf_base + offset` fresh:
+- the disp32 patch sites (`var a = _codebuf_base + GCP(S); S64(a, …)`)
+  capture-and-store with NO `EB` in between, so no grow can run
+  between the capture and the use;
+- the DSE/LASE/regalloc peephole passes read+patch already-emitted
+  code AFTER all emit, when the buffer is stable.
+A pattern that captured `_codebuf_base + cp` and then called `EB`
+(which can grow → relocate) before using it would dereference the
+freed old buffer. There is none today — keep it that way.
+
+The disp32 stores also do an 8-byte read-modify-write at `cp`
+(`S64(a, (L64(a) >> 32 << 32) | disp)`), writing 4 bytes PAST the
+4-byte slot, and they bypass `EB`'s cap-check entirely. So
+`_codebuf_grow` triggers at `cp >= _codebuf_cap - 64` (a 64-byte
+guard band), not at the exact cap, or the last RMW before a grow
+would write past the buffer end. The cx bytecode backend has its
+OWN codebuf at `0x54A000` (separate region, still fixed 512 KB) —
+it is NOT `_codebuf_base`.
+
+**The scattered magic number (fn-tables)**: `8192` (the fn-cap)
+was hard-coded in ~6 independent places — `REGFN`'s cap-check,
+the `fn_name_hash` + `fn_start_hash` probe/mask/clear bounds, the
+`live[1024]` DCE bitmap, and the 85 %-full warning — with NO single
+source of truth. Worse, the literal `8192` also appears in 5
+UNRELATED capped tables (var table, IR pool, PE reloc, struct
+field pool, the TS scratch stack). A blind `8192 → _fnt_cap` would
+have corrupted those. The migration was surgical per-context:
+`& 8191 → & _fnt_hash_mask` (hash masks only), `probes/sh_clr <
+8192 → _fnt_cap` (hash bounds only), `live[1024] → live[4096]`
+(the DCE bitmap, sized to the 32768 ceiling), REGFN's check → the
+grow call. Everything now reads one `_fnt_cap`.
+
+**Recognize again**: any "raise/remove a fixed cap" task where the
+cap value is a bare literal. Grep first; a literal that doubles as
+an unrelated table's size will silently break that table.
 """

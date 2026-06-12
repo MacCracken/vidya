@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **New topic: `build_systems` (P4) — 75 topics, 825 examples, 11/11.**
+  A minimal build-system core across all 11 languages: a DAG of build
+  targets, Kahn topological ordering, content-signature dirty-tracking
+  (input signature = source mixed with dependencies' output signatures,
+  `HB=131`/`HM=1000003` polynomial), ninja-style incremental rebuild
+  (only dirty targets run; content-addressed outputs let unchanged
+  rebuilds cut off downstream), and cycle detection. The Cyrius
+  reference (`content/build_systems/cyrius.cyr`) was designed first,
+  then ported to rust / python / c / go / typescript / shell / zig 0.16
+  / x86_64 asm / aarch64 asm, plus an OpenQASM thematic analog (the
+  dependency DAG as a topologically-ordered CNOT cascade with X-driven
+  dirty propagation). The same six-scenario contract holds in every
+  port: topo orders all 3 targets (app after both deps); cold build
+  rebuilds 3; a no-edit build rebuilds 0; editing one leaf rebuilds it
+  + the root (2) while the sibling stays untouched; a 2-node mutual
+  dependency is detected as a cycle. `concept.toml` carries 4 best
+  practices, 4 gotchas (bad/good), and 2 performance notes (ninja null
+  build, content-addressed caching). Validator: 825/825 green.
+
 ## [2.7.2] — 2026-06-12
 
 ### Changed

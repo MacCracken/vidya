@@ -9,7 +9,7 @@
 - **Vidya**: 2.7.2 (canonical source: [`../../VERSION`](../../VERSION); `cyrius.cyml` reads it via `${file:VERSION}`)
 - **Cyrius pin**: 6.1.41 (in [`../../cyrius.cyml`](../../cyrius.cyml); ecosystem wrapper is 6.2.0 — build with `CYRIUS_HOME=~/.cyrius/versions/6.1.41` + `--strict-pin` so cycc matches the pin)
 - **Binary size**: ~2.1 MB static ELF (`build/vidya`) — grew from ~1.1 MB on the 6.1.x stdlib; ~1934 unreachable fns are DCE-eliminable (`CYRIUS_DCE=1`)
-- **Corpus**: 74 topics × 11 languages = 814 examples; coverage gaps = 0
+- **Corpus**: 75 topics × 11 languages = 825 examples; coverage gaps = 0 (P4 `build_systems` landed, Unreleased)
 
 ## Dep pins (from `cyrius.cyml`)
 
@@ -23,7 +23,7 @@ Stdlib modules used (see `cyrius.cyml` `[deps] stdlib`): `syscalls, string, allo
 
 ## Cycle posture
 
-- **In flight**: v2.7.x — P4 (build systems) on the topic side. v2.7.0 + v2.7.1 were infra-only cycles; build_systems / package_resolution / reproducible_builds slid to the next content slots. See [`roadmap.md`](roadmap.md) "In flight (2.7.x)" for slot disposition.
+- **In flight**: v2.7.x — P4 (build systems) on the topic side. v2.7.0–v2.7.2 were infra-only cycles (dep bumps, cyrius 5→6, zig 0.16, bayan consolidation). **`build_systems` landed (Unreleased)** — 11/11, 825/825 — the first P4 content. `package_resolution` is the next content slot; `reproducible_builds` closes P4. See [`roadmap.md`](roadmap.md) "In flight (2.7.x)" for slot disposition.
 - **Loose ends** from v2.7.1 ship: zugot recipe sha256 backfill (post-release-artifact), watch CI wallclock on the new content-validation gate, see "2.7.x dep-track follow-ups" in roadmap.
 
 ## Consumers
