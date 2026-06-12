@@ -2,8 +2,8 @@
 
 > **Status**: Active | **Last Updated**: 2026-06-12
 >
-> **Version**: 2.7.2 | **Cyrius**: 6.1.41 (Zig content pin: 0.16.0)
-> **Topics**: 77 (77 fully covered) — **P0 → P4 complete (Unreleased)** 🎉
+> **Version**: 2.7.3 | **Cyrius**: 6.1.41 (Zig content pin: 0.16.0)
+> **Topics**: 77 (77 fully covered) — **P0 → P4 complete** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 847 source files; concept files: 77
 > **Validator**: 847/847 green
@@ -30,8 +30,7 @@ This table is one row per minor for navigation only.
 
 ## Current State
 
-**77 topics fully covered (11/11 languages) — P0 → P4 complete
-(Unreleased).**
+**77 topics fully covered (11/11 languages) — P0 → P4 complete.**
 
 `vidya stats` reports `Topics: 77, Complete: 77 (all 11 languages),
 Examples: 847`; validator 847/847 green. No partial topics. P4
@@ -40,7 +39,7 @@ next minor (2.8.x) opens P5 functional / type theory.
 
 ---
 
-## P4 — Build Systems ✅ COMPLETE (Unreleased)
+## P4 — Build Systems ✅ COMPLETE (shipped 2.7.3)
 
 3 topics × 11 langs = 33 new examples (72 → 77 topics; 814 → 847
 examples). Aligns with cyrius/zugot tooling work; each primitive has a
