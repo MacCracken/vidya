@@ -6,18 +6,18 @@
 
 ## Version
 
-- **Vidya**: 2.7.1 (canonical source: [`../../VERSION`](../../VERSION); `cyrius.cyml` reads it via `${file:VERSION}`)
-- **Cyrius pin**: 5.11.55 (in [`../../cyrius.cyml`](../../cyrius.cyml))
-- **Binary size**: ~1.1 MB static ELF (`build/vidya`)
+- **Vidya**: 2.7.2 (canonical source: [`../../VERSION`](../../VERSION); `cyrius.cyml` reads it via `${file:VERSION}`)
+- **Cyrius pin**: 6.1.41 (in [`../../cyrius.cyml`](../../cyrius.cyml); ecosystem wrapper is 6.2.0 — build with `CYRIUS_HOME=~/.cyrius/versions/6.1.41` + `--strict-pin` so cycc matches the pin)
+- **Binary size**: ~2.1 MB static ELF (`build/vidya`) — grew from ~1.1 MB on the 6.1.x stdlib; ~1934 unreachable fns are DCE-eliminable (`CYRIUS_DCE=1`)
 - **Corpus**: 74 topics × 11 languages = 814 examples; coverage gaps = 0
 
 ## Dep pins (from `cyrius.cyml`)
 
 | Dep | Pin | Notes |
 |---|---|---|
-| cyrius (toolchain) | 5.11.55 | Absorbed 5.10.x + 5.11.x cycles in one bump at v2.7.1 |
-| sakshi | 2.2.4 | Cycle-counter timestamps via `rdtsc` / `cntvct_el0`; aarch64 portability |
-| vyakarana | 2.2.1 | Streaming API (ADR 0017 on vyakarana side); migration landed in [ADR 0002](../adr/0002-vyakarana-2x-streaming-api.md) |
+| cyrius (toolchain) | 6.1.41 | Crossed 6.0.x → 6.1.x at v2.7.2, onto the series the ecosystem rides (sandhi 6.1.21, sakshi 6.1.17, vyakarana 6.1.24, sit 6.1.30, hoosh 6.1.31) |
+| sakshi | 2.2.10 | Cycle-counter timestamps via `rdtsc` / `cntvct_el0`; aarch64 portability |
+| vyakarana | 2.2.3 | Streaming API (ADR 0017 on vyakarana side); migration landed in [ADR 0002](../adr/0002-vyakarana-2x-streaming-api.md) |
 
 Stdlib modules used (see `cyrius.cyml` `[deps] stdlib`): `syscalls, string, alloc, str, fmt, vec, hashmap, io, fs, tagged, json, fnptr, args, toml, regex, net, tls, base64, fdlopen, sandhi`. `tls`/`base64`/`fdlopen` are explicit until the cyrius v5.10.x SLOT 19 transitive-stdlib arc closes — see roadmap "2.7.x dep-track follow-ups".
 
@@ -35,7 +35,7 @@ Stdlib modules used (see `cyrius.cyml` `[deps] stdlib`): `syscalls, string, allo
 | sandhi | active (vidya is *consumer*, sandhi provides HTTP stdlib) | n/a (other direction) |
 | sakshi | active (vidya is *consumer*, sakshi provides tracing) | n/a (other direction) |
 | cyrius | bidirectional (vidya documents cyrius, cyrius runs vidya) | n/a |
-| zugot | `marketplace/vidya.cyml` pinned at 2.7.1; sha256 backfill pending release artifact |
+| zugot | `marketplace/vidya.cyml` pinned at 2.7.2; sha256 backfill pending release artifact |
 
 ## Verification hosts
 

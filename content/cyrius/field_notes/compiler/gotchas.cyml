@@ -12,6 +12,13 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
+# 44 entries (6.1.40 added, CVE-24: the four per-fn local tables
+# (fn_local_names/depths/types/slice) are indexed by SFLC, which counts stack-frame
+# SLOTS not vars — a `stack var buf[N]` registers N/8 fillers — so frames >~2 KB
+# silently overran the old 256/576-entry tables; relocated all four to the heap top
+# (0x5D9D000/0x5DBD000/0x5DDD000/0x5DFD000) at 16384 slots each + a loud SFLC cap.
+# Plus the local-vs-global array convention: local `var a[N]` = N BYTES rounded to
+# 8; global = N i64 SLOTS — the footgun behind the daimon report.)
 # 43 entries (6.1.18 added: adding a PUBLIC stdlib fn (a top-level `module::fn` in
 # lib/) makes check.sh's api-surface gate fail cryptically — `case-FAIL: test3
 # addition count not reported as 1` — because docs/api-surface.snapshot is now
@@ -2681,4 +2688,60 @@ Recognize it: a new `E*_PE` lands, x86 + Windows are green, then a
 `--strict` aarch64/macOS build (or CI) breaks on "undefined function."
 Grep `backend/aarch64/emit.cyr` for the existing `_PE) { return 0; }`
 cohort and add yours next to `EPE_SYSCALL_DYNAMIC`.
+"""
+
+[[entries]]
+name = "per_fn_local_tables_indexed_by_slot_not_var"
+description = "The four per-fn local tables (fn_local_names / fn_local_depths / fn_local_types / fn_local_slice) are indexed by SFLC, which counts stack-frame SLOTS, NOT vars — a `stack var buf[N]` registers N/8 filler slots — so any frame larger than ~2 KB silently overran the old 256/576-entry tables (CVE-24). v6.1.40 relocated all four to the heap top at 16384 slots each + added a loud SFLC cap."
+category = "cyrius"
+tags = ["compiler", "local-tables", "sflc", "heap-cap", "overflow", "cve-24", "v6.1.40"]
+content = """
+**The trap (CVE-24)**: cyrius's four per-function local tables —
+`fn_local_names`, `fn_local_depths`, `fn_local_types`,
+`fn_local_slice` — are indexed by `SFLC` (the stack-frame local
+count). `SFLC` counts stack-frame **SLOTS**, not user-visible
+variables. A `stack var buf[N]` (a byte array on the frame) doesn't
+register as one entry — it registers **N/8 filler slots** (one per
+8-byte slot the array occupies). So a single `stack var buf[2048]`
+burns 256 table entries by itself.
+
+The old tables were sized 256 / 576 entries. Any function whose
+frame exceeded ~2 KB of slot-arrays silently ran `SFLC` past the
+table end and wrote past the region — a heap overrun with no
+diagnostic. Self-host never tripped it (cycc's own fns stay small),
+so it was invisible until a consumer with a large stack buffer (the
+daimon report) hit it.
+
+**The fix (v6.1.40)**: relocate all four tables to the heap top,
+each sized **16384 slots**:
+
+  - fn_local_names   @ 0x5D9D000
+  - fn_local_depths  @ 0x5DBD000
+  - fn_local_types   @ 0x5DDD000
+  - fn_local_slice   @ 0x5DFD000
+
+plus a LOUD `SFLC` cap check (error + exit, not silent truncation)
+so a future overrun reports the slot count and the file to raise,
+instead of corrupting the heap.
+
+**The footgun behind the report — local vs global array sizing**:
+the array-size convention differs by scope, which is exactly what
+let the frame grow past expectation:
+
+  - **local** `var a[N]` = **N BYTES**, rounded UP to 8 (so
+    `var a[5]` still consumes one 8-byte slot; `var a[2048]`
+    consumes 256 slots).
+  - **global** `var a[N]` = **N i64 SLOTS** (N*8 bytes).
+
+So a buffer that looks identical in source (`var a[2048]`) is 2 KB
+on the stack but 16 KB in `.bss` as a global. Size local arrays by
+BYTE count; size globals by slot count. Mixing the two mental
+models is how the daimon frame quietly grew past the old cap.
+
+**Recognize again**: any "large stack buffer corrupts compiler
+state / heap" shape, or a consumer whose fn has a multi-KB
+`stack var buf[N]`. Check `SFLC` against the table cap; the slot
+count is `frame_bytes / 8`, not the var count. Related:
+`large_fn_local_var_array_is_bss_not_stack` (the dual — big
+fn-local arrays land in `.bss`, not the stack frame).
 """

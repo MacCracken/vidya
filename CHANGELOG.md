@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.2] — 2026-06-12
+
+### Changed
+
+- **Cyrius pin: 5.11.55 → 6.1.41.** Crosses the 6.0.x line into the
+  6.1.x series the rest of the ecosystem now rides (sandhi 6.1.21,
+  sakshi 6.1.17, vyakarana 6.1.24, sit 6.1.30, hoosh 6.1.31).
+  Rehydration is `cyrius lib sync` (syncs vendored `lib/` to the
+  manifest pin — 88 `.cyr` files from
+  `~/.cyrius/versions/6.1.41/lib/`) rather than `cyrius update`, which
+  re-resolves to the *wrapper's* version and would have pulled 6.2.0.
+  Build with the pinned toolchain
+  (`CYRIUS_HOME=~/.cyrius/versions/6.1.41 cyrius build --strict-pin …`)
+  so cycc matches the pin; the default wrapper is 6.2.0 and
+  `--strict-pin` rejects that drift. `cyrius.lock` is now populated
+  (105 deps locked) where it had been empty.
+- **sakshi: 2.2.4 → 2.2.10.** Latest tracing release.
+- **vyakarana: 2.2.1 → 2.2.3.** Latest streaming-tokenizer release.
+- **Binary size: ~1.1 MB → ~2.1 MB static ELF.** The 6.1.x stdlib is
+  larger; the build flags ~1934 unreachable fns (DCE-eliminable via
+  `CYRIUS_DCE=1`). `cyrius test` green (41 passed, 0 failed); corpus
+  unchanged at 74 topics × 11 languages = 814 examples.
+
 ### Added
 
 - **Kernel field notes brought current through agnos 1.41.x** —
