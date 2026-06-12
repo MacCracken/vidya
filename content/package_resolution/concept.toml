@@ -1,0 +1,56 @@
+id = "package_resolution"
+title = "Package Resolution and Version Selection"
+description = "Package resolution is the problem of choosing one concrete version for every package in a dependency graph such that every version constraint is satisfied simultaneously. It starts with semantic versioning: a major.minor.patch triple where major bumps signal breaking changes, minor adds features, and patch fixes bugs — encode the triple so that comparison is a single total order. Constraints are ranges: a caret ^1.2.3 means '1.2.3 up to but not including the next major' (= [1.2.3, 2.0.0)), the everyday 'compatible update' rule. When two packages both depend on a third (a diamond), the resolver intersects the ranges each requirer imposes and picks the highest surviving version; an empty intersection is a genuine conflict that must be reported, not papered over. The hard part is that choices interact: greedily taking the highest version of one package can force an impossible constraint on another, so a correct resolver backtracks — try a lower version and re-solve — or uses conflict-driven clause learning (pubgrub, the algorithm behind Dart's pub and uv) to prune the search. The graph must also be checked for cycles, which have no valid install order. The resolved set is written to a lockfile so subsequent installs are deterministic and skip resolution entirely. This is the engine inside npm, cargo, pip, and cyrius.cyml's own resolver."
+topic = "PackageResolution"
+tags = ["semver", "version-constraints", "caret", "dependency-resolution", "diamond-dependency", "backtracking", "pubgrub", "lockfile", "version-selection", "cycle-detection", "npm", "cargo"]
+related_topics = ["build_systems", "reproducible_builds", "compiler_bootstrapping", "module_systems"]
+
+[[best_practices]]
+title = "Encode semver as a comparable triple, never compare version strings"
+explanation = "major.minor.patch has a precise precedence: major dominates minor dominates patch. Encode it so that comparison is a single integer (or tuple) compare — e.g. major*1_000_000 + minor*1_000 + patch — and ordering falls out for free. The cardinal sin is comparing the textual form: lexicographically '1.10.0' < '1.9.0' because '1' < '9' at the third character, which inverts the real order and silently selects the wrong version. (Real semver also orders pre-release tags below their release, e.g. 1.0.0-rc.1 < 1.0.0 — a separate field, but the same 'compare components, not strings' rule.)"
+
+[[best_practices]]
+title = "Caret means 'up to the next major' — resolve to the HIGHEST compatible version"
+explanation = "^1.2.3 admits [1.2.3, 2.0.0): any 1.x at or above 1.2.3, because minor and patch bumps are defined to be backward-compatible. The conventional resolution (npm, cargo) is to pick the HIGHEST version in range, so users get bug fixes and new features without opting into a breaking major. Picking the lowest 'because it's what was tested' defeats the point of ranges and leaves known fixes on the table; pin an exact version only when you genuinely need to."
+
+[[best_practices]]
+title = "Resolve diamonds by intersecting constraints; an empty intersection is a real conflict"
+explanation = "When A and B both depend on C, C must satisfy A's range AND B's range — intersect them ([max(lo), min(hi))) and pick the highest C that fits. If the intersection is empty (A wants C ^1, B wants C ^2), there is no single C that works: report the conflict with both requirers named. Silently choosing one side's version and ignoring the other produces a build that links incompatible code — the diamond-dependency bug that 'works on my machine' until it doesn't."
+
+[[best_practices]]
+title = "Backtrack (or learn conflicts) — greedy highest-first can dead-end"
+explanation = "Choosing the highest version of each package in isolation is greedy and incomplete: the newest A might require a C that conflicts with B, even though an older A would have resolved cleanly. A correct resolver, on hitting a conflict, backtracks to the most recent choice and tries the next-best version. Modern resolvers (pubgrub in Dart's pub and uv) go further with conflict-driven clause learning — they remember WHY a combination failed and prune whole regions of the search space — but the guarantee is the same: if a satisfying assignment exists, find it; otherwise prove none does."
+
+[[gotchas]]
+title = "Lexicographic version comparison inverts ordering at two digits"
+explanation = "Comparing version strings character-by-character breaks the moment a component reaches double digits: '1.10.0' sorts BEFORE '1.9.0' because the character '1' is less than '9'. A resolver that sorts candidates as strings will hand you 1.9.0 when 1.10.0 was available and newer. Always parse into numeric components and compare those."
+bad_example = "if (ver_a_string < ver_b_string) { newest = ver_b_string; }  // \"1.10.0\" < \"1.9.0\" is TRUE — wrong"
+good_example = "if (encode(ver_a) < encode(ver_b)) { newest = ver_b; }  // 1_010_000 vs 1_009_000 — correct"
+
+[[gotchas]]
+title = "Treating caret as 'same minor' excludes valid upgrades"
+explanation = "^1.2.0 does NOT mean 'only 1.2.x'. It means [1.2.0, 2.0.0) — every 1.x at or above 1.2.0, including 1.5.0 and 1.99.0. Implementing the upper bound as 'next minor' wrongly rejects compatible releases and pins the user to a stale line, missing security fixes shipped in 1.3+. The upper bound of a caret is the next MAJOR."
+bad_example = "hi = make(major, minor+1, 0)   // ^1.2.0 → [1.2.0, 1.3.0): excludes 1.5.0"
+good_example = "hi = make(major+1, 0, 0)       // ^1.2.0 → [1.2.0, 2.0.0): includes all 1.x ≥ 1.2.0"
+
+[[gotchas]]
+title = "Caret on 0.x — minor IS the breaking axis below 1.0"
+explanation = "Before 1.0.0 the API is declared unstable, so npm and cargo treat the minor as the breaking field: ^0.2.3 means [0.2.3, 0.3.0), NOT [0.2.3, 1.0.0). A resolver that applies the plain 'next major' rule to 0.x ranges will happily upgrade 0.2.x to 0.9.x and pull in breaking changes. Special-case major == 0: the caret's upper bound is the next minor."
+bad_example = "caret_hi(0.2.3) = 1.0.0   // upgrades 0.2.3 → 0.9.0, crossing breaking 0.x changes"
+good_example = "caret_hi(0.2.3) = 0.3.0   // major==0 ⇒ minor is the breaking axis"
+
+[[gotchas]]
+title = "Greedy resolution reports a false 'unresolvable'"
+explanation = "Picking the highest version of every package without backtracking can fail on a graph that is actually solvable: take the newest A, discover it forces C ^2 which conflicts with B's C ^1, and declare defeat — when stepping A down one version would have asked for C ^1 and resolved cleanly. Never conclude 'no solution' from a single greedy pass; exhaust the alternatives (backtrack) before failing."
+bad_example = "pick highest A; if its deps conflict → return UNRESOLVABLE  // never tried older A"
+good_example = "for A from highest to lowest: if resolve(rest | A's deps) succeeds → use it; else continue  // backtrack"
+
+[[performance_notes]]
+title = "Resolution is NP-hard in general; conflict learning makes it practical, lockfiles make it free"
+explanation = "Version selection with interacting constraints is equivalent to SAT and worst-case exponential. Naive backtracking can blow up on adversarial graphs; pubgrub (uv, Dart pub) adds conflict-driven clause learning — when a combination fails it derives a general 'incompatibility' and skips every assignment that would repeat the mistake, which collapses the practical search to near-linear on real graphs. Once solved, the assignment is written to a lockfile, so every later install is an O(graph) read with zero search."
+evidence = "uv (Astral) reports resolving large Python graphs in tens to low-hundreds of milliseconds using pubgrub, versus pip's older backtracking resolver taking seconds to minutes on conflict-heavy graphs. Cargo and npm both persist the result (Cargo.lock / package-lock.json) so repeat installs skip resolution entirely."
+
+[[performance_notes]]
+title = "Lockfiles trade resolution cost for reproducibility"
+explanation = "A lockfile records the exact resolved version (and hash) of every package, transitively. The first resolve pays the search cost once; thereafter `install` reads the lockfile and fetches exactly those versions — deterministic across machines and CI, and fast because no constraint solving happens. The cost is that ranges in the manifest are only re-resolved on an explicit update, which is the right default: you want the same bytes in CI that you tested locally."
+evidence = "npm ci (lockfile-only install) is consistently faster and more reproducible than npm install (which may re-resolve): npm's docs recommend `npm ci` for CI precisely because it skips resolution and installs the locked tree directly. Cargo.lock guarantees byte-identical dependency versions across a team without re-running the resolver."

@@ -1,0 +1,188 @@
+# Reproducible Builds — Cyrius reference (runnable)
+#
+# A reproducible build is a pure function of its inputs: the same
+# sources produce a byte-identical artifact, on any machine, at any
+# time. Three classic sources of non-determinism, and their fixes:
+#
+#   1. Embedded wall-clock timestamps  → clamp every timestamp to
+#      SOURCE_DATE_EPOCH (a fixed build time taken from the sources,
+#      e.g. the last commit date) so "now" never leaks in.
+#   2. Filesystem iteration order      → readdir() returns entries in
+#      inode/hash order, which varies; SORT filenames before processing
+#      so the output doesn't depend on directory layout.
+#   3. Non-deterministic artifact names → name artifacts by the HASH of
+#      their content (content-addressing), so identical inputs map to
+#      identical paths — the build becomes idempotent.
+#
+# The verification is simple: build twice and compare digests. This
+# models that pipeline over an in-memory set of files (name key +
+# content signature) and shows a deterministic build staying identical
+# across runs that differ in input order AND wall-clock time, while a
+# naive build drifts.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var HB = 131;
+var HM = 1000003;
+var HSEED = 7;
+
+fn fold(h, v) { return (h * HB + v) % HM; }
+
+# --- 1. Deterministic timestamps: clamp "now" to SOURCE_DATE_EPOCH ---
+fn normalize_ts(now, sde) {
+    if (now > sde) { return sde; }
+    return now;
+}
+
+# --- 3. Content-addressed artifact path: a pure function of content ---
+fn cas_path(content) { return (content * HB + 7) % HM; }
+
+# --- File set: parallel arrays (name sort-key, content signature) ---
+var f_name[128];
+var f_content[128];
+var f_n = 0;
+
+fn files_reset(n) { f_n = n; return 0; }
+fn file_set(i, name, content) {
+    store64(&f_name + i * 8, name);
+    store64(&f_content + i * 8, content);
+    return 0;
+}
+
+# --- 2. Sorted iteration: insertion-sort files by name key, ascending,
+#     reordering content alongside so the pairing is preserved. ---
+fn files_sort() {
+    var i = 1;
+    while (i < f_n) {
+        var kn = load64(&f_name + i * 8);
+        var kc = load64(&f_content + i * 8);
+        var j = i - 1;
+        var done = 0;
+        while (done == 0) {
+            if (j < 0) {
+                done = 1;
+            } else {
+                if (load64(&f_name + j * 8) > kn) {
+                    store64(&f_name + (j + 1) * 8, load64(&f_name + j * 8));
+                    store64(&f_content + (j + 1) * 8, load64(&f_content + j * 8));
+                    j = j - 1;
+                } else {
+                    done = 1;
+                }
+            }
+        }
+        store64(&f_name + (j + 1) * 8, kn);
+        store64(&f_content + (j + 1) * 8, kc);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# --- The build: fold the (normalized) timestamp and every file's
+#     (name, content) into one artifact digest. Flags toggle the two
+#     determinism fixes so we can contrast a correct vs naive pipeline. ---
+fn build_digest(do_sort, do_norm, now, sde) {
+    if (do_sort == 1) { files_sort(); }
+    var ts = now;
+    if (do_norm == 1) { ts = normalize_ts(now, sde); }
+    var h = fold(HSEED, ts);
+    var i = 0;
+    while (i < f_n) {
+        h = fold(h, load64(&f_name + i * 8));
+        h = fold(h, load64(&f_content + i * 8));
+        i = i + 1;
+    }
+    return h;
+}
+
+# Same SET of three files, presented in two different input orders.
+fn setup_order_a() {
+    files_reset(3);
+    file_set(0, 30, 111);
+    file_set(1, 10, 222);
+    file_set(2, 20, 333);
+    return 0;
+}
+fn setup_order_b() {
+    files_reset(3);
+    file_set(0, 20, 333);
+    file_set(1, 30, 111);
+    file_set(2, 10, 222);
+    return 0;
+}
+
+# === Tests ===
+
+fn test_normalize_ts() {
+    assert_eq(normalize_ts(9999, 5000), 5000, "clamp future now to SOURCE_DATE_EPOCH");
+    assert_eq(normalize_ts(3000, 5000), 3000, "keep timestamp already <= SDE");
+    return 0;
+}
+
+fn test_sorted_iteration() {
+    setup_order_a();
+    files_sort();
+    assert_eq(load64(&f_name + 0 * 8), 10, "sorted name[0] = 10");
+    assert_eq(load64(&f_name + 1 * 8), 20, "sorted name[1] = 20");
+    assert_eq(load64(&f_name + 2 * 8), 30, "sorted name[2] = 30");
+    # content stayed paired with its name
+    assert_eq(load64(&f_content + 0 * 8), 222, "content followed name 10");
+    return 0;
+}
+
+fn test_content_addressed() {
+    assert_eq(cas_path(111), cas_path(111), "same content → same path");
+    assert_eq(cas_path(111) != cas_path(222), 1, "different content → different path");
+    return 0;
+}
+
+fn test_reproducible_build() {
+    # Deterministic pipeline (sort + normalize): two builds that differ
+    # in BOTH input order and wall-clock "now" must produce equal digests.
+    setup_order_a();
+    var d1 = build_digest(1, 1, 9999, 5000);
+    setup_order_b();
+    var d2 = build_digest(1, 1, 8888, 5000);
+    assert_eq(d1, d2, "deterministic build is byte-identical across runs");
+    return 0;
+}
+
+fn test_nondeterministic_build_differs() {
+    # Naive pipeline (no sort, raw now): the same source set yields
+    # different digests when order or clock differ — the bug repro
+    # builds eliminate.
+    setup_order_a();
+    var d1 = build_digest(0, 0, 9999, 5000);
+    setup_order_b();
+    var d2 = build_digest(0, 0, 8888, 5000);
+    assert_eq(d1 != d2, 1, "naive build drifts with order + timestamp");
+    return 0;
+}
+
+fn test_normalization_alone_kills_clock_drift() {
+    # With sorting on but only the clock differing, normalization makes
+    # the two runs identical; without it they differ.
+    setup_order_a();
+    var norm1 = build_digest(1, 1, 9999, 5000);   # clamps 9999 → 5000
+    setup_order_a();
+    var norm2 = build_digest(1, 1, 7777, 5000);   # clamps 7777 → 5000
+    assert_eq(norm1, norm2, "normalized timestamp removes clock dependence");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_normalize_ts();
+    test_sorted_iteration();
+    test_content_addressed();
+    test_reproducible_build();
+    test_nondeterministic_build_differs();
+    test_normalization_alone_kills_clock_drift();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

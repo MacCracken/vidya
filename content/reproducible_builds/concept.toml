@@ -1,0 +1,56 @@
+id = "reproducible_builds"
+title = "Reproducible Builds"
+description = "A build is reproducible when the same source inputs always produce a bit-for-bit identical artifact — regardless of when, where, or by whom it is built. This matters for security (an independent rebuilder can confirm a published binary really came from its claimed source, catching a compromised toolchain or build server) and for caching (identical inputs map to identical outputs, so a content-addressed cache can skip the work). The enemy is non-determinism leaking into the output. The three classic culprits: embedded wall-clock timestamps (a binary that records `time(NULL)` or `__DATE__` differs every build — the fix is SOURCE_DATE_EPOCH, a fixed build time derived from the sources such as the last commit date, that every tool clamps to); unstable iteration order (readdir() and hash-map iteration return entries in inode or hash order that varies between filesystems and runs — the fix is to sort before emitting); and environment-dependent names (absolute build paths, temp directories, usernames, hostnames baked into debug info — the fix is to normalize or strip them, e.g. GCC's -ffile-prefix-map or Go's -trimpath). Content-addressing the outputs (naming an artifact by the hash of its content) makes the build idempotent. Reproducibility is not assumed; it is verified — build twice (ideally in deliberately different environments) and compare digests. The Debian, Arch, and NixOS reproducible-builds efforts treat a diverging rebuild as a bug to be hunted down."
+topic = "ReproducibleBuilds"
+tags = ["reproducible", "deterministic", "source-date-epoch", "content-addressing", "bit-for-bit", "supply-chain", "timestamp-normalization", "sorted-iteration", "trimpath", "build-verification"]
+related_topics = ["build_systems", "package_resolution", "compiler_bootstrapping", "security"]
+
+[[best_practices]]
+title = "Clamp every timestamp to SOURCE_DATE_EPOCH; never embed wall-clock now"
+explanation = "Any build step that records the current time — archive member mtimes, gzip headers, a `__DATE__` string, a copyright-year stamp — makes the output differ on every run. The cross-tool convention is SOURCE_DATE_EPOCH: a single Unix timestamp, taken from the sources (commonly the last commit date), exported into the build. Tools that would emit 'now' instead use it, and crucially CLAMP — if a real file mtime is newer than SOURCE_DATE_EPOCH, pin it down to that epoch — so a freshly-checked-out tree with current mtimes still produces the recorded time. The result is a build whose timestamps depend only on the sources."
+
+[[best_practices]]
+title = "Sort every unordered iteration before it reaches the output"
+explanation = "readdir() yields directory entries in filesystem-dependent order; hash-map and hash-set iteration yields key-dependent order that changes with seed or insertion history. If that order flows into an artifact — the member order of an archive, the link order of object files, a generated table — the output is non-deterministic. Sort the keys (by name, by a stable id) before emitting. This is cheap and turns 'works on my filesystem' into 'works everywhere.'"
+
+[[best_practices]]
+title = "Content-address artifacts so the build is idempotent and verifiable"
+explanation = "Name an output by the hash of its content (and of all its inputs). Identical inputs then map to an identical path, so a rebuild either produces the same bytes at the same address (cache hit, no work) or — if something leaked non-determinism — produces a DIFFERENT hash, which is exactly the signal you want. Content-addressing is what lets a remote cache be shared safely across machines and what lets a verifier compare a single digest instead of diffing whole trees."
+
+[[best_practices]]
+title = "Verify by rebuilding and comparing — reproducibility is tested, not assumed"
+explanation = "A build is only reproducible if you've checked. Build the artifact twice — ideally in deliberately varied environments (different directory, hostname, build time, CPU count, even a future date) — and compare the digests. A divergence is a bug: bisect what differs (diffoscope is the standard tool) and eliminate the leak. The reproducible-builds projects for Debian, Arch, and NixOS run exactly this as continuous verification across tens of thousands of packages."
+
+[[gotchas]]
+title = "Embedding the wall clock — the binary changes every build"
+explanation = "Recording the current time anywhere in the output (a build-date string, archive mtimes, a gzip timestamp field) guarantees two builds of identical source produce different bytes, defeating verification and cache reuse. Derive the time from SOURCE_DATE_EPOCH and clamp file mtimes down to it instead of reading the system clock."
+bad_example = "stamp = time(NULL);            // or strftime(__DATE__) — every build differs"
+good_example = "stamp = min(file_mtime, SOURCE_DATE_EPOCH);  // time depends only on the sources"
+
+[[gotchas]]
+title = "Iterating a directory or hash map in native order"
+explanation = "Emitting files in readdir() order, or table rows in hash-map iteration order, bakes a filesystem- and seed-dependent ordering into the artifact. The same sources on another machine (or the same machine after a rehash) produce a different byte stream. Always sort the collection by a stable key before it influences the output."
+bad_example = "for f in readdir(dir): archive.add(f)        // order varies by filesystem/inode"
+good_example = "for f in sorted(readdir(dir)): archive.add(f) // stable, order-independent output"
+
+[[gotchas]]
+title = "Baking in absolute build paths, hostnames, or usernames"
+explanation = "Debug info, assertion messages, and __FILE__ macros often capture the absolute build directory (/home/alice/build/...), and some toolchains embed the hostname or username. These differ per machine and break bit-for-bit reproducibility even when the logic is deterministic. Strip or remap them: GCC/Clang -ffile-prefix-map, Go -trimpath, and setting a fixed build path all canonicalize these out."
+bad_example = "// debug info records /home/alice/proj/src/main.c and host 'alice-laptop'"
+good_example = "// -ffile-prefix-map=$PWD=. and -trimpath → paths normalized to a stable root"
+
+[[gotchas]]
+title = "Parallel build steps writing in completion order"
+explanation = "When N jobs run concurrently and append their results to a shared output (a combined log, a merged index, a linked archive) in whatever order they finish, the artifact's contents depend on scheduling — non-deterministic by construction. Collect results into a buffer keyed by a stable id and emit them in sorted order after the parallel phase, so concurrency speeds the build without leaking into the bytes."
+bad_example = "parallel_for(jobs, |j| output.append(run(j)))   // append in finish order"
+good_example = "results[j.id] = run(j); for id in sorted(ids): output.append(results[id])"
+
+[[performance_notes]]
+title = "The determinism tax is tiny; the payoff is cache hits and verifiability"
+explanation = "The fixes cost almost nothing at build time — a sort of the input list (O(n log n) on a handful of entries) and a timestamp clamp (a comparison). In exchange, identical inputs produce identical outputs, which is the precondition for content-addressed build caches (skip any artifact already in the cache) and for independent verification (compare one hash instead of re-auditing the build). The marginal build cost is dwarfed by the avoided rebuilds and the security guarantee."
+evidence = "Bazel and Nix rely on input-addressed determinism for their caches; on incremental CI the majority of actions are served from cache precisely because identical inputs hash identically. The Debian Reproducible Builds project verifies ~95%+ of the archive rebuilds bit-for-bit, turning 'trust the build server' into 'anyone can check.'"
+
+[[performance_notes]]
+title = "Reproducibility is the foundation of trustworthy build caching and supply-chain audit"
+explanation = "Once a build is a pure function of its inputs, the output hash is a stable cache key: a clean build becomes a series of cache lookups, and a binary's provenance can be checked by re-deriving it from source and comparing digests — no need to trust the original builder. Without reproducibility, a cache can return stale or environment-specific artifacts, and a compromised build server can ship a backdoored binary that no source audit would reveal."
+evidence = "SOURCE_DATE_EPOCH is a cross-project spec (reproducible-builds.org) honored by GCC, dpkg, rpm, gzip, and more. Go made -trimpath and reproducible output a release goal; the Go toolchain produces bit-identical binaries given identical inputs and GOFLAGS, which underpins its module checksum (go.sum) verification."

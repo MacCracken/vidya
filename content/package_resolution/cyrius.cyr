@@ -1,0 +1,244 @@
+# Package Resolution — Cyrius reference (runnable)
+#
+# Semantic versioning, caret constraint matching, range intersection
+# for diamond dependencies, highest-version selection, bounded
+# backtracking, and dependency-cycle detection — the core of a
+# dependency resolver (npm, cargo, cyrius.cyml's own resolver).
+#
+# A semver major.minor.patch is encoded as one integer
+#   enc = major*1_000_000 + minor*1_000 + patch
+# so version comparison IS integer comparison. A constraint is a
+# half-open range [lo, hi). A caret ^X.Y.Z allows everything from
+# X.Y.Z up to (but not including) the next major: [X.Y.Z, (X+1).0.0).
+# Resolving a shared ("diamond") dependency means intersecting the
+# ranges every requirer imposes and picking the highest version that
+# survives — and backtracking on an earlier choice when the highest
+# pick paints a later dependency into an impossible corner.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/assert.cyr"
+
+var VMAJ = 1000000;
+var VMIN = 1000;
+
+# --- Semver encode / inspect ---
+fn sv(maj, min, pat) { return maj * VMAJ + min * VMIN + pat; }
+fn sv_major(v) { return v / VMAJ; }
+
+# --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0) ---
+fn caret_lo(v) { return v; }
+fn caret_hi(v) { return (sv_major(v) + 1) * VMAJ; }
+
+# --- Constraint satisfaction over a half-open range ---
+fn satisfies(v, lo, hi) {
+    if (v < lo) { return 0; }
+    if (v >= hi) { return 0; }
+    return 1;
+}
+
+# --- Range intersection: [max(lo), min(hi)); empty iff lo >= hi ---
+fn range_lo_max(a, b) { if (a > b) { return a; } return b; }
+fn range_hi_min(a, b) { if (a < b) { return a; } return b; }
+fn range_empty(lo, hi) { if (lo >= hi) { return 1; } return 0; }
+
+# --- Highest version in vers[0..n) that lies in [lo, hi); -1 if none ---
+fn best_match(vers, n, lo, hi) {
+    var best = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        var v = load64(vers + i * 8);
+        if (satisfies(v, lo, hi) == 1) {
+            if (v > best) { best = v; }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+# --- Available versions of the shared dependency C ---
+var c_vers[128];
+var c_n = 0;
+fn setup_c() {
+    c_n = 3;
+    store64(&c_vers + 0 * 8, sv(1, 0, 0));
+    store64(&c_vers + 1 * 8, sv(1, 5, 0));
+    store64(&c_vers + 2 * 8, sv(2, 0, 0));
+    return 0;
+}
+
+# --- Diamond resolution: A requires C ^a_base, B requires C ^b_base.
+#     Intersect the two carets and pick the highest C that fits.
+#     Returns chosen C version, or -1 if the constraints conflict. ---
+fn resolve_shared(a_base, b_base) {
+    var lo = range_lo_max(caret_lo(a_base), caret_lo(b_base));
+    var hi = range_hi_min(caret_hi(a_base), caret_hi(b_base));
+    if (range_empty(lo, hi) == 1) { return 0 - 1; }
+    return best_match(&c_vers, c_n, lo, hi);
+}
+
+# --- Bounded backtracking: A has candidate versions (a_vers), each of
+#     which requires a different caret on C (a_creq). B requires C
+#     ^b_base. The absolute-highest A may force a C constraint that
+#     conflicts with B; choose the HIGHEST A for which some C still
+#     satisfies both. Records the chosen C in g_chosen_c. -1 if none. ---
+var g_chosen_c = 0;
+fn resolve_backtrack(a_vers, a_creq, an, b_base) {
+    var bestA = 0 - 1;
+    var bestC = 0 - 1;
+    var i = 0;
+    while (i < an) {
+        var aver = load64(a_vers + i * 8);
+        var creq = load64(a_creq + i * 8);
+        var lo = range_lo_max(caret_lo(creq), caret_lo(b_base));
+        var hi = range_hi_min(caret_hi(creq), caret_hi(b_base));
+        if (range_empty(lo, hi) == 0) {
+            var c = best_match(&c_vers, c_n, lo, hi);
+            if (c != (0 - 1)) {
+                if (aver > bestA) { bestA = aver; bestC = c; }
+            }
+        }
+        i = i + 1;
+    }
+    g_chosen_c = bestC;
+    return bestA;
+}
+
+# --- Dependency-graph cycle detection (Kahn ready-scan; a cycle leaves
+#     some package permanently unplaceable). ---
+var p_depcnt[128];
+var p_deps[1024];        # flat: p_deps[p*MAXD + k],  MAXD = 8
+var p_placed[128];
+var p_n = 0;
+var MAXD = 8;
+
+fn pkg_reset(n) {
+    p_n = n;
+    var i = 0;
+    while (i < n) { store64(&p_depcnt + i * 8, 0); i = i + 1; }
+    return 0;
+}
+fn pkg_add_dep(p, d) {
+    var c = load64(&p_depcnt + p * 8);
+    store64(&p_deps + (p * MAXD + c) * 8, d);
+    store64(&p_depcnt + p * 8, c + 1);
+    return 0;
+}
+fn pkg_has_cycle() {
+    var i = 0;
+    while (i < p_n) { store64(&p_placed + i * 8, 0); i = i + 1; }
+    var placed = 0;
+    while (placed < p_n) {
+        var progress = 0;
+        var p = 0;
+        while (p < p_n) {
+            if (load64(&p_placed + p * 8) == 0) {
+                var ready = 1;
+                var k = 0;
+                var dc = load64(&p_depcnt + p * 8);
+                while (k < dc) {
+                    var d = load64(&p_deps + (p * MAXD + k) * 8);
+                    if (load64(&p_placed + d * 8) == 0) { ready = 0; }
+                    k = k + 1;
+                }
+                if (ready == 1) {
+                    store64(&p_placed + p * 8, 1);
+                    placed = placed + 1;
+                    progress = 1;
+                }
+            }
+            p = p + 1;
+        }
+        if (progress == 0) { return 1; }   # stuck ⇒ cycle
+    }
+    return 0;
+}
+
+# === Tests ===
+
+fn test_semver() {
+    assert_eq(sv(1, 2, 3) > sv(1, 2, 0), 1, "patch ordering");
+    assert_eq(sv(2, 0, 0) > sv(1, 9, 9), 1, "major dominates minor/patch");
+    assert_eq(sv_major(sv(1, 5, 2)), 1, "extract major");
+    return 0;
+}
+
+fn test_caret() {
+    assert_eq(caret_lo(sv(1, 2, 0)), sv(1, 2, 0), "caret lower = base");
+    assert_eq(caret_hi(sv(1, 2, 0)), sv(2, 0, 0), "caret upper = next major");
+    assert_eq(satisfies(sv(1, 4, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))), 1, "1.4.0 in ^1.2.0");
+    assert_eq(satisfies(sv(2, 0, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))), 0, "2.0.0 not in ^1.2.0");
+    assert_eq(satisfies(sv(1, 1, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))), 0, "1.1.0 below ^1.2.0");
+    return 0;
+}
+
+fn test_intersect() {
+    assert_eq(range_lo_max(sv(1, 0, 0), sv(1, 3, 0)), sv(1, 3, 0), "intersect lo = max");
+    assert_eq(range_hi_min(sv(2, 0, 0), sv(3, 0, 0)), sv(2, 0, 0), "intersect hi = min");
+    var lo = range_lo_max(caret_lo(sv(1, 0, 0)), caret_lo(sv(2, 0, 0)));
+    var hi = range_hi_min(caret_hi(sv(1, 0, 0)), caret_hi(sv(2, 0, 0)));
+    assert_eq(range_empty(lo, hi), 1, "^1.0.0 and ^2.0.0 are disjoint");
+    return 0;
+}
+
+fn test_best_match() {
+    setup_c();
+    assert_eq(best_match(&c_vers, c_n, caret_lo(sv(1, 0, 0)), caret_hi(sv(1, 0, 0))), sv(1, 5, 0), "highest C in ^1.0.0 = 1.5.0");
+    assert_eq(best_match(&c_vers, c_n, caret_lo(sv(3, 0, 0)), caret_hi(sv(3, 0, 0))), 0 - 1, "no C in ^3.0.0");
+    return 0;
+}
+
+fn test_resolve_diamond_ok() {
+    setup_c();
+    assert_eq(resolve_shared(sv(1, 0, 0), sv(1, 0, 0)), sv(1, 5, 0), "A^1 ∩ B^1 picks C 1.5.0");
+    return 0;
+}
+
+fn test_resolve_conflict() {
+    setup_c();
+    assert_eq(resolve_shared(sv(1, 0, 0), sv(2, 0, 0)), 0 - 1, "A^1 vs B^2 is unresolvable");
+    return 0;
+}
+
+fn test_resolve_backtrack() {
+    setup_c();
+    # A 1.1.0 requires C ^2.0.0; A 1.0.0 requires C ^1.0.0; B requires C ^1.0.0.
+    # The highest A (1.1.0) forces C ^2 which conflicts with B^1 — backtrack.
+    var a_vers[16];
+    var a_creq[16];
+    store64(&a_vers + 0 * 8, sv(1, 1, 0)); store64(&a_creq + 0 * 8, sv(2, 0, 0));
+    store64(&a_vers + 1 * 8, sv(1, 0, 0)); store64(&a_creq + 1 * 8, sv(1, 0, 0));
+    var chosenA = resolve_backtrack(&a_vers, &a_creq, 2, sv(1, 0, 0));
+    assert_eq(chosenA, sv(1, 0, 0), "backtrack picks A 1.0.0, not 1.1.0");
+    assert_eq(g_chosen_c, sv(1, 5, 0), "and resolves C to 1.5.0");
+    return 0;
+}
+
+fn test_cycle() {
+    pkg_reset(2);
+    pkg_add_dep(0, 1);
+    pkg_add_dep(1, 0);
+    assert_eq(pkg_has_cycle(), 1, "A↔B is a dependency cycle");
+    pkg_reset(3);
+    pkg_add_dep(2, 0);
+    pkg_add_dep(2, 1);                 # app → A, B (diamond, acyclic)
+    assert_eq(pkg_has_cycle(), 0, "diamond graph is acyclic");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_semver();
+    test_caret();
+    test_intersect();
+    test_best_match();
+    test_resolve_diamond_ok();
+    test_resolve_conflict();
+    test_resolve_backtrack();
+    test_cycle();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

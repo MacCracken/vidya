@@ -3,10 +3,10 @@
 > **Status**: Active | **Last Updated**: 2026-06-12
 >
 > **Version**: 2.7.2 | **Cyrius**: 6.1.41 (Zig content pin: 0.16.0)
-> **Topics**: 75 (75 fully covered) — **P0 → P3 complete; P4 build_systems landed (Unreleased)** 🎉
+> **Topics**: 77 (77 fully covered) — **P0 → P4 complete (Unreleased)** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 825 source files; concept files: 75
-> **Validator**: 825/825 green
+> **Examples**: 847 source files; concept files: 77
+> **Validator**: 847/847 green
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -30,32 +30,29 @@ This table is one row per minor for navigation only.
 
 ## Current State
 
-**75 topics fully covered (11/11 languages) — P0 → P3 complete; P4
-`build_systems` landed (Unreleased).**
+**77 topics fully covered (11/11 languages) — P0 → P4 complete
+(Unreleased).**
 
-`vidya stats` reports `Topics: 75, Complete: 75 (all 11 languages),
-Examples: 825`; validator 825/825 green. No partial topics.
+`vidya stats` reports `Topics: 77, Complete: 77 (all 11 languages),
+Examples: 847`; validator 847/847 green. No partial topics. P4
+(build_systems, package_resolution, reproducible_builds) closed; the
+next minor (2.8.x) opens P5 functional / type theory.
 
 ---
 
-## In flight (2.7.x) — Build Systems (P4)
+## P4 — Build Systems ✅ COMPLETE (Unreleased)
 
-3 topics × 11 langs ≈ 33 new examples. Aligns with cyrius/zugot
-tooling work; each primitive has a direct cyrius-toolchain
-counterpart.
+3 topics × 11 langs = 33 new examples (72 → 77 topics; 814 → 847
+examples). Aligns with cyrius/zugot tooling work; each primitive has a
+direct cyrius-toolchain counterpart. All three landed in the 2.7.3
+content cycle (after the 2.7.0–2.7.2 infra-only cycles: cyrius 5→6,
+zig 0.16, bayan consolidation).
 
-**Slot drift:** 2.7.0 and 2.7.1 were infra-only cycles
-(cyrius/sakshi/vyakarana bumps, streaming-API migration, CI
-refresh — no topic content). The three P4 topics below have
-slid to the next available patch slots. Original pinning
-(2.7.0/.1/.2) is preserved here as historical intent; actual
-patch slots will be filled as the topics ship.
-
-| Topic | Status | Plan |
+| Topic | Status | What it covers |
 |---|---|---|
-| **build_systems** | ✅ **landed (Unreleased)** — 11/11, 825/825 | DAG of build targets + content-signature dirty-tracking + Kahn topological order + ninja-style incremental rebuild + cycle detection. Cyrius reference designed first, then 10 ports. |
-| **package_resolution** | **next content slot** | Semver constraint matching + dependency-graph build + cycle detection + version selection (pubgrub or naive backtracking). cyrius.cyml's resolver is the reference. |
-| **reproducible_builds** | closes P4 | Deterministic timestamps (SOURCE_DATE_EPOCH) + sorted file iteration + content-addressable artifact paths + verifying byte-identical rebuilds. The cyrius compiler self-host check is the reference. |
+| **build_systems** | ✅ landed — 11/11 | DAG of build targets + content-signature dirty-tracking + Kahn topological order + ninja-style incremental rebuild + cycle detection. |
+| **package_resolution** | ✅ landed — 11/11 | Semver as a comparable triple + caret constraint ranges + diamond intersection + highest-version selection + bounded backtracking + cycle detection. |
+| **reproducible_builds** | ✅ landed — 11/11 | SOURCE_DATE_EPOCH timestamp clamping + sorted iteration + content-addressed artifacts + byte-identical rebuild verification. |
 
 After P4 closes, next minor (2.8.x) opens **P5 functional /
 type theory**.
@@ -108,7 +105,7 @@ component needs vidya support next.
 
 | Minor | Theme | Topics | Notes |
 |---|---|---|---|
-| 2.7.x | **P4 build systems** (in flight) | build_systems, package_resolution, reproducible_builds | Aligns with cyrius/zugot tooling. |
+| 2.7.x | **P4 build systems** ✅ complete | build_systems, package_resolution, reproducible_builds | Aligns with cyrius/zugot tooling. Landed in the 2.7.3 content cycle. |
 | 2.8.x | **P5 functional / type theory** | functional_patterns, effect_systems, dependent_types | More research-flavored; lowest priority. |
 | 2.9.x | **P6 Cyrius-specific concepts** | cyrius_basics, cyrius_bootstrap, cyrius_agents, cyrius_capabilities, cyrius_ipc | Programming-concept slots that document Cyrius patterns the way other topics document general patterns. Distinct from `content/cyrius/` (the language reference + field notes). |
 

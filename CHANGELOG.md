@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **New topic: `build_systems` (P4) — 75 topics, 825 examples, 11/11.**
+- **P4 build-tooling cluster complete — 3 new topics, 77 topics / 847
+  examples, all 11/11.** `build_systems`, `package_resolution`, and
+  `reproducible_builds` close P4. Each was designed Cyrius-first and
+  ported to the other 10 languages (rust / python / c / go / typescript
+  / shell / zig 0.16 / x86_64 asm / aarch64 asm + an OpenQASM thematic
+  analog), with a fixed scenario contract asserted identically in every
+  port. Validator: 847/847 green.
+- **New topic: `build_systems` — DAG + topological order + incremental rebuild.**
   A minimal build-system core across all 11 languages: a DAG of build
   targets, Kahn topological ordering, content-signature dirty-tracking
   (input signature = source mixed with dependencies' output signatures,
@@ -26,7 +33,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   + the root (2) while the sibling stays untouched; a 2-node mutual
   dependency is detected as a cycle. `concept.toml` carries 4 best
   practices, 4 gotchas (bad/good), and 2 performance notes (ninja null
-  build, content-addressed caching). Validator: 825/825 green.
+  build, content-addressed caching).
+- **New topic: `package_resolution` — semver + constraint solving.**
+  Semantic versions encoded as a comparable integer triple, caret
+  (`^x.y.z`) constraint ranges, range intersection for diamond
+  dependencies, highest-compatible-version selection, bounded
+  backtracking (the highest version of one package can force an
+  impossible constraint on another — step down and re-solve), and
+  dependency-cycle detection. Contract per port: semver ordering and
+  major extraction; caret bounds + satisfaction; `^1.0.0 ∩ ^2.0.0` is
+  empty; highest match in `^1.0.0` is 1.5.0; a diamond on a shared dep
+  resolves to 1.5.0; conflicting carets are unresolvable; backtracking
+  picks A 1.0.0 (not 1.1.0) with C 1.5.0; A↔B is a cycle, a diamond is
+  acyclic. `concept.toml`: 4 best practices, 4 gotchas (incl. the 0.x
+  caret special case and lexicographic-compare bug), 2 perf notes
+  (pubgrub/conflict-learning, lockfiles).
+- **New topic: `reproducible_builds` — deterministic, bit-for-bit output.**
+  The three classic non-determinism leaks and their fixes: wall-clock
+  timestamps → clamp to `SOURCE_DATE_EPOCH`; unstable readdir/hash-map
+  order → sort before emitting; non-deterministic artifact names →
+  content-addressing. Modeled as a build that folds a (normalized)
+  timestamp and a sorted file set into one digest; the contract proves
+  a deterministic pipeline (sort + normalize) yields byte-identical
+  digests across runs that differ in BOTH input order and wall-clock
+  time, while the naive pipeline drifts, and that timestamp
+  normalization alone removes clock dependence. `concept.toml`: 4 best
+  practices, 4 gotchas (incl. embedded build paths, parallel-write
+  ordering), 2 perf notes (Debian reproducible-builds, `-trimpath` /
+  go.sum). Validator across the cluster: 847/847 green.
 
 ## [2.7.2] — 2026-06-12
 
