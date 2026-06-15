@@ -101,6 +101,51 @@
 # Mach-O output-basename breaks reproducible cmp).
 
 [[entries]]
+name = "element_typed_array_slot_spelling_v621"
+description = "Bare `var a[N]` is byte-sized in a fn / slot-sized at top level — an accidental divergence that silently corrupts any address-taken local written with the `store64(&a + i*8)` slot idiom (the daimon route-404 class). v6.2.1 adds `var a: T[N]` (N elements of T) as the unambiguous slot/typed spelling; the audit found the class live in cycc itself (PARSE_SWITCH/PARSE_MATCH jump tables) + stdlib + folded libs."
+category = "cyrius"
+tags = ["layout", "var-array", "byte-vs-slot", "0x12A000", "daimon", "v6.2.1"]
+content = """
+**The trap**: the SAME syntax `var a[N]` reserves different sizes by
+scope. In a function (`PARSE_ARRAY`, parse_decl.cyr) it's `(N+7)&~7`
+**bytes**; at top level (`PARSE_GVAR_ARR`) it's `N*8` (N i64 **slots**).
+Both register into the one var-size table at `0x12A000`. A
+function-local slot array written with `store64(&a + i*8, …)` therefore
+runs off its byte-sized backing — `var parts[4]` is 8 bytes (1 slot),
+so `store64(&parts + 24, …)` corrupts the next static object. Layout-
+sensitive, so it stays dormant until an unrelated change shifts the
+layout (daimon: deleting dead code moved `parts` 24 B before sandhi's
+`" "` literal → every HTTP route 404'd).
+
+**The fix (v6.2.1)**: `var a: T[N]` = N elements of T, sized
+`N*sizeof(T)` identically in BOTH scopes. `i64[N]` = N slots (the slot
+spelling), `u8[N]` = N bytes, widths i8..i64/u8..u64/u128. Pure
+**frontend** change — the element width threads through `scalar_type`
+(in-fn, `PARSE_ARRAY(S,noff,ew)`) / `ann_scalar` (top-level,
+`PARSE_GVAR_ARR(S,noff,sti,ew)`) into the `0x12A000` byte size, and
+every backend (x86/aarch64/macho/pe/cx) inherits it by SUMMING that
+table — no backend edits. Bare `var a[N]` keeps its legacy per-scope
+meaning (best reserved for byte buffers).
+
+**Two-step bootstrap REQUIRED when migrating cycc's OWN arrays**:
+because the OLD build/cycc byte-sizes the new `i64[N]` annotation,
+`build/cycc → stage_a` gives stage_a byte-sized internal tables;
+`stage_a → stage_b` (stage_a has the feature) gives slot-sized tables.
+So `stage_a != stage_b`; the fixpoint is `stage_b == stage_c`. cycc's
+own source had no >32-arm switch/match, so the under-sized `ends[256]`
+(32 slots) self-hosted by luck for years — the classic latent-until-
+layout-shift signature.
+
+**Audit lesson**: run the audit against the lib SOURCE repos, not the
+vendored fold — the fold-copy scan missed sigil `snp_report_verify`'s
+`parsed[4]` that the source check caught (same `memset(&x,0,32)`-on-an-
+8-byte-buffer bug as its sibling `inters[4]`). The ecosystem libs
+(sigil/sakshi/agnosys) are the language's own stdlibs: patch each
+lib's source, hold for release, then re-fold — never hand-edit the
+`# Do not edit` vendored copy.
+"""
+
+[[entries]]
 name = "large_fn_local_var_array_is_bss_not_stack"
 description = "A large function-local `var buf[N]` in cycc is allocated in `.bss` static storage, NOT the stack frame — and a `var[]` sitting in a statically-dead region (e.g. after a `#ifdef`-gated early `return`) STILL reserves its `.bss` even on the path that never reaches it. Diagnose via section deltas, not `sub rsp` scanning."
 category = "cyrius"
