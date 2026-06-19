@@ -90,7 +90,16 @@ DURATION STRUCT {secs, nsecs}:
   dur_to_ms(d), dur_to_ns(d), dur_between(start_ns, end_ns)
 
 BLOCKING:
-  sleep_ms(ms) via nanosleep syscall.
+  sleep_ms(ms) — portable: Linux/macOS poll(NULL,0,ms) (v6.0.65, not the
+  off-Linux-faulting nanosleep#35), Windows kernel32 Sleep, AGNOS sleep_ms#41.
+
+PER-TARGET BACKING (the agnos branches are the gotcha):
+  AGNOS monotonic = uptime_ms#40 (clock_now_ns()=#40*1e6, 10 ms tick), sleep =
+  sleep_ms#41 — bound v6.2.6 (were fixed-0/no-op stubs through 6.2.5 under the
+  obsolete "no monotonic/sleep in the frozen 0-33 surface" note). AGNOS wall
+  clock = time_unix#46 (whole seconds, 0=unknown), bound v6.2.3. The raw
+  wrappers live in lib/syscalls_x86_64_agnos.cyr (sys_uptime_ms/sys_sleep_ms/
+  sys_time_unix); prefer chrono.* over raw syscall(40)/(41) at call sites.
 
 ISO-8601:
   Format/parse helpers, epoch↔date conversions, leap year.
@@ -652,3 +661,54 @@ that both this module and sandhi compose-use. Default per
 sandhi's pinned 1.2.0 roadmap entry: leave parallel impls
 intentional unless profiling surfaces a hot-path reason.
 """
+
+[[entries]]
+name = "tls_native_server_alpn"
+description = "tls_native is a TLS server as well as a client; v6.2.22 adds server-side ALPN (RFC 7301). `tls_native_set_alpn(ctx, protos, len)` configures the offer on BOTH roles; on a server the ClientHello ALPN offer is now parsed, intersected with the configured list in server-preference order (§3.2), and the choice emitted in EncryptedExtensions (1.3) / ServerHello (1.2). `tls_native_get_alpn_selected(ctx, buf, max)` returns the negotiated protocol for client OR server."
+category = "cyrius"
+---
+USAGE (server):
+  var ctx = tls_native_new_server(cert, clen, key, klen);
+  tls_native_set_alpn(ctx, "\x02h2\x08http/1.1", 12);  # see WIRE
+  tls_native_server_load_creds(ctx);
+  tls_native_accept(ctx, cfd);
+  var buf[64];
+  var n = tls_native_get_alpn_selected(ctx, &buf, 64); # 2 -> "h2", or 0 = none
+
+WIRE: `protos` is the RFC 7301 ProtocolNameList contents —
+one length byte then the name, repeated. `0x02 "h2" 0x08 "http/1.1"`
+is the two-protocol offer above (server-preference order). set_alpn
+caps it at 255 bytes.
+
+SELECTION (RFC 7301 §3.2): the SERVER's preference wins. `_tn_select_alpn`
+walks the server list outer / client list inner and returns the first
+server protocol the client also offered. No overlap -> nothing negotiated
+(lenient; no `no_application_protocol` alert), and the HTTP/1.1 default
+still works. Every read is bounds-checked against the untrusted client offer.
+
+PRE-v6.2.22 the setter was CLIENT-ONLY: a server set ALPN, got TLS_OK, and
+silently never negotiated (h2-over-TLS unreachable). The fix reuses the
+existing `TLS_CTX_OFF_ALPN_SEL` slot + the existing accessor — no ctx-layout
+change. Verified against `openssl s_client -alpn http/1.1` (now reports
+`ALPN protocol: http/1.1`).
+
+[[entries]]
+name = "protobuf_proto3_codec"
+description = "lib/protobuf.cyr (v6.2.17) — proto3 WIRE encode/decode: varint + zigzag, fixed64/fixed32, length-delimited (strings / bytes / nested messages), field skip. ~17 `pb_*` functions, zero dependencies. It is a wire codec, NOT a .proto compiler — you build/parse messages field-by-field."
+category = "cyrius"
+---
+lib/protobuf.cyr handles the proto3 WIRE format (the four wire types:
+0 varint, 1 fixed64, 2 length-delimited, 5 fixed32) — you supply the
+message shape:
+
+ENCODE: pb_write_varint / pb_write_zigzag (sint32/64) / pb_write_fixed64
+  / pb_write_fixed32 / pb_write_len (length-delimited: string, bytes, an
+  embedded message). Each takes a field number + value and appends the
+  tag (field<<3 | wire_type) followed by the payload.
+DECODE: pb_read_tag -> (field, wire_type); pb_read_varint / pb_read_zigzag
+  / pb_read_fixed* / pb_read_len; pb_skip_field to step over an unknown
+  field by its wire type.
+
+`protobuf.tcyr` (42 asserts) is the reference. Use it for gRPC-shaped
+payloads, AGNOS service IPC, or any length-prefixed binary protocol
+without pulling in a code generator. (CHANGELOG 6.2.17.)

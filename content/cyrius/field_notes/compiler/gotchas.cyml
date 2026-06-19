@@ -2890,3 +2890,81 @@ grow call. Everything now reads one `_fnt_cap`.
 cap value is a bare literal. Grep first; a literal that doubles as
 an unrelated table's size will silently break that table.
 """
+
+[[entries]]
+name = "agnos_target_stub_predicated_on_obsolete_kernel_surface"
+description = "A `#ifdef CYRIUS_TARGET_AGNOS return 0;` stub written against an EARLIER kernel ABI silently rots once the kernel grows the missing syscall — the stub keeps 'working' (returns a deterministic 0) so nothing fails loud, while every consumer re-rolls a direct-syscall workaround. Re-check the live kernel ABI before trusting a frozen-surface comment."
+category = "cyrius"
+tags = ["agnos", "stub", "syscall", "chrono", "stale", "v6.2.6"]
+content = """
+**The trap**: `lib/chrono.cyr`'s AGNOS branches for monotonic time
+(`clock_now_ns()`) and `sleep_ms()` were fixed-`return 0` / no-op
+stubs, with a comment justifying them — "agnos has no monotonic /
+sleep syscall in the frozen 0-33 surface (228=clock_gettime,
+35=nanosleep are out of range)." True when WRITTEN (v6.0.56). But
+the agnos kernel grew `uptime_ms`#40 + `sleep_ms`#41 at 1.43.x (the
+cyrius-doom frame clock / pacing primitives). The stubs never
+faulted — `clock_now_ms()` just always returned 0 and `sleep_ms()`
+busy-spun — so no gate, no smoke, no self-host caught it. It
+surfaced only when the v6.2.5 `dig`/`yo` net-tool ports needed real
+timing and had to call `syscall(40)`/`syscall(41)` DIRECTLY,
+bypassing chrono. Classic "found by ports": the placebo that returns
+a plausible value is more dangerous than one that crashes.
+
+**The fix** (v6.2.6): add `sys_uptime_ms`#40 / `sys_sleep_ms`#41
+wrappers (new `SysNrAgnosTimer` enum) to
+`lib/syscalls_x86_64_agnos.cyr`; point chrono's agnos branches at
+them (`clock_now_ns()` = `sys_uptime_ms()*1e6`; `sleep_ms()` agnos
+branch calls `sys_sleep_ms(ms)`, guard `ms<=0`). Wall-clock#46 was
+already correctly bound at v6.2.3 — this was the monotonic+sleep
+counterpart it didn't cover. Extended `agnos-crossbuild-gate.sh`
+with a chrono monotonic/sleep probe so a re-stub is now caught.
+
+**Recognize again**: any `#ifdef CYRIUS_TARGET_AGNOS return 0;`
+(or no-op) guarded by a comment naming a kernel version / "frozen
+0-N surface." That comment is a timestamp, not an invariant — the
+kernel ABI doc (`agnos/docs/development/agnos-userland-abi.md`) is
+canonical and grows. Grep the doc for the capability before
+trusting the stub; a stub that returns a deterministic 0 will not
+fail loud when the assumption expires.
+"""
+
+[[entries]]
+name = "agnos_server_socket_accept_commits_v6222"
+description = "AGNOS gained inbound TCP at kernel 1.45.5/.6 (sock_listen#56 / sock_accept#57); cyrius v6.2.22 wires lib/net.cyr's sock_bind/listen/accept via a listen<->fd adapter. The non-obvious trap: sock_accept(#57) COMMITS the accept kernel-side (the conn is ESTABLISHED + marked accepted, never re-handed-out), so if the LOCAL 8-slot fd table is full you MUST reap the returned conn_id (#50) or it leaks a kernel slot forever. Also: a consumer's 'undefined CLONE_VM on --agnos' is almost always STALE vendored thread.cyr, not a lib bug."
+category = "cyrius"
+tags = ["agnos", "sockets", "net.cyr", "syscall", "v6.2.22", "thread.cyr", "stale-vendored"]
+content = """
+**AGNOS server sockets (v6.2.22).** The kernel exposes inbound TCP as two
+1-arg syscalls: `sock_listen(port)#56` (merges bind+listen -> a listen_id
+0..7) and `sock_accept(listen_id)#57` (non-blocking -> next ESTABLISHED
+conn_id 0..7, or -1 = WOULD_BLOCK). `lib/net.cyr`'s `sock_bind`/`sock_listen`/
+`sock_accept` route onto these on `--agnos` via a **listen<->fd adapter** in
+`lib/syscalls_x86_64_agnos.cyr` (parallel to the v6.2.3 conn<->fd adapter):
+bind stashes the port, listen issues #56, accept issues #57 + wraps the
+conn_id in a fresh tagged fd riding the existing #48/#49/#50 path. Both are
+1-arg, so NO codegen change.
+
+**Trap 1 — #57 COMMITS the accept.** Unlike a peek, `tcp_accept` sets the
+kernel conn's accepted-bit and never re-hands it out (and `tcp_close` on the
+listener skips accepted children). So in `sock_accept`, after #57 returns a
+conn_id, if your local fd allocation fails (the cyrius 8-slot table is full:
+1 listen + 7 conns), you MUST `sys_sock_close(cid)` (#50) BEFORE returning the
+error — otherwise that kernel conn slot leaks forever and, over the server's
+life, the kernel's 8-slot table is exhausted. (The client #47 path has no such
+window — the fd is allocated BEFORE the kernel call.) Caught by adversarial
+review, not the compile-only gate.
+
+**Trap 2 — clear ALL slot tables on close.** A bind-without-listen (or bind
+then a FAILED listen) close must zero `listen_port` too, or a recycled fd-slot
+inherits a stale port and silently mis-listens. `sys_close` clears conn_tbl +
+listen_tbl + listen_port uniformly on every socket-fd close.
+
+**Trap 3 — 'undefined CLONE_VM on --agnos' is NOT a lib bug.** `lib/thread.cyr`
+self-guards agnos since v6.2.3 (`#ifdef CYRIUS_TARGET_AGNOS` -> thread_agnos.cyr
+no-op mutexes; the `mmap.cyr`/CLONE_VM body is `#ifndef`-gated). A stdlib
+consumer hitting `undefined variable 'CLONE_VM'` on `--agnos` is almost always
+running a STALE vendored `thread.cyr` (pre-v6.2.3) — the fix is `cyrius deps`
+to refresh, NOT a compiler/lib change. (This is why sankoch 2.4.4's lock no-op
+is self-sufficiency, not a crash fix — CHANGELOG 6.2.22.)
+"""

@@ -2445,3 +2445,36 @@ OPT-OUT (libssl):
 This is the inverse of the pre-v6.1.21 default (libssl was the
 no-flag path; native TLS was opt-in). The flip makes the
 no-dependency, no-crates posture the one you get for free.
+
+[[entries]]
+name = "f64_named_type_and_operators"
+description = "`var x: f64` (global + local) tags a variable IEEE-754 double, so bare `+ - * /` route to EMIT_F64_BINOP and `< > <= >= == !=` to EF64_CMP (a REAL float compare, not integer-bit ordering) on x86 (SSE2) + aarch64 (NEON). f32 is type-only (f32_from / f32_to conversions, no f32 arithmetic). Shipped v6.2.18 (f32 conv) + v6.2.19 (named f64 + operator/comparison sugar) — the native-float math mini-arc."
+category = "cyrius"
+---
+NAMED FLOAT TYPE (v6.2.19):
+  var pi: f64 = ...;        # local
+  var e: f64;               # global
+A `: f64` annotation tags the var f64 in the type table, so bare
+operators on it lower to float ops instead of integer ops:
+
+  ARITHMETIC  + - * /          -> EMIT_F64_BINOP   (x86 addsd/subsd/mulsd/
+                                  divsd; aarch64 fadd/fsub/fmul/fdiv .d)
+  COMPARISON  < > <= >= == !=   -> EF64_CMP         (real f64 compare —
+                                  verified on negatives, NOT integer-bit order)
+
+Normal arithmetic precedence; the typed-operator dispatch reuses the
+existing GESTYPE / SESTYPE infrastructure. Literals and the conversion
+builtins propagate their result type, so `f64_from(n)` feeds straight
+into operator expressions. A 3-byte-prefix collision once let `f64`
+hijack the f64v2 / f64v4 SIMD types — the scalar f64/f32 checks run
+AFTER the SIMD ones to disambiguate.
+
+f32 IS TYPE-ONLY (v6.2.18): `f32_from(d)` (f64->f32, cvtsd2ss / fcvt s,d)
++ `f32_to(s)` (f32->f64, cvtss2sd / fcvt d,s) convert to/from the storage
+form, but there is NO f32 arithmetic — widen via f32_to -> f64 to compute.
+
+Scalar f64 was usable before the named type (literals, f64_add/sub/mul/div,
+f64_lt/gt/eq, f64_sqrt/abs/floor, int<->f64 f64_from / f64_to) — v6.2.19 is
+the SUGAR letting you write `a + b` instead of `f64_add(a, b)` once `a`/`b`
+are `: f64`. (CHANGELOG 6.2.18 / 6.2.19; cx scalar float + IEEE-754-direct
+literals are later math-arc bites.)
