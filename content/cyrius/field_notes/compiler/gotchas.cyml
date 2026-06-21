@@ -12,6 +12,14 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
+# 49 entries (6.2.33 added, CYRIUS_ARCH_X86 is predefined on EVERY x86 build —
+# AGNOS included — so a stdlib file guarded ONLY on `#ifdef CYRIUS_ARCH_X86` /
+# `CYRIUS_ARCH_AARCH64` silently takes the Linux branch on the agnos target and
+# calls Linux syscall numbers (sakshi: open#2/close#3/exit#60 = agnos
+# getpid/spawn/undefined → silent log corruption, compiles clean). The agnos
+# branch must `#ifdef CYRIUS_TARGET_AGNOS` FIRST + wrap the arch branches in
+# `#ifndef CYRIUS_TARGET_AGNOS`. Nested `#ifdef` works (4-deep verified); `#else`
+# does not. See the cyrius_arch_x86_predefined_even_on_agnos entry.)
 # 48 entries (6.2.0 added, Phase-0 growable pressure tables: the GROW / REHASH /
 # RELOCATION paths (fn-table 16-table realloc + fn_name_hash rehash; codebuf
 # off-heap relocate) are SELF-HOST-INVISIBLE — cycc's 6486 fns / ~1 MB codebuf
@@ -99,6 +107,60 @@
 # var base; aarch64 atomic_cas is not a full barrier — fence the lock.
 # .63 added: macho syscall dual-definition 61-vs-217;
 # Mach-O output-basename breaks reproducible cmp).
+
+[[entries]]
+name = "cyrius_arch_x86_predefined_even_on_agnos"
+description = "The compiler predefines `CYRIUS_ARCH_X86` on EVERY x86-hosted build — the AGNOS ring-3 target included (main.cyr:851, unconditional, before the target predefines). So a stdlib file that selects syscall numbers on `#ifdef CYRIUS_ARCH_X86` / `CYRIUS_ARCH_AARCH64` ALONE silently takes the Linux x86 branch on agnos and emits Linux syscall numbers — which compiles clean and corrupts at runtime (agnos's numbers differ). The fix is a precedence `#ifdef CYRIUS_TARGET_AGNOS` branch; surfaced v6.2.33 by sakshi's logger."
+category = "cyrius"
+tags = ["preprocessor", "agnos", "cross-target", "CYRIUS_ARCH_X86", "CYRIUS_TARGET_AGNOS", "ifdef", "v6.2.33"]
+content = """
+**The trap**: `PP_PREDEFINE(S, "CYRIUS_ARCH_X86")` fires unconditionally
+near the top of main.cyr (the x86-hosted compiler), BEFORE the per-target
+`CYRIUS_TARGET_{AGNOS,WIN,MACOS,LINUX}` predefines. agnos is an x86_64
+emit target, so on `env CYRIUS_TARGET_AGNOS=1 cycc` BOTH `CYRIUS_ARCH_X86`
+AND `CYRIUS_TARGET_AGNOS` are defined. A stdlib module that dispatches
+syscall numbers purely on the ARCH macro —
+
+    #ifdef CYRIUS_ARCH_X86
+    var SYS_OPEN = 2; var SYS_CLOSE = 3; var SYS_EXIT = 60;   # LINUX numbers
+    #endif
+
+— therefore takes the **Linux** branch on agnos. It compiles with zero
+errors and then calls the wrong kernel: on agnos #2=getpid, #3=spawn,
+#60=undefined, so a file logger silently corrupts (sakshi, v6.2.33).
+This is the cross-target sibling of the macOS-rot placebo: nothing in
+the self-host or check.sh path exercises agnos codegen, so it ships
+"found by ports."
+
+**The fix**: put the agnos branch FIRST and exclude the arch branches
+under it —
+
+    #ifdef CYRIUS_TARGET_AGNOS
+    var SYS_OPEN = 7; var SYS_CLOSE = 6; var SYS_EXIT = 0;     # agnos numbers
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifdef CYRIUS_ARCH_X86
+    ...linux x86...
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    ...linux aarch64...
+    #endif
+    #endif
+
+cyrius's preprocessor supports **nested `#ifdef`/`#ifndef`** (verified
+4-deep) but has **no `#else`** — so a per-target split is always
+"agnos/win/macos guards FIRST, then `#ifndef AGNOS { #ifdef ARCH... }`".
+
+**Recognize it again**: any per-target `var SYS_* = <linux number>` or
+raw `syscall(<linux-num>,…)` reachable on agnos that is guarded only on
+an ARCH macro. cyrlint flags raw `sys_open(<expr>,<literal>,…)` and raw
+getdents, but NOT a clean Linux-number `var` taken via the arch branch —
+so this class needs a real `env CYRIUS_TARGET_AGNOS=1 cycc` build +
+emit-inspect (the `_agnos_xsys_gate` / agnos-crossbuild gate), never just
+self-host. Numbers that ARE carried in every peer (SYS_LSEEK,
+SYS_GETRANDOM) are safe to use bare; flock is peer-carried ONLY on agnos,
+so io.cyr's `xflock` centralizes its per-target number.
+"""
 
 [[entries]]
 name = "element_typed_array_slot_spelling_v621"
