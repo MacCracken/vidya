@@ -1,0 +1,327 @@
+# Cyrius Field Notes — attn11, a Transformer Trained From Scratch
+# Lessons from building attn11: a GPT-style transformer — forward pass,
+# hand-derived backprop, and the Adam optimizer — written in Cyrius on raw
+# f64 arrays. No BLAS, no libc, no autodiff. The thing TRAINS, it doesn't
+# just infer. These are the things you learn when the gradients are yours.
+
+[[entries]]
+name = "attn11_overview"
+description = "What attn11 is, and why 'trained, not just inference' is the entire point"
+category = "cyrius"
+---
+TRAINED, NOT JUST INFERENCE
+
+There are a hundred from-scratch transformer demos. Almost all of them load
+somebody else's weights and do a forward pass. That is the easy 20%. The hard
+80% — the part that makes it a transformer and not a fancy matrix-multiply — is
+the backward pass and the optimizer. attn11 does the hard part. It learns.
+
+The whole thing is the forward pass, the hand-derived gradients for every op,
+and Adam, written by hand on flat f64 arrays in Cyrius, a language where
+everything is an i64 and there is no float type, no BLAS, no libc, no autodiff
+framework. It trains a small char-level transformer on an embedded corpus, the
+loss descends on screen, and it samples text. It compiles to one static ELF.
+
+The thesis is small and stubborn: real gradient-based learning is expressible
+in an assembly-up, everything-is-i64 systems language. Not "you could in
+principle." Actually expressible, actually trained, and kept honest by
+finite-difference gradient checks on every backward op.
+
+What that buys you that PyTorch never will: you understand every number. There
+is no framework between you and the arithmetic. When the loss goes to NaN you do
+not file a GitHub issue — you read your own exp(). When a gradient is wrong, it
+is wrong because YOU got the chain rule wrong, and the finite-difference check
+tells you so in one run. The transformer stops being a magic box. It becomes a
+few thousand lines of arithmetic you can hold in your head.
+
+Everything below is what that cost, and what it taught.
+
+
+[[entries]]
+name = "an_f64_is_an_i64_wearing_a_costume"
+description = "Floating point as bit-patterns carried in i64 — the builtin discipline and the two traps that bite first"
+category = "cyrius"
+---
+AN F64 IS AN I64 WEARING A COSTUME
+
+Cyrius has no float type. An f64 is its 64-bit IEEE-754 pattern, carried in an
+i64 register. You do not add two floats with `+` — `+` is integer add, and on
+two bit-patterns it produces garbage. Every float operation goes through a
+builtin: f64_add, f64_mul, f64_div, f64_exp, f64_sqrt, f64_tanh. A line of
+neural-net math that reads `y = a*x + b` in any other language reads
+`f64_add(f64_mul(a, x), b)` here. The whole model is written in that prefix-soup.
+
+It sounds miserable. It mostly isn't — after a day your eyes parse f64_fmadd as
+one token. But two traps bite before you get there, and they bite SILENTLY.
+
+TRAP 1 — comparisons are not NaN-correct. This toolchain's f64 compares go
+through the integer comparator on the bit-pattern. For finite numbers that
+happens to order correctly. For NaN it does not, and worse, the usual "NaN != NaN"
+guard you reach for does not hold. So you never test a result with `==`/`<`. You
+test finiteness on the BIT PATTERN with f64_is_finite, and you do it at every
+boundary where a NaN could be born (a div, an exp, a sqrt of something that
+might be negative). A NaN that slips past the guard does not crash — it
+propagates, and twelve ops later your loss prints "nan" with no clue where.
+
+TRAP 2 — long float literals mis-parse. Write a constant like 3.0e-3 with enough
+digits and the lexer mangles it. You will stare at a learning rate that is
+silently wrong by orders of magnitude. The fix is a habit: build precise
+constants from integer ratios at runtime — f64_div(f64_from(3), f64_from(1000))
+for 3e-3 — never from a long decimal literal. Once it is a reflex it is free.
+
+The deeper lesson: in this language the float is not a primitive the compiler
+protects. It is data you are choosing to interpret a certain way, and the
+interpretation is YOUR job at every step. That is exactly as dangerous and
+exactly as clarifying as it sounds.
+
+
+[[entries]]
+name = "grad_check_or_it_didnt_happen"
+description = "Central finite differences are the only thing standing between hand-derived backprop and a confident lie"
+category = "cyrius"
+---
+GRAD-CHECK OR IT DIDN'T HAPPEN
+
+Hand-deriving a backward pass is deriving the chain rule for a graph by hand and
+then transcribing it into prefix-soup f64 builtins. You WILL get it wrong. Not
+"might." Will. A transposed index, a reduction summed over the wrong axis, a
+factor of two from the GELU derivative, a += where the CPU order is a pure-sum
+seed. Every one of those produces code that runs, trains, and descends a loss
+that looks plausible — while learning the wrong function.
+
+The only thing that catches it is the central finite difference. Perturb one
+parameter by ±epsilon, measure (L(+eps) - L(-eps)) / 2eps, compare to your
+analytic gradient. If they agree to ~1e-5 relative, your math is right. If they
+don't, it's wrong, and the index where the relative error spikes tells you
+roughly where. This is not a nice-to-have test. It is the load-bearing wall.
+
+The rule attn11 lives by: a backward op without a passing grad-check is not
+"mostly done," it is INCOMPLETE. It does not land. The suite grew to over a
+thousand checks (1056, green on x86_64 and on aarch64 under qemu — the cross-arch
+run catches the x86-only-builtin assumptions you didn't know you made). Every
+single new gradient op earned its entry before merge.
+
+What it actually caught, repeatedly: the gemb gradient in the LM head wanted a
+zero-init-then-pure-sum, and I reused the read-modify-write accumulate pattern
+from dW out of habit. Ran fine. Loss descended. The bit-exact GPU test then
+showed a 68% mismatch, and the finite-difference check on the CPU side localized
+it to the exact tensor. Without the check it would have shipped as a "working"
+transformer that was quietly 68% wrong in one gradient.
+
+If you take one thing from attn11: when you write your own gradients, the
+finite-difference check is not optional discipline. It is the difference between
+engineering and a confident lie.
+
+
+[[entries]]
+name = "the_simd_var_you_must_never_reassign"
+description = "The accumulate-in-memory matmul discipline, and why var buf[N] is a contract for N BYTES"
+category = "cyrius"
+---
+THE SIMD VAR YOU MUST NEVER REASSIGN
+
+The matmul is ~80% of the FLOPs, so it gets the 4-wide SIMD path: f64v_fmadd
+over the contraction dimension. There is one rule about SIMD-typed variables in
+this toolchain that is not in any tutorial and will cost you a day if you learn
+it the hard way: NEVER REASSIGN A SIMD-TYPED VAR. It miscompiles. Silently.
+Wrong numbers, no error.
+
+So you do not write `acc = f64v_fmadd(acc, x, w)` in a loop. You accumulate into
+a plain byte buffer, load/store the lanes explicitly, and let the buffer be the
+state. The SIMD var is born, used once, and never reassigned. It reads stranger
+than the obvious loop, but the obvious loop produces a matmul that is subtly
+wrong in a way no high-level test catches until your grad-check or your
+byte-identity check screams.
+
+The other half of the same lesson: `var buf[N]` allocates N BYTES, not N
+entries. This is the single most expensive misconception in the whole language,
+across every project that uses it. A tensor of 64 f64 values is var buf[512],
+not var buf[64]. Get it wrong and Cyrius lays the overflow into the next global,
+which often tolerates being clobbered just long enough for everything to look
+correct. Every buffer declaration is a contract, and the contract is denominated
+in bytes. I wrote the size as `count * 8` everywhere, explicitly, even when 8 was
+"obvious," because the obvious is exactly what the eye skips.
+
+A tensor here is nothing but a heap pointer to a flat, row-major run of f64
+bit-patterns. The shape lives in your code, not in the data. That is liberating —
+no shape-checking ceremony — and it means a stride bug is just wrong arithmetic
+that runs fine and learns garbage. The memory-accumulator discipline and the
+bytes-not-entries contract are the two habits that keep the flat array honest.
+
+
+[[entries]]
+name = "byte_identity_is_the_best_test_i_have"
+description = "The no-flag-run-stays-byte-identical invariant turns out to be the cheapest, strongest regression test in the project"
+category = "cyrius"
+---
+BYTE IDENTITY IS THE BEST TEST I HAVE
+
+attn11 grew a lot of optional machinery — BPE, MoE, four sequence mixers, RoPE,
+diffusion, ternary, REINFORCE, a whole GPU backend. Every one is opt-in behind a
+--flag, and there is one invariant that governs all of it: WITH NO FLAGS, THE RUN
+IS BYTE-FOR-BYTE WHAT IT WAS BEFORE. Train the default model, save the checkpoint,
+and the bytes are identical to the previous version's. Always.
+
+This sounds like a constraint. It is actually the best regression test in the
+project, and it costs nothing. A unit test asserts the things you thought to
+check. A byte-identity check asserts EVERYTHING at once: train 8 steps on the old
+binary, train 8 steps on the new one, `cmp` the two checkpoints. Zero differing
+bytes or you broke something — and "something" includes the optimizer state, the
+RNG stream position, every weight, things you would never write an assertion for.
+It has caught more real regressions than any hand-written test I added.
+
+It also defines what "correct" MEANS for risky work. The GPU backend's whole gate
+is byte identity: a --gpu run must produce a checkpoint identical to the no-flag
+run, bit for bit, including the optimizer state and the gradients. Not "close."
+Identical. That single sentence is what made it possible to move matmul,
+layernorm, Adam, and two backward ops onto the GPU and KNOW they were right —
+because the only acceptable diff was zero.
+
+The gotchas are real and worth knowing: never git-stash inside a backgrounded
+compound command; `pkill -f` happily matches your own shell; preset runs are slow
+so budget for them. But the discipline itself is simple and ruthless. If a change
+is supposed to be transparent, the checkpoint diff is exactly zero, or the change
+is not what you think it is. I reach for `cmp` before I reach for any framework.
+
+
+[[entries]]
+name = "the_gpu_was_an_oracle_not_a_speedup"
+description = "Building a bit-exact f64 GPU backend, measuring an honest loss, and the reframe that turned a negative into the cornerstone"
+category = "cyrius"
+---
+THE GPU WAS AN ORACLE, NOT A SPEEDUP
+
+I built the whole f64 tensor backend onto the GPU — matmul, layernorm, GELU, the
+fused attention core, the LM head, Adam, and the hand-derived backward for all of
+it — on a sovereign path: mabda's own SPIR-V→GFX9 emitter lowering f64 to scalar
+GFX9 instructions over PM4/DRM. Launcher-free, pure-Cyrius, single static ELF, no
+ROCm, no Vulkan loader, no vendor BLAS. The full training step runs end-to-end on
+the device. Bit-exact against the CPU oracle where the op allows it, ~1e-13 where
+an in-shader transcendental forces tolerance.
+
+It is also, on this hardware, 4–7× SLOWER than the CPU. And I am telling you that
+number on purpose.
+
+Here is the honest arc. The dev box is an AMD Cezanne APU: scalar VALU f64, no
+matrix core, FP64 throttled — the CPU's 4-wide AVX f64 simply wins. I ran a
+controlled width sweep expecting the gap to narrow with scale (the usual story:
+"transfer dominates at small sizes, amortizes at large"). It did not. The gap is
+FLAT at ~3.7× across the whole on-device range, because both the matmul FLOPs and
+the weight transfer scale as C², so their ratio is constant. Worse, scaling UP
+makes the GPU run a SMALLER fraction on-device, not a faster one, because the
+biggest ops hit three hard ceilings — a 65535 dispatch cap, a 4MB per-buffer cap,
+a 256-id compile cap. There is no schedule you can write that beats a compute
+floor. The wall is the f64 arithmetic itself.
+
+So I stopped pretending it was a speedup and named what it actually is: a
+hardened, bit-exact CORRECTNESS ORACLE. The GPU's job is not to be fast. Its job
+is to independently reproduce the CPU's exact bytes, which makes it a second,
+architecturally-different witness that the math is right. The line that reframed
+the whole effort: we did not spend our way to a loss — we built the ruler we will
+measure the wins with.
+
+The technical lessons that generalize, if you ever generate shaders by hand:
+- THE TRANSCENDENTAL WALL. There is no bit-exact f64 exp in SPIR-V (spirv-val
+  rejects exp/log on double). So softmax and GELU can't be byte-identical to the
+  x86 hardware exp. Two consequences: hand-roll exp in-shader from the proven
+  primitives (Cody-Waite reduction + a Taylor-Horner polynomial + ldexp, ~2e-13),
+  and put every tolerance op behind a SEPARATE flag so the bit-exact ops keep the
+  byte-identity invariant the others can't.
+- DATA-INDEPENDENT TRANSCENDENTALS GO ON THE HOST. RoPE's cos/sin depend only on
+  (channel, position) — so the host precomputes the table bit-exact and the GPU
+  does only the cheap rotation. That kept RoPE bit-exact while exp could not be.
+- STRAIGHT-LINE ONLY, 256 IDS. The ISA compiler took no loops and no phi and
+  capped at 256 SSA ids, so every kernel is UNROLLED and HOST-TILED. An untiled
+  unroll silently overflows its build buffer at large inner dimensions — and the
+  256-id cap only rejects AFTER the overflowing build, so guard the upper bound
+  yourself.
+- A SHADER CACHE KEY MUST INCLUDE EVERY SHAPE BAKED INTO THE SPIR-V. I left the
+  head dimension out of one cache key. Two shapes that shared (C,T) but differed
+  in head count collided on a stale kernel and silently corrupted. The
+  bit-identity test caught it; nothing else would have.
+
+And the strategic payoff: the negative is CLEAN. Text is precision-tolerant — f64
+on the GPU was never going to make the model better, only validate it — so the
+forward-perf bet pivots to where this substrate is an ADVANTAGE: integer matmul
+on the int8 edge hardware that actually rewards it. The f64 GPU stays as the
+oracle. You keep the witness; you move the bet. A measured negative you understand
+is worth more than a speedup you can't explain.
+
+
+[[entries]]
+name = "everything_is_i64_so_the_weights_want_to_be_too"
+description = "Ternary/BitNet as the natural endpoint of an everything-is-i64 language, and the honest result that pointed at the real integer lane"
+category = "cyrius"
+---
+EVERYTHING IS I64, SO THE WEIGHTS WANT TO BE TOO
+
+In a language where everything is already an i64, the most natural model you can
+build is one whose weights are integers. Ternary — weights in {−1, 0, +1}, the
+BitNet idea — is the precision ladder's endpoint and a glove-fit for this
+substrate: a matmul against ternary weights has no multiplies. It is add when the
+weight is +1, subtract when −1, skip when 0, and one scale per output. The thing
+the rest of the world emulates, this language just IS.
+
+attn11 ships it (--ternary): a straight-through estimator, master weights stay
+f64, the fake-quant forward and the STE backward grad-checked like everything
+else. And then I did the honest thing and benchmarked the pure i64-add collapse
+head-to-head against the SIMD-f64 path. It was ~3× SLOWER.
+
+Why is the lesson. The collapse is scalar add/subtract/skip; the f64 path is
+4-wide f64v_fmadd. One-at-a-time integer adds lose to four-at-a-time fused
+float multiply-adds, every time, on this hardware. The integer win is real, but
+it is not THERE — not with the activations still f64 and not on a CPU built for
+FMA. Two things have to be true for integer to actually pay: the ACTIVATIONS have
+to be quantized too (so the whole matmul is genuinely integer, int8×int8→int32,
+not a float path with integer weights bolted on), and the HARDWARE has to reward
+integer throughput (int8 tensor cores — which consumer GPUs have, while their f64
+is throttled 1/32 to 1/64). The ternary memory win — 1.58 bits per weight versus
+64 — is real and was never the bottleneck I measured.
+
+So the result is a "negative" that is actually a map. The everything-is-i64
+thesis is right about the destination and the build proved the weights learn and
+grad-check; it was just early about the road. The forward bet now goes to the
+integer/edge lane: quantize activations, build an honest int8 matmul, and chase
+the crossover on the hardware that rewards it — the one place a tiny zero-deps
+integer model has a structural edge instead of a tax. The giants are weakest at
+the edge. That is where i64 stops being a constraint and starts being the point.
+
+
+[[entries]]
+name = "build_it_local_then_extract_it"
+description = "Own the stack: write the numeric core yourself, prove it in the consumer, then extract it to a reusable crate once it's earned"
+category = "cyrius"
+---
+BUILD IT LOCAL, THEN EXTRACT IT
+
+attn11 depends on a tensor core (rosnet), an RNG (tyche), and a GPU foundation
+(mabda). It did not start that way. The tensor layer, the matmul, the RNG, the
+entire GPU backend were all written INSIDE attn11 first, proven against its
+grad-checks and its byte-identity gate, and only THEN extracted into sibling
+crates the rest of the ecosystem reuses. The pattern is worth naming because it
+inverts the usual instinct to design the shared library up front.
+
+Why local-first wins here: you cannot design the right boundary for code you have
+not yet made work. attn11's matmul earned its API by being the matmul a real
+training loop hammered a million times; rosnet's linear_bwd is shaped the way it
+is because attn11's backward needed exactly that shape. Designing it abstractly,
+in a library with no consumer, would have produced a cleaner-looking interface
+that was wrong in ways only a real user finds.
+
+The extraction itself taught the second half. When the GPU backend was proven, I
+moved the WHOLE thing — foundation, generic tensor ops, and the transformer-
+specific kernels — into rosnet as one unit, rather than carving the "clean"
+generic-vs-transformer split first. Whole-unit move, lower risk: it is a pure
+relocation, so the gate is simply that the bytes don't change, and the boundary
+stays refinable later when a second consumer actually pressures it. The cleaner
+split is a real goal; it is just not worth the risk before anything needs it.
+
+Two Cyrius mechanics make this painless and are worth knowing. A dependency's
+modules AUTO-PREPEND onto every compile target, so a consumer gets gpu_* with no
+manual include — which also means a GPU bundle that references a Linux-only
+symbol still has to TYPE-CHECK as dead code on a non-Linux target (a one-line
+stub constant, gated, keeps the auto-prepended dead code compiling). And a
+profile bundle (a [lib.gpu] alongside the default [lib]) lets the GPU surface ship
+SEPARATELY, so CPU-only consumers stay free of the GPU foundation entirely — no
+contamination, no size cost, symbols left unresolved for whoever actually wants
+them. Own the stack, prove it in anger, extract it once it's earned.

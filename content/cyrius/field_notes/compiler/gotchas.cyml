@@ -12,6 +12,16 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
+# 50 entries (6.2.35 added, undefined FUNCTIONS compile to a `ud2`/SIGILL stub +
+# a WARNING (exit 0, valid binary) but undefined CONSTANTS/enum-values are a HARD
+# error — the function-vs-constant asymmetry. So a stdlib fn call that resolves to
+# nothing on a target compiles GREEN and traps only at runtime; a missing enum
+# const fails the build loudly. Bit the M6 chain on agnos: lib/sync.cyr had no
+# CYRIUS_TARGET_AGNOS mutex backend, so patra's mutex_new/lock/unlock were
+# silent ud2 stubs (patra_init's unconditional mutex_new → runtime SIGILL), while
+# the filed "add inert SYS_FUTEX constants" fix was dead. A "does it compile"
+# gate PASSES this regression — assert symbols are DEFINED (grep the warning). See
+# the undefined_fn_ud2_stub_vs_undefined_const_hard_error entry.)
 # 49 entries (6.2.33 added, CYRIUS_ARCH_X86 is predefined on EVERY x86 build —
 # AGNOS included — so a stdlib file guarded ONLY on `#ifdef CYRIUS_ARCH_X86` /
 # `CYRIUS_ARCH_AARCH64` silently takes the Linux branch on the agnos target and
@@ -107,6 +117,56 @@
 # var base; aarch64 atomic_cas is not a full barrier — fence the lock.
 # .63 added: macho syscall dual-definition 61-vs-217;
 # Mach-O output-basename breaks reproducible cmp).
+
+[[entries]]
+name = "undefined_fn_ud2_stub_vs_undefined_const_hard_error"
+description = "cyrius treats an unresolved FUNCTION call and an unresolved CONSTANT/enum-value asymmetrically: a call to a function defined nowhere compiles to a `ud2;ud2;nop` (SIGILL) stub at the call site + a `warning: undefined function` and STILL exits 0 with a valid binary (src/backend/x86/fixup.cyr overwrites the `e8` call placeholder with `0F 0B 0F 0B 90` when the fn target is the -1/-2 undef sentinel — deliberate, so it's a loud localisable SIGILL not a jump into low memory); but a reference to an undefined constant/enum value is a HARD compile error (`undefined variable '…'`). CYRIUS_STRICT=1 does NOT promote the fn warning. Consequence: a stdlib fn that resolves to nothing on some target ships GREEN and traps only at runtime. Surfaced v6.2.35 on agnos (lib/sync.cyr had no agnos mutex backend → patra's mutex_* were ud2 stubs → patra_init SIGILL), and explains why the M6-chain issue's 'add inert SYS_FUTEX constants' fix was both unnecessary AND a misdiagnosis (patra ≤1.11.x referenced SYS_FUTEX as a raw CONSTANT → real hard error; 1.12.x uses mutex_lock() a FUNCTION → silent ud2 → no error)."
+category = "cyrius"
+tags = ["codegen", "fixup", "ud2", "undefined-function", "undefined-constant", "agnos", "cross-target", "silent-failure", "v6.2.35"]
+content = """
+**The asymmetry** (the thing that bites):
+
+| unresolved symbol | cycc behavior |
+|---|---|
+| **function call** | `warning: undefined function 'f'` + emit `ud2;ud2;nop` at the call site; **exit 0, valid binary** |
+| **constant / enum value** | `error: undefined variable 'X'`; **exit 1, no output** |
+
+So `return f(x)` where `f` is defined nowhere COMPILES (and SIGILLs at
+runtime if reached); `return X` where `X` is an undefined enum value does
+NOT. `CYRIUS_STRICT=1` does not change the function case.
+
+**Why** (src/backend/x86/fixup.cyr ~170-194): for a function-call fixup
+whose target is the undef sentinel (<0), cycc overwrites the 5-byte
+`e8 XX XX XX XX` call placeholder with `0F 0B 0F 0B 90` = `ud2; ud2; nop`.
+Intentional — a SIGILL at the exact call site beats the disp32 resolving
+to an arbitrary low address (the sandhi M2 2026-04-24 jump-into-entry bug).
+Runtime confirmation: such a binary exits 132 (128+SIGILL) at the call.
+
+**Where it bit (v6.2.35, the M6 persistence chain on agnos):**
+`lib/sync.cyr` defined `mutex_new/lock/unlock` only under
+`#ifdef CYRIUS_TARGET_{WIN,MACOS,LINUX}` — no agnos branch. patra includes
+`sync.cyr` (not `thread.cyr`/`thread_agnos.cyr`), so on `--agnos` those
+calls were undefined → ud2 stubs, compiling GREEN. `patra_init()` calls
+`mutex_new()` UNCONDITIONALLY, so patra_init itself SIGILLs at runtime on
+agnos. The filed fix ("add inert `SYS_FUTEX`/`FUTEX_*` to the agnos peer")
+was a misdiagnosis: those constants are only referenced by stale patra
+≤1.11.x's `_patra_lock`, which used `SYS_FUTEX` as a RAW CONSTANT (→ hard
+error → that's the error the reporter actually saw). patra 1.12.x moved to
+`mutex_lock()` (a FUNCTION → silent ud2), so once 1.12.3 is folded nothing
+references the constants. Real fix: an agnos `#ifdef` no-op mutex backend in
+sync.cyr (single-core cooperative-iron — no contender, lock is a no-op).
+
+**How to recognize / guard it:**
+- A consumer "compiles clean for `--agnos`" (or any target) but crashes
+  early at runtime → grep the build stderr for `warning: undefined function`.
+  Those are live landmines, not noise.
+- A regression GATE for this class must NOT just check `exit 0` — it must
+  assert the symbols are DEFINED (compile a probe that references them and
+  FAIL if stderr contains `undefined function '<name>`). See
+  scripts/agnos-crossbuild-gate.sh probe 1f.
+- Mirror of the macОS-rot placebo: self-host + check.sh never exercise
+  agnos codegen, so undefined-fn stubs ship "found by ports."
+"""
 
 [[entries]]
 name = "cyrius_arch_x86_predefined_even_on_agnos"
@@ -3029,4 +3089,35 @@ consumer hitting `undefined variable 'CLONE_VM'` on `--agnos` is almost always
 running a STALE vendored `thread.cyr` (pre-v6.2.3) — the fix is `cyrius deps`
 to refresh, NOT a compiler/lib change. (This is why sankoch 2.4.4's lock no-op
 is self-sufficiency, not a crash fix — CHANGELOG 6.2.22.)
+"""
+
+[[entries]]
+name = "macho_sysxlat_imm8_signext_getdents_v6234"
+description = "EMACHO_SYSXLAT's _msx helper emits `cmp rax, imm8` (48 83 F8 ib), which SIGN-EXTENDS the byte. Any Linux syscall number 128..255 routed through _msx silently never matches (217=0xD9 -> -39), so the BSD translation is skipped and the raw Linux number reaches the Darwin `syscall` -> SIGSYS. getdents64(217) hit this on x86-macOS; use _msx32 (imm32 cmp) for any number > 127. Self-host-blind (cycc never lists a dir) — found by ports. v6.2.34."
+category = "cyrius"
+tags = ["macho", "x86", "EMACHO_SYSXLAT", "syscall", "imm8", "sign-extend", "getdents", "self-host-blind", "v6.2.34"]
+content = """
+**x86-macOS syscall translation: `_msx` imm8 sign-extension (v6.2.34).**
+`EMACHO_SYSXLAT` (src/backend/x86/emit.cyr) rewrites each Linux syscall number
+in `rax` to its Darwin BSD number at emit time, one `_msx(lin, classed)` entry
+per syscall. `_msx` hand-rolls `cmp rax, lin` as `48 83 F8 ib` — the `83 /7 ib`
+form, whose immediate is an **8-bit value sign-extended to 64 bits**. So for any
+`lin` in 128..255 the compare is against a NEGATIVE number: `getdents64` 217 =
+`0xD9` sign-extends to `-39`, `cmp rax, -39` never matches `rax = 217`, the
+`mov rax, 0x2000158` (getdirentries64 344) is skipped, and the **raw Linux 217**
+reaches the Darwin `syscall` instruction -> `SIGSYS` (exit 140) on every
+directory listing.
+
+**Rule:** route any syscall number > 127 through `_msx32` (`48 3D id` =
+`cmp rax, imm32`), exactly as getrandom 318 already did. `_msx` is safe ONLY for
+lin <= 127. 217 was the lone offender in the 128..255 gap.
+
+**Why it survived for ~minors:** purely **self-host-blind** — cycc reads its
+sources by path and never walks a directory, so the self-host gate (even on
+real macOS) cannot exercise getdents64. The aarch64 backend translated 217
+correctly all along (wide-immediate `cmp x8,#217`), so it was an x86-only gap.
+Caught by a fresh consumer install + a backend imm-width review; PROVEN on real
+x86 Darwin (`ach`): pre-fix binary SIGSYS (exit 140), post-fix lists the dir
+(exit 3). The textbook "found by ports" / "self-host is a placebo for dir ops"
+failure class. Closes live half of 2026-06-02-macos-x86-release-no-compiler.
 """
