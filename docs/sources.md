@@ -8,7 +8,7 @@ References for language specifications, algorithms, and standards used across vi
 
 | Language | Spec / Reference | Version / Edition |
 |----------|-----------------|-------------------|
-| Cyrius | [Cyrius language guide](https://github.com/MacCracken/cyrius/blob/main/docs/cyrius-guide.md) | Pinned at 6.1.41 (see `cyrius.cyml`) |
+| Cyrius | [Cyrius language guide](https://github.com/MacCracken/cyrius/blob/main/docs/cyrius-guide.md) | Pinned at 6.4.2 (see `cyrius.cyml`) |
 | Rust | [The Rust Reference](https://doc.rust-lang.org/reference/) | Edition 2024 |
 | Python | [Python Documentation](https://docs.python.org/3/) | 3.x |
 | C | ISO/IEC 9899:2018 (C17) | C17 |

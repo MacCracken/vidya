@@ -107,8 +107,17 @@ assert_eq "$sched_state" "R" "scheduler sees us as Running"
 # Field 17 after comm = nice value (field 19 of raw stat)
 # Field 16 = priority (20 for default), field 17 = nice (0 for default)
 nice_val=$(echo "$stat_after_comm" | awk '{print $17}')
-# Default nice is 0
-assert_eq "$nice_val" "0" "default nice = 0"
+# Nice is INHERITED from the parent, not reset per process. A fresh login
+# session defaults to 0, but a process launched under nice/renice (batch
+# runners, CI, cgroup managers) inherits that value — so the LIVE nice is
+# environment-dependent. Assert it's a valid nice level [-20, 19] rather
+# than exactly 0, which flakes whenever an ancestor was renice'd (this test
+# once tripped the content gate at got '5'). The default-of-0 concept lives
+# in NICE_DEFAULT below.
+if (( nice_val < -20 || nice_val > 19 )); then
+    echo "FAIL: nice must be in [-20, 19], got $nice_val" >&2
+    exit 1
+fi
 
 # Field 20 after comm = num_threads (field 22 of stat, but offset by our parsing)
 # This is more reliably read from /proc/self/status

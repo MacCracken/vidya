@@ -68,7 +68,7 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 | Build binary | `cyrius build src/main.cyr build/vidya` | Output: ~600KB static ELF |
 | Run program | `cyrius run <file.cyr>` | Compile + run in one step (also used by content validator for `cyrius.cyr` examples) |
 | Run tests | `cyrius test` | Runs `tests/vidya.tcyr` |
-| Run benchmarks | `cyrius bench` | Runs `tests/vidya.bcyr` |
+| Run benchmarks | `cyrius bench tests/vidya.bcyr` | **Path required in 6.4.x** — no-arg `cyrius bench` only scans `benches/` + `tests/bcyr/`, not `tests/*.bcyr` |
 | Format | `cyrius fmt <file>` | **Per-file in 5.7+** (no recursive sweep flag) |
 | Lint | `cyrius lint <file>` | **Per-file in 5.7+** |
 

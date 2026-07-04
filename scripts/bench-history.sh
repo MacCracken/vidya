@@ -17,8 +17,12 @@ echo "  Commit: $GIT_DESC"
 echo "  Output: $OUTFILE"
 echo ""
 
-# Run benchmarks and tee to file
-cargo bench 2>&1 | tee "$OUTFILE"
+# Run benchmarks and tee to file.
+# cyrius 6.4.x no longer discovers tests/*.bcyr from the no-arg `cyrius
+# bench` (it looks in benches/ + tests/bcyr/), so pass the path explicitly
+# — same form as sakshi's CI. (`cargo bench` here was dead Rust-era debt;
+# vidya migrated off Rust at v2.0.)
+cyrius bench tests/vidya.bcyr 2>&1 | tee "$OUTFILE"
 
 echo ""
 echo "Results saved to $OUTFILE"

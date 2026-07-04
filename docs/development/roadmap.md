@@ -2,7 +2,7 @@
 
 > **Status**: Active | **Last Updated**: 2026-06-12
 >
-> **Version**: 2.7.3 | **Cyrius**: 6.1.41 (Zig content pin: 0.16.0)
+> **Version**: 2.8.0 (infra-only cut — cyrius 6.4.2; P5 content opens in a later 2.8.x) | **Cyrius**: 6.4.2 (Zig content pin: 0.16.0)
 > **Topics**: 77 (77 fully covered) — **P0 → P4 complete** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 847 source files; concept files: 77

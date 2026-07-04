@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.0] — 2026-07-04
+
+### Changed
+
+- **Cyrius toolchain 6.1.41 → 6.4.2** (infra-only cut — no new content
+  topics; corpus stays at 77 topics / 847 examples). A three-minor-series
+  jump — the bulk was internal cycc / self-host churn (growable-region
+  migration, codegen), so consumer impact was small and mechanical:
+  - **stdlib link surface grew.** The 6.2.x→6.4.x sandhi / TLS refolds
+    added follow-through references the cyrius transitive resolver doesn't
+    chase, so five modules were added to `[deps] stdlib` in `cyrius.cyml`:
+    `chrono` (`clock_now_ns`/`clock_now_ms`), `dynlib` (`dynlib_auxv_*`),
+    and `sigil` + `ct` + `keccak` (`sha384_init_into`). Without them the
+    build failed with 5 reachable-undefined functions.
+  - **Binary grew ~2.1 MB → ~14.7 MB.** Linking `sigil` (pulled via the
+    `tls` → `sha384_init_into` transitive that sandhi's server path now
+    references) brings in its parallel-crypto banks — ~13 MB of reachable
+    static data (`SIGIL_CRYPTO_BANKS=64`). Not DCE-eliminable. This is the
+    baseline cost of a sandhi consumer on 6.4.2 (sit is ~14.9 MB); vidya's
+    `serve` is plaintext localhost and never runs the crypto at runtime.
+- **sakshi 2.2.10 → 2.4.4** — 2.2.10 was a 6.1.x-era artifact. 2.4.4 adds
+  128-bit W3C trace-id support; purely additive, no behavior change for
+  existing callers. (vyakarana held at 2.2.3 — still the latest tag; its
+  6.1.x `dist` compiles and runs clean under 6.4.2.)
+
+### Fixed
+
+- **`cyrius bench` discovery.** cyrius 6.4.x dropped `tests/*.bcyr` from the
+  no-arg `cyrius bench` (it now looks only in `benches/` and `tests/bcyr/`),
+  which had been silently finding zero benchmarks. CI (`.github/workflows/ci.yml`)
+  and `scripts/bench-history.sh` now pass the explicit path
+  `cyrius bench tests/vidya.bcyr`. `bench-history.sh` had also been calling a
+  dead `cargo bench` (Rust-era debt removed at v2.0) — replaced in the same edit.
+- **Flaky content-gate assertion in `content/process_and_scheduling/shell.sh`.**
+  It asserted the live process nice `== 0`, but nice is *inherited* — under a
+  renice'd ancestor (CI/batch runners) the read returns non-zero (tripped the
+  gate at `got '5'`). Now asserts the live nice is a valid level `[-20, 19]`;
+  the default-of-0 concept stays in the `NICE_DEFAULT` constant. Also more
+  accurate pedagogically (nice is inherited, not reset per process).
+
 ## [2.7.3] — 2026-06-12
 
 ### Added
