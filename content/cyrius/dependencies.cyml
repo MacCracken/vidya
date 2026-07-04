@@ -33,6 +33,143 @@ via the dep include list. Namespaced deps map to lib/{depname}_{basename};
 if the basename matches depname, lib/{depname}.cyr alias is also created.
 
 [[entries]]
+name = "deps_lever1_granularity"
+description = "dependency-model lever 1 (Phases A-D): requires key, .deps sidecar, [groups], distlib --modular per-module extraction, and the v6.3.32 built-in std default group that dissolves the stdlib category"
+category = "cyrius"
+---
+v6.2.46–.50 added "lever 1" of the dependency model — declaring + resolving
+deps at module granularity instead of hand-ordering whole folds. Five pieces:
+
+1. requires (v6.2.46) — a named dep declares the stdlib leaves it needs:
+
+    [deps.sigil]
+    git = "..."
+    tag = "3.9.5"
+    requires = ["ct", "keccak", "random"]
+
+   `cyrius deps` pulls each leaf through the recursive stdlib resolver AHEAD
+   of the dep's own modules (topological by resolution order), dedups, and
+   FAILS LOUD on a missing leaf — replacing the old "ct must precede sigil"
+   hand-ordering + its omit-one → runtime ud2/SIGILL trap.
+
+2. .deps sidecar (v6.2.47/.48) — `cyrius distlib` emits dist/<pkg>.deps next
+   to the fold, listing the lib/ leaves it strips at fold time (the fold
+   destroys its own includes). `cyrius deps` auto-reads it, so a consumer
+   declaring just [deps.<pkg>] gets the fold's stdlib in scope — no requires
+   needed. The producer scans its umbrella include-hub (src/lib.cyr /
+   src/main.cyr) AND excludes its own [deps.NAME] folds (those resolve
+   transitively — listing them would double-include).
+
+3. [groups] (v6.2.49) — name a recurring set once, expand at resolve time:
+
+    [groups]
+    crypto = ["ct", "keccak", "random"]
+
+   Referenced in [deps].stdlib or a [deps.NAME] requires. Nested (groups of
+   groups), deduped, self/mutual cycles skipped. Byte-identical when absent.
+
+4. distlib --modular (v6.2.50) — per-module extraction. Emits
+   dist/<pkg>/<module>.cyr (one file per [lib].modules entry, src/ self-refs
+   stripped, lib/ kept) + dist/<pkg>/index.cyml — a [modular] dep graph
+   `<module> = [siblings…, "lib:<leaf>"…]`. The flat single-file distlib is
+   unchanged (default).
+
+5. modular = [...] (v6.2.50) — a consumer pulls EXACT sub-modules:
+
+    [deps.sigil]
+    path = "../sigil"
+    modular = ["ed25519"]
+
+   The resolver reads dist/sigil/index.cyml and pulls ed25519 + only its
+   transitive siblings + lib leaves (topo order) into lib/sigil_ed25519.cyr —
+   NOT the whole monolith.
+
+6. std default group (v6.3.32 Phase D — lever-1 COMPLETION, dissolves the "stdlib"
+   category). `std` is a BUILT-IN [groups]-style group naming the universal core
+   leaves: ["string", "fmt", "alloc", "io", "vec", "str", "syscalls"] — the set
+   every real program pulls (matches the `cyrius init` templates). Reference it in
+   the stdlib list instead of hand-ordering the core:
+
+    [deps]
+    stdlib = ["std", "chrono", "net"]   # std expands to the 7 universals
+
+   `std` expands via the same [groups] path (item 3), in the SAME order as the
+   explicit list, so a `["std", …]` list resolves the SAME leaves as spelling the
+   7 out — byte-identical, and it drops the omit-one→SIGILL order-sensitivity the
+   old hand-ordered list had. A manifest that defines its OWN `[groups] std = [...]`
+   OVERRIDES the built-in (registered after the manifest's [groups] parse). Manifests
+   that never name `std` are unaffected. `stdlib` remains the section key (back-compat
+   alias); the flagship migration is descent (18-element hand list → `["std", <9
+   non-core>]`, same symbol set). This completes lever 1 (Phases A–D).
+
+SECURITY (v6.2.51, CVE-32): sub-module / leaf / pkg names from a dep-controlled
+index.cyml are validated (reject any / or ..) before any filesystem op — a
+malicious index sibling like `a/../../../x` would otherwise delete an arbitrary
+.cyr during automatic `cyrius deps`.
+
+Lever 2 (v6.3.1) builds on [groups] + --modular: required-vs-optional deps,
+features, and platform/target scoping. The undefined-fn reachable-call
+hard-error (safe once optional refs are declarable) follows in its own slot
+v6.3.2 (un-bundled once lever 2 landed + its 21/192 corpus blast radius was
+measured).
+
+[[entries]]
+name = "deps_lever2_optional"
+description = "v6.3.1 dependency-model lever 2: optional = true, the [features] table, --features/--no-default-features, and platform-conditional target= keys (axes combine)"
+category = "cyrius"
+---
+v6.3.1 added "lever 2" — restricting WHICH build contexts pull a dep, on top
+of lever 1's WHAT-granularity. Three axes that combine:
+
+1. optional = true — a dep that resolves only when an active feature names it:
+
+    [deps.wgpu]
+    git = "..."
+    optional = true
+
+   With no feature naming it, it is never fetched. A plain required dep (no
+   `optional`) always resolves, exactly as before.
+
+2. [features] table (Cargo-style) — named sets that activate optional deps:
+
+    [features]
+    default = ["std-io"]
+    gpu = ["wgpu"]
+    win-shell = ["mabda"]
+
+   `cyrius build --features gpu` activates wgpu; plain `cyrius build` activates
+   only `default` (unless --no-default-features). A feature's members may name
+   other features (recursively expanded, cycle-guarded) or optional deps; a
+   `--features wgpu` naming an optional dep directly activates it too.
+
+3. target = "<arch|os>" — resolves only on a matching build target:
+
+    [deps.mabda]
+    optional = true
+    target = "windows"
+
+   Arch axis: x86_64 / x86 / aarch64 / arm64 (vs the build's --aarch64). OS
+   axis: windows / agnos / bare-metal (vs --win/--agnos/--target=*-bare-metal),
+   and "linux" = a native userland build. An unrecognized string never matches.
+
+The axes COMBINE — a dep gated out on EITHER (inactive feature OR mismatched
+target) is skipped entirely: no clone, no requires-pull, no module copy, no
+include push. A skipped dep is NOT marked visited, so a later transitive
+*required* reference can still resolve it.
+
+GOTCHA (the ordering hazard): `cyrius`'s dep resolver (_auto_deps) fires BEFORE
+each subcommand's own flag loop, so --features/--no-default-features and the
+target flags are parsed in a PRE-SCAN ahead of resolution (re-reading them in
+the subcommand loop is idempotent). Wiring them only into the build loop would
+run the resolver with stale state.
+
+100% cbt-side (cbt/deps.cyr + cbt/core.cyr + cbt/cyrius.cyr) — touches no src/,
+so cycc is byte-identical. A manifest with no [features]/optional/target
+resolves the identical include set + order as v6.2.x. Feature unification
+across transitive deps stays out of scope (the consumer manifest's [features]
+drives the process-global active set).
+
+[[entries]]
 name = "stdlib_deps"
 description = "stdlib deps copy .cyr files from the installed Cyrius distribution into the project lib/"
 category = "cyrius"

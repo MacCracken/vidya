@@ -12,7 +12,39 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
-# 50 entries (6.2.35 added, undefined FUNCTIONS compile to a `ud2`/SIGILL stub +
+# 64 entries (v6.3.x closeout, 6.3.44: +4 durable gotchas from the .43/.44
+# cross-OS + stdlib correctness sweep — macho_syscall_xlat_source_numbers_arch_specific
+# (getpid returned GARBAGE on aarch64-macOS behind a callable-only smoke),
+# emit_gvar_inits_parallel_copy_of_parse_struct_init (a field-shape fix must
+# land in BOTH the in-fn and global-scope struct-init loops),
+# stdlib_mutex_single_owner_sync_cyr (+ module-qualified api-surface snapshot),
+# cross_os_self_host_real_hardware_non_negotiable.)
+# 60 entries (6.3.10 shipped non-i64 generics — the instantiate-once engine
+# RE-INVOKES PARSE_FN_DEF / PARSE_STRUCT_DEF on the base's verbatim tokens with name +
+# concrete-binding overrides (full fidelity for free); gotcha = the def-start token
+# index is stored +1 because token 0 is valid. See generic_instantiate_once_reinvoke.
+# 6.3.9 shipped i64 generic FUNCTIONS — the base fn IS the i64
+# monomorphization (body emitted with T->i64); the load-bearing gotcha was the
+# `: T` return triggering the retptr/stash ABI in the return-type rough-scan —
+# see generic_fn_i64_base_and_ret_stash. 6.3.7 made non-capturing closures `|x| body` actually work — they
+# were a scaffolded-but-untested, non-functional feature. FOUR codegen bugs, all
+# from the closure being an anonymous fn emitted INLINE in the enclosing fn while
+# sharing its per-fn state + local tables: (1) it inherited `_cur_fn_regalloc` →
+# params stored past phantom callee-saved slots + read from stale regs; (2) its
+# frame size was never EPATCHFRAME'd; (3) it reused the shared local-slot tables
+# from slot 0, clobbering the enclosing fn's locals; (4) the enclosing fn's
+# regalloc byte-scan post-pass rewrote the inline closure code → SIGILL. See the
+# closure_inline_emit_shares_enclosing_fn_state entry. 6.3.8 added lexical capture
+# by value — see closure_lexical_capture_by_value_env_object.)
+# 56 entries (6.3.5 added the pass-1 fn-signature prescan (CO-01) + monomorph
+# token-replay substrate (AR-01): the 3-pass driver structure (register / emit-fn-
+# bodies / emit-top-level) means the forward-call ABI bug only bites IN-FN calls;
+# pass-1 stops at the first top-level statement so the prescan covers decls-first;
+# `_prescan_params` must consume `)` or `: Struct` returns never classify; the
+# inline replay emit path was always intact — only the capture was gated off. See
+# the forward_call_prescan_and_monomorph_substrate entry.)
+# 55 entries (6.2.51 added the modular-resolver CVE-32 + `mod`-keyword trap;
+# 6.2.35 added, undefined FUNCTIONS compile to a `ud2`/SIGILL stub +
 # a WARNING (exit 0, valid binary) but undefined CONSTANTS/enum-values are a HARD
 # error — the function-vs-constant asymmetry. So a stdlib fn call that resolves to
 # nothing on a target compiles GREEN and traps only at runtime; a missing enum
@@ -124,7 +156,18 @@ description = "cyrius treats an unresolved FUNCTION call and an unresolved CONST
 category = "cyrius"
 tags = ["codegen", "fixup", "ud2", "undefined-function", "undefined-constant", "agnos", "cross-target", "silent-failure", "v6.2.35"]
 content = """
-**The asymmetry** (the thing that bites):
+**UPDATE v6.3.2 (2026-06-28) — the default FLIPPED.** A *reachable* undefined-fn call is now a
+**HARD ERROR by default** (`error: refusing to emit binary with N reachable undefined function(s)`;
+exit 1, no output). The check in `src/backend/{x86,aarch64}/fixup.cyr` gates on a new `_allow_undef`
+global (default 0 = error) instead of `_strict_mode`. `--allow-undef` (CLI) / `--al` downgrades back
+to the warn+ud2+exit-0 behavior described below. **Dead-host (DCE-unreachable) refs STAY
+warn+ud2+exit-0** (filtered out of the reachable count). So the asymmetry table below now describes
+(a) any undef under `--allow-undef`, or (b) a genuinely dead-host ref — NOT the default reachable
+case, which is now symmetric with the constant case (both hard-error). The flip's repo-wide blast
+radius (forks, cross-arch builds, aspirational tools — not just the tcyr corpus) was cleaned with
+ZERO `--allow-undef` via stubs/guards; see project memory `project_v632_undef_hard_error`.
+
+**The asymmetry** (pre-v6.3.2 default; now the `--allow-undef` / dead-host case):
 
 | unresolved symbol | cycc behavior |
 |---|---|
@@ -155,6 +198,22 @@ error → that's the error the reporter actually saw). patra 1.12.x moved to
 `mutex_lock()` (a FUNCTION → silent ud2), so once 1.12.3 is folded nothing
 references the constants. Real fix: an agnos `#ifdef` no-op mutex backend in
 sync.cyr (single-core cooperative-iron — no contender, lock is a no-op).
+
+**Recurring class — `#ifdef CYRIUS_TARGET_LINUX`-only stdlib helpers / raw
+Linux syscall numbers.** This is the same shape, hit THREE times now:
+v6.2.33 (io.cyr's `xopen`/`xstat`/… substrate), v6.2.35 (sync.cyr mutex), and
+**v6.2.36 (io.cyr's `file_lock`/`file_unlock`/`file_trylock`/`file_lock_shared`/
+`file_append_locked` — Linux-only + raw `syscall(73)`, so undefined `ud2` stubs
+on agnos+macOS and the wrong number on aarch64; descent's `persist_init` →
+libro FileStore → `file_append_locked` trapped at BOOT).** The fix pattern is
+always the same: **route through the portable `x*` wrapper** that centralizes
+the per-target syscall number (`xflock` → #59 agnos / #92 macOS / #73 x86 / #32
+aarch64), and where a target lacks a feature the others have, branch it (agnos
+has no kernel `AO_APPEND` yet → `xlseek` SEEK_END under the lock instead of
+`O_APPEND`). PREVENTION: periodically grep `lib/` for `#ifdef
+CYRIUS_TARGET_LINUX` blocks that define `fn` (without sibling agnos/macОS
+branches) and for raw `syscall(<small Linux num>)` outside the peer files —
+each is a latent off-Linux `ud2`.
 
 **How to recognize / guard it:**
 - A consumer "compiles clean for `--agnos`" (or any target) but crashes
@@ -3120,4 +3179,516 @@ Caught by a fresh consumer install + a backend imm-width review; PROVEN on real
 x86 Darwin (`ach`): pre-fix binary SIGSYS (exit 140), post-fix lists the dir
 (exit 3). The textbook "found by ports" / "self-host is a placebo for dir ops"
 failure class. Closes live half of 2026-06-02-macos-x86-release-no-compiler.
+"""
+
+[[entries]]
+name = "mod_reserved_keyword_and_cve32_traversal_replication_v6250"
+description = "Two traps from the v6.2.50 Phase C modular resolver: (1) `mod` is a RESERVED cyrius keyword — a var/param named `mod` fails to parse ('expected identifier, got reserved keyword'); use `submod`. (2) A NEW filesystem-write path that takes dep-controlled names MUST replicate the existing path-traversal guard — _dep_pull_submodule added sys_unlink+copy on `lib/<pkg>_<submod>.cyr` but the guard lived only in _dep_copy_file (CVE-04), and the unlink ran BEFORE it -> arbitrary .cyr deletion from a malicious index.cyml (CVE-32, fixed v6.2.51). Validate names at EVERY ingestion point before any fs op."
+category = "cyrius"
+tags = ["cyrius.cyml", "deps", "distlib", "modular", "reserved-keyword", "path-traversal", "CVE-32", "security", "v6.2.50", "v6.2.51"]
+content = """
+**Two traps from the Phase C modular resolver (v6.2.50/.51).**
+
+(1) `mod` is a RESERVED cyrius keyword. Naming a variable or fn parameter `mod`
+fails to compile: `expected identifier, got reserved keyword 'mod' (cannot be
+used as an identifier)`. Hit while writing `_dep_pull_submodule(dep_src, pkg,
+mod, ...)` in cbt/deps.cyr — renamed the param to `submod`. (Same class as
+`secret`/`pub`/`shared`.) Grep the keyword set before naming dep/module vars.
+
+(2) **Replicate the traversal guard at EVERY new fs-write ingestion point.**
+The .50 `--modular` resolver added a fresh write path: `_dep_pull_submodule`
+does `sys_unlink(dst)` + `_dep_copy_file(src, dst)` where
+`dst = lib/<pkg>_<submod>.cyr` and `submod` comes from a dep-controlled
+`dist/<pkg>/index.cyml` (the sibling-dep list). The project already had the
+CVE-04 guard — but it lived INSIDE `_dep_copy_file`, and the new `sys_unlink`
+ran BEFORE that call. So a malicious index sibling like `a/../../../x` escaped
+lib/ and `sys_unlink`'d an arbitrary `.cyr` during automatic `cyrius deps`
+(CVE-32, P1). This is the exact dep-resolver injection class hardened at
+v6.1.33 (CVE-14/15/16) that the new path silently failed to replicate.
+
+Fix (v6.2.51): a shared `_dep_reject_unsafe_name(name)` (reject any `/` or `..`)
+called at ALL ingestion points — the sub-module name at the TOP of
+`_dep_pull_submodule` (before any fs op), each index-returned `lib:<leaf>`, and
+the producer-side `pkg_name` in `_distlib_modular_emit`. Regression:
+`_deps_modular_traversal_gate`. LESSON: when you add a code path that turns
+externally-controlled strings into filesystem paths, the guard goes at the new
+path's first op — an existing guard one call deeper does not cover an earlier
+unlink/open. Audit "every place dep-controlled data becomes a path," not "the
+copy helper."
+"""
+
+[[entries]]
+name = "forward_call_prescan_and_monomorph_substrate"
+description = "v6.3.5 revived two generics prerequisites and exposed three non-obvious facts about cycc's driver structure. (1) The driver is 3-PASS: pass-1 registers structs/enums/globals (and now fn signatures), pass-2 emits fn BODIES (PARSE_FN_DEF), pass-3 (PARSE_PROG) emits top-level statements. So the CO-01 'forward call gets mask 0' bug only bites a call INSIDE a fn body (pass-2) to a fn defined LATER — a top-level call always sees full masks because pass-2 finished all defs before pass-3 runs. A test with a top-level forward call proves nothing. (2) Pass-1 STOPS at the first top-level statement (catch-all `scan = 0` in main.cyr's pass-1 loop), so the prescan — like struct/global registration — only reaches declarations BEFORE the first statement. The standard decls-before-statements (C-style: fns first, `main()`/asserts last) order is fully covered; a fn defined after `alloc_init()` is NOT prescanned. (3) The inline-replay EMIT path (PARSE_FNCALL, the `GFINL != 0` branch) was never removed — only the body-token CAPTURE was gated off (`_INLINE_OK = 0` per backend). Re-enabling capture (v6.3.5's opt-in `_MONOMORPH_OK` / `CYRIUS_MONOMORPH=1`) revives value-inlining with no path rewrite."
+category = "cyrius"
+tags = ["prescan", "forward-call", "abi", "3-pass", "fn-table", "monomorphization", "inline-replay", "co-01", "ar-01", "v6.3.5"]
+content = """
+**CO-01 — forward-call ABI prescan.** A call lexically before its callee's definition used to
+auto-register the callee with mask 0 (PARSE_FNCALL's `if (fi < 0) { fi = REGFN }`), silently dropping
+`: Str` auto-coercion, SIMD-arg routing, and the struct-return retptr ABI. Fix: a pass-1
+`_prescan_fn_sig` (wired into all 7 forks' pass-1 in place of the inline fn-skip) REGFNs every
+top-level fn and records its masks/count/variadic/return-type before pass-2 emits any call. Shared
+`_classify_param_type` / `_classify_return_type` (extracted from PARSE_FN_DEF, differential-verified
+byte-identical) keep prescan and definition in lockstep.
+
+**The cursor-reset trick.** `_prescan_fn_sig` extracts metadata on a THROWAWAY cursor (advancing
+through the signature however the scan needs), then `STI(S, start_ti)` and replays the verbatim
+pre-CO-01 skip (`_prescan_skip_fn`). So pass-1's NET token-cursor advance is byte-identical to before —
+the only new effect is the registration + mask writes (state, not cursor). This is why the prescan
+doesn't perturb pass-1's downstream parsing.
+
+**The `)` gotcha (cost hours).** `_prescan_params` originally returned with the cursor still on `)`
+(it never consumed the closing paren), so the return-type block in `_prescan_fn_sig` saw `)` instead
+of `:` and NEVER classified `: Struct` returns → `SFRS` stayed 0 → a forward call to a struct-returning
+fn kept the scalar-return ABI → segfault. Fix: `if (PEEKT(S) == 11) { STI(S, GTI(S) + 1); }` at the end
+of `_prescan_params`. Lesson: when a helper is followed by a sibling scan, it must leave the cursor
+where the sibling expects it.
+
+**How to debug 'the prescan is a no-op'.** Symptom: forward call still wrong, prescan-on == prescan-off
+binary. First check whether the fn was even REACHED by pass-1 (instrument the prescan, or print GFNC at
+pass-2 start) — if the callee is defined after a top-level statement, pass-1 stopped before it (fact 2
+above). Then check the CALL site resolves the prescanned fi (FINDFN must find it) vs re-REGFNing a
+fresh mask-0 slot.
+
+**AR-01 — monomorph substrate (gated proof).** `_MONOMORPH_OK` (util.cyr, default 0; set by
+`CYRIUS_MONOMORPH=1` in all 7 drivers) ORs into PARSE_FN_DEF's two capture gates. OFF → byte-identical
+codegen (the per-backend `_INLINE_OK = 0` default is untouched — x86 was disabled for code SIZE at
+v1.11.3, aarch64 for a metadata overlap since relocated to S+0x9EA000). ON → capture fires and the
+intact replay emits per-call-site value-substituted code. Proven byte-correct + active by
+`_monomorph_substrate_gate` (compile a fixture ±flag → both exit 42, binaries differ) on x86 + real pi.
+TYPE substitution (generics) builds on this in v6.3.7 — the substrate substitutes VALUES today, not
+types yet.
+
+**Filed alongside:** `var p = mk()` (inferred local type from a struct-returning call) segfaults even
+NON-forward — a pre-existing var-decl/retptr defect, not CO-01. Use `var p: T = mk()`.
+"""
+
+[[entries]]
+name = "closure_inline_emit_shares_enclosing_fn_state"
+description = "A cyrius closure literal `|params| body` is an anonymous fn (`__clNNNNN`) that PARSE_FACTOR emits INLINE inside the enclosing fn's code range (an EJMP0 jumps over it) while sharing the enclosing fn's per-fn codegen globals AND the per-fn local-slot tables. That sharing is the root of four v6.3.7 closure bugs: (1) the closure inherited `_cur_fn_regalloc` from an auto-regalloc'd enclosing fn, so ESTOREPARM shifted its param slots past phantom callee-saved saves and its locals were register-allocated to stale callee regs (`|x| x` returned 0); (2) the closure called ESUBRSP but never EPATCHFRAME, so its `sub rsp,imm32` kept the 0 placeholder — a 0-byte frame whose first body push clobbered param slot 0; (3) the closure reset SFLC(0) and wrote its params/locals into the SHARED name/depth/type/slice tables (S+0x5D9D000 / 0x5DBD000 / 0x5DDD000 / 0x5DFD000) starting at slot 0, overwriting the enclosing fn's locals at those slots (`var c0` shadowed by a later `|x|` became 'undefined variable'); (4) the enclosing fn's regalloc post-pass (the byte-scan at parse_fn.cyr `if (_cur_fn_regalloc > 0)`) scanned the INLINE closure bytes and NOP-patched/reallocated them → SIGILL when the closure was called."
+category = "cyrius"
+tags = ["closure", "lambda", "codegen", "regalloc", "inline-emit", "local-tables", "per-fn-state", "frame-patch", "v6.3.7"]
+content = """
+**A closure is a nested fn sharing the parent's mutable codegen state.** cyrius
+has no general nested fns, so the closure path (`PARSE_FACTOR`, token 35 `|` or
+54 `||`) is the only place a fn body is emitted WHILE another fn is mid-emit. It
+reuses the parent's per-fn globals and per-fn slot tables, so it must save / reset
+/ restore ALL of them — not just `in_fn` / `flc` / `sdep`.
+
+**The four fixes (v6.3.7), all in `parse_expr.cyr`'s closure branch:**
+
+1. **Per-fn codegen state.** Save + zero `_cur_fn_regalloc`, `_cur_fn_ret_stash`,
+   `_cur_fn_ret_sid`, `_cur_fn_ret_scalar`, `_cur_fn_naked`, set `_cur_fn_ix` to the
+   closure's fi; restore after. A closure takes no `#regalloc` / struct-ret /
+   `#naked`. The regalloc leak was the param bug — disasm showed `mov [rbp-0x30],rdi`
+   (param shifted by 5×8) and the body loading `a` from an unloaded `rbx`.
+
+2. **Frame patch.** Capture `ESUBRSP`'s patch handle and `EPATCHFRAME(handle,
+   (GFLC*8+15)&-16)` after the body, exactly like PARSE_FN_DEF. (The v6.2.41 change
+   that dropped ESUBRSP's size arg claimed "patched later via EPATCHFRAME" but the
+   closure path never called it — and there were no closure tests to catch it.)
+
+3. **Local-table isolation.** Before SFLC(0), snapshot the enclosing range
+   `[0, parent_flc)` of all four slot tables into an alloc'd buffer
+   (`_cl_save_locals`); restore it after the closure (`_cl_restore_locals`).
+
+4. **Skip the enclosing fn's regalloc post-pass.** A new global
+   `_cur_fn_has_closure` is set in the closure branch and gates the post-pass:
+   `if (_cur_fn_regalloc > 0 && _cur_fn_has_closure == 0)`. Skipping it keeps a
+   correct, un-reallocated frame (the prologue's callee-saved saves are just
+   unused) — the only cost is losing the optimization for that one fn. The clean
+   long-term fix is to emit closures OUTSIDE the parent's byte range, but the skip
+   is correct and minimal.
+
+**Calling convention.** A closure value is a plain fn pointer (`ELOAD_FN_ADDR`,
+same fixup type as `&fn`), so `callptr` / `fncallN` invoke it; `||` is a
+zero-param closure at a factor position (binary `a || b` never reaches there as a
+leading token). Names are `__clNNNNN` (5 zero-padded digits of GFNC) — the old
+`__cl<clid%10>` single digit aliased the 11th closure onto the 1st in REGFN.
+
+**LESSON:** any new "emit a fn body mid-emit" path must isolate the FULL per-fn
+state (codegen globals + the 4 slot tables) AND stay clear of the parent's
+byte-scan passes. A feature with zero tests (closures had none) hid all four for
+many releases. `cycc` itself uses no closures, so self-host + the differential are
+byte-identical — the only signal is a dedicated `closures.tcyr`.
+"""
+
+[[entries]]
+name = "closure_lexical_capture_by_value_env_object"
+description = "v6.3.8 added lexical capture by value to cyrius closures: a closure body that reads an enclosing local (a free var) captures it by value into a heap env object `[fn_ptr, cap0, cap1, …]`, and the closure VALUE becomes that object (not a bare fn pointer). It works by a PRE-SCAN of the closure body before emitting its prologue (`_cl_prescan_captures` in parse_expr.cyr): a name that FINDLOCAL-fails in the closure's own scope, is not a param/shadow, is not an `IDENT(`-shaped call name, and IS present in the enclosing-fn snapshot is recorded as a capture. If anything is captured, the closure gains a HIDDEN env param at arg-reg 0 / slot 0 and all user params shift to 1+; captured reads in the body become `load64(env + (1+capidx)*8)`. At construction the parent emits `alloc((1+ncap)*8)`, stores the fn addr at obj[0] and each captured value at obj[1+i], and the closure expression evaluates to the object. `callptr` auto-dispatches: if the callee local carries the `CLOSURE_TYID` (0x40000003) var type-tag it loads the fn ptr from `[obj]` and passes obj as the hidden arg1 (see closure semantics)."
+type = "gotcha"
+tags = ["closure", "lambda", "lexical-capture", "by-value", "env-object", "callptr", "alloc", "var-type-tag", "v6.3.8"]
+body = """
+**Capture is by value into a vtable-shaped heap object.** A capturing closure
+is no longer a bare fn pointer — it's `alloc((1+ncap)*8)` laid out as
+`[fn_ptr, cap0, cap1, …]`. The closure fn gains a hidden env param (arg-reg 0 /
+local slot 0); user params shift up by one (`ESTOREPARM(S, clpc + 1, …)` and the
+fn's stored param count `_fnt_params[clfi]` is bumped). A captured read compiles
+to `EFLLOAD(env) ; EADDRA_IMM((1+capidx)*8) ; ELOAD64`. The closure VALUE is the
+object; a `var f = |x| base + x;` local is tagged `CLOSURE_TYID` so the call site
+knows to dispatch it. Non-capturing closures are unchanged (still a bare fn ptr,
+no allocation) — only a body that actually reads an enclosing local pays for an
+env object.
+
+**`callptr` auto-dispatch.** When the callee is a bare ident whose local type-tag
+is `CLOSURE_TYID`, `callptr` spills the object, loads `[obj]` as the fn pointer,
+pushes the object as a synthetic arg1, and calls indirect. Call sites are
+identical to the non-capturing form — `callptr(f, 2)` works whether `f` captured
+or not. This is the "auto-dispatch" calling convention chosen over a separate
+`callclosure` builtin.
+
+**THE non-obvious bug — stale name in the construction scratch slot.** The env
+construction needs a scratch local slot to hold the freshly-alloc'd object while
+it stores fn-addr + captures. That slot is a real entry in the shared local
+name/depth/type/slice tables (`S+0x5D9D000` …), and those tables are NOT cleared
+between fns — a slot can still hold a name string from a PREVIOUS fn. If the
+scratch slot is left named, a later `var f` in this fn whose name happens to
+collide trips the duplicate-variable check ("duplicate variable f") even though
+the user only declared it once. Two same-name capturing closures in one fn hit
+this every time. FIX: anonymize the scratch slot the instant it's claimed —
+`S64(S + 0x5D9D000 + slot*8, 0 - 1); SLDEP(S, slot, 0);` (name = -1, depth 0).
+The same anonymization is applied to `callptr`'s obj/fn-ptr spill slots.
+
+**Platform.** PE (Windows) capturing closures are a compile error for now
+(`ERR_MSG "capturing closures not yet supported on Windows PE"`); the env build
++ `ECALLPTR_PE` 16-byte-align interaction is unverified, so it fails loud rather
+than miscompiling. Non-capturing closures work on PE. Capture is verified
+byte-correct on x86_64 + aarch64 (real pi + qemu).
+
+**LESSON:** when you borrow a shared per-fn table slot for scratch, ANONYMIZE it
+— the tables carry stale names across fns, and a live name in a scratch slot is
+a landmine for the duplicate-decl check. Tests: `closures_capture.tcyr`
+(single / multi / param-mix / by-value / thunk / with-locals / two-closures),
+all via `callptr`. `cycc` uses no closures, so the only signal is the dedicated
+tcyr — self-host + differential stay byte-identical.
+"""
+
+[[entries]]
+name = "generic_fn_i64_base_and_ret_stash"
+description = "v6.3.9 shipped i64 generic FUNCTIONS (`fn foo<T>(...)`) on the AR-01 token-replay substrate, gated behind _MONOMORPH_OK (default off → cycc byte-identical). The key architectural choice: in an i64-everywhere language the BASE fn is its own i64 instantiation — the body is emitted ONCE with `T -> i64` bound (via _bind_generic_call(S, fi, -8, -8) right before PARSE_PROG in PARSE_FN_DEF), so i64-typed calls are plain normal calls to the base, no instantiate-once machinery needed. `<T>` names are captured at the signature (_capture_tparams, replacing SKIP_GENERICS, gated) into _fnt_tparams (lazy-alloc, 0=non-generic); a scoped T->concrete binding (_tp_n0/_tp_c0/_tp_n1/_tp_c1) is consulted at the 4 type-resolution sites (param-type, local `: T`, slice<T>, sizeof) by _tp_resolve, with canonical token <0=-scalarwidth / >0=struct-sid. THE load-bearing bug: a `: T` generic return type made the return-type ROUGH-SCAN (the pre-param-loop lookahead that sets _cur_fn_ret_stash) default to stash=8 (struct retptr ABI), reserving arg-reg 0 for a hidden retptr and shifting every user param by one — so `id<T>(x:T):T{return x}` stored x into rsi's slot and read 0. Non-i64 instantiation + explicit `foo<i64>(x)` + generic structs are v6.3.10."
+type = "gotcha"
+tags = ["generics", "monomorphization", "type-param", "ret-stash", "retptr-abi", "i64-everywhere", "base-as-instance", "v6.3.9"]
+body = """
+**The base fn IS the i64 monomorphization.** Cyrius is i64-everywhere (ADR-002),
+so v6.3.9 does NOT defer a generic fn's body or build instantiate-once for i64.
+PARSE_FN_DEF binds every captured type-param to i64 (`_bind_generic_call(S, fi,
+0-8, 0-8)`) immediately before `PARSE_PROG` emits the body, so the body emits as
+the i64 instance. An i64-typed call (inferred or `id(42)`) is an ordinary normal
+call to that base — no minting, no jump-over, no replay. Dedup is by construction
+(one base = one i64 instance). Non-i64 type-args (`foo<i32>`, `foo<Point>`) need a
+separate instance and are deferred to v6.3.10, where the closure-style
+instantiate-once is shared with generic structs.
+
+**THE gotcha — `: T` return ⇒ phantom retptr/stash ⇒ param shift.** A `: T`
+generic return type segfaulted/returned-garbage for ANY body that read a param
+(`return x` gave 0; `return a` gave arg1). Root cause: PARSE_FN_DEF runs a
+RETURN-TYPE ROUGH-SCAN *before* the param loop (a lookahead past `()` to `: Type`)
+that decides `_cur_fn_ret_stash` — and `_cur_fn_ret_stash > 0` makes the param
+loop reserve arg-reg 0 (RDI/RCX) for a hidden struct retptr, shifting user param 0
+into the SECOND arg reg. For `: T`, `FINDSTRUCT(T)` misses and `T` matches no
+scalar name, so the rough-scan fell through to the default `_cur_fn_ret_stash = 8`
+— treating the generic return as a big-struct retptr. Disasm of the broken `id`:
+`mov rdi,-0x30 ; mov rsi,-0x38 ; … mov rax,-0x38` (TWO param stores for a 1-param
+fn, body reads the second = rsi, which `id(42)` never sets → 0). Fix: in the
+rough-scan, recognize a captured type-param (`_is_tparam_of(S, fi, _rs_rt_noff)`)
+as i64-shaped (`_rs_is_scalar = 1`) so it does NOT set the stash. The *other*
+return-type site (the post-param classify) already takes `_rtc = -8` for `: T` via
+the same `_is_tparam_of` check — both sites must agree the generic return is
+scalar.
+
+**LESSON.** A new "abstract" type spelling (`T`) that isn't a struct and isn't a
+known scalar will silently fall into whatever the type machinery's DEFAULT is — and
+for return types that default is the retptr/big-struct ABI. Any place that
+branches on "struct vs scalar" by `FINDSTRUCT > 0` must get a type-param escape
+hatch, or generic code inherits struct ABI. Gate: `_generics_fn_i64_gate`
+(check.sh 104→105) compiles `tests/fixtures/monomorph/generic_fn_i64.cyr` under
+CYRIUS_MONOMORPH=1 (must exit 42) and asserts it's REJECTED with the flag off (the
+`: T` return is gate-only) — so the feature provably can't touch default codegen.
+Verified byte-correct on x86_64 + aarch64 (qemu). cycc itself uses no generics →
+self-host + the differential vs the pre-arc compiler stay byte-identical; the gate
+is the only signal.
+"""
+
+[[entries]]
+name = "generic_instantiate_once_reinvoke"
+description = "v6.3.10 added non-i64 generic instances (foo<i32>, Box<Point>) via an instantiate-once engine that RE-INVOKES the canonical emitter on the base's verbatim tokens rather than replicating it. At a non-i64 generic call/use: mint base$ty into the name pool (_mint_generic_name, '$' separator), FINDFN/FINDSTRUCT is the dedup index (hit → reuse the instance fi/sid). On a miss, _instantiate_generic_fn jumps over the instance (EJMP0), STIs to the base fn's `fn`-keyword token (_fnt_defstart, stored +1 because token 0 is valid), sets _inst_name = mangled + _inst_conc0/1 = the concrete tokens, and calls PARSE_FN_DEF — which re-parses the full signature (params/masks/return) + body and emits the specialized fn with T bound to the concretes (PARSE_FN_DEF honors _inst_name for the fn name + _inst_conc0 for the body binding instead of base-as-i64). Enclosing fn state is saved/restored around the re-invoke + _cur_fn_has_closure=1 makes the enclosing fn skip its regalloc byte-scan (the instance is inline in its code range). Generic STRUCTS are the same idea but simpler (no codegen): _instantiate_generic_struct re-invokes PARSE_STRUCT_DEF, whose field `: T` parse gained a _tp_resolve consult."
+type = "gotcha"
+tags = ["generics", "monomorphization", "instantiate-once", "re-invoke", "PARSE_FN_DEF", "PARSE_STRUCT_DEF", "dedup", "v6.3.10"]
+body = """
+**Re-invoke, don't replicate.** The clean way to emit a specialized generic
+instance is NOT to hand-roll a parallel prologue/param/body emitter — it's to
+re-run the CANONICAL emitter (PARSE_FN_DEF / PARSE_STRUCT_DEF) on the base's
+verbatim tokens with two overrides: a NAME override (`_inst_name` → the mangled
+`foo$ty` / `Box$ty`) and a BINDING override (`_inst_conc0/1` → the concrete type
+tokens, vs the default base-as-i64 `T→i64`). That buys full fidelity — params,
+ABI masks, struct-typed args, return type, regalloc — for free, and stays in
+lockstep with the base by construction.
+
+**Mechanism (fns).** `_instantiate_generic_fn`: mint → `FINDFN` dedup → on miss,
+`EJMP0` over the instance, `STI` to `GFDS(base_fi)` (the base's `fn` token), set
+the overrides, `PARSE_FN_DEF(S)`, clear overrides, `EPATCH` the jump. The instance
+is emitted INLINE in the enclosing fn's code range (jumped over), so the enclosing
+fn must skip its regalloc post-pass — set `_cur_fn_has_closure = 1` in the restore
+(the same guard closures use, for the same reason). Save/restore the enclosing
+`_cur_fn_*` + `GFLC`/`GLVAR`/`rp_vec`/`GTI` + the local-table snapshot
+(`_cl_save_locals`) around the re-invoke.
+
+**THE gotcha — def-start +1.** The base's `fn`-keyword token index is stored as
+`_defstart_ti + 1` (and read back `- 1`), because **token index 0 is valid** (a
+generic fn can be the very first token in a no-include file) and `0` is the
+table's "unrecorded" sentinel. Storing the raw index 0 made the instantiate
+return the not-recorded error and every instance silently fell back to a clean
+compile error / wrong path until the +1 sentinel fix. Same pattern any time a
+0-based index shares a table with a 0=absent sentinel.
+
+**Structs.** Generic structs over i64 already worked (the base struct IS the i64
+instance: `val: T` registers as an untyped 8-byte field). Non-i64 use
+(`Box<Point>`) re-invokes `PARSE_STRUCT_DEF` (no codegen — struct registration
+only, so no `EJMP0`/state-save), with the field-type parse gaining a `_tp_resolve`
+consult so `: T` resolves to the concrete sid/width via `ADDFIELDTYPED`. Wired at
+the `var x: Box<conc>` type-resolution site. STRUCTSZ/FIELDOFF are lazy, so the
+re-added concrete-typed fields yield correct sizes/offsets with no cache work — a
+field after a `Holder<Point>`'s 16-byte Point field lands at offset 16, proving
+the specialized layout.
+
+**LESSON.** When you need to emit a specialized copy of something the compiler
+already knows how to emit, re-invoke the canonical path with overrides — far less
+code + drift than a parallel emitter. Verified x86 + aarch64; gated `_MONOMORPH_OK`
+→ self-host + differential byte-identical; `_generics_full_gate` (check.sh 106).
+"""
+
+[[entries]]
+name = "async_await_futures_dce_nameread"
+description = "v6.3.11 added async/await as first-class FUTURES (deferred-then-forced), NOT stackless CPS coroutines — a premise-check found the cooperative runtime (lib/async.cyr) is run-to-completion (async_run calls fncall1 to completion with blocking epoll yields; no suspend/resume), so true CPS coroutines would need a poll-runtime rework. An `async fn f(p0..pn): T` compiles to a CONSTRUCTOR that allocs a heap Future [ &f$impl, argc, args… ] and returns it (the body becomes a hidden f$impl reached only by pointer; the CALL DOES NOT RUN THE BODY); await fut lowers to future_force(fut) which calls the bundled impl with the bundled args via fncallN. The Future object reuses the closure-env heap construction (alloc + fn-addr fixup + field stores). THE LANDMINE: the pass-2 top-level dispatch reads the fn name at TOKVAL(GTI+1) for its DCE reachability pre-check, assuming the cursor is at `fn` — a leading `async` (token 134) shifted it by one, so it read `fn`(value 0) not the name, mis-marked the async fn unreachable, and stubbed it (call site saw the fn as undefined). Fix: consume `async` INSIDE the fn-dispatch block (cursor → `fn`, so all DCE/match-peek/stub logic stays correct) and arm _pending_async only on the reachable path."
+type = "gotcha"
+tags = ["async", "await", "futures", "future_force", "DCE", "dispatch", "run-to-completion", "v6.3.11"]
+body = """
+**Futures, not coroutines.** `async fn` / `await` are sugar over the EXISTING
+cooperative epoll runtime — and that runtime is run-to-completion (`async_run`
+drives each task to completion via `fncall1` with *blocking* epoll/timerfd
+yields; it has no suspend/resume). So the roadmap's "CPS state machines" framing
+is aspirational for this runtime. The faithful, complete-for-this-runtime model
+is first-class **Futures**: calling an `async fn` builds a deferred Future
+`[ &f$impl, argc, args… ]` (a heap object — same construction as a closure env);
+`await` forces it. True stackless coroutines that suspend/resume *mid-body* across
+an `await` are a pinned follow-on needing a poll-based runtime rework. Don't try to
+bolt suspend/resume onto the run-to-completion driver.
+
+**Lowering.** In PARSE_FN_DEF, after name-mangling, rename the body to `f$impl`
+(`_mint_impl_name`) so the body emits as the hidden impl; at the END (before
+`return 0`), `_async_emit_constructor` synthesizes the user-named `f`:
+EJMP0 jump-over → EFNPRO → ESTOREPARM the params → ESUBRSP → alloc((2+pc)*8) →
+store &f$impl@[0] (ELOAD_FN_ADDR fixup), pc@[8], params@[16+i*8] → return obj →
+EFNEPI → EPATCHFRAME → EPATCH. `await` is a factor-level prefix (token 135) in
+PARSE_FACTOR: eval operand → rax, EPUSHR, ECALLPOPS(1), ECALLFIX(future_force).
+`future_force`/`async_spawn_future` live in lib/async.cyr (shared, pure fncallN).
+
+**The DCE name-read landmine (general).** Any modifier keyword placed BEFORE `fn`
+collides with the pass-2 dispatch's DCE reachability pre-check, which reads the fn
+name at `TOKVAL(GTI+1)` assuming the cursor sits on `fn`. With `async` in front,
+it read the wrong token, the bitmap lookup missed, the fn was deemed unreachable
+and STUBBED (`xor eax,eax; ret`), and its call site reported the fn undefined.
+The robust fix is to consume the modifier INSIDE the fn-dispatch block so the
+cursor lands on `fn` before any name-read / match-peek / stub path runs, and to
+arm the per-fn flag (`_pending_async`) only on the reachable branch so a
+DCE-stubbed instance can't leak it to the next fn.
+
+**Gating.** Tokens 134/135 are lexed UNCONDITIONALLY (no bare `async`/`await`
+identifier exists in src/ or lib/, so cycc's token stream is unchanged →
+byte-identical self-host); the FEATURE is gated in pass 2 via a lazy
+`_ensure_async_gate` (reads `CYRIUS_ASYNC` on first async/await — no per-fork
+driver env-read edit). `_IS_FN_KW` (token 32 OR 134) routes the dispatch in all 7
+forks. Verified x86 + aarch64 + native-aarch64; check.sh 107; ecb+cass+pi
+SELFHOST_OK; differential + seed→cybs→cycc byte-identical.
+"""
+
+[[entries]]
+name = "wx_separate_pt_load_segments"
+description = "v6.3.12 split every userland ELF from one RWE PT_LOAD into two — text R E (not writable) + data R W (not executable) — for segment-level W^X (agnos 1.50.6 loader is PF_X-aware). DEFAULT ON; CYRIUS_WX=0 opts out. The split is hard because the code's absolute/PC-relative var+string relocations are patched in FIXUP against dbase = entry + acp (the data base), so EMITELF_USER's 2nd PT_LOAD p_vaddr MUST equal that same dbase or the patched code reads the wrong addresses. Both derive it from a shared _wx_data_vaddr(base + text_foff, cp) that rounds the code-area end up to a fresh 2 MB page (agnos huge-page granularity). Adding a 2nd 56-byte program header pushes .text from file offset 120 to 176, so _entry_base + e_entry must shift to base+176 under W^X. Flipping the default to ON needs a TWO-STEP BOOTSTRAP because the old single-segment cycc cannot emit W^X."
+type = "gotcha"
+tags = ["W^X", "ELF", "PT_LOAD", "cyrld", "FIXUP", "dbase", "two-step-bootstrap", "segments", "v6.3.12"]
+body = """
+**The lockstep invariant.** In cyrius, FIXUP patches every global-var and string
+reference in the emitted code against `dbase = entry + acp` (data base = end of the
+aligned code area): a string is at `dbase + totvar + idx`, a gvar at
+`dbase + pfx[idx]`. EMITELF_USER then serializes the data at a matching vaddr. To
+put data on its own permission-separated PT_LOAD, you MUST change `dbase` in BOTH
+places identically — pad `acp` in FIXUP so `dbase` lands on a fresh page, and emit
+the 2nd PT_LOAD's `p_vaddr` at the SAME value. The shared helper
+`_wx_data_vaddr(S, entry, cp)` (called with `entry = _entry_base` in FIXUP and
+`entry = base + text_foff` in EMITELF_USER — they're equal for userland) guarantees
+agreement. Get this wrong and every string/gvar load in the program reads garbage.
+
+**Why 2 MB.** The agnos loader maps 2 MB huge pages, so a text and data segment that
+share a 2 MB page can't get distinct permissions. Round the data vaddr up to a 2 MB
+boundary. The FILE offset only needs the ELF `p_align` (4 KB on x86, 64 KB on
+aarch64): since the 2 MB vaddr is a multiple of `p_align`, `p_vaddr ≡ p_offset
+(mod p_align)` holds with only a ≤`p_align` file pad — the ≤2 MB gap is *virtual*,
+near-zero file bytes (the "p_offset sharing" trick).
+
+**The .text shift.** A 2nd program header (56 bytes) pushes `.text` from file offset
+120 (64-byte ELF header + 1 PH) to 176 (+ a 2nd PH). `_entry_base` and the ELF
+`e_entry` MUST move to `base + 176` under W^X, or every absolute fn / var / string
+fixup (which is `entry + offset`) lands 56 bytes off the real code. Make
+`_entry_base` call `_wx_active` (forward-ref resolves via pass-1 fn registration).
+
+**Two-step bootstrap to flip default-on.** The existing single-segment cycc CANNOT
+emit W^X (its `_wx_active` doesn't exist / defaults off). So `old-cycc compiles
+new-src` → cc1: a single-segment binary whose *code* defaults W^X-on (a transition
+intermediate). `cc1 compiles src` → cc2: W^X (cc1 emits W^X). `cc2 compiles src` →
+cc3: W^X. `cc2 == cc3` is the stable fixpoint — install that as build/cycc. The
+seed chain works the same way: cybs (single-segment) emits gen1 (cycc code,
+single-seg), gen1 emits gen2 == build/cycc (W^X). Once build/cycc is cc2,
+version-bump's single self-host step reproduces W^X with no further two-step.
+
+**Guard.** W^X is userland-ELF only: `_wx_active` requires `_emit_fmt(S) == 0` (ELF,
+not Mach-O 1/2 or PE 3) AND `kmode == 0` (not kernel / shared `.so` / object). So
+Mach-O, PE, kernel, `.so`, and `.o` outputs are untouched. x86 and aarch64 are
+separate backends, so `_wx_active`/`_wx_data_vaddr` are duplicated in each (aarch64
+`p_align` is 0x10000, x86 0x1000). Verified: readelf -lW shows text R E / data RW on
+x86, aarch64, and CYRIUS_TARGET_AGNOS; pi (real aarch64) self-hosts the W^X cycc;
+CYRIUS_WX=0 is differential byte-identical to the pre-split release.
+"""
+
+[[entries]]
+name = "macho_syscall_xlat_source_numbers_arch_specific"
+description = "The Mach-O syscall-number translation is ARCH-SPECIFIC in its SOURCE numbers, not just its target: x86-macho feeds syscalls_macos.cyr (BSD-numbered — getpid 39, getppid 110) but aarch64-macho feeds syscalls_aarch64_linux.cyr (getpid 172, getppid 173) via lib/syscalls.cyr:64-70. So a getpid/getppid/syscall fix that reasons ONLY about the x86 EMACHO_SYSXLAT table (39/110) misses the aarch64-macho stdlib ENTIRELY — the aarch64 numbers (172/173) also need their own ESYSXLAT entries. getpid returned positive GARBAGE on aarch64-macOS (an untranslated 172 ran a raw svc) until v6.3.44, and a callable-only smoke PASSED on it (a garbage-positive value is still 'callable, stable'). Found only by tightening vr01_process_smoke.tcyr to assert a POSITIVE PID and running it on REAL ecb (aarch64-macOS) hardware."
+type = "gotcha"
+tags = ["macho", "syscall", "ESYSXLAT", "aarch64", "getpid", "getppid", "cross-os", "found-by-ports", "v6.3.44"]
+body = """
+**Two macho stdlibs, two number spaces.** `lib/syscalls.cyr` (lines
+~64-70) routes the Mach-O syscall SOURCE numbers by ARCH, not just OS:
+  - **x86-macho** includes `syscalls_macos.cyr` — the BSD numbers
+    (getpid **39**, getppid **110**).
+  - **aarch64-macho** includes `syscalls_aarch64_linux.cyr` — the Linux
+    aarch64 numbers (getpid **172**, getppid **173**).
+The BACKEND translation table (`EMACHO_SYSXLAT` on x86, `ESYSXLAT` on
+aarch64) then maps those source numbers to the real Darwin syscall
+(getpid → 20, getppid → 39). The trap: these are TWO SEPARATE tables in
+TWO SEPARATE backends. A fix that edits only the x86 table (39→20, 110→…)
+leaves aarch64-macho (172/173) untranslated — the stdlib picks a totally
+different source number there.
+
+**How it shipped garbage.** Pre-v6.3.44 the aarch64-macho ESYSXLAT had no
+entry for 172, so `getpid()` on aarch64-macOS emitted a raw `svc` with
+x8=172 (a Darwin number that isn't getpid) and returned a positive but
+GARBAGE value. getppid (173) returned 0. The x86 getpid (39→20) had
+worked since v6.0.02, which is exactly why reasoning "getpid works on
+macOS" was wrong — it worked on x86-macho only. Fix: aarch64 ESYSXLAT
+`172→20` (getpid) + `173→39` (getppid); x86 `110→39` getppid; and the
+`_macho_arm_routes` whitelist gained 172/173.
+
+**Why the old test missed it.** The smoke only checked that getpid was
+CALLABLE and returned a stable value — a garbage-positive integer passes
+that. Tightening the test to assert a POSITIVE, plausible PID *and running
+it on real ecb hardware* is what surfaced it. A green CI check and a
+disasm of the x86 table would never have caught it. (Same lesson class as
+the v6.3.43 Windows file-I/O std-handle bug.) See
+`cross_os_self_host_real_hardware_non_negotiable`.
+"""
+
+[[entries]]
+name = "emit_gvar_inits_parallel_copy_of_parse_struct_init"
+description = "EMIT_GVAR_INITS (the pass-2 replay of global var initializers, src/frontend/parse_decl.cyr) is a HAND-DUPLICATED PARALLEL COPY of PARSE_STRUCT_INIT's positional struct-literal loop. A struct field-shape fix that lands in one but not the other makes the global-scope init path silently DIVERGE from the in-fn path. The v6.3.44 bug: EMIT_GVAR_INITS never got the v5.10.7 IS_STR_FIELD single-8-byte-slot handling, so a global `var g = T { .., <str> };` with a Str field flattened the Str into a nested-struct 2-field embedding, PCMPE'd a nonexistent `len` expression, and hit `}` (`unexpected '}'`) — while the same literal inside a fn (which goes through PARSE_STRUCT_INIT, already fixed) compiled fine. There is a documented refactor backlog of ~5 such 'parallel copy' duplications in the struct/gvar-init path; until they're merged, ANY field-shape or width-correctness fix must be applied to BOTH loops."
+type = "gotcha"
+tags = ["EMIT_GVAR_INITS", "PARSE_STRUCT_INIT", "parse_decl", "struct-init", "global-scope", "parallel-copy", "IS_STR_FIELD", "refactor-backlog", "v6.3.44"]
+body = """
+**Two loops, one shape.** cyrius emits a struct literal's positional
+field stores in TWO places:
+  - `PARSE_STRUCT_INIT` — the in-fn path (`var g = T { … };` inside a fn).
+  - `EMIT_GVAR_INITS` — the pass-2 replay for GLOBAL-scope initializers
+    (deferred to after all decls register).
+They are hand-duplicated copies of the same positional loop, NOT a shared
+helper. Every per-field-shape refinement has had to be applied to both,
+and historically hasn't been: the v5.9.36 narrow-width initializer fix and
+the v5.10.7 single-slot Str handling both had to be mirrored. When only
+one loop gets a fix, the global-scope path silently DIVERGES.
+
+**The v6.3.44 divergence.** A Str field (field-type id > 0) in
+`EMIT_GVAR_INITS` fell into the nested-struct FLATTEN branch — which treats
+a struct-typed field as a 2-field by-value embedding and `PCMPE`s a second
+expression for the embedded struct's `len` field. A Str is a single 8-byte
+handle, not a 2-field embed, so the loop consumed a nonexistent expression
+and ran into the closing `}` → `unexpected '}'`. Diagnosis was masked by
+its being FILED as a `#derive(Serialize)` bug — but it is
+`#derive`-INDEPENDENT (a plain global struct literal with a Str field
+reproduces it). Fix: mirror the `IS_STR_FIELD` single-8-byte-slot branch
+into `EMIT_GVAR_INITS`, exactly as `PARSE_STRUCT_INIT` already had it.
+
+**Recognize it again.** A struct-literal shape that works inside `fn main`
+but errors at global scope (or vice-versa) is the fingerprint of a
+one-sided fix to this parallel-copy pair. There is a refactor backlog of
+~5 such duplications in the struct/gvar-init path — until they collapse
+into one shared emitter, patch BOTH loops for any field-shape change.
+"""
+
+[[entries]]
+name = "stdlib_mutex_single_owner_sync_cyr"
+description = "As of v6.3.44 the stdlib mutex has a SINGLE OWNER: lib/sync.cyr. mutex_new/lock/unlock + MUTEX_SIZE used to be defined in BOTH lib/thread.cyr AND lib/sync.cyr (and in each platform sibling: thread_win ⇄ sync_windows SRWLOCK, thread_agnos ⇄ sync agnos) — so any consumer linking both thread and sync (sync arrives transitively via alloc/atomic/patra) saw 3 `duplicate fn 'mutex_*'` warnings and a silent link-order winner if the impls ever drifted. Now sync.cyr owns them, thread.cyr includes sync.cyr once at the top, all thread*.cyr drop their inline defs, and cyrius's include-once dedup collapses the both-included case to one definition. sync.cyr's own #ifdef routing picks the backend (Linux futex / Windows SRWLOCK / macOS spinlock / agnos no-op). SECOND gotcha: the api-surface snapshot is MODULE-QUALIFIED (thread::mutex_lock vs sync::mutex_lock), so RELOCATING a fn from one module to another shows up as REMOVALS in the snapshot diff — regenerate it (build/cyrius_api_surface --update) and verify the removals are relocations, not real deletions."
+type = "gotcha"
+tags = ["mutex", "sync.cyr", "thread.cyr", "single-owner", "include-once", "duplicate-fn", "api-surface", "module-qualified", "v6.3.44"]
+body = """
+**Single owner.** `mutex_new` / `mutex_lock` / `mutex_unlock` + `MUTEX_SIZE`
+now live in exactly one file: `lib/sync.cyr`. Before v6.3.44 they were
+ALSO defined in `lib/thread.cyr` (Linux futex) and in each platform sibling
+(`thread_win.cyr` ⇄ `sync_windows.cyr` SRWLOCK; `thread_agnos.cyr` ⇄ the
+sync agnos branch). Because `sync` arrives transitively (alloc → atomic →
+patra all pull it in), any consumer linking `thread` too got THREE
+`duplicate fn 'mutex_*'` warnings on every build — with a silent
+link-order winner if the two impls ever drifted. Fix: `sync.cyr` is the
+single owner; `thread.cyr` includes it once at the top and all three
+`thread*.cyr` drop their inline defs. `sync`'s own `#ifdef` routing selects
+the backend (Linux futex / Windows SRWLOCK / macOS spinlock / agnos no-op),
+and include-once dedup collapses the both-included case. Behavior-preserving
+on Linux/Windows/agnos (the bodies were byte-identical) and a NET FIX on
+macOS (a working spinlock instead of the never-routed futex).
+
+**The api-surface snapshot is MODULE-QUALIFIED.** Symbols are recorded as
+`module::fn` (e.g. `thread::mutex_lock`, `sync::mutex_lock`), so MOVING a
+fn between modules registers as REMOVALS (`thread::mutex_*` gone) even
+though the consumer-visible unqualified `mutex_*` is unchanged (it stays
+via `sync`/`sync_macos`/`sync_windows`). Regenerate the snapshot
+(`build/cyrius_api_surface --update`) and confirm the removals are
+RELOCATIONS, not deletions — the v6.3.44 fold was 9 relocations / 0 real
+additions. (Same regenerate-and-verify discipline as any folded lib that
+adds/moves public fns — the check.sh api-surface gate goes RED on a stale
+snapshot's exact-count line.)
+"""
+
+[[entries]]
+name = "cross_os_self_host_real_hardware_non_negotiable"
+description = "Cross-OS self-host on REAL hardware — ecb (macOS arm64), cass (Windows PE), pi (aarch64 Linux), one ssh away each — is a STANDING release gate, not a closeout-only or CI-only check. A GREEN CI CHECK IS NOT VERIFICATION. Two v6.3.x bugs shipped SILENTLY behind green smoke and were caught ONLY by running on the hardware: (1) v6.3.43 — Windows sys_write/sys_read on FILE handles (EWRITE_PE always translated the fd → GetStdHandle, so only std handles 0/1/2 ever worked; a CreateFileW handle wrote to garbage) — never caught because no test had ever written to a FILE on Windows. (2) v6.3.44 — getpid returned positive GARBAGE on aarch64-macOS (untranslated syscall 172) — a callable-only smoke passed on it. Hello-world / exit-code / callable-only smoke is a PLACEBO; the actual behavior asserted on the actual hardware IS the test. The macOS COMPILER self-host rotted silently ~9 minors behind a CI job that only ran hello-world."
+type = "gotcha"
+tags = ["cross-os", "self-host", "ecb", "cass", "pi", "release-gate", "found-by-ports", "smoke-is-placebo", "v6.3.43", "v6.3.44"]
+body = """
+**A checkmark is not the compiler running on the hardware.** After ANY
+compiler-backend or stdlib change, cycc must self-host BYTE-IDENTICAL and
+the platform tests must PASS with real assertions on real macOS (ecb,
+arm64), real Windows (cass, PE), and real aarch64 Linux (pi) — each one
+`ssh` away via `~/.ssh/config`. This is a STANDING per-release gate (the
+LIBTEST `vr01_` glob + `SELFHOST_OK`/`LIBTEST_OK` on ecb/cass/pi), not a
+closeout-only or CI-only step.
+
+**Two silent-rot cases from v6.3.x, both found only by running:**
+  - **v6.3.43, Windows file I/O.** `EWRITE_PE` (src/backend/x86/emit.cyr)
+    ALWAYS translated the fd into a *standard handle* via GetStdHandle
+    (`neg;sub 10`), so `sys_write`/`sys_read` only ever worked for fd
+    0/1/2 — a real `CreateFileW` handle (a large value) mistranslated into
+    a bogus std-handle index → WriteFile to an invalid handle → the whole
+    file round-trip silently failed. Never caught because NO test had ever
+    written to a FILE on Windows (tests/win/ was all stdout). Fix: an
+    unsigned `cmp rax,2; ja` fd-branch (fd>2 = handle direct), mirroring
+    the fix EREAD_PE already had since v6.0.45.
+  - **v6.3.44, aarch64-macOS getpid.** getpid returned positive GARBAGE
+    (an untranslated syscall 172) — see
+    `macho_syscall_xlat_source_numbers_arch_specific`. A callable-only
+    smoke passed on the garbage.
+
+**The precedent.** The macOS COMPILER self-host rotted silently for ~9
+minors (v5.3.13 → v6.0.32, 400+ patches) behind a CI job named "Mach-O
+ARM64 Native ✓" that only ran hello-world / exit-code programs and never
+once built or self-hosted cycc. It surfaced only when a human installed on
+a Mac and got a broken toolchain. Hello-world / exit-code / callable-only
+smoke is a PLACEBO — the compiler self-hosting on the target, and the
+actual behavior asserted on the actual hardware, IS the test.
 """

@@ -2,6 +2,111 @@
 # Lessons from building and hardening the AGNOS kernel in Cyrius.
 
 [[entries]]
+name = "freestanding_tls_fork_not_threads"
+description = "v6.3.4 #7 — proving tls_native runs in-kernel needed a handshake over ONLY the transport/entropy hooks; threads hit sigil's shared-crypto-state landmines, so fork+mmap (isolated crypto) was the answer"
+category = "cyrius"
+---
+FREESTANDING TLS: PROVE IT OVER THE HOOKS, AND USE FORK NOT THREADS
+
+Bare-metal deliverable #7 was "kernel-freestanding lib/tls_native link + in-kernel
+handshake smoke." The premise-check found the foundation already shipped: the
+transport vtable (read/write/now fn-pointers, v6.2.4) + the entropy hook
+(tls_native_set_entropy, v6.2.28) ARE the freestanding hooks, and tls_native
+already compiles under the bare-metal kernel target. The gap was the PROOF — every
+existing handshake e2e (tls12_handshake, tls_native_alpn) drives client<->server
+over sys_socketpair + sys_fork + sys_getrandom. None proves a handshake over the
+hooks ALONE. That proof is the deliverable: a full TLS 1.3 handshake where the only
+thing the TLS path touches is the vtable (an in-memory loopback) + the entropy hook
++ a clock hook — zero socket/getrandom/clock syscalls. A kernel installs its net
+driver + CSPRNG into those hooks; the stack runs with no host-OS coupling, which the
+libssl wrapper structurally cannot do.
+
+THE TRAP — THREADS DON'T WORK, FORK DOES:
+
+The blocking connect()/accept() drivers need two endpoints running concurrently, so
+the instinct is two THREADS sharing an in-memory loopback (CLONE_VM). It crashes,
+and the debugging is a tour of sigil's concurrency model:
+  1. crypto BANKS — sigil widens its racing HKDF/AES-NI/SHA-NI scratch into 8
+     per-thread lanes; a worker must call crypto_bank_set(N) or it collides with
+     the main thread on lane 0 (→ AEAD tag mismatch, the first symptom).
+  2. lazy TABLE init — sha256/sha512/aes_gcm/ed25519 build shared tables on first
+     use; two threads race the init unless the main thread pre-warms (the
+     "batch path pre-warms before fan-out" contract: sha256_global_init() etc.).
+  3. NI cpuid PROBES — sha_ni_available()/aes_ni_available() cache via shared
+     probe-scratch; same race, warm them too.
+  4. thread STACK — THREAD_STACK_SIZE is 64 KB; the handshake's ~16 KB record
+     buffers × nested frames overflow it.
+And after all four there were still more landmines — tls_native+sigil are simply
+NOT built for two concurrent endpoints in one address space (the fork-based tests
+never hit any of this because separate address spaces isolate every shared global).
+
+THE ANSWER: fork (separate address spaces → isolated crypto state, like the
+socketpair tests) + an mmap MAP_SHARED page for the loopback (the vtable memcpy's it
+— NOT a socket). The TLS path stays syscall-free; only the harness (fork + the one
+mmap + waitpid) crosses a syscall boundary, and those are the kernel-provides-
+scheduler-and-memory stand-ins. The full 1.3 handshake is strictly lock-step, so the
+two directional byte streams are single-producer/single-consumer and need only a
+memory fence (the v6.3.3 #6 mfence/dmb) for publish/acquire across the shared page —
+no lock. Don't forget the entropy hook reseeds in the child (post-fork) so the two
+endpoints get distinct ECDHE shares. See tests/tcyr/tls_native_freestanding.tcyr.
+
+Side find: the TLS 1.3 SERVER ctx leaves get_version() at 0 (the 1.2 server + the
+1.3 client track it) — filed tls13-server-get-version-zero; the smoke asserts the
+1.3-only AEAD suite (0x1302) instead.
+
+[[entries]]
+name = "settable_kernel_base_dedup_first"
+description = "v6.3.3 #5 — making the kernel ELF load base settable was all-or-nothing across 5 emit sites; de-dup to ONE accessor FIRST, then it's byte-identical-verifiable"
+category = "cyrius"
+---
+SETTABLE KERNEL LOAD BASE: DE-DUP BEFORE YOU KNOB
+
+For most of v6.x the kernel ELF load base was a literal — 0x100000 (x86 multiboot)
+/ 0x40000000 (aarch64) — HARDCODED in FIVE places that all have to agree or the
+kernel boots to garbage:
+
+  _entry_base()           x86 + aarch64 fixup.cyr — the base the absolute-fixup
+                          loop computes VAs from (dbase = entry + acp).
+  EMITELF_KERNEL   (x86)  ELF32 multiboot1 — base repeated 6x (entry, text/bss/rod
+                          addr, p_vaddr, p_paddr).
+  EMITELF64_KERNEL (x86)  ELF64 multiboot2.
+  EMITELF_KERNEL   (aa64) ELF64.
+
+The trap (filed as the kernel-load-base-settable issue): change _entry_base but
+miss ONE emitter's p_vaddr and you ship an ELF whose fixups point at a different
+base than its PT_LOAD declares. Nothing catches it except a real boot — the shape
+checks pass, the header looks fine, and it triple-faults on entry.
+
+THE FIX ORDER THAT MAKES IT SAFE (v6.3.3 #5):
+
+  1. DE-DUP FIRST. Introduce ONE accessor — `_kernel_load_base(S)` (per arch) —
+     and route _entry_base + all three emitters through it. With the override cell
+     at 0, it returns the same literal → the ELF32 AND ELF64 kernels are
+     byte-identical pre/post (proven by `cmp`), self-host + seed-derive hold. The
+     dangerous 5-site change is now a verifiable no-op.
+  2. ONLY THEN add the knob. CYRIUS_KERNEL_BASE=0x<hex> env (a tiny _parse_hex_env
+     — the compiler's first 0x-hex env parser) folds into the ONE accessor. The
+     `[sections] base = "0x.."` manifest key is just cbt appending that env. One
+     code path, two surfaces.
+  3. VERIFY BY BOOTING, not by reading the header. A 0x200000 build must shift
+     e_entry AND p_vaddr in lockstep (a check.sh gate) AND actually boot under
+     QEMU emitting its serial marker. The header agreeing is necessary but not
+     sufficient — the fixups have to have followed the base, and only execution
+     proves that.
+
+Corollary: when you expose a value that a settable knob will later override, the
+build-report that prints it must read the SAME source of truth — a hardcoded
+"entry 0x1000a8" report silently lies the moment someone overrides the base, which
+is exactly the drift the report existed to prevent. Make the report base-aware in
+the same slot.
+
+ALSO LANDED v6.3.3 #6: the last missing x86 inline-asm primitives — the memory
+fences mfence/lfence/sfence (0F AE F0/E8/F8). cli/sti/hlt/cpuid/port-I-O/wrmsr/lgdt
+shipped at .27/.28; aarch64's dmb/dsb/isb were already there. Fences are
+UNPRIVILEGED, so unlike cli/sti they get a tcyr that EXECUTES them (real encoding
+proof), not just a compile check.
+
+[[entries]]
 name = "the_143kb_lie"
 description = "How 14 buffer overflows made a kernel look smaller than it was — the AGNOS v1.11.0 to v1.22.0 hardening story"
 category = "cyrius"

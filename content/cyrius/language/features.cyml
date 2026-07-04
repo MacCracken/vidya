@@ -3,7 +3,10 @@
 # Last full refresh 2026-06-09 at v6.1.18; v6.1.x feature additions (TS/TSX→JS
 # emitter, --target=js, #if NAME>=VALUE numeric preprocessor, PIE/.gnu.hash,
 # Windows directory-listing) documented below.
-# 55 entries (v6.1.x carve/TLS additions: bayan_ganita_stdlib_carve,
+# v6.3.x closeout (2026-07-03, v6.3.45): +4 entries for the "language
+# trio" minor — closures_v637_v638, generics_monomorphization_v639_v6310,
+# async_await_futures_v6311, and derive_str_fields refreshed for f64.
+# 59 entries (v6.1.x carve/TLS additions: bayan_ganita_stdlib_carve,
 # native_tls_default).
 
 [[entries]]
@@ -459,7 +462,7 @@ IMPLEMENTATION:
 
 [[entries]]
 name = "derive_str_fields"
-description = "#derive(Serialize) — auto-generate JSON serializer for structs"
+description = "#derive(Serialize) — auto-generate JSON serializer/deserializer for structs (i8/i16/i32/i64/f64/Str/nested; f64 v6.3.40)"
 category = "cyrius"
 ---
 `#derive(Serialize)` before a struct auto-generates
@@ -503,6 +506,17 @@ SEMANTICS:
                                             width-correct loadN
                                             (v5.9.30 i64; v5.9.36
                                             i8/i16/i32 added)
+    `: f64` fields                        → bare JSON numbers (v6.3.40):
+                                            `_to_json` renders via
+                                            fmt_float_buf (lib/fmt.cyr);
+                                            `_from_json`/`_from_json_str`
+                                            parse via f64_parse (lib/math.cyr).
+                                            An f64-deriving struct MUST have
+                                            `lib/math.cyr` in scope (for
+                                            f64_parse) IN ADDITION to
+                                            lib/fmt.cyr. Fractional values
+                                            (`1234.5`) round-trip through the
+                                            6-decimal text form.
     `: Str` fields                        → quoted JSON strings: "alice"
     Nested struct fields (typed by another
     `#derive(Serialize)` struct name)     → recursive _to_json call
@@ -511,7 +525,22 @@ SEMANTICS:
     bytes. `Str\0` → string path. `i8\0` / `i16\0` / `i32\0`
     / `i64\0` → primitive integer path (v5.9.36; narrow widths
     paired with parser-side struct-literal width-correct
-    initializer fix in the same slot).
+    initializer fix in the same slot). `f64\0` → the float path
+    (v6.3.40 — before that an f64 field emitted an undefined
+    `f64_to_json` / `f64_from_json`, a hard "reachable undefined
+    function" build error, same class as the i64 gap fixed v5.9.35).
+
+GLOBAL-SCOPE Str-FIELD FIX (v6.3.44):
+    A `var g = T { .., <str> };` at GLOBAL scope, where T has a Str
+    field, used to fail to PARSE (`unexpected '}'`) — the in-fn init
+    was fine. Root cause: EMIT_GVAR_INITS's pass-2 replay of a global
+    struct literal is a PARALLEL COPY of PARSE_STRUCT_INIT's positional
+    loop that never got the v5.10.7 single-8-byte-slot Str handling, so
+    a Str field fell into the nested-struct FLATTEN branch and PCMPE'd a
+    second (nonexistent) `len` expression, hitting `}`. Fixed by
+    mirroring the IS_STR_FIELD branch into EMIT_GVAR_INITS. (The bug is
+    `#derive`-INDEPENDENT — a plain global struct literal with a Str
+    field reproduced it.)
 
 DESERIALIZER COMPANION:
     #derive(Serialize) ALSO generates `_from_json(pairs)` (the
@@ -2478,3 +2507,145 @@ f64_lt/gt/eq, f64_sqrt/abs/floor, int<->f64 f64_from / f64_to) — v6.2.19 is
 the SUGAR letting you write `a + b` instead of `f64_add(a, b)` once `a`/`b`
 are `: f64`. (CHANGELOG 6.2.18 / 6.2.19; cx scalar float + IEEE-754-direct
 literals are later math-arc bites.)
+
+[[entries]]
+name = "closures_v637_v638"
+description = "Closures: `|params| body` (and `|| body` thunk) as a first-class value; a closure referencing an enclosing local CAPTURES it BY VALUE at construction (heap env object). Invoke via callptr(f, args). Non-capturing closures stay bare fn pointers. Shipped v6.3.7 (non-capturing base) + v6.3.8 (lexical capture). DEFAULT-ON (not gated). PE: non-capturing only."
+category = "cyrius"
+---
+SYNTAX:
+    var add = |a, b| a + b;          # two-param closure
+    var r   = callptr(add, 20, 22);  # -> 42
+
+    var thunk = || 7;                # zero-param closure (|| is NOT
+                                     # logical-or here — at a factor
+                                     # position it's an empty-param
+                                     # closure; `a || b` still parses
+                                     # as short-circuit OR)
+
+    var block = |x| { var t = x * 2; t + 1; };  # { block } body
+
+CAPTURE (v6.3.8) — BY VALUE:
+    var base = 100;
+    var addbase = |x| x + base;      # captures `base` = 100
+    base = 999;                      # does NOT change the closure's copy
+    callptr(addbase, 1);             # -> 101, not 1000
+
+    A closure that references a name failing FINDLOCAL in its own scope
+    (and that isn't a global/fn) records it as a CAPTURE. A capturing
+    closure emits a heap env object `[fn_ptr, cap0, cap1, …]`
+    (`alloc((1+ncap)*8)`) — the closure VALUE is that object. So a
+    capturing closure REQUIRES `include "lib/alloc.cyr"` + `alloc_init()`
+    (ERR_MSG fails loud if alloc is unresolved). A NON-capturing closure
+    is detected as such and stays a BARE fn pointer (no heap).
+
+INVOCATION — callptr auto-dispatches:
+    `callptr(f, args…)` is the canonical call. When the callee local
+    carries the CLOSURE_TYID (0x40000003) var-type tag, callptr loads the
+    fn pointer from `[obj]` and passes the object itself as the hidden
+    first (env) argument — so the call site is IDENTICAL whether or not
+    the closure captured. (A capturing closure fn gains an env parameter
+    at arg-reg 0 / local slot 0; user params shift up by one — handled
+    transparently.) fncallN also works for the bare-fn-pointer case.
+
+SEMANTICS / IMPLEMENTATION:
+    A closure is an anonymous fn emitted INLINE in the enclosing fn.
+    v6.3.7 fixed the four bugs that made the scaffolded feature
+    non-functional (param passing via stale regalloc, unpatched frame
+    size, shared local-table clobbering, regalloc post-pass rewriting the
+    inline code → SIGILL) — a fn that emits any closure skips the
+    regalloc byte-scan post-pass (`_cur_fn_has_closure`).
+
+PLATFORM CAVEAT: capturing closures are NOT yet supported on Windows PE
+(hard error `capturing closures not yet supported on Windows PE`);
+non-capturing closures are fine on all targets. On Linux x86_64 + aarch64
++ (non-capturing) Windows PE they run correctly.
+
+CROSS-REF: field_notes/compiler/gotchas.cyml
+`closure_inline_emit_shares_enclosing_fn_state` (v6.3.7 codegen bugs) +
+`closure_lexical_capture_by_value_env_object` (v6.3.8 env object).
+
+[[entries]]
+name = "generics_monomorphization_v639_v6310"
+description = "Generics via MONOMORPHIZATION: `fn f<T>(a: T): T`, `var x: Box<i32>`, generic structs + fns, scalar + struct type-args, explicit `f<i64>(x)` + inferred receivers. Shipped v6.3.9 (i64 fns) + v6.3.10 (non-i64 + structs + explicit syntax), engine finalized through v6.3.39. OPT-IN behind CYRIUS_MONOMORPH=1 — the default-on flip is PINNED to v6.4.0."
+category = "cyrius"
+---
+STATUS — GATED, default-OFF (through v6.3.x):
+    Generics are behind `CYRIUS_MONOMORPH=1` (experimental). With the flag
+    OFF the surface is REJECTED and default codegen is byte-identical (cycc
+    itself uses no generics). Flipping the flag DEFAULT-ON is a USER
+    decision PINNED to v6.4.0 (needs a full flag-ON differential + flag-ON
+    self-host + cross-OS pass). Set the env var to use them today.
+
+SYNTAX:
+    fn id<T>(x: T): T { return x; }          # generic fn
+    fn add<T>(a: T, b: T): T { return a + b; }
+    var r = id<i64>(5);                      # explicit type argument
+    var s = add<i32>(3, 4);                  # non-i64 instance
+    var t = add(3, 4);                       # inferred (i64) receiver
+
+    struct Box<T> { val: T; }                # generic struct
+    var b: Box<i32> = Box { 7 };
+    struct Holder<T> { v: T; tag: i64; }
+    var h: Holder<Point> = ...;              # struct type-argument
+
+HOW IT WORKS — instantiate-once:
+    In an i64-everywhere language the BASE fn/struct IS its own i64
+    instantiation (body emitted once with `T -> i64`). A non-i64 use mints
+    `foo$ty` / `Box$ty` into the name pool (`$` separator), with FINDFN /
+    FINDSTRUCT as the dedup index; on a miss the specialized instance is
+    emitted by RE-INVOKING PARSE_FN_DEF / PARSE_STRUCT_DEF on the base's
+    verbatim tokens with a concrete `T -> conc` binding override (full
+    fidelity — params, ABI masks, struct args, return, regalloc — for
+    free). Explicit `foo<…>(` is disambiguated from `a < b` via a
+    non-consuming lookahead gated on the flag + a generic-fn callee.
+
+COVERED (x86 + aarch64, gated): generic fns over i64 + narrow scalars +
+struct type-args; generic structs; explicit + inferred receivers; struct
+type-arg on a generic fn (`wrap<Point>(pt)`, v6.3.39); multi-field generic
+struct return/receive. INTENTIONALLY still rejected: multi-tparam struct
+combos (`Two<Point,i64>`), nested `Outer<Inner<T>>`.
+
+CROSS-REF: field_notes/compiler/gotchas.cyml
+`generic_fn_i64_base_and_ret_stash` (v6.3.9) +
+`generic_instantiate_once_reinvoke` (v6.3.10 engine).
+
+[[entries]]
+name = "async_await_futures_v6311"
+description = "async/await as first-class FUTURES over the cooperative epoll runtime: an `async fn` call builds a deferred Future (does NOT run the body); `await fut` forces it to its value. OPT-IN behind CYRIUS_ASYNC=1 (default-off). Needs lib/async.cyr + lib/alloc.cyr. Shipped v6.3.11. NOT stackless CPS coroutines (run-to-completion runtime)."
+category = "cyrius"
+---
+STATUS — GATED, default-OFF: behind `CYRIUS_ASYNC=1` (default off → cycc
+self-host byte-identical; the tokens are lexed unconditionally but the
+FEATURE is gated in pass 2). Set the env var to use it.
+
+SYNTAX:
+    async fn work(n): i64 { return n * 2; }   # `async` before `fn`
+    var fut = work(21);                       # builds a Future — does
+                                              # NOT run the body
+    var v   = await fut;                      # forces it -> 42
+    var v2  = await work(21);                 # await a call directly
+
+MODEL — Futures, NOT coroutines:
+    Calling an `async fn f(p0..pn): T` compiles to a CONSTRUCTOR that
+    allocates a heap Future `[ &f$impl, argc, args… ]` and returns its
+    pointer; the body becomes a hidden `f$impl` reached only by pointer,
+    so the CALL DOES NOT RUN THE BODY. `await fut` lowers to
+    `future_force(fut)`, which calls the bundled impl with the bundled
+    args via fncallN and returns its value. The Future reuses the
+    closure-env heap construction. Futures are spawnable
+    (`async_spawn_future`) and forced cooperatively by `async_run`
+    (a blocking-epoll, run-to-completion driver). 0–6 params.
+
+REQUIRES: `include "lib/alloc.cyr"` + `include "lib/async.cyr"` (the
+runtime — future_force / async_spawn_future / async_run — is shared across
+all targets, pure fncallN dispatch, no new syscalls).
+
+DEFERRED (documented): true stackless coroutines that suspend/resume
+MID-BODY across an `await` (a poll-driven state machine) need a poll-based
+runtime rework; also force-once Future memoization, async generic fns, and
+struct-returning async fns.
+
+CROSS-REF: field_notes/compiler/gotchas.cyml
+`async_await_futures_dce_nameread` (the DCE name-read landmine when a
+modifier keyword precedes `fn`).
