@@ -35,7 +35,8 @@ The type_id is metadata — it does NOT change how the value is stored
 (still 8 bytes on stack). It enables the compiler to:
   1. Warn on assignment between incompatible types
   2. Scale pointer arithmetic correctly
-  3. Emit correct-width loads/stores (movzx for i8/i16, mov for i64)
+  3. Emit correct-width loads/stores (signed i8/i16/i32 → movsx,
+     unsigned uN → movzx, i64 → mov; v6.3.35)
 
 TCC REFERENCE: VT_INT=0, VT_BYTE=1, VT_SHORT=2, VT_VOID=3, VT_PTR=5,
 VT_FUNC=6, VT_STRUCT=7, VT_FLOAT=8, VT_DOUBLE=9. Stored in CType.t
@@ -356,9 +357,16 @@ helper functions. When loading a variable, check var_types[]:
   if type_id == 4: width = 4
   else: width = 8  (default, backward compatible)
 
-WHY MOVZX NOT MOVSX: Zero-extension is safer default. Sign-extension
-(movsx) is needed for signed i8/i16 values used in arithmetic. Can
-add a signed flag later (type_id | 0x80 = signed).
+WHY MOVZX vs MOVSX (UPDATED v6.3.35): extension is now signedness-
+dependent, not a blanket zero-extend. SIGNED sub-i64 loads (i8/i16/i32 —
+locals, struct fields, call-args) SIGN-extend (x86 movsx/movsxd, aarch64
+ldurs*/ldrs*); only UNSIGNED uN loads zero-extend (movzx). A sub-i64
+struct FIELD is always signed (struct-def only recognizes i8/i16/i32).
+Signedness is read off the type-name low byte ('i' 0x69 vs 'u' 0x75);
+implemented as a negative-width sentinel in the slice-width table so no
+new heap region was needed. (Historical: this entry originally proposed
+zero-extend-always with 'add a signed flag later' — that signed path
+shipped at v6.3.35. See src/backend/x86/emit.cyr:464-501,563-566.)
 
 STRUCT FIELDS: Field width comes from struct_ftypes[]. When a field
 is typed as i8, its size is still 8 in the struct layout (alignment).
@@ -697,8 +705,12 @@ name = "multi_width_implementation_plan"
 description = "v2.0 implementation plan: multi-width types (i8, i16, i32) — concrete code changes"
 category = "cyrius"
 ---
-STATUS: v2.0.0-dev research. This is the foundational change — everything else
-(sizeof, struct padding, unions, bitfields, variadic, u128) depends on this.
+STATUS: HISTORICAL — v2.0.0-era research plan. The multi-width type work
+planned here SHIPPED and has since evolved: width-correct load/store, SIGNED
+sub-i64 sign-extension (v6.3.35), >8B struct-by-value param ABI (v6.3.36).
+Kept as design lineage, not pending work. This was the foundational change —
+everything else (sizeof, struct padding, unions, bitfields, variadic, u128)
+depended on it.
 
 PRINCIPLE: Backward compatible. Untyped variables remain i64. Type annotations
 enable width-correct codegen. All existing code compiles identically.
