@@ -1,8 +1,9 @@
 # Cyrius Field Notes — Language Gotchas (platform & ABI)
 # Per-OS preprocessor target flags, struct return by value, variadic fns,
-# the fncall6-into-extern-C arg-count ceiling, and AArch64 cross-`bl`
-# register clobber + immediate-encoding limits.
-# 5 entries.
+# the fncall6-into-extern-C arg-count ceiling, AArch64 cross-`bl`
+# register clobber + immediate-encoding limits, and the agnos
+# two-sided ABI syscall-wrapper mirror.
+# 6 entries.
 
 [[entries]]
 name = "per_os_target_flags_win_vs_linux"
@@ -350,4 +351,21 @@ x86_64 hides all three: arbitrary 64-bit immediates fit in
 rdi, r8–r11), so the surface area of "what can I keep across a
 call" is smaller and more obvious. Porting an x86_64 asm
 example to aarch64 always surfaces at least one of these three.
+
+[[entries]]
+name = "agnos_two_sided_abi_mirror"
+description = "An `#ifdef CYRIUS_TARGET_AGNOS` syscall-wrapper band is byte-identical on every non-agnos target; verify agnos-only wrappers via agnos-crossbuild-gate.sh + a call-probe. The a4=r10 5-arg syscall form rides r10 (push→pop)."
+category = "cyrius"
+---
+**v6.4.2** — the agnos audio syscall band (`sys_snd_*`, #64–#69) landed as the ring-3 half of a two-sided ABI (kernel HDA handlers land in parallel on the agnos arm). The pattern for adding an agnos syscall wrapper, and why it's low-risk to the cross-OS self-host:
+
+THE TWO-SIDED MIRROR. `lib/syscalls_x86_64_agnos.cyr` is a STANDALONE faithful mirror of `agnos/docs/development/agnos-userland-abi.md` — it does NOT include `syscalls_linux_common.cyr`. agnos has its own numbers, exit=0 (not Linux 60), AO_* open flags (not Linux O_*), and the explicit-length invariant (every path arg carries its length — no NUL assumption). The register convention IS the same as x86_64-Linux (rax=num, rdi/rsi/rdx/r10 = a1..a4), so the `syscall` instruction EMIT is unchanged — only the NUMBERS differ. RE-FREEZE RULE (§5): the kernel doc is canonical; this file mirrors it. If a number/signature changes in the doc, re-freeze here.
+
+BYTE-IDENTICAL EVERYWHERE ELSE. The wrappers are `#ifdef CYRIUS_TARGET_AGNOS`-gated (the flag is predefined only for the agnos emit target, `CYRIUS_TARGET_AGNOS=1`; `src/main.cyr` reads it early). So they're #ifdef'd OUT of every non-agnos build → cycc self-hosts byte-identical on Linux/macOS/Windows/aarch64, and seed → cybs → cycc stays byte-identical. A pure-additive agnos wrapper band is NOT a compiler change.
+
+HOW TO VERIFY AGNOS-ONLY CODE (a Linux-hosted cycc can't run it). Two gates, both host-side: (1) the standing `scripts/agnos-crossbuild-gate.sh` (9 sub-checks → a valid agnos ELF) must stay green; (2) a CALL-PROBE — a tiny program that calls every new wrapper, compiled with `build/cyrius build --agnos`, must produce a valid agnos ELF (rc=0, no reachable-undefined fn) and emit `syscall` with the right `eax` numbers. Runtime (HDA → ALC897 for audio) validates QEMU-side on the agnos arm, not here.
+
+THE a4=r10 5-ARG FORM. agnos's 4-arg syscalls pass the 4th arg in r10 (§1a). In Cyrius source that's a 5-arg `syscall(N, a1, a2, a3, a4)` call — e.g. `sys_snd_write_nb(slot,buf,frames)` is `syscall(SYS_SND_WRITE, slot, buf, frames, 1)` where the trailing `1` = O_NONBLOCK bit0. The compiler passes that 4th syscall arg through **push → pop %r10**, so the non-blocking wrapper shares the exact instruction shape of the blocking form (`sys_symlink#63` uses the same 5-arg form) — no ABI drift between them.
+
+The band: `SND_OPEN=64, SND_CONFIG=65, SND_WRITE=66, SND_CLOSE=67, SND_DRAIN=68, SND_AVAIL=69`; seven wrappers (write + write_nb share #66). Frozen ABI is a single 48000 Hz / 16-bit / stereo S16-interleaved output stream, slot 0..3, and #65–#69 reject a slot not owned by the caller (-1).
 

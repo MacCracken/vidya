@@ -7,7 +7,8 @@
 # For design / convention patterns see patterns.cyml.
 # For non-obvious internal traps see gotchas.cyml.
 #
-# 10 entries (.63 added: real-flow gate vs self-host placebo).
+# 11 entries (.63 added real-flow gate vs self-host placebo; v6.4.2 added stdlib
+# public-fn addition trips three hygiene gates).
 
 [[entries]]
 name = "premise_check_at_slot_entry"
@@ -735,4 +736,54 @@ running allocating programs instead.)
 Cross-ref: gotchas.cyml (macho_syscall_number_dual_definition_61_vs_217,
 macho_output_basename_breaks_reproducible_cmp); retros/v60x.cyml;
 CLAUDE.md Closeout 3b ("hello-world smoke is a placebo").
+"""
+
+[[entries]]
+name = "stdlib_public_fn_addition_trips_three_hygiene_gates"
+description = "Adding PUBLIC fns to a lib/*.cyr file trips THREE stdlib-hygiene check.sh gates EVEN when cycc is byte-identical (an agnos-gated addition): lint (>120-char lines), api-surface (regen the snapshot), and cyrdoc --check (each public fn needs its OWN leading # doc comment). They surface one-at-a-time — verify all three locally before the gate."
+category = "cyrius"
+tags = ["process", "stdlib", "check.sh", "api-surface", "cyrdoc", "v6.4.2"]
+content = """
+**The rule**: a lib-only addition that is CODEGEN-invisible (a
+`#ifdef CYRIUS_TARGET_AGNOS` syscall wrapper, gated off every
+non-agnos target → cycc byte-identical) still trips THREE
+stdlib-hygiene gates in check.sh. They fire ONE AT A TIME —
+fix the first, rerun, hit the second, etc. Verify all three
+LOCALLY before the release gate so you don't ping-pong.
+
+**The three gates** (v6.4.2, adding `sys_snd_*` audio wrappers
+to `lib/syscalls_x86_64_agnos.cyr`):
+
+1. **lint (>120 chars/line).** A 3-byte UTF-8 glyph in a
+   comment inflates the BYTE length past 120 even though the
+   visible column count looks fine. Count bytes, not glyphs,
+   when wrapping doc comments.
+
+2. **api-surface.** ANY new public fn changes the recorded
+   surface. Regenerate the snapshot:
+   `build/cyrius_api_surface --update`, then verify the diff is
+   **+N / -0** (additions only, zero removals — a removal is a
+   breaking change, see stdlib_dep_care_not_application_care).
+   The gate's exit-code test passes on a stale snapshot; the
+   drop-first-line 'expect exactly N added' test goes RED —
+   confirm `comm -23 old new` is empty first.
+
+3. **cyrdoc --check.** EACH public fn needs its OWN leading `#`
+   doc comment immediately above the `fn` line — NOT one
+   grouped block covering several fns. A shared block passes
+   the eye but fails cyrdoc's per-fn scan.
+
+**Generalize**: 'cycc is byte-identical' proves ONLY the
+codegen path. The stdlib-hygiene gates (lint/api-surface/
+cyrdoc) are orthogonal — a lib addition clears the self-host
+fixpoint and still reds three separate gates. Run
+`cyrius lint` + `cyrius_api_surface --update` + `cyrdoc
+--check` on the touched lib file BEFORE `release-gate.sh`.
+
+Cross-ref: methodology.cyml `stdlib_dep_care_not_application_care`
+(api-surface removals = major bump). For the agnos two-sided
+ABI mirror mechanics (a4=r10 5-arg syscall form, agnos-crossbuild
+gate + call-probe) see language/stdlib_modules.cyml.
+
+Full backstory: cyrius CHANGELOG v6.4.2 (sys_snd_* band #64-#69).
 """

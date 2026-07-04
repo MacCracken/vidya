@@ -1,7 +1,7 @@
 # Cyrius Field Notes — Language Gotchas (parser & syntax)
 # Operator precedence, var/scope/bracket parser rules, and shift semantics that
 # bite at parse time or at the lexer.
-# 8 entries.
+# 10 entries.
 
 [[entries]]
 name = "the_logical_shift_trap"
@@ -207,18 +207,21 @@ GENERAL RULE when porting bitwise algorithms from C to cyrius:
 
 [[entries]]
 name = "var_bracket_size_must_be_literal"
-description = "`var name[N]` requires N to be an integer literal; `var name[CONST_IDENT]` is rejected at parse — STILL ACTIVE at v5.8.46 (re-confirmed at v5.8.47 vidya audit)"
+description = "`var name[N]` requires N to be a NUM literal OR (since v5.10.48) an enum-constant IDENT; plain `var NAME = LITERAL;` named-constant idents are still rejected. PARTIALLY FIXED v5.10.48."
 category = "cyrius"
 ---
-**Status (2026-05-03)**: still active at cyrius v5.8.46. Tracked
-at:
-`cyrius/docs/development/issues/2026-05-03-parser-cosmetic-limits-bare-return-and-var-bracket.md`
-(filed during the v5.8.47 vidya audit alongside its companion
-`bare_return_in_if_block_rejected`).
+**Status (2026-07-04, v6.4.2)**: PARTIALLY FIXED at v5.10.48 — `var
+name[N]` now accepts N as a NUM literal OR an IDENT that resolves to
+a compile-time ENUM constant (parse_decl.cyr PARSE_ARRAY, via
+enum_const_val marker bit 63). What is STILL rejected: an IDENT that
+is a plain top-level `var NAME = LITERAL;` (cyrius has no
+named-constant infrastructure outside enums). Pre-v5.10.48 behavior
++ workarounds preserved below. Tracked at:
+`cyrius/docs/development/issues/2026-05-03-parser-cosmetic-limits-bare-return-and-var-bracket.md`.
 
-The `var name[N]` stack-local syntax requires N to be an integer
-literal at parse time. Even if `CONST_IDENT` is a `var` initialized
-to a constant integer expression, the parser rejects it.
+The `var name[N]` stack-local syntax requires N to be a NUM literal
+OR an enum-constant IDENT at parse time. A plain `var CONST = 32;`
+name (not an enum constant) is still rejected.
 
     var TEX_STRUCT_SIZE = 32;
 
@@ -239,9 +242,11 @@ WORKAROUNDS:
      pointing to the documented size.
   2. Heap-allocate instead. `alloc(TEX_STRUCT_SIZE)` works fine —
      `alloc` takes a runtime expression, no parser constraint.
-  3. Use an enum constant. Enums are compile-time-resolved before
-     `var` declarations parse, but in practice the compiler still
-     wants a literal here, so test before you bet on it.
+  3. Use an enum constant — this is now the CANONICAL fix (v5.10.48):
+     `enum Sz { TEX = 32; } fn build_texture() { var tex[TEX]; }`.
+     Enum constants are compile-time-resolved and accepted directly
+     in the `var name[N]` position. (Only non-enum named `var`
+     constants remain rejected.)
 
 WHERE THIS BIT US:
 
@@ -374,16 +379,19 @@ test to construct Stats inline.
 
 [[entries]]
 name = "bare_return_in_if_block_rejected"
-description = "Cyrius's parser rejects bare `return;` inside an `if { ... }` block — must use `return 0;` (no void in Cyrius) — STILL ACTIVE at v5.8.46 (re-confirmed at v5.8.47 vidya audit)"
+description = "✅ FIXED in v5.10.48 — bare `return;` inside an `if { ... }` block now synthesizes `return 0;` (byte-identical codegen); pre-fix behavior + no-void-in-Cyrius note preserved below for pre-v5.10.48 toolchains"
 category = "cyrius"
 ---
-**Status (2026-05-03)**: still active at cyrius v5.8.46. Tracked
-at:
-`cyrius/docs/development/issues/2026-05-03-parser-cosmetic-limits-bare-return-and-var-bracket.md`
-(filed during the v5.8.47 vidya audit alongside its companion
-`var_bracket_size_must_be_literal`).
+**Status (2026-07-04, v6.4.2)**: ✅ FIXED at v5.10.48. Bare
+`return;` inside a braced block now synthesizes `return 0;` — the
+parser peeks for `;` BEFORE calling PCMPE and, if present, emits
+`mov rax, 0` + a jump to the epilogue (byte-identical to `return
+0;` codegen at that position; parse_fn.cyr:685-699). The old
+'unexpected ;' error no longer fires. Pre-fix behavior preserved
+below for pre-v5.10.48 toolchain users. Tracked at:
+`cyrius/docs/development/issues/2026-05-03-parser-cosmetic-limits-bare-return-and-var-bracket.md`.
 
-THE TRAP:
+PRE-v5.10.48 TRAP:
 
     fn fb_set(x, y, color) {
         if (x < 0) { return; }              # ERROR: unexpected ';'

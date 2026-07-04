@@ -12,6 +12,15 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
+# 68 entries (v6.4.2, 6.4.x: +2 gotchas from the v6.4.0/.1 generics-flip +
+# allocator-hardening work — monomorph_default_on_flip_gftp_decouple
+# (CYRIUS_MONOMORPH default-on needed GFTP(S,fi)!=0 as the precise per-fn
+# signal + decoupling from _INLINE_OK to avoid a +25.6% general-inlining
+# regression; generics are now DEFAULT-ON, CYRIUS_MONOMORPH=0 opts out) and
+# alloc_reset_zero_on_reset_chunk_model_and_lib_fix_not_auto_byte_identical
+# (zero-on-reset info-leak fix; _heap_used is cumulative so a naive memset
+# over-runs the first chunk; a lib fix is NOT auto cycc-byte-identical when
+# cycc includes the lib).)
 # 64 entries (v6.3.x closeout, 6.3.44: +4 durable gotchas from the .43/.44
 # cross-OS + stdlib correctness sweep — macho_syscall_xlat_source_numbers_arch_specific
 # (getpid returned GARBAGE on aarch64-macOS behind a callable-only smoke),
@@ -3250,14 +3259,18 @@ pass-2 start) — if the callee is defined after a top-level statement, pass-1 s
 above). Then check the CALL site resolves the prescanned fi (FINDFN must find it) vs re-REGFNing a
 fresh mask-0 slot.
 
-**AR-01 — monomorph substrate (gated proof).** `_MONOMORPH_OK` (util.cyr, default 0; set by
-`CYRIUS_MONOMORPH=1` in all 7 drivers) ORs into PARSE_FN_DEF's two capture gates. OFF → byte-identical
-codegen (the per-backend `_INLINE_OK = 0` default is untouched — x86 was disabled for code SIZE at
-v1.11.3, aarch64 for a metadata overlap since relocated to S+0x9EA000). ON → capture fires and the
-intact replay emits per-call-site value-substituted code. Proven byte-correct + active by
-`_monomorph_substrate_gate` (compile a fixture ±flag → both exit 42, binaries differ) on x86 + real pi.
-TYPE substitution (generics) builds on this in v6.3.7 — the substrate substitutes VALUES today, not
-types yet.
+**AR-01 — monomorph substrate.** `_MONOMORPH_OK` (util.cyr) ORs into PARSE_FN_DEF's two capture gates.
+**As of v6.4.0 the default is 1 (util.cyr:273) — generics are DEFAULT-ON; `CYRIUS_MONOMORPH=0` opts
+out** (this was `default 0` / `CYRIUS_MONOMORPH=1`-opt-in when this entry was first written at v6.3.5).
+The default-on flip was NOT a one-liner: the capture arm was DECOUPLED from general inlining by
+qualifying it with `GFTP(S, fi) != 0` (only generic fns are captured; see
+`monomorph_default_on_flip_gftp_decouple`) so the flip doesn't re-enable value-inlining for every fn.
+The per-backend `_INLINE_OK = 0` default is untouched — x86 was disabled for code SIZE at v1.11.3,
+aarch64 for a metadata overlap since relocated to S+0x9EA000. When the gate fires the intact replay
+emits per-call-site value-substituted code. `_monomorph_substrate_gate` was **repurposed** at the flip:
+it originally proved the substrate ACTIVE (compile a fixture ±flag → both exit 42, binaries differ) and
+now proves the DECOUPLE holds (non-generic fns stay un-inlined under flag-on). TYPE substitution
+(generics) builds on this in v6.3.7 — the substrate substitutes VALUES today, not types yet.
 
 **Filed alongside:** `var p = mk()` (inferred local type from a struct-returning call) segfaults even
 NON-forward — a pre-existing var-decl/retptr defect, not CO-01. Use `var p: T = mk()`.
@@ -3691,4 +3704,114 @@ once built or self-hosted cycc. It surfaced only when a human installed on
 a Mac and got a broken toolchain. Hello-world / exit-code / callable-only
 smoke is a PLACEBO — the compiler self-hosting on the target, and the
 actual behavior asserted on the actual hardware, IS the test.
+"""
+
+[[entries]]
+name = "monomorph_default_on_flip_gftp_decouple"
+description = "v6.4.0 flipped CYRIUS_MONOMORPH default-on (generics on by default; CYRIUS_MONOMORPH=0 opts out). It was NOT a one-liner: the precise per-fn signal is GFTP(S, fi) != 0 (generic-fn-type-params; non-zero = the fn is generic), because a generic fn's base AND all its token-replayed instances SHARE the generic fi. Two entangled prerequisites: (1) DECOUPLE monomorph from _INLINE_OK — they shared the inline-CAPTURE gate (_INLINE_OK==1 || _MONOMORPH_OK==1), so flipping re-enabled GENERAL inlining (+25.6% x86 size regression, the v1.11.3 class) → gate capture to `_INLINE_OK==1 || (_MONOMORPH_OK==1 && GFTP(S,fi)!=0)` at BOTH SFBS/SFBE sites; (2) narrow the v6.3.29 frame-trim blanket (`if _MONOMORPH_OK!=0 return`) to `if _MONOMORPH_OK==1 && GFTP(S,fi)!=0 return`, passing fi into _ra_frame_trim. cycc has ZERO generic fns → flag-on == flag-off byte-identical (1,024,552 B). DEAD ENDS (the 'why not X' record): _cur_fn_has_closure (incomplete), _ra_picker_ran (over-conserved +12KB), _inst_conc0 (missed nested). GFTP is the only clean signal — a property of the FN, not transient emit state."
+type = "gotcha"
+tags = ["generics", "monomorphization", "GFTP", "default-on-flip", "inline-decouple", "frame-trim", "_INLINE_OK", "_MONOMORPH_OK", "v6.4.0"]
+body = """
+**The flip needed a precise per-fn signal, not a global toggle.** v6.4.0
+made `CYRIUS_MONOMORPH` default-ON (`_MONOMORPH_OK = 1` in
+`src/common/util.cyr`); `CYRIUS_MONOMORPH=0` is the opt-out. The whole
+generics feature was already correct behind the flag (through v6.3.39) —
+this slot de-risked the DEFAULT flip, and it was NOT a one-liner. Two
+prerequisites were entangled, and both are resolved by the SAME signal:
+**`GFTP(S, fi) != 0`** — the fn has generic type-params. A generic fn's
+base AND every token-replayed instance share the generic fn's `fi`, so
+`GFTP != 0` cleanly covers the whole generic family and NOTHING else
+(see the comment at parse_fn.cyr:1834).
+
+**Prerequisite 1 — decouple monomorph from `_INLINE_OK`.** The two
+shared the inline-CAPTURE gate: `_INLINE_OK == 1 || _MONOMORPH_OK == 1`.
+With `_MONOMORPH_OK` now 1 by default, that OR re-enabled GENERAL value
+inlining for EVERY fn — a **+25.6 %** x86 size regression (the same
+class as the original v1.11.3 inline-off decision; ~1.02 MB → ~1.29 MB
+on a flag-on self-host). Fix: qualify the monomorph arm with GFTP at
+BOTH capture sites (SFBS body-start + SFBE classify):
+`if (_INLINE_OK == 1 || (_MONOMORPH_OK == 1 && GFTP(S, fi) != 0))`
+(parse_fn.cyr:3133 / :3178). Non-generic fns are never captured;
+generic fns still are.
+
+**Prerequisite 2 — narrow the v6.3.29 frame-trim blanket.** The frame
+trim had a blanket `if (_MONOMORPH_OK != 0) return` — under the flag
+that disabled the trim for EVERY fn (+16 KB). Narrow it to
+`if (_MONOMORPH_OK == 1 && GFTP(S, fi) != 0) return` and thread `fi`
+through — `_ra_frame_trim(S, fn_start, fi)` (parse_fn.cyr:1821, guard
+at :1838). Only generic fns skip the trim now.
+
+**Why byte-identical.** cycc's own source has ZERO generic fns, so
+under the flip every capture/trim GFTP check is 0 → flag-on codegen ==
+flag-off codegen → cycc self-hosts byte-identical (1,024,552 B) and the
+differential is status-diff=0 / codegen-diff=0 over the whole corpus in
+BOTH modes.
+
+**DEAD ENDS (kept as the 'why not X' record).** Three other per-fn
+signals were tried and rejected before GFTP:
+  - `_cur_fn_has_closure` — incomplete (doesn't cover all generic fns).
+  - `_ra_picker_ran` — over-conserved (+12 KB; too broad).
+  - `_inst_conc0` — missed NESTED instances.
+GFTP won because it is a PROPERTY OF THE FN (its captured type-params),
+not transient emit state that a given pass may or may not have set. The
+v6.3.5 `_monomorph_substrate_gate` was REPURPOSED here: it now proves
+the DECOUPLE holds (monomorph-on leaves non-generic fns un-inlined), the
+inverse of what it originally proved.
+
+**Recognize again.** Any 'flip a gated default on' where the gate shared
+an OR with another feature's gate: flipping silently re-enables that
+other feature for the whole program. The fix is a precise per-fn (or
+per-site) qualifier that is a stable PROPERTY, not transient state — and
+measure the size delta on a flag-on self-host, because a same-file-size
+cycc (0 generic fns) hides a large regression on real consumers.
+"""
+
+[[entries]]
+name = "alloc_reset_zero_on_reset_chunk_model_and_lib_fix_not_auto_byte_identical"
+description = "v6.4.1 made alloc_reset() zero the reclaimed span (CVE-2026-34988-class memory-reuse info-leak — the ONE point the forward-only bump allocator re-hands an address). THE TRAP: the naive `memset(_heap_first_base, 0, _heap_used)` is UNSAFE — _heap_used is CUMULATIVE across chunks, so it over-runs the first chunk (past _heap_first_end) on a multi-chunk heap. Only the FIRST chunk is a reuse channel (spills re-mmap fresh kernel-zeroed chunks), so scrub its written extent: `_heap_ptr - _heap_first_base` when still in the first chunk (common, exact), else the whole first chunk via the `_heap_base != _heap_first_base` spill discriminator; macOS/Windows single-region backends zero exactly [_heap_base, _heap_ptr). A new un-gated `_alloc_zero(base,n)` (store64/store8 loop) keeps the foundational allocator free of a lib/string.cyr memset dependency; fixed in all 4 backends. DURABLE LESSON: cycc INCLUDES lib/alloc.cyr AND alloc_reset is reachable via the allocator vtable's reset_fn (address-taken → NOT DCE'd), so the scrub added +424 B of code to cycc (absorbed into page-align padding → file size unchanged at 1,024,552 B). A 'lib fix' is NOT automatically cycc-byte-identical when cycc includes the lib."
+type = "gotcha"
+tags = ["alloc", "alloc_reset", "info-leak", "CVE-2026-34988", "chunk-chain", "_heap_used", "_alloc_zero", "lib-fix-byte-identical", "vtable-reachable", "v6.4.1"]
+body = """
+**The leak.** The bump allocator is forward-only — every allocation
+moves onto never-touched, kernel-zeroed pages — EXCEPT `alloc_reset()`,
+the one point it rewinds the bump pointer and hands the same address to
+a new owner. Pre-v6.4.1 it rewound without zeroing, so a post-reset
+allocation read the prior occupant's bytes (CVE-2026-34988 /
+CVE-2022-39393 class; sandhi's per-batch reset is the live call site).
+
+**THE TRAP — `_heap_used` is cumulative across chunks.** The obvious
+fix `memset(_heap_first_base, 0, _heap_used)` is UNSAFE: on a chunk-chain
+allocator (`lib/alloc.cyr` Linux, `alloc_agnos.cyr`) `_heap_used` counts
+bytes across ALL chunks, so it over-runs the first chunk — writing past
+`_heap_first_end` into whatever follows. Correct model: only the FIRST
+chunk is a reuse channel (a spill past it re-`mmap`s a fresh, already
+kernel-zeroed chunk that alloc_reset drops entirely), so scrub just the
+first chunk's WRITTEN extent (`lib/alloc.cyr:243-257`):
+
+    var span = _heap_ptr - _heap_first_base;                       # still in chunk 1 (common, exact)
+    if (_heap_base != _heap_first_base) {                          # a spill happened
+        span = _heap_first_end - _heap_first_base;                 # → whole first chunk
+    }
+    if (span > 0) { _alloc_zero(_heap_first_base, span); }
+
+The `_heap_base != _heap_first_base` test IS the multi-chunk
+discriminator. macOS (`alloc_macos.cyr`) / Windows (`alloc_windows.cyr`)
+are single contiguous regions → zero exactly `[_heap_base, _heap_ptr)`.
+
+**Why a local `_alloc_zero`.** `alloc.cyr` is the foundational
+allocator; making it call `memset` (lib/string.cyr) would give every
+platform backend a string.cyr dependency. New un-gated
+`_alloc_zero(base, n)` (alloc.cyr:105) is a plain `store64`/`store8`
+loop, visible to every included backend (the `arena_*` precedent proves
+un-gated alloc.cyr fns reach the backends). Fixed in ALL FOUR backends.
+
+**THE DURABLE LESSON — a lib fix is not auto cycc-byte-identical when
+cycc includes the lib.** cycc INCLUDES `lib/alloc.cyr`, AND `alloc_reset`
+is reachable via the allocator vtable's `reset_fn` (address-taken → NOT
+DCE-eliminated). So the scrub added **+424 B of code to cycc** — here it
+happened to be absorbed into page-align padding (file size unchanged at
+1,024,552 B), but that is luck, not a guarantee. Do NOT assume 'it's
+just a lib change → cycc is byte-identical'; run the self-host fixpoint
+(and, for any allocator/heap change, the two-step + seed-derive) for a
+lib touched by code cycc includes.
 """

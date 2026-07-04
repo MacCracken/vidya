@@ -82,9 +82,12 @@ global variable budget:
 
 Both produce identical code — the values are inlined at use sites.
 
-WARNING: Enum values must be non-negative integers. For negative constants
-like FIXED_NEG_ONE, you still need `var FIXED_NEG_ONE = 0 - 65536;`
-(Cyrius has no negative literals — use `0 - N`).
+WARNING: Enum VALUES must be non-negative integers — `enum E { NEG = -1; }`
+still errors 'expected number, got -' (verified v6.4.2). For a negative
+constant, declare it as a top-level `var FIXED_NEG_ONE = 0 - 65536;` or
+`var FIXED_NEG_ONE = -65536;` — negative literals DO work in general
+expressions now; it is only the enum-value grammar position that rejects
+the leading `-`.
 
 In cyrius-doom, converting constants to enums saved 30+ gvar_toks slots,
 which made the difference between compiling and not compiling.
@@ -225,10 +228,18 @@ THE TRAP:
         return parse(str_new(&buf, n));        # Str's data ptr → static buf
     }
 
-This is the compounded form of "var buf[N] is BYTES not ELEMENTS,
-and lives in the binary." Sized properly, the first call works
-fine. The second call overwrites the buffer in-place; every Str
-the first call returned now points at the second file's bytes.
+This is the compounded form of "var buf[N] is BYTES not ELEMENTS."
+NOTE (v6.3.15 default-on stack arrays): a fn-local `var buf[N]` now
+behaves TWO ways by size — SMALL arrays route to per-thread STACK
+slots (so a returned `&buf` DANGLES after the fn returns, reused by
+the next call), while OVERSIZED arrays (over the per-fn stack budget,
+as with `var buf[262144]`) STILL fall back to one shared global
+buffer (the compiler emits `note: oversized array local kept in
+shared global ... use alloc()` plus the `large static data` warning).
+Either way the borrow is unsafe across calls. Sized properly, the
+first call works; the second call clobbers the first — every Str the
+first call returned now points at the second file's bytes (shared
+global) or at reused stack (small).
 
 You see this as parsed values bleeding across calls — IDs become
 suffixes/prefixes of later IDs, descriptions become fragments of
