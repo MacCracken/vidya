@@ -42,6 +42,19 @@ TCC REFERENCE: VT_INT=0, VT_BYTE=1, VT_SHORT=2, VT_VOID=3, VT_PTR=5,
 VT_FUNC=6, VT_STRUCT=7, VT_FLOAT=8, VT_DOUBLE=9. Stored in CType.t
 with bitwise OR for qualifiers (VT_UNSIGNED, VT_CONST, etc).
 
+SIMD EXTENSION (v6.4.x, the negative band carries more than pointers now):
+the reserved range `<= -2048` is a STRUCTURED VECTOR DESCRIPTOR band,
+decoded by `_vec_desc` in src/common/util.cyr — distinct from the plain
+`-scale` typed-pointer values just above it. f32v4 (128-bit) is sentinel
+-2121; f32v8 (256-bit) is -2153; integer vectors (i8v16/i16v8/i32v4/i64v2
++ unsigned) get their own sentinels in the same band, with a "signed" flag
+in descriptor bit 1. Any site that maps a negative type sentinel to a
+struct-id (`0 - sltype -> sid`) MUST guard against these — the magnitude
+exceeds the 1024 struct-id cap, so an unguarded decode reads PAST the
+struct tables (the v6.4.4 `.field` OOB memory-unsafety class). See
+`language/features.cyml` for the SIMD syntax/builtins and
+`field_notes/compiler/gotchas.cyml` for the VEX-encoding traps.
+
 [[entries]]
 name = "type_check_single_pass"
 description = "Type checking during parsing without a separate pass or inference engine"
@@ -875,3 +888,65 @@ fn body for each payloaded variant:
   EFNEPI
 
 Empty parens `Foo()` (v5.8.23): arity = 0, alloc(8), tag-only.
+
+[[entries]]
+name = "simd_vector_types_v64x"
+description = "SIMD vector types as a type-system extension (v6.4.x, complete on all four backends: x86 SSE/AVX2, aarch64 NEON, Win64 PE, cx bytecode): descriptor-encoded 128/256-bit vectors, builtins up to token 151, new x86 VEX backend emitters"
+category = "cyrius"
+---
+STATUS: v6.4.x SIMD compute arc — Phase 5 COMPLETE on all four backends
+(f32v4/f32v8 + integer vectors, elementwise + FMA + dot): x86 SSE+AVX2
+(.4-.9), aarch64 NEON (.28-.30), Win64 PE value-form params+returns (.31),
+cx bytecode per-lane loops (.32). This is the type system's first move
+beyond scalars + structs into fixed-width SIMD vectors.
+
+VECTOR TYPES (all encoded in the `<= -2048` structured-descriptor band,
+decoded by `_vec_desc` in src/common/util.cyr — see the type_id_encoding
+entry's SIMD note):
+  f64v2   — 128-bit, 2 x f64   (value constructors + splat/lane at v6.4.3)
+  f64v4   — 256-bit, 4 x f64
+  f32v4   — 128-bit, 4 x f32   sentinel -2121  (v6.4.4, first f32 SIMD)
+  f32v8   — 256-bit, 8 x f32   sentinel -2153  (v6.4.8, first AVX2/VEX)
+  i8v16 / i16v8 / i32v4 / i64v2 (+ unsigned)   integer vectors (v6.4.6),
+          own sentinels in the band, "signed" flag = descriptor bit 1
+
+BUILTIN TOKENS (lexer/parser SIMD-op tokens, highest is now 151):
+  138-140  f32v_add / f32v_sub / f32v_mul        (v6.4.4)
+  141-142  f32v_fmadd / f32v_dot                 (v6.4.5)
+  143-145  iv_add / iv_sub / iv_mul              (v6.4.6; 5th arg = a
+           COMPILE-TIME lane-width literal)
+  146      iv_dp8                                 (v6.4.7; u8·i8 -> i32
+           widening int8 dot — the BitNet/b1.58 GEMM inner loop:
+           pmaddubsw / pmaddwd / paddd)
+  147-149  f32v8_add / f32v8_sub / f32v8_mul     (v6.4.8, 2-byte C5 VEX)
+  150-151  f32v8_fma / f32v8_dot                 (v6.4.9, 3-byte C4 VEX:
+           vfmadd231ps + vextractf128 8-lane reduce)
+
+x86 BACKEND EMITTERS (src/backend/x86/float.cyr): EMIT_F32V_LOOP /
+EMIT_F32V_FMADD / EMIT_F32V_DOT (SSE, hand-rolled hex), EMIT_IVEC_BINOP /
+EMIT_IVEC_DP8 (integer), and the FIRST-EVER VEX-encoding emitters
+EMIT_F32V8_LOOP / EMIT_F32V8_FMADD / EMIT_F32V8_DOT. AVX2/FMA are NOT
+x86-64 baseline, so the lib wrappers (lib/simd.cyr) probe CPUID at
+runtime — simd_has_avx2() (leaf 7 EBX bit 5) and simd_has_fma() (leaf 1
+ECX bit 12, a DIFFERENT leaf+bit) — and fall back to 2xSSE / scalar.
+
+ABI: the value-form vector param/return ABI is descriptor-driven
+(`_is_simd128` / `_is_simd256` / `_is_simd_any` in util.cyr), generalized
+from the original exact-sentinel checks so new vector widths slot in
+without re-touching ~21 register-class sites. aarch64 NEON (EMIT_F32V_LOOP/
+FMADD/DOT, EMIT_IVEC_BINOP/DP8; fmul+fadd NOT fmla to match x86 rounding),
+Win64 PE value-form params+returns (by-pointer copy-in + retptr), and cx
+per-lane scalar loops (_CX_VLOOP_BIN, cxvm opcodes through 0x68) all shipped
+at v6.4.28-.32; the simd_f32v4 / simd_ints / simd_f32v8 XFAILs were all
+removed at v6.4.30 and no backend carries live SIMD stubs anymore. The one
+remaining stub: the aarch64 NATIVE 256-bit f32v8 emitters are return-0 stubs
+never reached at runtime — lib/simd.cyr routes f32v8 through native f32v4
+NEON, so the verb WORKS on aarch64, just not via a native 256-bit path
+(native 256-bit stays x86-AVX2-only).
+
+DELIBERATELY NOT a struct: a SIMD vector is a single register-class value
+(XMM/YMM), not a heap-allocated tagged object. It rides the negative-band
+descriptor encoding precisely to stay OUT of the struct-id / tagged-union
+machinery — the tag-in-first-field approach (oberon_type_descriptors
+entry) is for heap records; vectors are flat, register-resident, and
+sized entirely by their descriptor.

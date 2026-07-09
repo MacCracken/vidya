@@ -12,6 +12,60 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
+# 79 entries (v6.4.32, cx SIMD codegen: +1 gotcha
+# cx_simd_emitters_are_easy_the_real_bugs_are_local_addressing_eloadlocaladdr_stub_and_regalloc_disp_nonuniformity
+# — cx SIMD emitters mirror the f64 loop trivially; the real blockers are 2 pre-existing cx
+# local-addressing bugs the SIMD pointer-stash exposes (ELOAD_LOCAL_ADDR return-0 stub → &local
+# aliases addr 0; scalar load/store disp omitted the regalloc/ret_stash reservation EFLADDR had →
+# stash collides with arrays; unify via _cx_ldisp). cxvm >> is LOGICAL (dp8 sign-ext = b−((b>>7)<<8)).
+# git-stash-rebuild-vs-baseline proves regression-vs-pre-existing; end cx gates with `return assert_summary()`.)
+# 78 entries (v6.4.28, SIMD Phase 5 f32v4 NEON: +1 gotcha
+# aarch64_neon_simd_emitter_mirror_f64v_loop_verify_encodings_with_llvm_mc_and_value_form_params_die_on_win64
+# — a new aarch64 NEON SIMD emitter (EMIT_F32V_*) mirrors the existing EMIT_F64V_LOOP/DOT (change
+# .2d→.4s, lsl#3→lsl#2, +2→+4); verify every hand-encoded word with `llvm-mc --show-encoding`;
+# match x86 rounding (fmul+fadd, NOT fused fmla) for fmadd/dot; DON'T make a value-form SIMD test a
+# full vr01_ — value-form f32v4 params hard-error on Win64 PE, so gate the flat-array subset instead.)
+# 77 entries (v6.4.27, agnos O_RDWR flag-map: +1 gotcha
+# agnos_ao_access_mode_bits_are_1to1_with_linux_o_flags_pass_through_dont_fold_verify_under_mirshi
+# — agnos AO_RDONLY/WRONLY/RDWR = 0/1/2 == Linux O_*; io.cyr:80 folded (flags&3)!=0 → |0x1 so
+# O_RDWR became write-only and reads failed on agnos ONLY; fold passed compile+Linux, only mirshi
+# read-after-write caught it; fix `ao |= flags&3`; the sakshi.cyr dup is a fold → fix at source.)
+# 76 entries (v6.4.26, Windows PE batch: +1 gotcha
+# new_pe_reroute_fn_needs_return0_stubs_in_aarch64_and_cx_backends_for_symbol_resolution
+# — a new E*_PE reroute fn (real impl in backend/x86/emit.cyr) called from parse_expr.cyr is
+# referenced by ALL forks; aarch64/cx/macho backends need a `fn X_PE(S){return 0;}` stub or
+# the cx/aarch64 cycc build fails "undefined function" — invisible to local Linux+wine tests
+# (both include the x86 backend); ONLY the cross-OS gate's cycc_cx build on cass catches it.)
+# 75 entries (v6.4.25, aarch64 exp2/atan + Payne-Hanek: +1 gotcha
+# aarch64_transcendental_polyfill_dispatch_and_dekker_dd_range_reduction
+# — aarch64 has no native exp2/atan/trig; EF64_* route to lib/math.cyr _f64_*_polyfill via
+# _FINDFN_CSTR; large-|x| trig needs a NO-FMA Dekker double-double reduction, gated so the
+# small-angle path stays byte-identical; lib/math.cyr is NOT in cycc so x86 stays byte-id.)
+# 74 entries (v6.4.24, P1 struct-field: +1 gotcha
+# struct_field_access_mis_parsed_as_enum_variant_when_field_name_shadows_a_global_var
+# — X.Y disambiguation loaded a global whenever the FIELD name was a global var, ignoring
+# base X; fix = if X is a known var, X.Y is a field access (enum-variant base is a TYPE).)
+# 73 entries (v6.4.21, LEXID cap: +1 gotcha
+# heap_region_shared_by_all_forks_must_relocate_to_arena_top_because_fork_arenas_diverge
+# — growing a fixed-offset heap region a SHARED file touches means relocating to the
+# arena top + extending ALL 7 forks' arenas (they map DIFFERENT sizes: x86/win 0x7300000
+# with the IR arena, aarch64/macho/cx only 0x5E1D000); lazy mmap makes the extra range free.)
+# 72 entries (v6.4.20, cx arc C: +1 gotcha
+# cxvm_guest_syscall_is_compiler_renumbered_at_runtime_fix_pointer_slot_and_pe_arity
+# — a portable .cyx runs cross-OS via a cxvm-ONLY fix: the compiler already
+# renumbers a runtime var syscall number per-host (ESYSXLAT/EMACHO), so the bugs
+# were the open pointer-slot (s2 not s3) + the Windows argc-6 arity-bucket miss
+# (→ arity-correct dispatch); cycc_cx cross-compiles clean but faults on macOS.)
+# 71 entries (v6.4.10, 6.4.x SIMD arc: +2 gotchas from the v6.4.4-.10
+# SIMD-compute-arc + fixes work — vex_encoding_vvvv_ones_complement_and_fma_cpuid_leaf
+# (the FIRST VEX/AVX the toolchain emits: the VEX vvvv field is the 1's-COMPLEMENT
+# of src1 → a wrong-polarity nibble assembles VALID but reads the WRONG register,
+# invisible to self-host → disasm-gate every new VEX op; FMA is CPUID leaf 1 ECX.12,
+# a DIFFERENT leaf+bit than AVX2's leaf 7 EBX.5) and
+# two_step_bootstrap_for_toplevel_array_sizing_and_legit_codegen_diff (a change to
+# how cycc sizes its OWN top-level arrays is a TWO-STEP bootstrap, same class as
+# W^X-flip; and a real bug fix SHOULD show differential codegen-diff>0 WITH
+# status-diff=0 — codegen-diff=0 on a behavior fix means it didn't fire).)
 # 68 entries (v6.4.2, 6.4.x: +2 gotchas from the v6.4.0/.1 generics-flip +
 # allocator-hardening work — monomorph_default_on_flip_gftp_decouple
 # (CYRIUS_MONOMORPH default-on needed GFTP(S,fi)!=0 as the precise per-fn
@@ -158,6 +212,26 @@
 # var base; aarch64 atomic_cas is not a full barrier — fence the lock.
 # .63 added: macho syscall dual-definition 61-vs-217;
 # Mach-O output-basename breaks reproducible cmp).
+
+[[entries]]
+name = "cx_bytecode_backend_functional_but_not_cli_exposed"
+description = "The cyrius-x (cx) bytecode backend is REAL, self-hosting, and end-to-end tested — but has ZERO user-facing surface, so it is easy to wrongly conclude 'we have no bytecode/WASM target' (surfaced by a user premise-check 2026-07-05; do NOT re-dismiss it). It began as the git commit caa7122e 'wasm what' and grew into cyrius-x: src/backend/cx/emit.cyr (register-based 4-byte-instruction emitter, r0-r31), src/main_cx.cyr (the cx compiler fork), programs/cxvm.cyr (the VM), and programs/checks/cx.cyr (a ~15-check gate IN the green check.sh that builds cc_cx, builds cxvm, emits .cyx, pipes it through cxvm, and asserts the exit code — 'cc5_cx output is now clean CYX bytecode end-to-end' is a real commit). What's MISSING is only the last-mile CLI exposure: the `cyrius` CLI accepts default(x86)/--aarch64/--win/--agnos/--target=js but has NO --target=cx; cxvm is NOT installed by install.sh (only built ad-hoc inside the gate); and `cyrius run` runs native code, not .cyx. This is the exact shape of the TS→JS gap before --emit-js/--target=js wired it into the CLI at v6.1.12. Also incomplete on cx: float ops (roadmap_6.md:742) and SIMD (EMIT_F32V_LOOP/EMIT_IVEC_*/EMIT_F32V8_LOOP are silent stubs on cx). Productization tracked in docs/development/proposals/2026-07-05-cx-bytecode-cli-exposure.md + roadmap-future.md, scheduled AFTER the v6.4.x SIMD arc. LESSON: 'grep for the literal string wasm returns nothing' is NOT 'the work doesn't exist' — a backend can be fully built and gated yet invisible because it has no CLI verb; check git history + backend dirs + the checks/ gates before declaring a feature absent."
+category = "cyrius"
+
+[[entries]]
+name = "struct_field_access_mis_parsed_as_enum_variant_when_field_name_shadows_a_global_var"
+description = "v6.4.24 (P1): `bc.exit_code` silently read the WRONG value (a global, not the struct field) when the field name also happened to be a top-level var. Root cause in parse_expr.cyr's `X.Y` disambiguation (enum-variant vs struct-field): it decided 'enum-variant' by checking whether `FINDVAR(Y) >= 0` — i.e. whether the FIELD NAME Y is a known global var — and if so loaded that global, IGNORING the base X entirely (`Enum.VARIANT` semantics = 'load the global const VARIANT, ignore the enum-type prefix'). So `struct_var.field` where `field` shadowed a top-level var loaded the global instead of the field. SILENT wrong value (no error/crash). LESSON 1 (the fix): the base of an enum-variant access is a bare ENUM TYPE NAME, never a variable — so if X is a known local/global var (FINDLOCAL/FINDVAR), `X.Y` is a FIELD access, full stop; guard the enum-variant branch on `X` not being a var. Genuine `Enum.VARIANT` (base is a type) is preserved. cycc byte-identical (its own source has no field-shadows-global pattern). LESSON 2 (why it fooled everyone): it looked 'size-dependent / only in a large unit' and got FILED as a two-struct field-name/offset collision — but it's neither a two-struct collision (renaming the other struct's field doesn't help) nor a buffer overflow (token/name buffers well under cap). It only bites when the field name ALSO happens to be a top-level var, so small repros pass; a large consumer (stiva's `var exit_code = main()`) has such a var. The consumer's rename-dodge (exit_code→exit_status) worked only because exit_status wasn't also a top-level var. LESSON 3 (method): when a filing's hypothesis is wrong and it won't repro minimally, instrument cycc — a CYRIUS_DUMP_PP env-guarded dump of preprocess_out (S+0x459D000, GBL bytes) + a token-window dump in ERR (tok_types@0x2D7C000 / tok_values@0x357C000 / tok_names@0x60000, walk back from GTI) + a filtered field-load trace pinpointed it in the live unit. Also: reproduce by FULLY reverting the consumer's dodge (a PARTIAL revert — field renamed but accessors not — produced a self-inflicted red-herring 'unexpected ,' from FINDFIELD<0→ERR, wasting a cycle)."
+category = "cyrius"
+
+[[entries]]
+name = "heap_region_shared_by_all_forks_must_relocate_to_arena_top_because_fork_arenas_diverge"
+description = "v6.4.21 (LEXID cap 16384→65536): growing a fixed-offset heap region that lex.cyr/parse*.cyr (SHARED across all 7 main_*.cyr forks) accesses is NOT a one-line bump — two traps. (1) BOXED-IN: `lexid_entries` (16384×8B @ 0x457C900) had `preprocess_out` (8 MB) starting 1792 bytes later, so it can't grow in place; it must RELOCATE. (2) FORK ARENA DIVERGENCE: the 7 forks map DIFFERENT arena sizes — x86-Linux (main.cyr) + Windows (main_win.cyr) map 0x7300000 (they include the IR node/cp arena 0x5E9D000..0x729D000, x86-only under CYRIUS_IR); the aarch64/macho/cx forks (main_aarch64{,_native,_macho}.cyr, main_x86_macho.cyr, main_cx.cyr) map only 0x5E1D000 (no IR arena). A region accessed by a SHARED file must live at ONE fixed offset common to ALL forks — and there is NO free common region above the packed 0..0x5E1D000 (the x86 IR arena occupies 0x5E1D000..0x729D000, which the small forks don't even map). SOLUTION (the ir_nodes v6.3.28 pattern): relocate the region to a fresh offset ABOVE the highest fork's top (0x7300000, past ir_cp) and extend ALL 7 forks' arenas to cover it (mmap size in main.cyr:693/main_win.cyr:351/the two macho forks; SYS_BRK in main.cyr:706/main_aarch64.cyr/main_aarch64_native.cyr/main_cx.cyr). KEY: on the small forks the range 0x5E1D000..0x7300000 (~25 MB) is now mapped-but-unused — that costs NOTHING because anonymous mmap/brk is LAZY (physical pages only on touch). So don't fear the 'waste'. This is a LAYOUT change → TWO-STEP bootstrap; but it's cycc-BYTE-IDENTICAL (the relocated offset + cap are same-width immediates) and differential-diff=0 (it's cycc's RUNTIME heap, not codegen). Verify: cross-OS self-host on ALL of ecb/cass/pi (the arena extension is the exact thing that faults on a fork if you missed one) + a synthetic >old-cap-identifier program that fails on old cycc and compiles on new (proves the relocated region works, not just that it links). The var-family tables (_vars_base etc.) can't hold a per-var FLAG because fixup.cyr SUMS var_size for the global data-section layout (a negative/encoded size corrupts it on all backends) — see the signed-global-sign-ext issue for why signedness needs its own 8th table."
+category = "cyrius"
+
+[[entries]]
+name = "cxvm_guest_syscall_is_compiler_renumbered_at_runtime_fix_pointer_slot_and_pe_arity"
+description = "cx Release C (v6.4.20): making a portable .cyx do I/O on all 4 hosts is a cxvm-ONLY fix — the guest syscall number does NOT need a translation table in cxvm, because the compiler already renumbers it per-host AT RUNTIME. cxvm's 0x70 handler does `syscall(sn, ...)` with a VAR sn (the guest's x86-Linux number). On aarch64 `ESYSXLAT` (src/backend/aarch64/emit.cyr) and on macOS `EMACHO_SYSXLAT` emit a runtime `cmp x8,#N / b.ne / movz x8,#M` chain BEFORE svc — so whatever runtime value is in the number register gets renumbered. Empirically: the PRE-fix cxvm cross-compiled to aarch64/macho already ran a write+exit .cyx unchanged. Adding a `_cx_hostsys` renumber table in cxvm (the scoping workflow's proposed design) would DOUBLE-translate (guest 1→64, then 64→garbage). The two REAL bugs were: (1) POINTER-SLOT — the handler translated the guest virtual-offset→real-address on the wrong register for open: open(path,flags,mode) puts path in arg0=s2, but it fixed s3(=flags), so every open() EFAULTed on ALL hosts; read/write buf=s3 were correct. Fix keys on the GUEST number BEFORE renumber, shifts only the pointer reg (offset 0=NULL untouched). aarch64 open→openat's AT_FDCWD arg-shift is emitted by ESYSXLAT and composes automatically. (2) WINDOWS ARITY — cxvm issued a FIXED `syscall(sn,s2,s3,s4,s5,s6)` = argc 6. `EPE_SYSCALL_DYNAMIC` routes var-numbered PE syscalls BY ARITY (argc4→read/write/open/lseek, argc2→close/exit, argc7→mmap) and has NO argc-6 bucket → every guest write/read/open/close/exit hit _pe_dyn_nomatch → -ENOSYS (cass exit=-38, no output; verified defender-clean, NOT a quarantine). Fix: arity-correct dispatch — `if sn∈{0,1,2,8} syscall(sn,s2,s3,s4)` (argc4), `elif sn∈{3,60} syscall(sn,s2)` (argc2), `else` 5-arg passthrough. PE arity buckets now route to the SHIPPED EWRITE_PE/EREAD_PE/EOPEN_PE/ECLOSE_PE/ELSEEK_PE/EEXIT emitters (ZERO new backend code); Linux/macOS ignore extra args so exact-arity is equally correct → one dispatch, four hosts. cycc byte-identical (cxvm is a program, off the self-host/seed chain). SEPARATE catch: the cx COMPILER cycc_cx (src/main_cx.cyr) cross-compiles to Mach-O/PE CLEAN but FAULTS on macOS (signal 12; 2 syscalls ESYSXLAT doesn't route) — so cxvm ships to the tarballs but cycc_cx does NOT (issues/2026-07-07-cycc_cx-cross-native-macho-pe.md). LESSON: cross-compiling clean ≠ running clean — RUN the newly-shipped binary on the host; and when a scoping premise says 'add a translation table', check whether the compiler already translates at runtime before duplicating it."
+category = "cyrius"
 
 [[entries]]
 name = "undefined_fn_ud2_stub_vs_undefined_const_hard_error"
@@ -3814,4 +3888,329 @@ happened to be absorbed into page-align padding (file size unchanged at
 just a lib change → cycc is byte-identical'; run the self-host fixpoint
 (and, for any allocator/heap change, the two-step + seed-derive) for a
 lib touched by code cycc includes.
+"""
+
+[[entries]]
+name = "vex_encoding_vvvv_ones_complement_and_fma_cpuid_leaf"
+description = "The v6.4.8/.9 SIMD arc emitted the FIRST VEX/AVX instructions the toolchain has ever produced (f32v8 256-bit: 2-byte C5 VEX for vaddps/vsubps/vmulps at v6.4.8; 3-byte C4 VEX for vfmadd231ps + vextractf128 at v6.4.9). Two traps bit here that hand-rolled hex-literal encoders on the SSE side never had. (1) THE VEX vvvv FIELD IS THE 1's-COMPLEMENT OF THE src1 REGISTER — the non-destructive 3-operand form encodes src1 in the inverted vvvv nibble, so a wrong-polarity vvvv assembles to a VALID instruction that silently reads the WRONG register (no crash, no decode error — just wrong math). It is INVISIBLE to a size/self-host check and can even pass a coarse value test if the mis-read register happens to alias. The only defense is to round-trip EVERY new VEX op through a real disassembler (llvm-mc / llvm-objdump) and diff the mnemonic+operands against intent — a disasm gate, not an eyeball. (2) FMA NEEDS A DIFFERENT CPUID LEAF/BIT THAN AVX2 — the runtime feature probe for vfmadd231ps is CPUID leaf 1, ECX bit 12 (simd_has_fma), NOT the AVX2 probe of leaf 7, EBX bit 5 (simd_has_avx2). They are genuinely separate capabilities (a CPU can have AVX2 without FMA in principle), so a wrapper that gates FMA on the AVX2 bit is wrong; each 256-bit op checks the RIGHT bit and falls back (2×SSE, or scalar for FMA). AVX2/FMA are NOT x86-64 baseline — the CPUID probe + fallback is mandatory, not optional. Corollary from the same arc: decode.cyr's VEX length-decode was DROPPED because it collided with a pre-existing SYSCALL/CPUID mis-decode of no-ModRM 0F opcodes (filed P3) — the disassembler gate uses external llvm tooling, not the in-tree decoder."
+category = "cyrius"
+---
+The v6.4.4–.9 SIMD compute arc took x86 codegen from SSE-only into
+**AVX/VEX** territory for the first time: v6.4.8 emits 2-byte (C5) VEX
+for the f32v8 elementwise ops (vaddps/vsubps/vmulps on ymm), v6.4.9 adds
+3-byte (C4) VEX for `vfmadd231ps` + the 8-lane `vextractf128` reduce.
+Two traps here have NO analogue in the older hand-rolled SSE hex-literal
+emitters (EMIT_F32V_LOOP etc. in src/backend/x86/float.cyr).
+
+**TRAP 1 — the VEX `vvvv` field is the 1's-COMPLEMENT of src1.** The
+non-destructive 3-operand VEX form encodes the first source register in
+the `vvvv` nibble **inverted** (`~reg & 0xF`). Get the polarity wrong
+and you STILL assemble a valid instruction — it just reads a DIFFERENT
+register. No SIGILL, no decode failure, no assembler complaint: silently
+wrong math. It is invisible to a size/self-host check (the bytes are a
+legal encoding) and can even sneak past a coarse value test if the
+mis-read register happens to hold a compatible value. **The only defense
+is a disassembler gate:** round-trip every new VEX op through real
+external tooling (llvm-mc / llvm-objdump), diff the decoded
+mnemonic+operands against intent. Eyeballing the hex is not enough — the
+whole point of the trap is that the wrong bytes look plausible.
+
+**TRAP 2 — FMA and AVX2 are DIFFERENT CPUID capabilities.** The runtime
+probe for `vfmadd231ps` is **CPUID leaf 1, ECX bit 12**
+(`simd_has_fma`), which is a DIFFERENT leaf AND bit from the AVX2 probe
+**CPUID leaf 7 (ECX=0), EBX bit 5** (`simd_has_avx2`). They are not
+interchangeable — a part can advertise AVX2 without FMA — so gating the
+FMA path on the AVX2 bit is a real bug. AVX2/FMA are NOT x86-64 baseline;
+each 256-bit wrapper MUST probe the correct bit and branch to a fallback
+(2×SSE for elementwise, scalar for FMA) when absent. This is mandatory,
+not a nicety — a plain `-march=x86-64` box will `#UD` on an unguarded
+`vaddps ymm`.
+
+**Corollary — the in-tree decoder was NOT extended for VEX.** During the
+arc, `decode.cyr`'s VEX length-decode was DROPPED because it collided
+with a PRE-EXISTING mis-decode of no-ModRM 0F opcodes (SYSCALL/CPUID),
+filed P3 (issues/2026-07-05-decode-len-mislengths-no-modrm-0f-opcodes.md).
+So the disasm gate deliberately uses EXTERNAL llvm tooling, not the
+in-tree `decode.cyr` — don't reach for the in-tree decoder to validate
+VEX bytes; it can't, and fixing it is a separate tracked item.
+
+**Recognize again.** Any first-of-a-new-encoding-family codegen
+(VEX→EVEX, a new prefix, a new 3-operand form) where the encoding packs
+an operand in a non-obvious way (inverted, split across bytes): assume a
+plausible-but-wrong encoding will assemble cleanly and pass self-host,
+and add a disasm round-trip gate BEFORE trusting value tests. And any new
+ISA-extension op: find its EXACT CPUID leaf+bit (they are not grouped by
+"AVX-ness") and wire a runtime fallback.
+
+[[entries]]
+name = "two_step_bootstrap_for_toplevel_array_sizing_and_legit_codegen_diff"
+description = "Two paired differential-testing / bootstrap gotchas from the v6.4.x SIMD-and-fixes minor. (1) A LAYOUT change to how cycc sizes its OWN data needs a TWO-STEP BOOTSTRAP, same as a heap-map or W^X change. v6.4.10 fixed a P1 kernel-blocker: a bare top-level `var X[N]` was silently 8× UNDER-sized (N bytes, the fn-local default) instead of N×8 (the PARSE_GVAR_ARR slot size) when the array was declared AFTER the first bare top-level statement — because pass-2 PARSE_ARRAY fell through to the fn-local N-byte path. Fixed in parse_decl.cyr (~61): a bare NON-fn-local array gets N×8. Because cycc's OWN top-level arrays were mis-sized under the old compiler, flipping the sizing needs the two-step (old cycc → cc5b, then cc5b compiles itself; cycc==cc5b) — a plain one-step fixpoint can bake in the old layout. This joins W^X-default-flip and array-convention as the recurring 'cycc's own storage layout changed → two-step' class. (2) A BUG FIX legitimately shows differential codegen-diff>0 WITH status-diff=0 — the opposite of a pure refactor (which must be codegen-diff=0). When a fix CHANGES emitted bytes for the affected inputs (e.g. correct array sizing, a sign-extension fix, a correct register), the differential corpus SHOULD show codegen-diff>0 on exactly the affected programs while status-diff stays 0 (nothing that passed now fails); a codegen-diff=0 on a supposed behavior fix means the fix didn't actually fire. Read the two axes separately: status-diff guards regressions, codegen-diff measures blast radius."
+category = "cyrius"
+---
+Two paired gotchas about READING differential/bootstrap results, from the
+v6.4.x minor's fixes (not the SIMD codegen itself).
+
+**(1) A change to how cycc sizes its OWN top-level data needs a TWO-STEP
+BOOTSTRAP.** v6.4.10 fixed a P1 kernel-blocker: a bare top-level
+`var X[N]` was silently **8× under-sized** — it got N BYTES (the
+fn-local array default) instead of N×8 (the `PARSE_GVAR_ARR` slot size)
+**whenever it was declared AFTER the first bare top-level statement**,
+because at that point pass-2 `PARSE_ARRAY` fell through to the fn-local
+N-byte path instead of the global slot path. Fix (parse_decl.cyr ~61): a
+bare **non-fn-local** array is sized N×8. The catch: **cycc's own
+top-level arrays were affected**, so the sizing flip cannot be validated
+by a one-step fixpoint alone — the old (mis-sizing) cycc could bake the
+old layout into the new binary. Run the **two-step**: old cycc → `cc5b`,
+then `cc5b` compiles itself, assert `cycc == cc5b` (+ seed-derive). This
+is the SAME class as the W^X default-on flip and the local-vs-global
+array-convention gotcha: **whenever a change alters cycc's own storage
+layout / data sizing, it's a two-step, not a one-step.**
+
+**(2) A real behavior fix SHOULD show differential codegen-diff > 0 with
+status-diff = 0** — and that is CORRECT, not a red flag. The differential
+harness reports two independent axes over the corpus:
+  - **status-diff** — did any program's pass/fail status change? For a
+    fix this MUST stay 0 (nothing that compiled+ran now breaks).
+  - **codegen-diff** — did the emitted BYTES change, and for which
+    programs? For a fix that changes what's emitted (array sizing, a
+    sign-extension, a corrected register) this SHOULD be > 0, on exactly
+    the affected programs.
+
+The trap is conflating the two. A pure REFACTOR must be
+codegen-diff = 0 (identical bytes). A BUG FIX is the opposite: if a
+supposed behavior fix shows codegen-diff = 0, the fix **did not fire** —
+you changed a path nothing exercises, or guarded it wrong. So read the
+axes separately: status-diff is the regression guard; codegen-diff is the
+blast-radius measurement. `codegen-diff > 0 && status-diff = 0` on the
+programs you expected is exactly the signature of a landed, contained fix.
+"""
+
+[[entries]]
+name = "aarch64_transcendental_polyfill_dispatch_and_dekker_dd_range_reduction"
+category = "cyrius"
+description = """
+aarch64 has no native transcendentals — x86 gets them from x87 (fsin/fcos,
+f2xm1/fscale for exp/exp2, fyl2x for ln/log2, fpatan for atan). Every f64
+transcendental on aarch64 is therefore a lib/math.cyr POLYFILL that the aarch64
+backend dispatches to. The dispatch pattern (v5.7.31 exp/ln → v6.4.16 sin/cos →
+v6.4.25 exp2/atan) is identical: EF64_<OP>(S) in src/backend/aarch64/emit.cyr does
+`var pf = _FINDFN_CSTR(S, "_f64_<op>_polyfill", <len>); if (pf<0) ERR_MSG(...requires
+include lib/math.cyr...); EPUSHR(S); ECALLPOPS(S,1); ECALLFIX(S,pf);` — i.e. it emits
+a 1-arg call into the stdlib fn resolved by name. The x86 EF64_<OP> in
+src/backend/x86/emit.cyr keeps emitting native x87 bytes and is NOT touched. THREE
+consequences that trip you up:
+
+(1) x86 cycc stays BYTE-IDENTICAL across a pure-aarch64 transcendental change. The
+x86 fork (src/main.cyr) includes ONLY backend/x86/emit.cyr — not the aarch64 emit —
+and cycc does NOT include lib/math.cyr (it's a stdlib, not compiler source). So
+adding a polyfill + rerouting the aarch64 EF64_* changes ONLY the three aarch64 forks
+(main_aarch64{,_macho,_native}.cyr) and lib/math.cyr. The x86 self-host fixpoint and
+the differential (343 inputs, codegen-diff=0) are trivially green — that is CORRECT,
+not a missing test. The real verification is the aarch64 self-host fixpoint (build the
+x86-hosted aarch64-emitting cross-compiler `main_aarch64.cyr | cycc`, then `| itself`,
+cmp — byte-identical under qemu) PLUS running the actual polyfill on real hardware
+(pi + ecb) via a vr01_ tcyr. A green x86 run proves nothing about the aarch64 path.
+
+(2) The polyfill must NOT recurse into the builtin it backs. _f64_exp2_polyfill uses
+round/sub/mul/add/to (NOT f64_exp2); _f64_atan_polyfill uses gt/div/sub/add/mul/neg +
+bit ops (NOT f64_atan). Each polyfill compiles on x86 too (arch-independent body) but
+is only INVOKED on aarch64 — x86 keeps the x87 path.
+
+(3) Large-argument trig range reduction on a machine with only f64 add/sub/mul (no
+scalar FMA builtin) requires a Dekker double-double. The single-constant reduction
+`r = x - round(x*2/pi)*pi_2` catastrophically cancels for large |x| (rel err ~5e-2 at
+1e15). The fix is a NO-FMA Dekker TwoProduct: split via (2^27+1), form x*(2/pi) and
+frac*(pi/2) as hi+lo words with the constants pre-split into _SH/_SL halves so the
+product is exact without fma. Validated numerically (Python float64 == IEEE754) BEFORE
+touching the compiler — double-double is exact to ~1e-16 through |x|≈1e15; triple-double
+is NOT needed. GATE it (|x| >= 8192) so the cheap small-angle path is untouched and
+stays BYTE-IDENTICAL — the issue's "small path unchanged" is a byte-identity
+requirement, not a vibe. The dd quadrant k must come from the dd sum (round(ph+plo)),
+NOT a naive round(x*2/pi) which is off-by-one for large x — so the dd block writes k_f
+locally, and (no multi-return in this compiler) the ~14-line block is inlined verbatim
+in both sin and cos, same as their small-path reduction already is. Keep each emitted
+Horner/dd line under 120 chars up front (cyrlint gate) by accumulating into a stepwise
+var, not one deep f64_add(f64_add(...)) nest — cyrfmt won't split it for you.
+"""
+
+[[entries]]
+name = "new_pe_reroute_fn_needs_return0_stubs_in_aarch64_and_cx_backends_for_symbol_resolution"
+category = "cyrius"
+description = """
+Adding a new kernel32/PE reroute emitter (an `E<NAME>_PE(S)` fn — TerminateProcess,
+GetCurrentProcessId, ProcessPrng, etc.) is THREE edits, not one, and the third is
+easy to forget because local testing never exercises it:
+
+(1) the REAL impl in src/backend/x86/emit.cyr (emits the call bytes; often just
+    `_pe_ensure_<x>(S); return _pe_call_Narg_aligned(S, _pe_<x>_get());`),
+(2) the kernel32 IAT import registration in src/backend/pe/emit.cyr
+    (`var _pe_<x>_ready/_idx; fn _pe_ensure_<x>(S){ _pe_register_kernel32(S,&_idx,"<Name>"); }`),
+(3) the parse_expr.cyr dispatch (`if (sc_num == 0xF0NN) { if (argc==K) { E<NAME>_PE(S); ... } }`)
+    AND the routed-range warning string.
+
+The TRAP: parse_expr.cyr is compiled into EVERY fork (main.cyr, main_win.cyr,
+main_x86_macho.cyr, main_aarch64{,_macho,_native}.cyr, main_cx.cyr). The dispatch's
+CALL to E<NAME>_PE is emitted on every fork (the `if (_TARGET_PE==1)` is a runtime
+constant, so the call is still COMPILED, just dead). cycc requires the symbol to
+RESOLVE at compile time. But the real impl lives ONLY in backend/x86/emit.cyr,
+which is included by exactly THREE forks (x86-Linux, PE, x86-macho). The aarch64
+forks include backend/aarch64/emit.cyr and the cx fork includes backend/cx/emit.cyr
+— NEITHER pulls in the x86 backend. So those forks need a `return-0` STUB:
+`fn E<NAME>_PE(S){ return 0; }` in backend/aarch64/emit.cyr AND
+`fn E<NAME>_PE(S): i64 { return 0; }` in backend/cx/emit.cyr (note the aarch64
+stubs omit the `: i64`, the cx stubs keep it — match each file's local convention).
+There is already a big block of these stubs (EWAIT_PE, EGETEXIT_PE, ESETHANDLE_PE,
+EGETCURPID_PE, EPROCPRNG_PE, …) — add the new one next to them.
+
+WHY IT BITES SILENTLY: local Linux self-host + `cat prog | CYRIUS_TARGET_WIN=1 cc_win`
++ wine all use forks that include backend/x86/emit.cyr, so they compile fine and pass.
+The stub gap is invisible until a fork WITHOUT the x86 backend is built — which the
+cross-OS gate does when it builds cycc_cx (the cx compiler) on cass. v6.4.26 shipped
+ETERMINATE_PE with the x86 impl + pe import + parse dispatch, all green locally +
+wine (terminate test 3/3, self-host byte-identical), then cass SELFHOST_FAILED with
+`error: refusing to emit binary with 1 reachable undefined function(s): ETERMINATE_PE`
+— the cycc_cx build. Adding the two stubs fixed it. LESSON: after adding an E*_PE
+reroute, immediately build the aarch64 AND cx cross-compilers locally
+(`cat src/main_aarch64.cyr | build/cycc >/dev/null` and `cat src/main_cx.cyr |
+build/cycc >/dev/null`) — an undefined-function error there is the missing stub, and
+it's far cheaper to catch than a cass round-trip. This is the same class as the
+`_macho_arm_routes` stub-for-symbol-resolution note already in backend/x86/emit.cyr.
+"""
+
+[[entries]]
+name = "agnos_ao_access_mode_bits_are_1to1_with_linux_o_flags_pass_through_dont_fold_verify_under_mirshi"
+category = "cyrius"
+description = """
+The agnos file ABI reuses Linux's low-2-bit access-mode encoding EXACTLY:
+AO_RDONLY=0x0, AO_WRONLY=0x1, AO_RDWR=0x2 — identical to O_RDONLY/WRONLY/RDWR
+(lib/syscalls_x86_64_agnos.cyr). So in `file_open`'s `#ifdef CYRIUS_TARGET_AGNOS`
+flag-translation, the access mode PASSES THROUGH: `ao = ao | (flags & 3);`. Do NOT
+write `if ((flags & 3) != 0) { ao = ao | 0x1; }` — that folds BOTH WRONLY(1) and
+RDWR(2) to WRONLY(1), so an O_RDWR open becomes write-only on agnos and every later
+read on that fd returns -1 (v6.4.27 P1: `io.cyr:80`; patra "cannot read header"
+reopening its B-tree O_RDWR under sit/mirshi). The higher bits are NOT 1:1 and DO
+need per-bit mapping (O_CREAT 64→AO_CREAT 0x100, O_TRUNC 512→0x200, O_APPEND
+1024→0x400) — only the access-mode nibble is a straight pass-through.
+
+TWO meta-lessons: (1) an agnos flag/ABI-translation bug is INVISIBLE to Linux runs
+and to a bare `--agnos` COMPILE — both pass. The only thing that catches it is
+running the agnos binary under **mirshi** (~/Repos/mirshi/build/mirshi <bin>, the
+agnos→Linux ptrace supervisor) and asserting real I/O behavior (here: create+write,
+close, reopen O_RDWR, read → exit 42; the buggy fold exits 4 on the read). Build a
+minimal exit-code program (NOT the assert framework — it uses raw syscall(1,…) writes
+that aren't agnos-portable) and check $? under mirshi. (2) When the same helper is
+COPIED into a vendored stdlib (here lib/sakshi.cyr:88 had the identical fold), fix the
+cyrius-native site in a cyrius release but fix the fold at its SOURCE repo
+(~/Repos/sakshi) + patch-bump + re-vendor — never patch lib/sakshi.cyr directly (it's
+materialized; the edit evaporates on the next `cyrius deps`).
+"""
+
+[[entries]]
+name = "aarch64_neon_simd_emitter_mirror_f64v_loop_verify_encodings_with_llvm_mc_and_value_form_params_die_on_win64"
+category = "cyrius"
+description = """
+Implementing an aarch64 NEON SIMD emitter (SIMD Phase 5 — EMIT_F32V_LOOP/FMADD/DOT,
+and the pending EMIT_IVEC_*/EMIT_F32V8_*) is far easier than it looks because the
+loop + addressing + reduce infrastructure already exists for f64: mirror
+`EMIT_F64V_LOOP` / `EMIT_F64V_DOT` in src/backend/aarch64/emit.cyr. The pattern:
+`mov x10,x0`(n) `movz x11,#0`(index); loop `cmp x11,x10`/`b.ge done`; per operand
+`EFLLOAD(slot)` → `mov x12,x0` → `add x12,x12,x11,lsl #K` → `ldr q, [x12]`; the NEON
+op; `str q, [x12]`; `add x11,x11,#LANES`; `EJMP`/`EPATCH`. To go from f64v (2 lanes)
+to f32v4 (4 lanes) change exactly three things:
+  - element stride: `lsl #3` (×8) → `lsl #2` (×4)   [encoding 0x8B0B0D8C → 0x8B0B098C]
+  - the NEON op:    `.2d` → `.4s`  (fadd .4s=0x4E21D400, fsub=0x4EA1D400, fmul=0x6E21DC00)
+  - counter:        `add x11,#2` → `add x11,#4`      [0x9100096B → 0x9100116B]
+The 128-bit `ldr q`/`str q` are identical (width-agnostic). Horizontal reduce: f64
+needs ONE `faddp d0,v2.2d`; f32v4 needs TWO `faddp v2.4s` (4→2→1) then `fmov w0,s2`.
+
+THREE traps:
+(1) VERIFY EVERY hand-encoded word with `llvm-mc --arch=aarch64 --show-encoding`
+    (`printf 'fadd v0.4s,v0.4s,v1.4s\\n...' | llvm-mc ...`). Do NOT hand-compute A64
+    encodings from memory — the imm6 shift field + the sz bit are easy to get wrong.
+(2) MATCH x86 ROUNDING for fmadd/dot: x86 SSE has no FMA at f32v4 width, so its
+    EMIT_F32V_FMADD/DOT do mulps THEN addps (two roundings). Use `fmul`+`fadd`, NOT
+    the fused `fmla`, so the two arches agree bit-for-bit on the test values. (The
+    pre-existing f64 dot DOES use fmla and already diverges cross-arch — don't copy
+    that for new f32 work.)
+(3) A value-form SIMD test can't be a full `vr01_` cross-OS gate: value-form
+    f32v4/f64v2/f64v4 PARAMS/RETURNS hard-error on Win64 PE ("value-form params not
+    yet supported on Win64 PE — use pointer-form") — a documented, deliberate gap
+    (the Win64 vector-by-hidden-pointer ABI is unimplemented; filed
+    2026-07-08-win64-value-form-simd-params). So keep the value-form test a regular
+    tcyr (aarch64 covered by the native-arm64 CI corpus, un-XFAIL'd), and gate the
+    packed ops cross-OS with a SEPARATE flat-array test (`f32v_add(&r, a, b, n)` —
+    pointers + count, no vector value types) that also runs on cass. The strict-XFAIL
+    machinery (ci.yml) auto-forces the removal when the aarch64 stub becomes real: the
+    corpus gate is `test $xpass -eq 0`, so the test flips RED (XPASS) the moment your
+    emitter lands — that RED is the cue to remove it from XFAIL, not a regression.
+"""
+
+[[entries]]
+name = "cx_simd_emitters_are_easy_the_real_bugs_are_local_addressing_eloadlocaladdr_stub_and_regalloc_disp_nonuniformity"
+description = "cx SIMD (f64v_*/f32v_*/iv_*) emitters mirror the f64 loop trivially; the real blockers are 2 pre-existing cx local-addressing bugs the SIMD pointer-stash exposes: ELOAD_LOCAL_ADDR was a return-0 stub (&local aliases to addr 0) and the scalar load/store disp path omitted the regalloc/ret_stash reservation EFLADDR already had. Plus cxvm >> is LOGICAL."
+category = "cyrius"
+tags = ["cx", "cxvm", "simd", "codegen", "regalloc", "frame-layout", "v6.4.32"]
+content = """
+Adding SIMD to the cx bytecode backend (`src/backend/cx/emit.cyr`) is the same
+"mirror the f64 loop" job as the aarch64 NEON one — a single `_CX_VLOOP_BIN` driver
+covers f64v/f32v/iv add/sub/mul/div, and the special verbs (dot/scale/axpy/fmadd/
+sqrt/dp8) are short variants. cx is a scalar register VM, so a "SIMD" op is just a
+per-lane loop; it's a byte-exact **correctness oracle**, not hardware SIMD. Three
+cx-specific encoding facts:
+
+- **n arrives in r0, NOT a frame slot.** The intrinsic dispatch leaves the count in
+  r0 (like x86 rax after the arg stash); every emitter's first instruction is
+  `mov r8, r0` to save it before r0 is reused for values. A `nslot` param on the
+  loop driver is a trap — there is no such slot.
+- **f32 = compute-in-f64, round per lane.** Widen both operands (new cxvm opcode
+  `f32widen` 0x66 = cvtss2sd), run the scalar op in f64, narrow the result
+  (`f32narrow` 0x67 = cvtsd2ss). One packed op → one rounding, bit-exact vs `addps`/
+  `mulps`. `fmadd` narrows twice to match `mulps`+`addps` (two roundings). `f64v_sqrt`
+  compiles to the new `fsqrt` 0x68.
+- **cxvm `>>` (op 0x24) is LOGICAL, not arithmetic.** So the usual sign-extend trick
+  `(x << 56) >> 56` does NOT work for the i8 lane in `EMIT_IVEC_DP8`. Use
+  `b − ((b >> 7) << 8)` instead (subtract 256 iff the sign bit is set); `a` stays
+  zero-extended, accumulate in i64.
+
+**But the emitters are the easy part — SIMD is a tripwire for two PRE-EXISTING cx
+local-addressing bugs** that never bit before because nothing else stashed pointers
+in frame slots next to stack arrays:
+
+1. **`ELOAD_LOCAL_ADDR` was a `return 0` stub.** `&local` emitted nothing and left
+   r0 = 0, so `&a` and `&b` for two different locals BOTH evaluated to address 0 — a
+   silent aliasing bug for *any* address-of-a-stack-variable, not just SIMD. It only
+   surfaced as "f64v_add(&R,&A,&B,n) writes garbage" because SIMD is the first common
+   caller of `&local`. Fix: emit `r0 = fp − adisp`.
+2. **cx local-slot disp non-uniformity.** `EFLADDR` (address-of) folded the
+   `_cur_fn_regalloc` + `_cur_fn_ret_stash` reservation into its slot disp, but the
+   SCALAR load/store path (`EFLLOAD`/`EFLSTORE`, the f64v2 load/store pairs,
+   `ESTOREPARM`, and the SIMD stash loader `_cx_ld_local`) did NOT. A fn using both
+   stack arrays (addressed via EFLADDR) and the SIMD pointer stash (stored via
+   EFLSTORE) had the stash slots land on top of regalloc-shifted array storage. Fix:
+   route EVERY local-disp site through one `_cx_ldisp(idx)` helper that always adds
+   the reservation. Lesson: when one addressing path folds a frame reservation, ALL
+   of them must — an address-of and a load of the same slot index must resolve to the
+   same byte.
+
+**Debugging method that separated regression from pre-existing (reusable):**
+- Isolate SIMD correctness with synthetic **manual exit-code** probes (`if (x != y)
+  syscall(60, code)`), NOT assert_eq — library code drags in its own frame/global
+  behavior and muddies the signal.
+- To prove regression-vs-pre-existing, `git stash` the `src/` change and rebuild the
+  cx toolchain (`build/cycc < src/main_cx.cyr > cycc_cx`; `build/cycc < programs/
+  cxvm.cyr > cxvm`) — `build/cycc` is the committed prior-release x86 binary,
+  unchanged by your edit, so it reproduces the exact prior-release cx behavior. Run
+  the SAME repro against it. Here it proved the frame fix has NO general `var x =
+  <call>` regression with large (4-array) frames, and split off a genuinely
+  pre-existing cx bug: `var x = assert_summary()` mis-captures after a prior
+  `assert_eq` mutated the assert globals (fails on the prior release, zero SIMD/
+  arrays). Consequence: the standard tcyr ending `var r = assert_summary();` is
+  unreliable on cx — end cx gates with `return assert_summary();` directly.
+
+**Verifying cross-OS:** the cx round-trip fixture in `scripts/cross-os-selfhost.sh` is
+built by the LOCAL cycc_cx (shipped `.cyx`) AND recompiled by each host's NATIVE
+cycc_cx, then run on the native cxvm. Upgrade it from a bare write to run a real SIMD
+op (`f64v_add`+`f64v_sqrt` over local arrays → exit 42) so a green ecb/pi/cass leg
+proves the cx SIMD emitters + frame fix + new opcodes execute on real hardware — not
+the placebo "a write halts" that CLAUDE.md warns about.
 """

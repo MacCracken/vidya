@@ -9,7 +9,21 @@
 # v6.4.0 (2026-07-03): CYRIUS_MONOMORPH DEFAULT-ON flip — generics no
 # longer gated (CYRIUS_MONOMORPH=0 opts out); generics_monomorphization
 # entry updated. async/await + closures unchanged.
-# 59 entries (v6.1.x carve/TLS additions: bayan_ganita_stdlib_carve,
+# v6.4.4 (2026-07-05): +1 entry f32v4_packed_single_simd — SIMD arc
+# Phase 1 (128-bit packed single, structured-descriptor encoding, x86).
+# v6.4.5 (2026-07-05): SIMD arc Phase 2 — f32v_fmadd/f32v_dot matmul ops
+# + f32v4_fmadd/_dot wrappers folded into f32v4_packed_single_simd.
+# v6.4.6 (2026-07-05): +1 entry integer_vector_simd — SIMD arc Phase 3a
+# (i8/i16/i32/i64 vectors + iv_add/sub/mul, x86).
+# v6.4.7 (2026-07-05): SIMD arc Phase 3b — value-form typed int ops
+# (i32v4_add(a,b) etc.) + iv_dp8 (u8·i8→i32 widening dot, b1.58 GEMM)
+# folded into integer_vector_simd. Integer-SIMD arc closes.
+# v6.4.8 (2026-07-05): +1 entry f32v8_avx2_256bit_simd — SIMD arc Phase 4
+# R1: f32v8 256-bit AVX2 elementwise (first VEX/AVX) + CPUID runtime fallback.
+# v6.4.9 (2026-07-05): SIMD arc Phase 4 R2 — f32v8_fma (vfmadd231ps, first
+# 3-byte VEX) + f32v8_dot (8-lane vextractf128 reduce) folded into
+# f32v8_avx2_256bit_simd. Phase 4 CLOSES (f32 SIMD complete on x86).
+# 61 entries (v6.1.x carve/TLS additions: bayan_ganita_stdlib_carve,
 # native_tls_default).
 
 [[entries]]
@@ -1277,7 +1291,7 @@ unless profiling surfaces a hot-path reason.
 
 [[entries]]
 name = "f64v_simd_primitives"
-description = "Flat-array SIMD packed-double builtins. f64v_add/sub/mul/div/sqrt/abs/fmadd (v1.9.0; cross-arch close v5.10.16) + f64v_dot/scale/axpy (v5.10.17 — keystone for hisab gap-close). x86 SSE2 + aarch64 NEON .2D; cx no-op (cx f64 pipeline TBD)."
+description = "Flat-array SIMD packed-double builtins. f64v_add/sub/mul/div/sqrt/abs/fmadd (v1.9.0; cross-arch close v5.10.16) + f64v_dot/scale/axpy (v5.10.17 — keystone for hisab gap-close). x86 SSE2 + aarch64 NEON .2D + cx per-lane scalar loops (v6.4.32)."
 category = "cyrius"
 ---
 SHAPE:
@@ -1317,7 +1331,9 @@ CROSS-ARCH ENCODINGS:
     fused single-instruction y += x*alpha — measurable
     win over the x86 mulpd+addpd two-instruction shape.
 
-    cx: no-op stubs (entire cx f64 pipeline is TBD).
+    cx: per-lane scalar loops (v6.4.32 — EMIT_F64V_LOOP/
+    UNARY/FMADD/DOT/SCALE/AXPY, with the fsqrt opcode 0x68).
+    The cx f64 pipeline is no longer no-op/TBD.
 
 CONSUMER COMPOSITION (hisab Vec3/Vec4/Mat4):
 - |v|^2: f64v_dot(v, v, 3 or 4)
@@ -1462,6 +1478,184 @@ ARC PHASES (v5.10.28 - .39):
     Phase 8  (v5.10.37) — f64v4 quad-register return.
     Phase 9  (v5.10.38) — VALUE-FORM PARAMS (the unlock).
     Phase 10 (v5.10.39) — pointer-vs-value overload dispatch.
+
+[[entries]]
+name = "f32v4_packed_single_simd"
+description = "f32v4 — 128-bit packed single-precision (4× f32 lanes) value type + addps/subps/mulps, on the structured-descriptor SLTYPE encoding. Complete on all four backends: x86 SSE (Phase 1, v6.4.4), aarch64 NEON (v6.4.28), Win64 PE value-form (v6.4.31), cx per-lane bytecode (v6.4.32). SIMD Phase 5 done."
+category = "cyrius"
+---
+SYNTAX:
+    var a: f32v4 = f32v4_make(0x40000000, 0x40000000,   # 2.0f × 4
+                              0x40000000, 0x40000000);
+    var b: f32v4 = f32v4_splat(0x3F800000);             # 1.0f × 4
+    var r: f32v4 = f32v4_add(a, b);                     # 3.0f × 4 (addps)
+    var l0     = f32v4_lane0(r);                        # extract lane (i32 bits)
+
+    # value-form param + return (reuses the f64v2 XMM ABI):
+    fn scale2(v: f32v4): f32v4 { return f32v4_add(v, v); }
+
+f32 values are their i32 BIT PATTERNS (1.0f = 0x3F800000,
+2.0f = 0x40000000). Convert with f32_from / f32_to.
+
+THE ENCODING (Phase 0 structured descriptor):
+    A SIMD vector's SLTYPE is a STRUCTURED descriptor in a
+    reserved negative band <= -2048 (collision-free — struct
+    sids cap at 1024, so struct sltypes are >= -1024). One
+    `_vec_desc()` (src/common/util.cyr) decodes it:
+        desc       = |sltype| - 2048
+        is_float   = desc & 1
+        lane_log2  = (desc >> 2) & 7   # 2 → 4-byte lanes
+        lanes_log2 = (desc >> 5) & 7   # 2 → 4 lanes
+    f32v4 = sentinel -2121 (desc 73 = float | 4-byte | 4-lane
+    → 16 bytes). Legacy f64v2/f64v4 keep their FLAT -20/-21,
+    so the f64 SIMD path is byte-identical; f32v8 / integer
+    lanes extend by adding descriptor VALUES, not code arms.
+
+FOOTPRINT + ABI:
+    f32v4 = 16 bytes = 2 slots = 1 XMM = the SAME footprint as
+    f64v2, so it reuses f64v2's value-form ABI machinery
+    (ESTOREPARM_F64V2 / ELOAD_F64V2_TO_XMM). Value-form params
+    are gated `#ifdef CYRIUS_HAS_VAL_SIMD_PARAMS` (non-PE), same
+    as f64v2/f64v4 — PE consumers use the pointer-form wrappers.
+
+PACKED OPS (x86 SSE, Phase 1):
+    f32v_add / f32v_sub / f32v_mul → addps / subps / mulps —
+    the f64 packed path MINUS the 66 prefix (SIB scale ×4,
+    stride 4 bytes/lane). Builtin tokens 138-140 (NOT 135-137:
+    135 is `await`). aarch64 NEON EMIT_F32V_LOOP shipped v6.4.28
+    (fmul+fadd, NOT fmla, to match x86 rounding) and cx per-lane
+    loops shipped v6.4.32 → f32v4 compute runs on x86, aarch64,
+    PE, and cx.
+
+MATMUL OPS (x86 SSE, Phase 2, v6.4.5) — flat-array builtins:
+    f32v_fmadd(dst, a, b, c, n) → dst[i] = a[i]*b[i] + c[i]
+        (mulps + addps; token 141). The dense-matmul inner loop.
+    f32v_dot(a, b, n) → f32 bit pattern (sum a[i]*b[i]); token 142.
+        mulps+addps accumulate, then TWO haddps fold the 4 lanes,
+        movd eax extracts the 32-bit result. CALLER CONTRACT: n a
+        multiple of 4, or over-allocate to a multiple of 4 with
+        ZEROED padding — the tail iteration sums up to 3 lanes past
+        n (same footgun as f64v_dot). aarch64 NEON (v6.4.28,
+        EMIT_F32V_FMADD/DOT) + cx per-lane (v6.4.32) implement
+        these — SIMD Phase 5 complete.
+
+lib/simd.cyr WRAPPERS (value + pointer form):
+    f32v4_make / f32v4_splat / f32v4_lane{0..3} /
+    f32v4_add / f32v4_sub / f32v4_mul  — `&IDENT` auto-routes
+    to the `_ptr` form (same overload dispatch as f64v2).
+    f32v4_fmadd(a,b,c) / f32v4_dot(a,b) (v6.4.5) — the n=4
+    single-vector forms of the matmul ops (always lane-safe;
+    dot returns f32 bits, use f32_to for the value).
+
+GUARDS (v6.4.4, adversarial-review-found):
+    - `v.field` on any SIMD vector HARD-ERRORS ("SIMD vector
+      has no named fields") — the -2121 sentinel must never be
+      read as a struct id (it exceeds the 1024 struct cap →
+      would be an out-of-bounds struct-table read). Extract
+      lanes via f32v4_laneK(&v), not `.field`.
+    - A value-form SIMD arg is type-checked against the param
+      when the ABI engages (SIMD-returning callee): an f64v2
+      arg to an f32v4 param is rejected, not silently run as
+      addps over f64 bit patterns.
+
+[[entries]]
+name = "integer_vector_simd"
+description = "Integer SIMD vectors (128-bit): i8v16/i16v8/i32v4/i64v2 (+ unsigned u*) + packed add/sub/mul (iv_add/sub/mul), value-form typed ops (i32v4_add(a,b)), and the u8·i8→i32 widening dot iv_dp8 (the b1.58 GEMM inner loop). SIMD Phase 3a/3b (v6.4.6/v6.4.7); implemented on x86 SSE2, aarch64 NEON (v6.4.30), and cx (v6.4.32) — Phase 5 complete."
+category = "cyrius"
+---
+TYPES (128-bit, structured-descriptor SLTYPE like f32v4):
+    i8v16 / u8v16   — 16 lanes ×  8-bit
+    i16v8 / u16v8   —  8 lanes × 16-bit
+    i32v4 / u32v4   —  4 lanes × 32-bit
+    i64v2 / u64v2   —  2 lanes × 64-bit
+  Descriptor: signed = bit 1 (i* set, u* clear), lane_log2 = bits
+  2-4, lanes_log2 = bits 5-7 (util.cyr _vec_desc / GVEC_SIGNED).
+  i32v4 = sentinel -2122 (vs f32v4 -2121: the float/signed bits).
+  All share f32v4's 16 B / 1-XMM value-form ABI (descriptor-driven
+  via _is_simd128 — return/receive/param, byte-identical for f64).
+
+PACKED OPS — flat-array builtins (x86 SSE2):
+    iv_add(dst, a, b, n, w)   dst[i] = a[i] + b[i]   (paddb/w/d/q)
+    iv_sub(dst, a, b, n, w)   dst[i] = a[i] - b[i]   (psubb/w/d/q)
+    iv_mul(dst, a, b, n, w)   dst[i] = a[i] * b[i]   (pmullw/pmulld)
+  n = lane count; w = lane BYTE-WIDTH, a COMPILE-TIME LITERAL
+  (1/2/4/8) that selects the instruction. Tokens 143-145. add/sub
+  are two's-complement (signed==unsigned); mul is i16/i32 ONLY
+  (w=2/4) — w=1/8 hard-errors (no 1-instruction pmulb/pmulq).
+  Caller contract (same tail footgun as f32v_dot): n a multiple of
+  16/w, or over-allocate the lane count. aarch64 NEON (v6.4.30,
+  EMIT_IVEC_BINOP) + cx per-lane (v6.4.32) implement these too.
+
+WIDENING DOT — iv_dp8(a, b, n) → i32 (SIMD Phase 3b, v6.4.7):
+    iv_dp8(a, b, n)   sum(a[i] * b[i])   a = u8, b = i8, n%16==0
+  The BitNet/b1.58 quantized-matmul inner loop (ternary weights
+  {-1,0,1} are just i8). EMIT_IVEC_DP8 = pxor accumulator +
+  pcmpeqw/psrlw ones-vector, 16-lane loop of movups / pmaddubsw
+  (u8×i8 → i16 pairs) / pmaddwd ×ones (i16 → i32 widen) / paddd,
+  reduced with two phaddd + movd eax + movsxd rax,eax (SIGN-extend
+  — a negative dot must not come back zero-extended). Token 146.
+
+lib/simd.cyr WRAPPERS:
+  POINTER form (v6.4.6): i32v4_make(a,b,c,d) / i32v4_splat(x) /
+    i32v4_lane{0..3}_ptr / i32v4_add_ptr / _sub_ptr / _mul_ptr ;
+    i16v8/i8v16/i64v2 splat/make + _add_ptr/_sub_ptr(/_mul_ptr).
+  VALUE form (v6.4.7): i32v4_add/_sub/_mul(a,b) + i32v4_lane{0..3}(v);
+    i16v8_add/_sub/_mul ; i8v16_add/_sub ; i64v2_add/_sub. Integer
+    128-bit VALUE params now route through XMM as a full 16 bytes:
+    the value-form param-mask (class 1) was generalized from "exactly
+    f64v2" to "any 16-byte vector" (_is_simd128), and the caller
+    class-1 arg type-check relaxed to match (f32v4 code 3 stays
+    strict). VALUE-form SIMD args must be BARE LOCAL IDENTs (not
+    call-result temporaries) — the same constraint f32v4 carries.
+
+[[entries]]
+name = "f32v8_avx2_256bit_simd"
+description = "f32v8 — 256-bit SIMD (8× f32 in one YMM). SIMD Phase 4 R1 (v6.4.8), x86 AVX2 with a runtime SSE fallback. The FIRST VEX/AVX instructions the toolchain ever emits (before this: zero VEX; decode.cyr says 'no AVX/VEX')."
+category = "cyrius"
+---
+TYPE: f32v8 = 8 lanes × f32 = 32 bytes = 256-bit = one YMM.
+  Structured-descriptor sentinel -2153 (util.cyr _vec_desc → nslots 4,
+  laneb 4). Shares f64v4's 32-byte / 2×128-XMM value-form return ABI —
+  the f64v4 return/receive paths (parse_fn.cyr + parse_decl.cyr) were
+  generalized from exact -21 to _is_simd256 (byte-identical for f64v4).
+  Construct/return works cross-arch (aarch64 too); arithmetic now runs on
+  aarch64 (v6.4.29, via a 2×128-bit NEON fallback = EMIT_F32V_LOOP) and cx
+  (v6.4.32) as well as x86 AVX2. NATIVE 256-bit stays x86-AVX2-only — the
+  aarch64 256-bit emitters are return-0 stubs never reached at runtime;
+  lib/simd.cyr routes f32v8 through native f32v4 NEON, so the verb works.
+
+OPS (x86 AVX2, SSE2 is NOT baseline — vaddps ymm #UDs on pre-AVX2):
+    f32v8_add / f32v8_sub / f32v8_mul (dst, a, b, n)  tokens 147-149
+  EMIT_F32V8_LOOP = the f32v4 loop widened to 256-bit VEX: 128-bit SSE
+  bytes + a 2-byte VEX prefix (C5 FC), 8 f32/iter (rsi += 8), vzeroupper
+  (C5 F8 77) on exit. vaddps ymm = C5 FC 58 C1 (llvm-mc verified; the
+  vvvv field is the 1's-complement-of-src1 byte-order trap). aarch64
+  (v6.4.29, 2×128-bit NEON fallback) + cx (v6.4.32, aliases f32v_loop)
+  implement these; the simd_f32v8 XFAIL was removed at v6.4.29. Disasm-gated
+  (tests/simd_f32v8_disasm.sh) host-CPU-independently.
+
+RUNTIME FALLBACK (the reason f32v8 is usable off AVX2 CPUs):
+  simd_has_avx2() (lib/simd.cyr) — CPUID leaf 7 EBX bit 5, a byte-for-byte
+  clone of sigil's _sha_ni_cpuid_probe; cached, idempotent, no CAS latch.
+  The f32v8_*_ptr wrappers branch INSIDE the single call site: AVX2 →
+  vaddps ymm; else f32v_*(…, 8) = 2×SSE. Each path emitted once
+  program-wide (zero per-call bloat). cycc has no f32v8 → stays SSE2,
+  self-hosts byte-identical everywhere.
+
+lib/simd.cyr WRAPPERS (pointer-form first; value-form deferred):
+    f32v8_make(8 args) / f32v8_splat(x) / f32v8_lane{0..7}_ptr /
+    f32v8_add_ptr / _sub_ptr / _mul_ptr.
+  R2 (v6.4.9): f32v8_fma (vfmadd231ps ymm = C4 E2 7D B8 D1 — FMA3, the
+    FIRST 3-byte VEX; token 150) + f32v8_dot (token 151: vmulps/vaddps ymm
+    accumulate, then vextractf128 xmm1,ymm2,1 + vaddps xmm **L=0** fold +
+    vzeroupper + the f32v4 haddps×2/movd tail — two-haddps alone can't
+    cross the 128-bit split). f32v8_fma_ptr / f32v8_dot_ptr wrappers.
+    FMA needs a DIFFERENT CPUID bit than AVX2: simd_has_fma() = leaf 1 ECX
+    bit 12 (clone of aes_ni's leaf-1 probe), NOT leaf 7 EBX bit 5. The
+    fma fallback (mulps+addps, 2 roundings) can differ 1 ULP from fused —
+    use exact-product inputs for bit-equality. bench_f32v8_gemm ~1.48×
+    (256 vs 128-bit; sub-2× — fixed per-cell reduce overhead). Phase 4
+    CLOSES: f32 SIMD complete on x86 (f32v4 128-bit + f32v8 256-bit).
 
 [[entries]]
 name = "overload_dispatch_pointer_vs_value"

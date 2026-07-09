@@ -4,11 +4,11 @@
 # full surface). Header last refreshed 2026-07-03 (v6.4.0); some entries
 # below still carry their carve-origin version notes. Since the 2026-06-12
 # sync this file gained protobuf (v6.2.17) + tls_native ALPN (v6.2.22)
-# entries; folded sakshi is now 2.4.4 (v6.4.0), not 2.2.10. Original sync
+# entries; folded sakshi is now 2.4.5 (bumped v6.4.27), not 2.2.10. Original sync
 # note (still-relevant carve history follows):
 # `lib/fs.cyr` dir_list/is_dir/dir_walk now work on Windows via
 # `lib/fs_win.cyr` (FindFirstFileW, v6.1.18); `lib/sync.cyr` portable
-# mutex (v6.1.16); sakshi was folded at 2.2.10 (v6.1.18) — now 2.4.4; the
+# mutex (v6.1.16); sakshi was folded at 2.2.10 (v6.1.18) — now 2.4.5; the
 # base64/csv/json/toml/bigint/u128 modules were carved into
 # `lib/bayan.cyr` (v6.1.25) and matrix/linalg into `lib/ganita.cyr`
 # (v6.1.26). The
@@ -50,17 +50,29 @@ LIB/MATH.CYR (composed from builtins):
     var M = max(a, b);
 
 IMPLEMENTATION:
-    f64_atan uses x87 FPU: fld1 + fpatan, computing atan(ST(1)/ST(0)).
+    ON x86: f64_atan uses x87 FPU: fld1 + fpatan, computing atan(ST(1)/ST(0)).
+    Likewise f64_exp2 (f2xm1/fscale), f64_sin/f64_cos (fsin/fcos), etc.
+
+    ON aarch64 (no native transcendentals): the backend routes each f64
+    transcendental to a lib/math.cyr POLYFILL by name (_FINDFN_CSTR →
+    ECALLFIX). As of v6.4.25 the FULL set is polyfilled — exp/ln (v5.7.31),
+    sin/cos (v6.4.16), and exp2/atan (v6.4.25) — so `include "lib/math.cyr"`
+    is REQUIRED for these on aarch64 (else a hard-error naming the missing
+    _f64_*_polyfill). _f64_exp2_polyfill: 2^x = 2^n·exp(f·ln2). _f64_atan_polyfill:
+    sign/reciprocal/π6-fold reduction + t^21 Taylor. _f64_sin/cos_polyfill carry a
+    Dekker double-double (Payne-Hanek-lite) reduction for large |x| (gated ≥ 8192).
 
     The lib/math.cyr functions compose from existing builtins:
       sinh(x) = (f64_exp(x) - f64_exp(f64_neg(x))) / 2
       cosh(x) = (f64_exp(x) + f64_exp(f64_neg(x))) / 2
       tanh(x) = sinh(x) / cosh(x)
       pow(b,e) = f64_exp(f64_mul(e, f64_log(b)))
+      tan(x)  = f64_sin(x) / f64_cos(x)   # no dedicated builtin/op
 
-KEY LESSON: x87 FPU transcendentals (fpatan, fsin, fcos, fsqrt)
-are the most compact way to implement these — single instructions
-vs. Taylor series or lookup tables.
+KEY LESSON: x87 FPU transcendentals (fpatan, fsin, fcos, f2xm1, fsqrt)
+are the most compact way to implement these on x86 — single instructions
+vs. Taylor series. aarch64 has none, so every one is a stdlib polyfill the
+backend dispatches to by name; x86 keeps the native x87 bytes untouched.
 
 [[entries]]
 name = "base64_module"
