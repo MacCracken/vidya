@@ -12,6 +12,36 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
+# 84 entries (v6.4.46–.48 docs-sync: +2 gotchas, 1 retired-in-place, 4 marked resolved)
+# +shift_right_split_gtgt_stays_logical_gtgtgt_is_arithmetic_reverse_of_js_never_flip_gtgt (v6.4.46 — >> MUST stay
+#   logical: crypto rotates + ISUNION()=fcount>>63 depend on it; signed-shift goes through the NEW >>> operator)
+# +cyrius_auto_calls_main_top_level_var_main_double_runs_and_the_execve_helper_dispatch_pattern (v6.4.47 —
+#   auto-main double-run, args_init-first, the cyrsign-efi execve helper-dispatch, argv i64[16] slots-not-bytes)
+# ~cx_bytecode_backend_..._cli_exposed: the "cx has ZERO CLI surface" premise RETIRED — cx is CLI-exposed
+#   (--target=cx, cxvm installed) since v6.4.17–.22; entry flipped to record the closed gap + evergreen lesson.
+# ~4 stale caveats marked RESOLVED: macho socket-family (v6.2.24), callptr Win64-COM frame corruption (v6.0.86),
+#   PE capturing closures (v6.4.26), value-form SIMD params/returns on Win64 (v6.4.31).
+# 82 entries (v6.4.44, Win64 retptr deep-stack-param homing: +1 gotcha
+# win64_retptr_shifted_deep_stack_param_homing_offbyone_prologue_postloop_missing_pp_shift_f32v8_make_lanes_567
+# — a value-form-SIMD/struct-returning fn on Win64 PE (hidden retptr in RCX) with >6 params homed its
+# DEEP stack params (pidx>=6, the post-loop at parse_fn.cyr ~3404) one local slot too deep and dropped
+# the last, because the post-loop used the param index as BOTH source ABI slot AND dest local slot with
+# NO retptr shift — while the IN-loop homing (~3321) DOES apply `_pp_shift` and the body reads the
+# contiguous -0x30-lidx*8 slots via FINDLOCAL. f32v8_make(a..h) lanes 5,6,7 = garbage on cass, 0-4 OK;
+# Linux/SysV fine (no retptr for SIMD register returns, so _pl_shift==0 == old code == byte-id). Fix:
+# mirror _pp_shift in the post-loop (pidx=spi+shift src, lidx=spi dest, start spi=6-shift). Pre-existing
+# since v6.4.31; latent bc vr01_f32v8_ctor's stale "skips cass" comment masked that CYRIUS_HAS_VAL_SIMD_
+# PARAMS went true on PE at .31. Root-caused by disassembling caller (correct) vs callee prologue (skew).)
+# 81 entries (v6.4.44, PE reroute 16-align: +1 gotcha
+# pe_kernel32_reroutes_fixed_sub_rsp_only_aligns_on_right_parity_closehandle_faults_on_misalign_wine_cannot_repro
+# — 8 PE kernel32 reroutes (ECLOSE_PE/EWAIT/EGETEXIT/ESETHANDLE/ECREATEPIPE/EGETCMDLINE/EGETTICKS/EMMAP)
+# used a FIXED `sub rsp,0x28` that only 16-aligns the call when the caller's rsp lands on the right
+# parity; CloseHandle faults 0xC0000005 on an aligned SSE access inside kernel32 when misaligned.
+# Exposed by the async subprocess resume (deep call stack): 2 sequential async_run_process crashed,
+# single+batched worked (parity-dependent). CreateProcessW was fixed this way at v6.0.51 but its comment
+# wrongly generalized "≤4-arg reroutes tolerate a misalign". Fix: route through the rbx-anchored
+# _pe_call_Narg_aligned / _pe_srw_call_1arg helpers. WINE aligns leniently → returned 42 throughout;
+# only real Windows repros. WriteFile-trace of _async_step localized it after ckA/ckR/ckG bisection.)
 # 79 entries (v6.4.32, cx SIMD codegen: +1 gotcha
 # cx_simd_emitters_are_easy_the_real_bugs_are_local_addressing_eloadlocaladdr_stub_and_regalloc_disp_nonuniformity
 # — cx SIMD emitters mirror the f64 loop trivially; the real blockers are 2 pre-existing cx
@@ -214,8 +244,8 @@
 # Mach-O output-basename breaks reproducible cmp).
 
 [[entries]]
-name = "cx_bytecode_backend_functional_but_not_cli_exposed"
-description = "The cyrius-x (cx) bytecode backend is REAL, self-hosting, and end-to-end tested — but has ZERO user-facing surface, so it is easy to wrongly conclude 'we have no bytecode/WASM target' (surfaced by a user premise-check 2026-07-05; do NOT re-dismiss it). It began as the git commit caa7122e 'wasm what' and grew into cyrius-x: src/backend/cx/emit.cyr (register-based 4-byte-instruction emitter, r0-r31), src/main_cx.cyr (the cx compiler fork), programs/cxvm.cyr (the VM), and programs/checks/cx.cyr (a ~15-check gate IN the green check.sh that builds cc_cx, builds cxvm, emits .cyx, pipes it through cxvm, and asserts the exit code — 'cc5_cx output is now clean CYX bytecode end-to-end' is a real commit). What's MISSING is only the last-mile CLI exposure: the `cyrius` CLI accepts default(x86)/--aarch64/--win/--agnos/--target=js but has NO --target=cx; cxvm is NOT installed by install.sh (only built ad-hoc inside the gate); and `cyrius run` runs native code, not .cyx. This is the exact shape of the TS→JS gap before --emit-js/--target=js wired it into the CLI at v6.1.12. Also incomplete on cx: float ops (roadmap_6.md:742) and SIMD (EMIT_F32V_LOOP/EMIT_IVEC_*/EMIT_F32V8_LOOP are silent stubs on cx). Productization tracked in docs/development/proposals/2026-07-05-cx-bytecode-cli-exposure.md + roadmap-future.md, scheduled AFTER the v6.4.x SIMD arc. LESSON: 'grep for the literal string wasm returns nothing' is NOT 'the work doesn't exist' — a backend can be fully built and gated yet invisible because it has no CLI verb; check git history + backend dirs + the checks/ gates before declaring a feature absent."
+name = "cx_bytecode_backend_is_cli_exposed_check_backend_dirs_before_declaring_a_feature_absent"
+description = "The cyrius-x (cx) bytecode backend is a REAL, self-hosting, CLI-EXPOSED target: `cyrius build --target=cx` emits a portable `.cyx`, `cyrius run` executes it through the installed cxvm, and programs/checks/cx.cyr gates the whole path end-to-end in the green check.sh. Its last-mile CLI exposure landed in the v6.4.17-.22 arc (Release A CLI wiring .17, f64 arith .18-.19, cross-OS `.cyx` .20) with float/SIMD codegen following (.32); cxvm now installs via the `[bins]` loop in scripts/install.sh (`cbt/cyrius.cyr` accepts `--target=cx`, `cbt/core.cyr` routes it). HISTORICAL (through ~v6.4.16): the backend was fully built + gated but had NO CLI verb — no `--target=cx`, cxvm built only ad-hoc inside the gate, `cyrius run` ran native code — so a grep for `wasm`/`--target=cx` returned nothing and it was easy to wrongly conclude 'we have no bytecode/WASM target' (a user premise-check 2026-07-05 caught exactly that). That gap is now CLOSED — the shape mirrors the TS->JS gap before `--emit-js`/`--target=js` wired it in at v6.1.12. LESSON (evergreen): 'grep for the literal string returns nothing' is NOT 'the work doesn't exist' — a backend can be fully built and gated yet invisible because it has no CLI verb; check git history + src/backend/ dirs + the checks/ gates before declaring a feature absent."
 category = "cyrius"
 
 [[entries]]
@@ -2446,7 +2476,7 @@ the binary before exec.
 
 [[entries]]
 name = "callptr_indirect_call_frame_slot_spill_survives_win64_shadow"
-description = "v6.0.70: compiler-emitted indirect calls (callptr → IR_CALL_INDIRECT, x86 `call [rbp-disp]` / aarch64 `ldr x6;blr x6`). The crux is callee-survival across ECALLPOPS: the obvious 'push callee, pop after ECALLPOPS' is WRONG on Win64 (ECALLPOPS does `sub rsp,0x20` for the shadow home → buries a stack-pushed callee) and on SysV n>6. The correct general fix is to spill the callee to a FRESH frame local before the args (rbp-relative → unaffected by ECALLPOPS's rsp moves, re-entrant for nested callptr, any arg count). aarch64 must load into x6 (x0-x5 are arg regs, x9 is the >6-arg shuffle scratch). Open caveat: a real Win64 COM callee still corrupts the caller frame (callptr to a trivial callee works) — .71."
+description = "v6.0.70: compiler-emitted indirect calls (callptr → IR_CALL_INDIRECT, x86 `call [rbp-disp]` / aarch64 `ldr x6;blr x6`). The crux is callee-survival across ECALLPOPS: the obvious 'push callee, pop after ECALLPOPS' is WRONG on Win64 (ECALLPOPS does `sub rsp,0x20` for the shadow home → buries a stack-pushed callee) and on SysV n>6. The correct general fix is to spill the callee to a FRESH frame local before the args (rbp-relative → unaffected by ECALLPOPS's rsp moves, re-entrant for nested callptr, any arg count). aarch64 must load into x6 (x0-x5 are arg regs, x9 is the >6-arg shuffle scratch). RESOLVED at v6.0.86: on PE the callee is pushed on the stack rather than spilled to a frame slot, so nothing aliases an &-taken out-param; a real Win64 COM callee (dxgi_vram_bytes()=128 MB) verified on real cass hardware — see the next entry, callptr_callee_spill_aliases_addr_taken_local."
 category = "cyrius"
 tags = ["callptr", "indirect-call", "ir_call_indirect", "com", "vtable", "win64", "shadow-space", "frame-slot", "ffi", "v6.0.70"]
 content = """
@@ -2708,10 +2738,12 @@ EMACHO_SYSXLAT `_msx(S, 53, 0x2000087)` (53 is socketpair on the x86 enum,
 no collision). Keep `_macho_arm_routes` in lockstep (it whitelists the
 unrouted-syscall warning). Encodings: `as -arch arm64` on ecb.
 
-STILL LATENT (v6.0.84): the socket FAMILY (socket/connect/accept/bind/listen)
-is mapped ONLY as x86 numbers (41-50) in the aarch64-macho ESYSXLAT, so
-real-network sockets are likely broken on arm-macho (the .81 live-Cloudflare
-proof was on Linux). The socketpair e2e doesn't need them.
+RESOLVED (v6.2.24): the socket FAMILY (socket/connect/bind/listen/setsockopt)
+is now mapped in the aarch64-macho ESYSXLAT block too (socket 198→97, connect
+203→98, bind 200→104, listen 201→106, setsockopt 208→105 — the "aarch64-Linux
+socket numbers → Darwin" branch in src/backend/aarch64/emit.cyr). Real-network
+sockets on arm-macho are no longer x86-only-mapped; the .84 STILL-LATENT note
+is closed.
 """
 
 [[entries]]
@@ -3436,11 +3468,12 @@ this every time. FIX: anonymize the scratch slot the instant it's claimed —
 `S64(S + 0x5D9D000 + slot*8, 0 - 1); SLDEP(S, slot, 0);` (name = -1, depth 0).
 The same anonymization is applied to `callptr`'s obj/fn-ptr spill slots.
 
-**Platform.** PE (Windows) capturing closures are a compile error for now
-(`ERR_MSG "capturing closures not yet supported on Windows PE"`); the env build
-+ `ECALLPTR_PE` 16-byte-align interaction is unverified, so it fails loud rather
-than miscompiling. Non-capturing closures work on PE. Capture is verified
-byte-correct on x86_64 + aarch64 (real pi + qemu).
+**Platform.** PE (Windows) capturing closures SHIP as of v6.4.26 — routed
+through `ECALLPTR_PE` (the 16-byte-aligned path) with the env/fn-pointer pushed
+as the callee (parse_expr.cyr "v6.4.26: capturing closures now supported on PE");
+the "capturing closures not yet supported on Windows PE" error string is gone
+from src/. Capture is verified byte-correct on x86_64 + aarch64 (real pi + qemu)
+and now on real cass.
 
 **LESSON:** when you borrow a shared per-fn table slot for scratch, ANONYMIZE it
 — the tables carry stale names across fns, and a live name in a scratch slot is
@@ -3587,6 +3620,60 @@ byte-identical self-host); the FEATURE is gated in pass 2 via a lazy
 driver env-read edit). `_IS_FN_KW` (token 32 OR 134) routes the dispatch in all 7
 forks. Verified x86 + aarch64 + native-aarch64; check.sh 107; ecb+cass+pi
 SELFHOST_OK; differential + seed→cybs→cycc byte-identical.
+"""
+
+[[entries]]
+name = "aarch64_async_reactor_esysxlat_epoll_pwait_collision_and_event_offset"
+description = "v6.4.42: the aarch64 epoll async reactor (lib/async.cyr) had NEVER worked — TWO aarch64-only ABI bugs, both invisible to x86 self-host and the async gates (which run only on x86), found only by running the reactor fixtures on REAL pi hardware ('found by ports'). BUG 1 (the blocker): sys_epoll_wait issued the aarch64 epoll_pwait number (22) directly, but 22 is ALSO x86 `pipe`, which ESYSXLAT (src/backend/aarch64/emit.cyr) rewrites to pipe2(x0,0) + x1=0 — so every reactor wait ran pipe2(epfd, 0) → -EFAULT, and _async_step's epoll_wait never returned, hanging the whole reactor. The classic ESYSXLAT stdlib/x86 number-collision (cf. the flock 73↔ppoll, socket 41, getdents 217 collisions). BUG 2 (latent behind #1): the epoll_event `data` field was written/read at byte offset 4 unconditionally — correct only for x86_64 (EPOLL_PACKED, 12-byte struct); aarch64 leaves the struct unpacked (16 bytes, u64 aligned to offset 8), so the task-ptr round-trip through epoll_data landed at the wrong offset. Fix: sys_epoll_wait issues x86 232 (epoll_wait) + a new ESYSXLAT arg-extend entry maps 232 → epoll_pwait(22) with NULL sigmask (mirrors poll 7→ppoll 73); the reactor's epoll_data store/load are #ifdef CYRIUS_ARCH_AARCH64-guarded to @8. Both verified end-to-end on pi (all 7 async fixtures → exit 42, first time ever)."
+type = "gotcha"
+tags = ["aarch64", "async", "reactor", "epoll", "epoll_pwait", "ESYSXLAT", "syscall-collision", "EPOLL_PACKED", "found-by-ports", "pi", "v6.4.42"]
+body = """
+**Two aarch64-only ABI bugs, both self-host-blind.** cycc never issues epoll, and
+the async `*_gate` fixtures (programs/checks/main.cyr) compile with the x86
+build/cycc and run natively on x86 — so the aarch64 reactor path was NEVER
+exercised in CI. It surfaced only by cross-compiling the reactor fixtures to
+aarch64 and running them on real pi. Same class as the v6.2.10 socket / v6.2.24
+getdents64 / v6.0.68 stat gaps: "the compiler self-hosts on aarch64" does NOT mean
+"aarch64 stdlib syscalls work" — self-host only exercises the ~40 syscalls cycc
+itself makes.
+
+**BUG 1 — the ESYSXLAT number collision (the blocker).** ESYSXLAT emits, inline at
+every aarch64 syscall site, a runtime cmp/b.ne/movz chain that translates the
+x86-numbered syscalls the compiler + tools issue into aarch64 numbers. It also has
+`cmp x8,#22 → pipe2 + x1=0` (v6.2.27: aarch64 has no bare pipe(2); raw
+`syscall(22,&fds)` is x86-canonical pipe → pipe2). But the async stdlib's
+sys_epoll_wait issued aarch64 epoll_pwait = **22** directly. So x8=22 (meant as
+epoll_pwait) hit the pipe cmp → rewritten to pipe2(x0=epfd, x1=0) → wrote 2 fds to
+address `epfd` → **-EFAULT** on every wait. Diagnosed by dumping (epfd, ctl, nrA)
+from a pi probe: epoll_create1(20)=ok, epoll_ctl(21)=ok (20/21 not in ESYSXLAT),
+epoll_pwait(22)=-14. ONLY 22 collided (timerfd 85/86, socket 198, close 57, read
+63 etc. all pass through untranslated). THE RULE (already in CLAUDE.md): an aarch64
+stdlib syscall number that collides with an x86 number ESYSXLAT translates is
+silently mis-remapped — issue the x86 number + add an ESYSXLAT entry instead of the
+bare aarch64 number. Fix: sys_epoll_wait issues x86 **232** (4 args); a new ESYSXLAT
+entry `cmp x8,#232; b.ne +16; movz x4,#0; movz x5,#0; movz x8,#22` arg-extends it to
+epoll_pwait(epfd,events,maxevents,timeout,sigmask=0,sigsetsize=0). Placed AFTER the
+pipe(22) cmp so the x8=22 it produces is not re-caught (the same ordering rule the
+flock/at-family entries use). Exactly mirrors the poll 7→ppoll 73 arg-extend.
+
+**BUG 2 — epoll_event data offset (latent behind #1).** `struct epoll_event` is
+`__attribute__((packed))` ONLY under `#ifdef __x86_64__` (linux/eventpoll.h
+EPOLL_PACKED) → x86 layout is {events@0 u32, data@4 u64} sizeof 12. aarch64 leaves
+it unpacked → {events@0, 4 pad, data@8} sizeof 16. lib/async.cyr wrote the task ptr
+to epoll_data and read it back on wake at a hardcoded byte offset 4 (correct for
+x86 only). On aarch64 the kernel reads/writes data at offset 8, so the round-tripped
+`wtask` was garbage. Fix: `#ifdef CYRIUS_ARCH_AARCH64` → @8, else @4, at BOTH the
+write (_async_wait_events) and the wake read (_async_step); keep the standalone
+async_await_readable/async_timeout helpers consistent. cycc byte-identical (the
+guard's x86 branch is the pre-existing code).
+
+**Verification.** x86 cycc byte-identical (ESYSXLAT lives in
+main_aarch64.cyr's chain, not main.cyr; the wrapper is DCE-dead in cycc). ecb
+(macho, addition is after the `_TARGET_MACHO==2` early-return) + cass (x86 PE
+backend) byte-identical. pi self-hosts byte-identical AND runs all 7 async reactor
+fixtures → 42. Lesson: to verify an aarch64 stdlib syscall, run a program that
+CALLS it on real aarch64 — qemu-user is NOT a substitute here (qemu's own
+epoll_pwait emulation returned nothing for a ready fd, masking the real cause).
 """
 
 [[entries]]
@@ -4132,17 +4219,16 @@ THREE traps:
     the fused `fmla`, so the two arches agree bit-for-bit on the test values. (The
     pre-existing f64 dot DOES use fmla and already diverges cross-arch — don't copy
     that for new f32 work.)
-(3) A value-form SIMD test can't be a full `vr01_` cross-OS gate: value-form
-    f32v4/f64v2/f64v4 PARAMS/RETURNS hard-error on Win64 PE ("value-form params not
-    yet supported on Win64 PE — use pointer-form") — a documented, deliberate gap
-    (the Win64 vector-by-hidden-pointer ABI is unimplemented; filed
-    2026-07-08-win64-value-form-simd-params). So keep the value-form test a regular
-    tcyr (aarch64 covered by the native-arm64 CI corpus, un-XFAIL'd), and gate the
-    packed ops cross-OS with a SEPARATE flat-array test (`f32v_add(&r, a, b, n)` —
-    pointers + count, no vector value types) that also runs on cass. The strict-XFAIL
-    machinery (ci.yml) auto-forces the removal when the aarch64 stub becomes real: the
-    corpus gate is `test $xpass -eq 0`, so the test flips RED (XPASS) the moment your
-    emitter lands — that RED is the cue to remove it from XFAIL, not a regression.
+(3) HISTORICAL (fixed v6.4.31): value-form f32v4/f64v2/f64v4 PARAMS/RETURNS once
+    hard-errored on Win64 PE ("value-form params not yet supported on Win64 PE —
+    use pointer-form"). As of v6.4.31 they are address-passed (by hidden pointer) on
+    Win64 — parse_decl.cyr "v6.4.31: value-form SIMD arg → address-passed on Win64",
+    and main_win.cyr PP_PREDEFINEs CYRIUS_HAS_VAL_SIMD_PARAMS — so a value-form SIMD
+    test now runs on cass and CAN be a full `vr01_` cross-OS gate. (When first landing
+    an aarch64 SIMD emitter the strict-XFAIL machinery in ci.yml still auto-forces XFAIL
+    removal: the corpus gate is `test $xpass -eq 0`, so the test flips RED (XPASS) the
+    moment your emitter lands — that RED is the cue to remove it from XFAIL, not a
+    regression.)
 """
 
 [[entries]]
@@ -4214,3 +4300,25 @@ op (`f64v_add`+`f64v_sqrt` over local arrays → exit 42) so a green ecb/pi/cass
 proves the cx SIMD emitters + frame fix + new opcodes execute on real hardware — not
 the placebo "a write halts" that CLAUDE.md warns about.
 """
+
+[[entries]]
+name = "pe_kernel32_reroutes_fixed_sub_rsp_only_aligns_on_right_parity_closehandle_faults_on_misalign_wine_cannot_repro"
+description = "Windows PE kernel32 reroutes must DYNAMICALLY 16-align rsp before the call — a fixed `sub rsp, 0x28` is a latent bug. Win64 requires rsp = 0 (mod 16) immediately before a `call`; a fixed sub-rsp achieves that only when the caller's rsp lands on the exact parity the offset assumes, which depends on the function's frame size + expr-stack depth + call chain — so it silently works or faults by context. CloseHandle (and any kernel32 fn with an internal aligned SSE access, e.g. movaps) faults 0xC0000005 on an 8-misaligned stack; GetExitCodeProcess/WaitForSingleObject happen to tolerate it, which is why the crash localizes to CloseHandle though its siblings share the bug. EXPOSED at v6.4.44 by the async subprocess resume (lib/async_win.cyr _async_process_task): main -> task_join -> _async_pump -> _async_step -> fncall1 -> resume -> CloseHandle is a deep stack, and TWO sequential async_run_process calls crashed on real cass while a SINGLE call and the BATCHED (spawn-all-then-join) form worked — pure alignment-parity luck. CreateProcessW's ECREATEPROC_PE was already rbx-anchor-aligned at v6.0.51, but its own comment asserted 'the <=4-arg reroutes tolerate a misalign this 10-arg call does not' — that generalization was FALSE. FIX: route each of the 8 fixed-offset reroutes (ECLOSE_PE/EWAIT_PE/EGETEXIT_PE/ESETHANDLE_PE/ECREATEPIPE_PE/EGETCMDLINE_PE/EGETTICKS_PE/EMMAP_PE) through the existing rbx-anchored helpers (_pe_call_0/2/3/4arg_aligned, _pe_srw_call_1arg: push rbx; mov rbx,rsp; and rsp,-16; sub rsp,0x20; call; mov rsp,rbx; pop rbx). cycc SHRANK ~4 KB (inline reroutes -> shared helpers). HOW TO RECOGNIZE: a real-Windows-ONLY 0xC0000005 that WINE cannot reproduce (WINE aligns leniently -> returned 42 throughout) AND flips crash<->pass with call-depth / caller-frame changes -> suspect a fixed-`sub rsp` reroute, not the callee. Localize with a WriteFile (syscall(1,1,...)) trace bracketing each op; bisect step-0 vs resume vs the post-fncall1 loop code with manual GQCS + fncall1 replays. Self-host + seed-derive stay byte-identical (PE-emit-only; cycc's Linux codegen never calls these). See CHANGELOG [6.4.44]."
+category = "cyrius"
+
+[[entries]]
+name = "win64_retptr_shifted_deep_stack_param_homing_offbyone_prologue_postloop_missing_pp_shift_f32v8_make_lanes_567"
+description = "On Win64 PE a by-value SIMD/struct return uses a HIDDEN RETPTR in RCX, so every user arg shifts down one ABI slot (a,b,c -> rdx/r8/r9; d,e,f,g,h -> stack). The callee prologue homes params in TWO places and they must agree on that retptr shift: the IN-loop homing (parse_fn.cyr ~3321) computes `_pp_shift = (_cur_fn_ret_stash>0 && !aarch64) ? 1 : 0` and calls ESTOREPARM(int_pc+_pp_shift, li) -- pidx shifted for the source Win64 slot, lidx contiguous for the dest local slot. But the POST-loop that homes the DEEP stack params (pidx>=6, parse_fn.cyr ~3404) did `ESTOREPARM(spi, spi, pc)` -- using spi as BOTH pidx AND lidx with NO shift. Correct only with no retptr. With one, it homed each deep stack param ONE LOCAL SLOT TOO DEEP (dest lidx = true+1) and stopped one param short (spi<pc never reached the last source idx), so the first excluded stack param was never homed, the rest got the previous param's value, and the last param's incoming bytes were ignored. The body reads each param at the contiguous -0x30-lidx*8 slot via FINDLOCAL, so it diverged. SYMPTOM: f32v8_make(a..h) returned lanes 0-4 correct but lanes 5,6,7 = garbage/shifted on real cass; Linux/SysV all 8 lanes correct (SIMD returns via the xmm PAIR there, no retptr, so _pl_shift==0 and the emit is textually the old code -> self-host byte-identical). FIX: mirror _pp_shift in the post-loop -- `pidx = spi + _pl_shift` (shifted source), `lidx = spi` (contiguous dest), start `spi = 6 - _pl_shift`, guard `pc + _pl_shift > 6` (also catches the exact-6-param retptr case pc>6 dropped). PRE-EXISTING since v6.4.31 (Win64 value-form SIMD params/returns); latent for many minors because vr01_f32v8_ctor.tcyr carried a stale comment saying it 'skips cass', but v6.4.31 made CYRIUS_HAS_VAL_SIMD_PARAMS true on PE so the native cass cycc actually RAN the f32v8 assertions -- surfaced only when the v6.4.44 permanent Windows async gate ran the full vr01_ corpus on cass. HOW TO RECOGNIZE: a value-form-SIMD/struct-returning fn with >6 params whose DEEP args (3rd+ stack arg) are wrong on Win64 but correct on Linux -> suspect the retptr-shift being applied inconsistently between the two prologue-homing sites. Confirm by disassembling BOTH the prologue homing (`mov rax,[rbp+src]; mov [rbp-dst],rax`) and the body read (FINDLOCAL disp = -((lidx+1)*8)-regalloc*8-ret_stash) -- they must land on the same local slot. The caller (ECALLPOPS / parse_decl retptr push) was CORRECT; the bug is callee-side. Same '_cur_fn_ret_stash disp<->idx off-by-one' class as project_v6431_win64_valueform_simd, here the one remaining site. See CHANGELOG [6.4.44]."
+category = "cyrius"
+
+[[entries]]
+name = "shift_right_split_gtgt_stays_logical_gtgtgt_is_arithmetic_reverse_of_js_never_flip_gtgt"
+description = "v6.4.46 added `>>>` as the ARITHMETIC (sign-preserving) right shift and KEPT `>>` LOGICAL (zero-fill) — the REVERSE of JS/Java (there `>>` is arithmetic, `>>>` logical). The split is NOT arbitrary: `>>` MUST stay logical because two load-bearing sites depend on it. (1) CRYPTO ROTATES: keccak/sha/chacha rotate via `(x << n) | (x >> (64-n))` — logical `>>` is required or the high bits sign-extend and the rotate is wrong; flipping `>>` to arithmetic silently miscompiles SHA-3, cascading into TLS (tls_native_alpn went red). (2) THE COMPILER'S OWN UNION FLAG: `ISUNION()` is `fcount >> 63` — logical `>>` gives 1 for a tagged (high-bit-set) fcount, arithmetic `>>` gives -1 and the union sizeof/layout miscompiles (structs went red). BOTH were caught ONLY by check.sh's corpus — the self-host fixpoint AND seed-derive stayed GREEN because cycc's own source didn't exercise the exact miscompiled path until the corpus ran (a reminder that green self-host is necessary, not sufficient). LESSON: do NOT 'fix' `>>` to arithmetic to match JS/Java — it is a deliberate, load-bearing choice; route signed-shift needs through the NEW `>>>` (IR_ASHR=26; x86 `sar rax,cl` = 48 D3 F8; aarch64 `asrv` = 0x9AC12800; cx op 37). The drishti bug that motivated it was a signed value silently zero-filled by `>>`; the fix is `>>>`, never a `>>` semantics flip."
+category = "cyrius"
+tags = ["shift", "logical-shift", "arithmetic-shift", "operator", "crypto", "rotate", "union", "isunion", "sign-extension", "green-selfhost-not-sufficient", "v6.4.46"]
+
+[[entries]]
+name = "cyrius_auto_calls_main_top_level_var_main_double_runs_and_the_execve_helper_dispatch_pattern"
+description = "Three program-shape gotchas surfaced building the `cyrsign-efi` UEFI helper (v6.4.47). (1) DOUBLE-RUN: cyrius AUTO-CALLS `fn main` at program end, so a file that ALSO has a top-level `var z = main();` runs main TWICE (the crypto helper printed its output twice). Fix: end such a program with `var _rc = main(); syscall(60, _rc);` — the explicit exit syscall fires BEFORE the auto-main call, so main runs exactly once and the process exits with its rc. (2) args_init FIRST: `argc()`/`argv()` read a buffer `args_init()` fills from /proc/self/cmdline (lib/args.cyr, under `#ifdef CYRIUS_TARGET_LINUX`) — call `args_init()` before any argc/argv or you get argc 0 / garbage argv. (3) HELPER-DISPATCH: `cyrius sign-efi` does NOT link sigil's ~14 MB of crypto into the CLI — it `sys_execve`s a SEPARATE `cyrsign-efi` binary (located via find_tools/_tools_dir), keeping the CLI delta +144 B. The `[bins]` manifest in cyrius.cyml drives install.sh building the helper (`_build_tool sign-efi programs/cyrsign-efi.cyr`). ARGV-ARRAY SIZE trap: `var _se_argv: i64[16]` = 16 SLOTS (correct); `var _se_argv[16]` = 16 BYTES (2 slots) and overflows the execve argv. Windows `sys_execve` is a stub returning -1, so the dispatcher is Linux/macOS only."
+category = "cyrius"
+tags = ["main", "auto-call", "double-run", "args_init", "argv", "execve", "helper-dispatch", "cyrsign-efi", "sign-efi", "var-array-bytes-vs-slots", "v6.4.47"]

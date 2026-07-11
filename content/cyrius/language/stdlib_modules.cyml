@@ -1,6 +1,6 @@
 # Cyrius — Stdlib Modules (per-module usage)
 # How to use specific stdlib modules — APIs, conventions, gotchas.
-# 18 entries — a CURATED subset of the 98 lib/*.cyr modules (not the
+# 19 entries — a CURATED subset of the 99 lib/*.cyr modules (not the
 # full surface). Header last refreshed 2026-07-03 (v6.4.0); some entries
 # below still carry their carve-origin version notes. Since the 2026-06-12
 # sync this file gained protobuf (v6.2.17) + tls_native ALPN (v6.2.22)
@@ -744,3 +744,46 @@ DECODE: pb_read_tag -> (field, wire_type); pb_read_varint / pb_read_zigzag
 `protobuf.tcyr` (49 asserts) is the reference. Use it for gRPC-shaped
 payloads, AGNOS service IPC, or any length-prefixed binary protocol
 without pulling in a code generator. (CHANGELOG 6.2.17.)
+
+[[entries]]
+name = "uefi_secure_boot_enrollment"
+description = "lib/sigil.cyr (sigil 3.11.1, folded v6.4.48) — UEFI Secure Boot ENROLLMENT: build an EFI_SIGNATURE_LIST (.esl) + a signed EFI_VARIABLE_AUTHENTICATION_2 (.auth) blob for PK/KEK/db. Pairs with the native `cyrius sign-efi` Authenticode PE signer (v6.4.47)."
+category = "cyrius"
+---
+Sigil's UEFI arc completes the Secure Boot chain: after Authenticode
+PE signing (`cyrius sign-efi`, v6.4.47) you still have to ENROLL the
+signer cert into firmware. These three fns generate the enrollment
+artifacts. `include "lib/sigil.cyr"`.
+
+  efi_signature_list_from_cert(cert, clen, owner_guid, out)
+    — wraps one X.509 DER cert in an EFI_SIGNATURE_LIST (`.esl`):
+      28-byte header (EFI_CERT_X509_GUID SignatureType + sizes) then
+      one EFI_SIGNATURE_DATA (16-byte SignatureOwner + the DER cert).
+      Returns the total list length; `out` needs >= 44 + clen bytes.
+
+  efi_time(year, month, day, hour, minute, sec, out16)
+    — writes a 16-byte EFI_TIME (Year LE, Month, Day, Hour, Min, Sec,
+      then zeroed Pad/Nanosecond/TimeZone/Daylight) — the TimeStamp an
+      authenticated variable requires.
+
+  efi_auth_from_esl(ctx, key, cert, clen, out, out_len)
+    — signs an ESL into a `.auth` EFI_VARIABLE_AUTHENTICATION_2 blob:
+      EFI_TIME + WIN_CERTIFICATE_UEFI_GUID (a detached pkcs7-data
+      PKCS#7 SignedData) + the ESL payload. The PKCS#7 signs SHA-256
+      over (VariableName UCS-2 || VendorGuid || Attributes ||
+      TimeStamp || ESL) with the PARENT key (PK signs KEK, KEK signs
+      db) so firmware accepts it. `ctx` is a 56-byte EFI_AUTH_CTX
+      (EFI_AUTH_CTX_SIZE; slots EFI_AC_VARNAME / _VNLEN / _GUID /
+      _ATTRS / _TIME / _ESL / _ESLLEN). Returns 0 / -1 via out_len.
+
+TYPICAL FLOW (enroll a db cert, signed by KEK):
+    var esl[2048];
+    var n = efi_signature_list_from_cert(cert, clen, owner, &esl);
+    var tm[16];  efi_time(2026, 7, 10, 0, 0, 0, &tm);
+    # fill the EFI_AUTH_CTX slots, then:
+    var auth[4096];  var alen = 0;
+    efi_auth_from_esl(&ctx, kek_key, kek_cert, kek_clen, &auth, &alen);
+
+This is the ENROLLMENT half; the PE-signing half already shipped in
+sigil (see memory pin project_uefi_signing_shipped_in_sigil).
+CHANGELOG 6.4.48 / sigil 3.11.1.

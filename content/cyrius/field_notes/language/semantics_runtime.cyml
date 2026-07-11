@@ -463,3 +463,45 @@ eventually. Teach the pattern at the start; don't wait for
 the segfault. samvada's `tests/samvada.tcyr` already uses
 stack-local idiom; mabda's older test files retrofitted as
 they grew.
+
+[[entries]]
+name = "unwrap_is_option_only_result_silently_corrupts"
+description = "unwrap()/unwrap_or() operate on Option (Some/None); on a Result they silently return the raw error code instead of aborting — use result_unwrap/is_ok/payload for Results"
+category = "cyrius"
+---
+`unwrap(opt)` (lib/tagged.cyr) checks ONLY `is_none()` (tag == None == 0) before
+returning `payload(opt)`. A `Result` (lib/result.cyr) has Ok tag=0, Err tag=1 —
+tag layouts that OVERLAP Option's None=0/Some=1. So calling `unwrap()` on a Result
+is a category error with NO diagnostic:
+
+- an **Err** (tag=1, != None) sails past the `is_none` check → `unwrap` hands back
+  `payload(res)` = the RAW ERROR CODE as if it were a valid value (e.g. a negative
+  fd fed straight into a syscall);
+- an **Ok** (tag=0 == None) makes `unwrap` ABORT with "unwrap called on None".
+
+Because the tags overlap, the mismatch never faults at the unwrap site — it
+CORRUPTS DOWNSTREAM. This bit the async net client: `lib/net.cyr` fns
+(`tcp_socket`, `sock_accept`, `sock_connect`, `sock_send/recv`) return a **Result**,
+but the reactor glue reached for the familiar `unwrap()`. For Results use
+`is_ok(res)` / `is_err_result(res)` then `payload(res)`, or `result_unwrap()` /
+`result_unwrap_or()`. Rule of thumb: `unwrap` is Option-only; if a fn returns
+`Result<T,E>`, never `unwrap` it.
+
+
+[[entries]]
+name = "sockaddr_ipv4_is_network_order_bytes_packed_as_int"
+description = "async_connect/async_resolve pass IPv4 as the 4 network-order octets packed low-byte-first into an int (127.0.0.1 = 0x0100007F), NOT the host-order a.b.c.d value; resolve→connect round-trips untouched"
+category = "cyrius"
+---
+The `addr` argument to `async_connect(rt, addr, port)` (and the nameserver addr to
+`async_resolve`) is the four IPv4 octets in **network byte order, packed low-byte-
+first into an integer** — e.g. 127.0.0.1 is `0x0100007F` (b0=127 in the LOW byte),
+matching how it is stored raw with `store32(&sa+4, addr)` into `sockaddr_in`. The
+`port` is HOST order and byte-swapped inline to network order at the store site.
+`async_resolve` returns its resolved A record in the IDENTICAL packed form
+(`_async_dns_parse_a` reassembles the 4 answer octets as
+`b0 | (b1<<8) | (b2<<16) | (b3<<24)`), so a resolve result feeds STRAIGHT into
+`async_connect` with no conversion. The trap: this int is NOT the human-readable
+a.b.c.d and NOT host-order — passing `0x7F000001` (host-order 127.0.0.1), or
+`htonl`-ing the resolve output before connect, silently connects to the wrong host
+with no error. Same convention across net.cyr's sockaddr builders.
