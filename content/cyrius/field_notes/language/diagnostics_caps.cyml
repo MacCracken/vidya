@@ -1,7 +1,8 @@
 # Cyrius Field Notes — Language Gotchas (diagnostics & fixed caps)
 # Initialized-global-var slot ceiling, cc2 output buffer ceiling, preprocessed
-# line-number reporting, and the undefined-fn warning vs `--strict`.
-# 4 entries.
+# line-number reporting, the undefined-fn warning vs `--strict`, the LIVE
+# capacity ceilings, and what a v6.4.60+ diagnostic actually looks like.
+# 6 entries.
 
 [[entries]]
 name = "the_gvar_wall"
@@ -126,7 +127,22 @@ name = "the_preprocessed_line_number_problem"
 description = "Error messages report preprocessed line numbers, not source file + line — STILL ACTIVE at v5.8.46 (re-confirmed at v5.8.47 vidya audit; partially mitigated by the lex.cyr file_map but not surfaced in the error path)"
 category = "cyrius"
 ---
-**Status (2026-05-03)**: still active at cyrius v5.8.46.
+**Status (2026-07-27, v6.4.82)**: PARTIALLY MITIGATED. The line
+number is still the PREPROCESSED-stream line and the filename still
+collapses to literal `<source>` — but since v6.4.60 the diagnostic
+also carries a **column** and prints the **offending source line with
+a caret under it**, which in practice removes most of the counting
+work below:
+
+    error:<source>:1:5: expected identifier, got reserved keyword 'iv_add'
+        var iv_add = 1;
+            ^
+
+You can usually just read the excerpt and grep for it. See
+`diagnostics_carry_column_excerpt_and_dont_stop_at_the_first_error`
+in this file. The underlying file+line tracking is still unshipped.
+
+**Prior status (2026-05-03)**: still active at cyrius v5.8.46.
 Empirical re-test: a 5-line program with `var x = SOME_UNDEFINED;`
 on line 4 errors as `error:<source>:2: undefined variable
 'SOME_UNDEFINED'` — the line number doesn't match the user
@@ -136,9 +152,7 @@ filename available). Partial mitigation infrastructure exists
 (`file_map` + `file_map_str` regions in `src/frontend/lex.cyr`,
 ipc'd via `_resolve_file_line` in some error paths) but the
 common error sites still emit `error:<source>:N:` with the
-preprocessed-stream line number. Pinned to a future closeout
-slot — same lesson as the v5.8.46 process note about
-cap-overflow diagnostics needing source file + line.
+preprocessed-stream line number.
 
 ORIGINAL (DOOM-era, kept for historical context):
 
@@ -213,3 +227,113 @@ breakage at compile time instead of runtime. (Piping to
 `build/cycc --strict` directly still works for compiler-internal
 self-host.)
 
+[[entries]]
+name = "live_compiler_capacity_ceilings"
+description = "The capacity ceilings a consumer can actually hit, as of v6.4.82 — identifier pool 524288 B (512 KB, v6.4.76), fn_table init 8192 growing to a 32768 hard ceiling, var_table 8192, fixup_table 1048576, string_data 2097152, code buffer 64 MiB growable. Read this instead of any older 262144 / 8192-ceiling figure."
+category = "cyrius"
+---
+THE LIVE NUMBERS (source of truth: `src/common/util.cyr::_capacity_warnings`
+plus the `CYRIUS_STATS=1` meter in `src/main.cyr` — go read them, do not
+trust a doc that hasn't been premise-checked):
+
+    fn_table        8192 INITIAL, doubles to a 32768 HARD ceiling
+    identifier pool 524288 bytes (512 KB) at heap 0x60000-0xE0000
+    var_table       8192
+    fixup_table     1048576
+    string_data     2097152
+    code buffer     67108864 (64 MiB, growable off-heap since v6.4.49)
+    output buffer   16777216 (16 MiB, since v6.1.27)
+
+HOW TO SEE YOUR OWN NUMBERS:
+
+    CYRIUS_STATS=1 cyrius build ...      # full meter on stderr
+
+  Without `CYRIUS_STATS`, the compiler emits an 85%-of-cap WARNING per
+  table at end of compile. Since v6.4.50 all SEVEN drivers share one
+  implementation — before that, only the x86-Linux and Win64 drivers
+  warned at all, which is why a codebuf warning would appear on x86 and
+  vanish on aarch64/macho/cx for the same program.
+
+TWO TRAPS IN THE OLDER DOCUMENTATION:
+
+  1. **"identifier buffer 262144"** — retired at v6.4.76, which doubled
+     the pool 256 KB → 512 KB in place (into the free 0xA0000-0x100000
+     band). LEX's hard guard moved 261872 → **524016**. The pool END
+     must stay <= 0x100000: past that physical ceiling the compiler
+     HANGS rather than erroring, so this cap cannot simply be doubled
+     again in place.
+
+  2. **"fn_table cap 8192"** — 8192 is still the correct INITIAL cap
+     (and the var_table cap outright), so most surviving "8192"s in the
+     tree are RIGHT. What changed is the ceiling and the warning:
+     - v6.2.0 made the fn tables growable (REGFN doubles + rehashes).
+     - v6.4.75 fixed a **P0**: six fn-INDEXED side tables had never been
+       migrated and were still pinned to fixed 8192-slot bands, so past
+       8192 fns index `fi` wrote into slot `fi-8192` of its NEIGHBOUR —
+       silent metadata corruption, no diagnostic. All six now lazy-alloc
+       at the 32768 max.
+     - The WARNING was complicit: it divided by the LIVE `_fnt_cap`, so
+       it screamed "99%" at 8191 fns and went **SILENT** the moment the
+       table doubled (9000/16384 = 54%) — precisely when the corruption
+       began. It now divides by the fixed 32768 ceiling, which does not
+       move.
+     A blanket 8192 → 32768 find-and-replace INTRODUCES bugs. Check each
+     site.
+
+WARN THRESHOLDS (85%, integer arithmetic — `count * 100 / cap >= 85`):
+fn_table fires at 27853 fns (of 32768); identifier pool at 445645
+bytes (of 524288).
+
+WHAT TO DO WHEN YOU HIT ONE: the standing rule is grow the cap, not
+trim the program — but the identifier pool no longer has room to grow
+in place, and past 32768 fns the honest answer is splitting into
+compilation units. A consumer roughly 750 fns from the fn ceiling
+(stiva, v6.4.73) is the current high-water mark.
+
+[[entries]]
+name = "diagnostics_carry_column_excerpt_and_dont_stop_at_the_first_error"
+description = "Since v6.4.60 every error/warning prints `line:COLUMN` plus the source line with a caret; since v6.4.62 one compile reports MANY errors (panic-mode recovery), writes NO output file if any error fired, and cannot hang on hostile or truncated input."
+category = "cyrius"
+---
+WHAT YOU SEE NOW:
+
+    $ echo 'var iv_add = 1;' | cycc > /dev/null
+    error:<source>:1:5: expected identifier, got reserved keyword 'iv_add'
+        (cannot be used as an identifier; rename the variable/field/fn)
+        var iv_add = 1;
+            ^
+
+    $ printf 'var a: f64 = f64_from(3);\nvar b = a + 1;\n' | cycc > /dev/null
+    warning:<source>:2:14: f64 arithmetic with a non-f64 right operand
+
+THREE BEHAVIOURS WORTH RELYING ON:
+
+  1. **Many errors per compile.** A syntax error puts the parser into
+     panic mode; it skips to the next statement boundary and continues.
+     One run gives you the batch instead of one error per edit-compile
+     cycle. Scope is the `ERR_EXPECT` syntax class (346 sites); about 25
+     inline fatal errors still stop on the first hit.
+  2. **No output file when any error fired.** Every fork (including cx)
+     gates its writer on `_had_error`. A **0-byte output** is the
+     failure signature — if you see one, look at stderr, don't debug the
+     binary. You can never accidentally run a stale artifact.
+  3. **It cannot hang.** A `_had_error`-gated watchdog inside `PEEKT`
+     aborts cleanly if the token index stalls past a bound far above any
+     legal recursive-descent depth, and `PEEKT` clamps to EOF past the
+     token count (v6.4.78). A truncated file used to emit 166,670 error
+     lines; it now emits 5. On VALID input none of this machinery runs,
+     so there is no cost to correct programs.
+
+READING THE COLUMN: it points at the CURRENT parse token. For a
+backward-looking check ("expected `;`") that is the token AFTER the one
+you want — trust the caret over the number in those cases. A tab counts
+as one column. There is no per-file source line yet (see
+`the_preprocessed_line_number_problem`); the excerpt is what makes the
+message findable in practice — grep the printed line.
+
+IMPLEMENTATION NOTE (for anyone tempted to "improve" it): the column
+costs ZERO new heap — the token byte offset is packed into the HIGH 32
+bits of the existing `tok_lines` entry. And the watchdog is cheap for
+the same reason the EOF clamp was cheap: `PEEKT` already had an
+`_had_error` guard, and the runaway is post-error only, so clamping
+inside it measured at −0.07 % on self_compile.

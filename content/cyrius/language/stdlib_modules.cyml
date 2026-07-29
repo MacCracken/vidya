@@ -1,7 +1,20 @@
 # Cyrius — Stdlib Modules (per-module usage)
 # How to use specific stdlib modules — APIs, conventions, gotchas.
-# 19 entries — a CURATED subset of the 99 lib/*.cyr modules (not the
-# full surface). Header last refreshed 2026-07-03 (v6.4.0); some entries
+# 20 entries — a CURATED subset of the 99 lib/*.cyr modules (not the
+# full surface). Header refreshed 2026-07-27 at v6.4.82 (the v6.4.x
+# CLOSEOUT): chrono_module rewritten for the v6.4.67 DateTime/Duration/
+# strftime surface; file_locking gained the v6.4.57 crash-safe write set
+# (file_write_atomic / file_rename / xfsync / file_create_exclusive);
+# +1 entry thread_local_slot_allocator (v6.4.65 — stop hardcoding slot
+# indices). NOTE on the string-param rule that bit `lib/fs.cyr`: any
+# public fn taking a string MUST annotate the param `: Str`, or a bare
+# literal arrives as a raw cstr and every `str_*` call on it silently
+# returns nothing — see field_notes/language/semantics_runtime.cyml
+# `string_literal_to_str_coercion_is_annotation_only`.
+# Vendored dep pins at v6.4.82: sandhi 1.9.3 · sankoch 2.7.6 ·
+# sigil 3.12.1 · patra 1.12.12 · yukti 2.2.10 · mabda 4.0.7 ·
+# bayan 1.2.1 · ganita 1.0.4 · niyama 1.0.6 · vani 1.1.2 · sakshi 2.4.6.
+# Prior header refresh 2026-07-03 (v6.4.0); some entries
 # below still carry their carve-origin version notes. Since the 2026-06-12
 # sync this file gained protobuf (v6.2.17) + tls_native ALPN (v6.2.22)
 # entries; folded sakshi is now 2.4.6 (2.4.5 was bumped v6.4.27), not 2.2.10. Original sync
@@ -92,9 +105,40 @@ base64.tcyr. Unblocks: API clients, HTTP auth, data serialization.
 
 [[entries]]
 name = "chrono_module"
-description = "lib/chrono.cyr — time, duration, and sleep utilities"
+description = "lib/chrono.cyr — clocks, sleep, ISO-8601, and (v6.4.67) a DateTime handle + a Rust-chrono-shaped Duration API + strftime dt_format / dt_strptime. UTC only, all i64 math, no compiler change."
 category = "cyrius"
 ---
+DATETIME / DURATION / FORMAT (v6.4.67) — the samay-driven addition:
+
+  A `DateTime` is a BARE epoch-NANOSECOND i64 handle. No wrapper
+  allocation, consistent with `clock_epoch_ns`, and it ceilings around
+  the year 2262. UTC only — there is no timezone database.
+
+  DateTime:   dt_now / dt_from_epoch_secs / dt_from_epoch_ns /
+              dt_epoch_secs / dt_epoch_ns
+              field accessors dt_year / dt_month / dt_day /
+              dt_hour / dt_minute / dt_second
+  Duration:   dur_seconds / dur_minutes / dur_hours / dur_days /
+              dur_weeks / dur_millis / dur_nanos   (constructors; they
+              reuse the existing {secs,nsecs} layout, so old and new
+              code interoperate)
+              dur_num_seconds / _minutes / _hours / _days / _millis /
+              _nanos  (accessors)  +  dur_add / dur_sub
+  Arithmetic: dt_add / dt_sub (DateTime ± Duration) and dt_diff
+              (→ Duration; correct across a NEGATIVE span)
+  Format:     dt_format(dt, fmt) — `%Y %y %m %d %e %H %M %S %j %%`;
+              an unknown spec passes through as `%<c>`. Named
+              month/day strings are a documented Tier-2 extension, NOT
+              shipped.
+              dt_strptime(s, fmt) → epoch ns, or **-1**.
+
+  `dt_strptime` is deliberately STRICTER than `iso8601_parse`: it
+  REJECTS a non-digit numeric field rather than computing garbage.
+  Keep using `iso8601()` when you want the fixed-form fast path.
+
+  Gate: `tests/tcyr/vr01_chrono_datetime.tcyr`, 29 asserts, runs on
+  x86 + cross-OS.
+
 CLOCK FUNCTIONS:
   clock_now_ns()     — monotonic nanoseconds (clock_gettime CLOCK_MONOTONIC)
   clock_now_ms()     — monotonic milliseconds
@@ -120,13 +164,43 @@ PER-TARGET BACKING (the agnos branches are the gotcha):
 ISO-8601:
   Format/parse helpers, epoch↔date conversions, leap year.
 
-8 assertions in chrono.tcyr.
+8 assertions in chrono.tcyr + 29 in vr01_chrono_datetime.tcyr.
 
 [[entries]]
 name = "file_locking"
-description = "flock(2) wrappers in lib/io.cyr — concurrency-safe file I/O"
+description = "flock(2) wrappers + the v6.4.57 crash-safe write set (file_write_atomic / file_rename / xfsync / file_create_exclusive) in lib/io.cyr — concurrency- and crash-safe file I/O"
 category = "cyrius"
 ---
+CRASH-SAFE WRITE SET (v6.4.57) — reach for this before `file_write_all`
+whenever you are rewriting a file a user cares about. `file_write_all`
+is O_TRUNC plus ONE non-looping write: a short write leaves the file
+truncated, and a crash mid-write loses the original.
+
+fn file_write_atomic(path, buf, len)
+    Writes a unique SIBLING temp, LOOPS the write until every byte
+    lands (partial-write safe), `xfsync`es it, then atomically
+    `file_rename`s over the target. On any failure it unlinks the temp
+    and leaves the original intact.
+fn file_rename(old, new)
+    Portable same-fs rename. POSIX 2-arg `sys_rename` (aarch64
+    82→renameat 38, macho 82→BSD 128 via ESYSXLAT), AGNOS 4-arg
+    `sys_rename(old,ol,new,nl)`, and **Windows via `MoveFileExW` with
+    MOVEFILE_REPLACE_EXISTING** (both UTF-8 paths widened to UTF-16).
+fn xfsync(fd)
+    `sys_fsync` on Linux/macOS (macOS SYS_FSYNC=74 → BSD-95 via
+    ESYSXLAT), `sys_sync()` on AGNOS (a documented coarser residual),
+    no-op on Windows.
+fn file_create_exclusive(path, mode)
+    `O_CREAT|O_EXCL` on POSIX and Windows (O_EXCL → CREATE_NEW, mapped
+    at v6.4.58); `file_exists`+create on AGNOS, which has no exclusive-
+    create AO_* bit.
+
+Filed by **thoth**, whose model `edit`/`create_file` tools rewrite user
+source. Gate: `tests/tcyr/vr01_atomic_write.tcyr` on real aarch64 +
+macOS + Windows.
+
+FLOCK SET:
+
 fn file_lock(fd)         — exclusive blocking lock (flock LOCK_EX)
 fn file_unlock(fd)       — release lock (flock LOCK_UN)
 fn file_trylock(fd)      — non-blocking exclusive (returns -1 if locked)
@@ -787,3 +861,53 @@ TYPICAL FLOW (enroll a db cert, signed by KEK):
 This is the ENROLLMENT half; the PE-signing half already shipped in
 sigil (see memory pin project_uefi_signing_shipped_in_sigil).
 CHANGELOG 6.4.48 / sigil 3.11.1.
+
+[[entries]]
+name = "thread_local_slot_allocator"
+description = "lib/thread_local.cyr — `thread_local_alloc()` (v6.4.65) hands out a unique per-thread slot index. STOP hardcoding slot numbers: two libraries that both picked slot 3 silently clobbered each other's state, which is exactly how sigil's crypto bank collided with patra's SQL scratch."
+category = "cyrius"
+---
+THE OLD FAILURE MODE: `thread_local_get(slot)` / `thread_local_set(slot,
+v)` address ONE shared per-thread integer slot space. Every library that
+wanted per-thread state picked a slot index by hand. Two such libraries
+linked into one program silently clobbered each other — the v6.3.25
+`RECORD_LAYER_FAILURE` was sigil's crypto bank landing on patra's
+SQL-parse scratch, and the "fix" at the time was to hand-move sigil to
+slot 8. That is not a fix; it is a rescheduling.
+
+THE ALLOCATOR (v6.4.65):
+
+    var _MY_SLOT = 0;
+    var _MY_SLOT_INIT = 0;
+    fn my_slot() {
+        if (_MY_SLOT_INIT == 0) {      # CAS gate — allocate exactly once
+            _MY_SLOT = thread_local_alloc();
+            _MY_SLOT_INIT = 1;
+        }
+        return _MY_SLOT;
+    }
+
+  `thread_local_alloc()` hands out the next free slot monotonically,
+  **based at 16**. Slots 0-15 are FROZEN for app/legacy hardcoded use,
+  so an allocated library slot can never alias one — a partially
+  migrated program (new library, old application) stays collision-free
+  with no coordination between them.
+
+  `TLOCAL_MAX_SLOTS` went 16 → 128; the Windows per-thread
+  `TlsSetValue` block grew 128 → 1024 B to match.
+
+RULE FOR LIBRARY AUTHORS: never write a slot-index literal. Allocate at
+first use behind a once-gate. If you are reading someone's `= 8` or
+`= 3`, that is a pre-v6.4.65 hazard, not a convention to copy.
+
+FALSE ALARM WORTH KNOWING: sandhi's `_SANDHI_RPC_POLICY_SLOT = 16` was
+documented (in the file AND in the filed issue) as a "latent OOB
+thread-local slot". It is **not a thread-local slot at all** — it is a
+16-byte policy-record stride, never passed to `thread_local_get/set`.
+Premise-check against live source before migrating something that looks
+like a slot constant.
+
+Gate: `tests/tcyr/vr01_tls_alloc.tcyr` — unique monotonic slots >= 16,
+a high slot (100) round-trips through the grown backing, and allocated
+slots stay disjoint from the frozen 0-15 range. Runs on real hardware
+via the `vr01_` glob.

@@ -1,7 +1,7 @@
 # Cyrius Field Notes — Language Gotchas (parser & syntax)
 # Operator precedence, var/scope/bracket parser rules, and shift semantics that
 # bite at parse time or at the lexer.
-# 10 entries.
+# 12 entries.
 
 [[entries]]
 name = "the_logical_shift_trap"
@@ -195,19 +195,32 @@ the test catches it before ship.
 
 [[entries]]
 name = "caret_binds_tighter_than_binary_minus"
-description = "Cyrius's `^` (XOR) binds tighter than binary `-`, so `a ^ 0 - 1` is `(a ^ 0) - 1`, NOT `a ^ -1`"
+description = "`a ^ 0 - 1` is `(a ^ 0) - 1`, NOT `a ^ -1` — but NOT because `^` binds tighter. `^` and `-` are the SAME tier, left-associative. (Entry name is a misnomer kept for link stability; corrected at the v6.4.82 closeout, which also confirmed unary `~` DOES exist.)"
 category = "cyrius"
 ---
-Cyrius's operator precedence puts bitwise `^` (XOR) tighter than
-binary `-` (subtraction). This bites when writing the bitwise-NOT
-idiom as `value ^ 0 - 1` hoping to get `value ^ -1`:
+**CORRECTED 2026-07-27 (v6.4.82 closeout).** The OBSERVED behaviour
+below has always been right; the EXPLANATION was wrong, and one
+"cyrius has no..." claim had gone stale. Both re-verified by running
+the compiler:
+
+  * `^` does NOT bind tighter than `-`. `^`, `|`, `&`, `+` and `-`
+    all share ONE tier, evaluated LEFT to RIGHT. `x ^ 0 - 1` is
+    `(x ^ 0) - 1` for the same reason `1 - 2 + 3` is `(1-2)+3`:
+    equal precedence, left association. See
+    `bitwise_ops_share_the_additive_tier` for the full tier table.
+  * **Unary `~` EXISTS.** `~5 == -6`, probed at v6.4.82. The line
+    below saying cyrius has no `~` is retired — `x ^ -1` still
+    works and is still fine to read, but `~x` is the direct form.
+
+---
+
+The bite: writing the bitwise-NOT idiom as `value ^ 0 - 1` hoping to
+get `value ^ -1`:
 
     var not_x = x ^ 0 - 1;       # parses as (x ^ 0) - 1 = x - 1  ← WRONG
     var not_x = x ^ (0 - 1);     # OK via parens
     var not_x = x ^ -1;          # OK — cyrius supports negative literals
-
-Cyrius has no unary `~` operator. The canonical way to express
-bitwise NOT is `value ^ -1` (use the negative literal directly).
+    var not_x = ~x;              # OK — unary ~ (the direct form)
 
 Surfaced v5.4.15 writing `lib/keccak.cyr`'s chi step. First
 impl had `T1 ^ 0 - 1` and produced `2be83b...` for SHAKE128('')
@@ -215,11 +228,15 @@ instead of the NIST-canonical `7f9c2b...`. Changed to `T1 ^ -1`
 and bytes matched FIPS 202 immediately.
 
 GENERAL RULE when porting bitwise algorithms from C to cyrius:
-- No `~x` → use `x ^ -1`.
+- `~x` works; `x ^ -1` is the equivalent long form.
 - `>>` on 64-bit ints is LOGICAL (verified via probe:
   `0x8000000000000001 >> 63 == 1`, not `-1`), so the naive
   left-rotate `(x << n) | (x >> (64 - n))` works without an
-  explicit mask — as long as `n` is in `(0, 64)`.
+  explicit mask — as long as `n` is in `(0, 64)`. `>>>` (v6.4.46)
+  is the arithmetic/sign-preserving one.
+- Bitwise operands sit on the ADDITIVE tier, so ANY mixed
+  bitwise+arithmetic expression ported from C needs parens
+  re-checked, not just this one shape.
 
 [[entries]]
 name = "var_bracket_size_must_be_literal"
@@ -557,3 +574,118 @@ the existing cmp/jcc-skip cascade unchanged.
 Pattern destructuring (`match opt { Some(v) => use(v) }` binding
 the payload) is also a future slot — needs both auto-deref AND
 slot-binding from pattern offsets.
+
+[[entries]]
+name = "bitwise_ops_share_the_additive_tier"
+description = "Cyrius precedence is NOT C's: `&`, `|`, `^` sit on the SAME tier as `+` and `-`, left-associative. `1 | 2 + 1` == 4 (C: 3). `5 & 3 + 1` == 2 (C: 4). Shifts are on the `*` tier. Comparisons are LOOSER than bitwise, so C's `x & MASK == 0` foot-gun does the right thing here."
+category = "cyrius"
+---
+Every one of these was produced by RUNNING the compiler at the v6.4.82
+closeout (`var a = <expr>; syscall(60, a);`), not read off a grammar.
+
+THE TIERS (tightest first, each LEFT-associative):
+
+    1  unary / factor    -x   ~x   &x   *p   f(...)   ( ... )
+    2  TERM              *   /   %   <<   >>   >>>
+    3  EXPR              +   -   &   |   ^        <-- ONE TIER
+    4  comparison        ==  !=  <   >   <=  >=
+    5  logical           &&  binds tighter than  ||   (split v6.3.36)
+
+WHAT THAT COSTS YOU IF YOU THINK IN C:
+
+    expression        cyrius   C      why
+    ---------------   ------   ----   -------------------------------
+    1 | 2 + 1         4        3      (1|2)+1   vs   1|(2+1)
+    5 & 3 + 1         2        4      (5&3)+1   vs   5&(3+1)
+    3 | 1 & 2         2        3      (3|1)&2   vs   3|(1&2)
+    x ^ 0 - 1         x-1      x^-1   (x^0)-1   vs   x^(0-1)
+
+Two that AGREE, so don't use them to test your understanding:
+    1 & 2 | 3         3        3      C's & is tighter than its |,
+                                      cyrius reads left-to-right —
+                                      same answer, different reason
+    2 + 3 & 1         1        1      C's + is tighter than its &,
+                                      cyrius is left-to-right —
+                                      again the same answer
+
+WHAT IT BUYS YOU — the classic C mask bug is not a bug here:
+
+    4 & 6 == 4        1        0      cyrius: (4&6)==4  → true
+                                      C:      4&(6==4)  → 0
+  In C you must write `(x & MASK) == 0`; in cyrius the unparenthesized
+  form already means what you meant. Do not "fix" it back.
+
+SHIFTS ARE TERM-TIER, not their own:
+
+    1 + 2 << 1  == 5        # 1 + (2<<1)   — shift tighter than +
+    6 >> 1 + 1  == 4        # (6>>1) + 1
+    8 >> 1 * 2  == 8        # (8>>1)*2     — same tier as *, left-assoc
+    2 * 3 >> 1  == 3        # (2*3)>>1
+    8 >>> 1 + 1 == 5        # `>>>` is on the same tier as `>>`
+
+PRACTICAL RULE: when porting ANY mixed arithmetic/bitwise expression
+from C, Rust, Go, Python or JS, put the parens in. All four of those
+languages give bitwise operators their own looser tiers; cyrius does
+not. This is not a bug to be filed — it is the grammar. What IS worth
+knowing is that it interacts badly with reading code aloud: `mask | base
++ offset` reads as "mask OR (base+offset)" to almost everyone and
+computes `(mask|base)+offset`.
+
+RELATED: `caret_binds_tighter_than_binary_minus` (the keccak bug this
+tier layout caused, and the correction to its explanation).
+
+[[entries]]
+name = "float_bit_intrinsics_cannot_flank_term_operators"
+description = "`a * f64_from(2)` and `f64_from(2) * a` are PARSE ERRORS — the f64_*/f32_*/f64v_*/iv_*/bitget/u128/ret2 intrinsics cannot appear on either side of `* / % << >> >>>`. `+ - & | ^` and comparisons are fine. Parenthesize or bind to a var. Confirmed live at v6.4.82."
+category = "cyrius"
+---
+WHAT HAPPENS:
+
+    var a: f64 = f64_from(84);
+    var c: f64 = a / f64_from(2);
+    error:<source>:2:18: unexpected f64_from
+        var c: f64 = a / f64_from(2);
+                         ^
+
+    var c = f64_from(2) * a;
+    error:<source>:2:21: expected ';', got '*'
+
+Both directions fail. It is NOT float-specific — `var a = 3; var c = a
+* f64_from(2);` fails identically with an untyped `a`.
+
+THE AFFECTED SET (probed one by one at v6.4.82):
+
+    FAILS as a TERM operand:  f64_from  f64_to  f64_add  f64_sqrt
+                              f32_from  f32_to  (the whole f64_*/f32_*/
+                              f64v_*/f32v_*/iv_* families)
+                              bitget  bitset  bitclr
+                              store8/16/32/64   u128   ret2 / rethi
+    WORKS everywhere:         load8/16/32/64    syscall    sizeof
+                              ordinary fn calls
+
+THE AFFECTED OPERATORS:
+
+    FAILS:  *   /   %   <<   >>   >>>          (the TERM tier)
+    WORKS:  +   -   &   |   ^                  (the EXPR tier)
+            ==  !=  <   >   <=  >=
+
+WHY (for anyone reading the parser): these intrinsics are dispatched at
+the HEAD of `PARSE_TERM` and each arm ends in `return 0`. So as a LEFT
+operand the parse exits before reaching PARSE_TERM's `*`/`/` loop, and
+as a RIGHT operand that loop calls `PARSE_FACTOR`, one tier DOWN, which
+has never known these tokens. `+`/`-` work because `PEXPR`'s loop calls
+`PARSE_TERM` — the tier that does know them.
+
+WORKAROUNDS (both produce correct code today):
+
+    var c: f64 = a * (f64_from(2));      # parens re-enter at the top
+    var two: f64 = f64_from(2);          # or just bind it
+    var c: f64 = a * two;
+
+WHY THIS ENTRY EXISTS RATHER THAN A WORKAROUND RULE: this is a parser
+gap, not a design choice, and per the repo's own standing rule a
+codegen/parser defect must never be written down as a language rule for
+users to code around. Treat the workaround as temporary. Found by
+running the compiler during the v6.4.82 vidya closeout while checking
+that the f32/f64 entry's examples actually compiled — the first draft
+of that entry used `x / f64_from(2)` and did not.

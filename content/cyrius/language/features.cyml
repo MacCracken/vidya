@@ -9,6 +9,10 @@
 # v6.4.0 (2026-07-03): CYRIUS_MONOMORPH DEFAULT-ON flip — generics no
 # longer gated (CYRIUS_MONOMORPH=0 opts out); generics_monomorphization
 # entry updated. async/await + closures unchanged.
+# v6.5.0 (2026-07-29): +1 entry visibility_public_private_v650 — the first
+# enforced encapsulation boundary in the language (file-scoped `private`,
+# per-item `public`, covering fns AND global vars; private items are also
+# dropped from the exported symbol table).
 # v6.4.4 (2026-07-05): +1 entry f32v4_packed_single_simd — SIMD arc
 # Phase 1 (128-bit packed single, structured-descriptor encoding, x86).
 # v6.4.5 (2026-07-05): SIMD arc Phase 2 — f32v_fmadd/f32v_dot matmul ops
@@ -23,8 +27,23 @@
 # v6.4.9 (2026-07-05): SIMD arc Phase 4 R2 — f32v8_fma (vfmadd231ps, first
 # 3-byte VEX) + f32v8_dot (8-lane vextractf128 reduce) folded into
 # f32v8_avx2_256bit_simd. Phase 4 CLOSES (f32 SIMD complete on x86).
-# 61 entries (v6.1.x carve/TLS additions: bayan_ganita_stdlib_carve,
-# native_tls_default).
+# v6.4.82 (2026-07-27) — v6.4.x CLOSEOUT sweep. Two entries were
+# ACTIVELY WRONG, not merely stale, and were rewritten:
+#   * f64_named_type_and_operators said "f32 is type-only ... no f32
+#     arithmetic". WRONG since v6.4.56 — f32 scalar + - * / and
+#     comparisons ship on x86/PE/Mach-O/aarch64-NEON/cx. Also folded in
+#     v6.4.55 (scalar f64 as a fn RETURN type, xmm0, sentinel -9; f32 is
+#     NOT a legal return type) and v6.4.57 (float params + compound
+#     assign + the WARN-only float typecheck).
+#   * cap_raises_v51118_v51119 published the retired 262144-byte
+#     identifier cap as current. It is 524288 B (512 KB) since v6.4.76,
+#     and the fn_table warning now measures against the 32768 hard
+#     CEILING (v6.4.75) rather than the doubling live cap.
+# +2 entries: reserved_word_class_toknames (the 67-name class +
+# the v6.4.77 naming diagnostic), diagnostics_column_caret_multierror
+# (v6.4.60 column/caret, v6.4.62 multi-error + no-output-on-error +
+# anti-hang, v6.4.78 EOF clamp).
+# 64 entries.
 
 [[entries]]
 name = "byte_array_literal"
@@ -2057,17 +2076,63 @@ WHY THIS MATTERS:
 
 [[entries]]
 name = "cap_raises_v51118_v51119"
-description = "v5.11.18 doubled identifier-buffer cap 131072 → 262144 bytes; v5.11.19 doubled fn_table cap 4096 → 8192"
+description = "Compiler capacity caps and their history. CURRENT (v6.4.76+): identifier pool 524288 B (512 KB), fn_table init 8192 growable to a 32768 hard ceiling. The v5.11.18/.19 raises this entry was written for (131072 → 262144 / 4096 → 8192) are HISTORY — see the two SUPERSEDED blocks."
 category = "cyrius"
 ---
-NEW CAPS (consumer-visible compile-time limits):
+CURRENT CAPS (v6.4.76 — READ THIS BLOCK, the rest is history):
+
+    fn_table:           8192 INITIAL, doubles to a 32768 hard ceiling
+    identifier pool:    524288 bytes (512 KB) at heap 0x60000-0xE0000
+    var_table:          8192
+    fixup_table:        1048576
+    string_data:        2097152
+    code buffer:        67108864 (64 MiB, growable off-heap since v6.4.49)
+
+  Verify against `src/common/util.cyr::_capacity_warnings` and the
+  `CYRIUS_STATS=1` meter in `src/main.cyr` — those are the live numbers.
+
+WARNING THRESHOLDS (85% — integer `count * 100 / cap >= 85`):
+    fn_table warn at:           27853 fns    (85% of the 32768 CEILING,
+                                              not of the live _fnt_cap)
+    identifier pool warn at:    445645 bytes (85% of 524288)
+    LEX hard error at:          np + need >= 524016 (the guard in lex.cyr)
+
+SUPERSEDED v6.4.75 / v6.4.76 — what actually changed, and why the old
+numbers here were dangerous:
+    * v6.4.75 (P0): six fn-INDEXED side tables were still pinned to
+      FIXED 8192-slot heap bands even though the fn table itself became
+      growable at v6.2.0. Past 8192 fns, index `fi` of each table wrote
+      into slot `fi-8192` of its NEIGHBOUR — silent metadata corruption
+      with NO diagnostic. Fixed by lazy-alloc'ing all six at the 32768
+      max. The capacity WARNING was complicit: it divided by the LIVE
+      `_fnt_cap`, so it screamed "99 %" at 8191 fns and went SILENT the
+      instant the table doubled (9000/16384 = 54 %) — exactly when the
+      corruption started. It now divides by the fixed 32768 ceiling.
+    * v6.4.76: the identifier pool doubled 256 KB → 512 KB IN PLACE
+      (0x60000-0xE0000, into the free 0xA0000-0x100000 band). The pool
+      END must stay <= 0x100000 — above that physical ceiling the
+      compiler HANGS rather than erroring. LEX thresholds moved
+      261872 → 524016.
+    * NOTE ON "8192": most surviving 8192 references in the tree are
+      CORRECT — it is still the fn_table INITIAL cap (and the var_table
+      cap outright). A blanket 8192 → 32768 sweep INTRODUCES errors.
+
+SUPERSEDED v6.2.0 (Phase 0):
+    The fn-tables (and both fn hashes) became GROWABLE — when the count
+    would exceed `_fnt_cap` (init 8192), REGFN doubles the family and
+    rehashes the name-hash, up to the 32768 ceiling (the 2 B hash slot
+    stores fi+1, so fi+1 <= 65535). So the "load factor degrades to 1.0
+    at 8192" cliff below no longer applies: the hash grows with the cap
+    (mask = cap-1), keeping the factor bounded.
+
+--- HISTORY (v5.11.18 / v5.11.19, the raises this entry was filed for) ---
+
+CAPS AS OF v5.11.19:
 
     fn_table:           4096  → 8192    (v5.11.19)
     identifier buffer:  131072 → 262144 bytes  (v5.11.18)
 
-WARNING THRESHOLDS (85% of cap):
-    cyrius capacity --check (and CYRIUS_STATS=1 default-build
-    warnings) fire at 85% of the new cap:
+WARNING THRESHOLDS THEN (85% of the then-cap):
 
     fn_table warn at:           >= 6963 fns        (was >= 3686)
     identifier buffer warn at:  >= 222822 bytes    (was >= 111430)
@@ -2109,15 +2174,8 @@ NO ALGORITHMIC / API / ON-DISK CHANGE:
     Pure cap raise. Existing consumer source compiles unchanged.
     Hash table load factor at 8192 fns degrades to 1.0 (was 0.5
     at 4096); for the kybernet 3779-fn worst case load factor is
-    0.46 — well below probe cliff.
-
-SUPERSEDED v6.2.0 (Phase 0):
-    The fn-tables (and both fn hashes) are now GROWABLE — when the
-    count would exceed `_fnt_cap` (init 8192), REGFN doubles the
-    family and rehashes the name-hash, up to a 32768 ceiling. So the
-    "load factor degrades to 1.0 at 8192" cliff no longer applies:
-    the hash grows with the cap (mask = cap-1), keeping the factor
-    bounded. The 8192 here is now just the INITIAL cap.
+    0.46 — well below probe cliff. (Both superseded — see the two
+    SUPERSEDED blocks at the top of this entry.)
 
 [[entries]]
 name = "named_op_refactor_drift_gate_v51135_v51139"
@@ -2677,19 +2735,23 @@ no-dependency, no-crates posture the one you get for free.
 
 [[entries]]
 name = "f64_named_type_and_operators"
-description = "`var x: f64` (global + local) tags a variable IEEE-754 double, so bare `+ - * /` route to EMIT_F64_BINOP and `< > <= >= == !=` to EF64_CMP (a REAL float compare, not integer-bit ordering) on x86 (SSE2) + aarch64 (NEON). f32 is type-only (f32_from / f32_to conversions, no f32 arithmetic). Shipped v6.2.18 (f32 conv) + v6.2.19 (named f64 + operator/comparison sugar) — the native-float math mini-arc."
+description = "`var x: f64` / `var x: f32` tags a variable IEEE-754 double / single, so bare `+ - * /` route to EMIT_F{64,32}_BINOP and `< > <= >= == !=` to EF{64,32}_CMP (a REAL float compare, not integer-bit ordering) on x86/PE/Mach-O (SSE2/SSE) + aarch64 (NEON) + cx. Scalar `f64` is also a legal fn RETURN type (xmm0, sentinel -9). Shipped v6.2.18 (f32 conv) + v6.2.19 (named f64) + v6.4.55 (f64 return) + v6.4.56 (f32 ARITHMETIC + comparison + WARN-only typecheck) + v6.4.57 (float params + compound assign)."
 category = "cyrius"
 ---
-NAMED FLOAT TYPE (v6.2.19):
+NAMED FLOAT TYPE (v6.2.19 for f64, v6.4.56 for f32):
   var pi: f64 = ...;        # local
   var e: f64;               # global
-A `: f64` annotation tags the var f64 in the type table, so bare
+  var s: f32 = ...;         # single precision (v6.4.56)
+A `: f64` / `: f32` annotation tags the var in the type table, so bare
 operators on it lower to float ops instead of integer ops:
 
   ARITHMETIC  + - * /          -> EMIT_F64_BINOP   (x86 addsd/subsd/mulsd/
                                   divsd; aarch64 fadd/fsub/fmul/fdiv .d)
-  COMPARISON  < > <= >= == !=   -> EF64_CMP         (real f64 compare —
-                                  verified on negatives, NOT integer-bit order)
+                               -> EMIT_F32_BINOP   (x86 addss/subss/mulss/
+                                  divss; aarch64 fadd/fsub/fmul/fdiv s)
+  COMPARISON  < > <= >= == !=   -> EF64_CMP / EF32_CMP  (real float compares —
+                                  verified on negatives, NOT integer-bit order;
+                                  ucomisd / ucomiss + the NaN parity fold)
 
 Normal arithmetic precedence; the typed-operator dispatch reuses the
 existing GESTYPE / SESTYPE infrastructure. Literals and the conversion
@@ -2698,15 +2760,62 @@ into operator expressions. A 3-byte-prefix collision once let `f64`
 hijack the f64v2 / f64v4 SIMD types — the scalar f64/f32 checks run
 AFTER the SIMD ones to disambiguate.
 
-f32 IS TYPE-ONLY (v6.2.18): `f32_from(d)` (f64->f32, cvtsd2ss / fcvt s,d)
-+ `f32_to(s)` (f32->f64, cvtss2sd / fcvt d,s) convert to/from the storage
-form, but there is NO f32 arithmetic — widen via f32_to -> f64 to compute.
+f32 SCALAR ARITHMETIC IS LIVE (v6.4.56 — this entry said "type-only /
+no f32 arithmetic" until the v6.4.82 closeout; that was WRONG from
+v6.4.56 onward):
+    var a: f32 = f32_from(f64_from(3));
+    var b: f32 = f32_from(f64_from(4));
+    var s: f32 = a + b;            # addss / fadd s0,s0,s1
+    if (a < b) { ... }             # ucomiss / fcmp — a REAL f32 compare
+    var out = f64_to(f32_to(s));   # extract back to an i64 you can print
+  A f32 is BOXED as its IEEE-754 bit pattern in the low 32 bits of the
+  GP accumulator. There is no f32 literal syntax — CONSTRUCT with
+  `f32_from(f64_from(int))`, EXTRACT with `f64_to(f32_to(x))`.
+  Complete on x86 / Win64 PE / Mach-O / aarch64 NEON (S-regs) / cx
+  (widen-op-narrow). `f32_from` / `f32_to` (v6.2.18, cvtsd2ss /
+  cvtss2sd / fcvt) remain the conversion pair.
+
+SCALAR f64 AS A RETURN TYPE (v6.4.55) — returned in xmm0:
+    fn half(x: f64): f64 { var two: f64 = f64_from(2); return x / two; }
+  Return-type sentinel -9 (the SIMD band is <= -2048). The callee emits
+  `movq xmm0, rax` before the epilogue, the caller `movq rax, xmm0` after
+  the call and tags the result F64_TYID, so a bare operator on the call
+  result dispatches to the f64 emitters. Real `movq` on x86/PE/Mach-O,
+  no-op on aarch64/cx (both already return the bits in the GP reg).
+  **`: f32` is NOT a legal return type** — the allow-list is
+  i8/i16/i32/i64/Result/Option/Tagged/cstring/f64/f64v2/f64v4 + structs
+  + the SIMD sentinels. Return an f32 as `i64` (it is already just bits).
+
+FLOAT PARAMS + COMPOUND ASSIGN (v6.4.57): a `: f64` / `: f32` PARAM's
+local slot is tagged too, so `fn inc(x: f64): f64 { ... x + one ... }`
+computes instead of integer-adding the bit pattern; and `x += y`,
+`-=`, `*=`, `/=` on a float local route through EMIT_F{64,32}_BINOP.
+
+TYPECHECK — A WARNING, NOT AN ERROR (v6.4.56/.57): a plain `+ - * /` on
+an f64/f32 value with a NON-float right operand warns on stderr:
+
+    var a: f64 = f64_from(3);
+    var b = a + 1;
+    warning:<source>:2:14: f64 arithmetic with a non-f64 right operand
+
+  This is the exact trap where `x + 1` silently means "add the
+  denormal whose bits are 1", not "add 1.0". It stays a WARNING because
+  an error would break the legal i64-boxed-float idiom (ADR-002). Gated
+  on the default-on `CYRIUS_TYPE_CHECK`. The compare-mix warning
+  (v6.4.57) suppresses literal 0, so `if (x > 0)` does not fire but
+  `if (x > 5)` does.
+
+PARSER GOTCHA — a float/bit INTRINSIC CALL cannot flank a TERM-tier
+operator. `a * f64_from(2)` and `f64_from(2) * a` are both parse
+ERRORS (`* / % << >> >>>`); `+ - & | ^` and the comparisons are fine.
+Parenthesize (`a * (f64_from(2))`) or bind to a var. See
+field_notes/language/parser_syntax.cyml
+`float_bit_intrinsics_cannot_flank_term_operators`.
 
 Scalar f64 was usable before the named type (literals, f64_add/sub/mul/div,
 f64_lt/gt/eq, f64_sqrt/abs/floor, int<->f64 f64_from / f64_to) — v6.2.19 is
 the SUGAR letting you write `a + b` instead of `f64_add(a, b)` once `a`/`b`
-are `: f64`. (CHANGELOG 6.2.18 / 6.2.19; cx scalar float + IEEE-754-direct
-literals are later math-arc bites.)
+are `: f64`. (CHANGELOG 6.2.18 / 6.2.19 / 6.4.55 / 6.4.56 / 6.4.57.)
 
 [[entries]]
 name = "closures_v637_v638"
@@ -2852,3 +2961,151 @@ struct-returning async fns.
 CROSS-REF: field_notes/compiler/gotchas.cyml
 `async_await_futures_dce_nameread` (the DCE name-read landmine when a
 modifier keyword precedes `fn`).
+
+[[entries]]
+name = "reserved_word_class_toknames"
+description = "Reserved words are a CLASS, not a short list: 67 builtin/intrinsic names (TOKNAME_BUILTIN in src/common/util.cyr) plus the ~25 statement keywords. Since v6.4.77 the parser NAMES the one you hit instead of saying `got unknown`."
+category = "cyrius"
+---
+THE RULE: you cannot use a builtin/intrinsic name as an identifier —
+not as a `var`, not as a struct field, not as an fn name. That set is
+**67 names**, enumerated by `TOKNAME_BUILTIN` in `src/common/util.cyr`,
+plus the ~25 ordinary statement keywords (`if`, `while`, `fn`, `enum`,
+`match`, `pub`, `shared`, `in`, `default`, `stack`, …).
+
+THE 67 (families, not a hand-list — read the table for the exact set):
+    syscall
+    load8 / load16 / load32 / load64
+    store8 / store16 / store32 / store64
+    the whole  f64_*  family   (f64_add/sub/mul/div/from/to/eq/lt/gt/
+                                neg/sqrt/abs/floor/ceil/round/sin/cos/
+                                exp/ln/atan …)
+    the whole  f64v_* / f32_* / f32v_* / f32v8_* / iv_*  families
+    union · defer · secret · async · await · u128
+    bitget / bitset / bitclr · ret2 / rethi
+
+THE DIAGNOSTIC (v6.4.77) — it now names the collision:
+
+    $ echo 'var iv_add = 1;' | cycc > /dev/null
+    error:<source>:1:5: expected identifier, got reserved keyword 'iv_add'
+        (cannot be used as an identifier; rename the variable/field/fn)
+        var iv_add = 1;
+            ^
+
+Before v6.4.77, `IS_KEYWORD_TOK` and `TOKNAME` both stopped at token
+111, so all 67 of these fell through to `expected identifier, got
+unknown` — a syntactically clean identifier called "unknown". It cost
+the **hisab** consumer its whole 312-assertion suite, found only by
+bisection. `IS_KEYWORD_TOK` now DERIVES from `TOKNAME_BUILTIN`, so the
+"is it reserved?" set and the "what is it called?" set cannot drift.
+
+TWO TOKENS NAME BOTH SPELLINGS. Token 79 is double-assigned
+(`object` AND `f64_sqrt`) and so is token 111 (`stack` AND `callptr`) —
+the lexer cannot recover which you wrote, so the message prints
+`reserved keyword 'object'/'f64_sqrt'` and the v6.4.60 caret excerpt
+disambiguates. (Pre-.77 it picked one arbitrarily and LIED.)
+
+DON'T EXTEND A LIST HERE. Earlier docs named three or four of these
+("`secret`, `pub`, `shared` are reserved") — a partial observation
+written down as a language rule. If you need to know whether a name is
+reserved, either read `TOKNAME_BUILTIN` or just compile
+`var <name> = 1;` and read the error. RENAME (`iv_add` → `ivadd`,
+`f64_sqrt` → `fsqrt`) is the only fix; there is no escape syntax.
+
+[[entries]]
+name = "diagnostics_column_caret_multierror"
+description = "Compiler diagnostics carry line:COLUMN + a source excerpt with a caret (v6.4.60), report MANY errors per compile with panic-mode recovery instead of stopping at the first (v6.4.62), emit NO output file when any error fired, and never hang on hostile input."
+category = "cyrius"
+---
+WHAT AN ERROR LOOKS LIKE NOW (v6.4.60 + v6.4.62):
+
+    error:<source>:1:5: expected identifier, got reserved keyword 'iv_add'
+        (cannot be used as an identifier; rename the variable/field/fn)
+        var iv_add = 1;
+            ^
+
+  `file:LINE:COLUMN`, then the source line, then a caret under the
+  offending token. Warnings carry the same header:
+
+    warning:<source>:2:14: f64 arithmetic with a non-f64 right operand
+
+COLUMN SEMANTICS (v6.4.60): the column is the CURRENT parse token. For a
+backward-looking check ("expected `;`") that is the token AFTER the one
+you probably want — read the caret, not the number, in those cases. Tabs
+count as ONE column. Implemented with ZERO new heap: the token byte
+offset is packed into the HIGH 32 bits of the existing `tok_lines` entry.
+
+MANY ERRORS PER COMPILE (v6.4.62): a syntax error no longer stops the
+compile. The parser enters PANIC MODE, skips to the next statement
+boundary, and keeps going, so one run reports the whole batch. Scope is
+the `ERR_EXPECT` syntax class (346 sites); ~25 inline fatal errors still
+fail fast on the first hit.
+
+THREE GUARANTEES THAT COME WITH IT:
+  1. **No output on error.** If ANY error fired, the compiler writes no
+     binary (all forks, including cx). You can never accidentally run a
+     stale/partial artifact — a 0-byte file is the failure signature.
+  2. **It never hangs.** A `_had_error`-gated watchdog inside `PEEKT`
+     aborts cleanly if the token index stalls past a bound far above any
+     legal recursive-descent depth. On VALID input none of this
+     machinery ever runs.
+  3. **Truncated input terminates.** `PEEKT` clamps to EOF past the
+     token count (v6.4.78) — a truncated file used to cascade 166,670
+     error lines; it now prints 5.
+
+PRACTICAL: pipe stderr through `head` when bringing up a new file — you
+will get the real first error plus its neighbours, not one error per
+edit-compile round trip.
+
+[[entries]]
+name = "visibility_public_private_v650"
+description = "private / public — file-scoped visibility for fns and global vars (v6.5.0)"
+category = "cyrius"
+---
+SYNTAX:
+
+    private                        # THIS FILE is private-by-default
+    fn helper(): i64 { return 7; } # file-private
+    var _state = 0;                # file-private (vars too)
+    public fn api(): i64 {         # re-exposed
+        return helper();           # in-file use is unrestricted
+    }
+    public var CONFIG = 7;
+
+`pub` is a synonym for `public` — the same lexer token (73).
+
+THE OPT-IN RULE — this is the part to internalise. A file with NO `private`
+declaration behaves EXACTLY as it did before v6.5.0. Visibility is not
+retrofitted onto the tree; you turn it on one file at a time. That is why the
+entire ecosystem kept compiling on adoption day with a blast radius of zero.
+
+SCOPE OF `private`: the FILE the keyword appears in. NOT the files it includes,
+and NOT the file that includes it. Cyrius includes are textual, so this is the
+distinction to be careful about — the boundary is the ORIGIN file each fn/var
+was parsed from, tracked per-item, not the expanded translation unit.
+
+VIOLATIONS ARE HARD ERRORS (not warnings):
+
+    error:main.cyr:12:9: 'helper' is private to lib/thing.cyr
+            var x = helper();
+                ^
+
+Reported through the multi-error path (v6.4.62), so ONE compile lists every
+violation. Enforcement covers ordinary calls, TAIL calls, operator-overload
+dispatch, and global-var reads — the var path enforces inside `FINDVAR`, which
+is the single resolver every global read reaches.
+
+VISIBILITY ALSO CONTROLS LINKAGE: a private fn is omitted from the exported
+symbol table, so it disappears from `.dynstr` / `nm` and from
+`cyrius api-surface`. Measured on adoption of `lib/regex.cyr`: exported
+symbols 24 -> 14. The API surface a consumer sees is now the API surface you
+declared, rather than every non-underscore fn in the file.
+
+RELATION TO THE `_` PREFIX: the leading-underscore convention still suppresses
+export and is unchanged. `private` is the enforced mechanism; `_` remains a
+naming convention. They compose — a `_`-prefixed fn in a `private` file is
+private for both reasons.
+
+RESERVED WORDS: `public`, `pub` and `private` cannot be used as identifiers.
+They are part of the `TOKNAME_BUILTIN` reserved CLASS (see the reserved-word
+entry) — do not treat this as a three-name list.

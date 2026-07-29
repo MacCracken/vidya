@@ -1,6 +1,10 @@
 # Cyrius Field Notes — Language Gotchas (stdlib & file format)
 # str/cstr boundary surprises, toml + cyml format quirks, and the sandhi
 # service-layer stdlib dep.
+# Refreshed 2026-07-27 at v6.4.82: `str_data_not_nul_terminated` now
+# states the literal → Str coercion RULE (it fires only for a param
+# annotated `: Str`), and the two entries that were missing their
+# `category = "cyrius"` line got it.
 # 5 entries.
 
 [[entries]]
@@ -24,8 +28,22 @@ NUL-terminated — Str carries its length explicitly. Passing
     sys_write(1, str_data(s), str_len(s));
 
 The symmetric rule: cstr literals have an implicit trailing NUL.
-Passing `"hello"` where a Str is expected is a type mismatch;
-wrap with `str_from("hello")`.
+Passing `"hello"` where a Str is expected is a type mismatch —
+UNLESS the receiving parameter is annotated `: Str`, in which
+case the compiler coerces the literal for you. That annotation
+is the whole trigger:
+
+    fn f(s: Str) { ... }   f("hello");   # coerced — a real Str
+    fn g(s)      { ... }   g("hello");   # NOT coerced — raw cstr,
+                                         # and str_len(s) then reads
+                                         # load64(ptr+8) = garbage.
+                                         # SILENT empty/zero result.
+
+Wrapping the call site in `str_from("hello")` always works and is
+what you want when the callee is out of your control. But if the
+callee IS yours, annotate the param — see
+`semantics_runtime.cyml::string_literal_to_str_coercion_is_annotation_only`
+(the bug that hid in 11 `lib/fs.cyr` fns for ~a year, fixed v6.4.72).
 
 CONVERSION TABLE:
     str_from(cstr)        → Str (copy ptr + compute length)
@@ -138,6 +156,7 @@ non-zero would have been a coincidence.
 [[entries]]
 name = "cyml_toml_plus_markdown_frontmatter"
 description = "CYML = TOML header + markdown body, separated by `---`. The cyrius 5.x ecosystem moved manifests + content files to this format; `lib/bayan.cyr` parses it (parser consolidated into bayan; lib/cyml.cyr no longer exists)"
+category = "cyrius"
 ---
 THE FORMAT:
 
@@ -211,7 +230,8 @@ matches `---` at column 0.
 
 [[entries]]
 name = "sandhi_service_layer_dep"
-description = "sandhi (सन्धि — junction) is the cyrius 5.x service-boundary stdlib: HTTP client/server, TLS, service discovery. Ships with the toolchain — declare as `\"sandhi\"` in `[deps] stdlib = [...]`"
+description = "sandhi (सन्धि — junction) is the cyrius service-boundary stdlib: HTTP client/server, TLS, service discovery. Ships with the toolchain (vendored at 1.9.3 as of v6.4.82) — declare as `\"sandhi\"` in `[deps] stdlib = [...]`"
+category = "cyrius"
 ---
 WHAT IT IS:
 

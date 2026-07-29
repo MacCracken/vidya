@@ -8,9 +8,9 @@
 # review and cleanup. Resolved patches were dropped — the fix is in the
 # compiler now and no agent action is needed.
 #
-# Verified on Cyrius 6.4.72 (current as of 2026-07-23 — SIMD
-# Phase 5 complete on all four backends; v6.4.0 opened the
-# v6.4.x minor, v6.3.45 was the prior v6.3.x closeout). The v6.0.0
+# Verified on Cyrius 6.4.82 (current as of 2026-07-27 — the v6.4.x
+# CLOSEOUT; v6.4.0 opened the minor, v6.3.45 was the prior v6.3.x
+# closeout). The v6.0.0
 # cycle opened 2026-05-19 with the two-binary rename ceremony: cyrc → cybs
 # (Cyrius Bootstrap) + cc5 → cycc (Cyrius Computer Compiler).
 # Bootstrap chain is now seed (asm) → cybs → cycc. v5.x closed
@@ -20,7 +20,12 @@
 # target + the macOS/Windows cross-OS reckoning — see
 # retros/v60x.cyml). mabda 3.0 fold was DROPPED from v5.11.x at
 # .67-.68 boundary; folded into stdlib at 3.0.1 in v6.0.x. cycc
-# self-host byte-identical at ~1,103,512 B (v6.4.72; check.sh 147;
+# self-host byte-identical at 1,108,368 B (v6.4.82; check.sh 150;
+# self_compile ~622 ms; 251 .tcyr; api-surface 4749 public fns;
+# heap map 100 regions / 0 overlaps — see the region-count note
+# under the v6.4.x closeout block below, the number reached 100
+# again by a DIFFERENT route than the pre-.75 100).
+# Size history: 1,103,512 B at v6.4.72;
 # byte-identical v6.4.31→v6.4.32, .32 being cx-backend-only; the
 # v6.4.10→v6.4.32 span added the aarch64 NEON / Win64 PE value-form /
 # cx SIMD backends (Phase 5 complete on all four); the SIMD x86 arc +
@@ -33,12 +38,66 @@
 # the v6.1.x growth was the TS frontend + JS emitter + the 64 KB TS
 # parse scratch + the Windows-pillar work; the v6.2→v6.3 SHRINK
 # to 1,024,552 B is DCE-floor + heap-map consolidation across the
-# minor). Stdlib module count: 99
+# minor. Stdlib module count: 99
 # lib/*.cyr (after the bayan + ganita data/math carve, v6.1.25/.26;
 # lib/sys.cyr system-introspection added v6.1.28; lib/async.cyr
-# cooperative-Future runtime v6.3.11; protobuf/freelist etc.).
-# cycc_aarch64 633,800 B / cycc_win 938,496 B / cycc_cx 550,496 B cross-builds
-# (v6.4.32).
+# cooperative-Future runtime v6.3.11; lib/chrono.cyr DateTime/Duration
+# v6.4.67; protobuf/freelist etc.).
+# cycc_aarch64 651,904 B / cycc_win 984,064 B / cycc_cx 572,704 B cross-builds
+# (v6.4.82 gate run).
+#
+# Vendored stdlib pins at v6.4.82 (each verified against the `# Version:`
+# header in lib/<name>.cyr — sakshi uses `# Bundled distribution of
+# sakshi vX` instead, which is how an earlier sweep skipped it):
+# sandhi 1.9.3 · sankoch 2.7.6 · sigil 3.12.1 · patra 1.12.12 ·
+# yukti 2.2.10 · mabda 4.0.7 · bayan 1.2.1 · ganita 1.0.4 ·
+# niyama 1.0.6 · vani 1.1.2 · sakshi 2.4.6.
+#
+# ─── v6.4.x CLOSEOUT (v6.4.82, 2026-07-27) ───
+# The minor closes on a correctness burst, not a feature burst. What a
+# USER of the language gets that they did not have at v6.4.0:
+# - **Scalar float completion** (.55/.56/.57): `f64` as a fn RETURN type
+#   (xmm0, sentinel -9); f32 scalar `+ - * /` and REAL comparisons on
+#   x86/PE/Mach-O/aarch64-NEON/cx; float params + compound assign; a
+#   WARN-only float typecheck that catches `x + 1` meaning "add the
+#   denormal whose bits are 1". `f32` is still NOT a legal return type.
+# - **Diagnostics** (.60/.62/.78): `line:COLUMN` + source excerpt +
+#   caret on every error and warning; MANY errors per compile via
+#   panic-mode recovery; NO output file when any error fired; a
+#   `PEEKT` watchdog + EOF clamp so hostile or truncated input can
+#   never hang the compiler (166,670 error lines → 5).
+# - **Reserved words are a 67-name CLASS** (.77): `TOKNAME_BUILTIN` is
+#   the single source of truth and `IS_KEYWORD_TOK` derives from it, so
+#   the parser NAMES the intrinsic you collided with. 67 tokens used to
+#   report `got unknown`; a consumer lost a 312-assertion suite to it.
+# - **Caps** (.75/.76): identifier pool 256 KB → **512 KB** (524288 B,
+#   LEX threshold 524016); the fn_table capacity warning now measures
+#   against the fixed **32768** ceiling instead of the DOUBLING live cap
+#   (it used to go silent exactly when corruption started). 8192 is
+#   still the correct fn_table INITIAL cap — a blanket 8192→32768 sweep
+#   would introduce errors.
+# - **Const-expression correctness** (.74/.80/.81): four separate
+#   occurrences of one `_cfo` const-fold-rewind mechanism, each found
+#   after the previous was called complete — `100 >>> 1 + 1` == 2,
+#   `1 - 2 + 3` == 5 (10 % of 3-term const exprs), and struct
+#   operator-overload `p * 3 + 1` == 4. If you pinned a workaround
+#   around any of these, drop it.
+# - **Security** (.81): CVE-32/33/34 — three unbounded copies reachable
+#   from untrusted source (an `include` of a 31490-char path SIGSEGV'd
+#   cycc) — plus CVE-35/36 (fixed `/tmp` literals in the CLI).
+# - **Tooling**: `cyrius coverage` now reports on the PROJECT's own
+#   `src/` rather than the vendored stdlib (.72, `--full` restores the
+#   old behaviour, `--min` gates CI); `cyrius audit` no longer fmt/lint
+#   walks a consumer's vendored `lib/` (.78); `thread_local_alloc()`
+#   ends hardcoded thread-local slot collisions (.65); crash-safe
+#   `file_write_atomic` / `file_rename` / `xfsync` /
+#   `file_create_exclusive` (.57); `lib/chrono.cyr` DateTime/Duration/
+#   strftime (.67).
+# - **Heap-region count**: 100 through .74 → 94 at .75 (six fn-indexed
+#   side tables went lazy-alloc) → 100 again at .81, but by a DIFFERENT
+#   route: the auditor's size parser was fixed to see unit-suffixed
+#   entries it had been silently skipping. Do not read the matching
+#   number as "the old 100 was right all along".
 #
 # ─── v6.4.0 (OPENS v6.4.x, 2026-07-03) ───
 # HEADLINE: the CYRIUS_MONOMORPH default-on flip — generics (fns +
@@ -318,8 +377,10 @@
 # porting_guide           — How to add a new architecture backend (aarch64 example)
 # stdlib                  — Module catalog with key APIs and dep bundles
 
-# ─── Language Features (features.cyml) ─── 26 entries ──────────────
-# How to use specific Cyrius language features.
+# ─── Language Features (features.cyml) ─── 65 entries ──────────────
+# How to use specific Cyrius language features. (The list below names the
+# type/syntax entries; features.cyml also carries the per-release feature
+# entries the index does not enumerate.)
 
 # multi_width_types       — i8/i16/i32/i64/u128 with width-correct codegen
 # sizeof_operator         — Compile-time size constants
@@ -345,15 +406,22 @@
 # integer_vector_simd        — i8v16/i16v8/i32v4/i64v2 (+ unsigned u*) 128-bit integer vectors: descriptor sentinels (signed = desc bit 1), iv_add/iv_sub/iv_mul(dst,a,b,n,w) width-literal → paddb/w/d/q; value-form typed ops (i32v4_add(a,b), param-mask class 1 = any 16-byte vector); iv_dp8 u8·i8→i32 widening dot (b1.58 GEMM); complete on all four backends (Phase 3a/3b, v6.4.6/v6.4.7 x86 SSE2; aarch64 NEON v6.4.30 EMIT_IVEC_BINOP/DP8; cx per-lane v6.4.32)
 # f32v8_avx2_256bit_simd     — f32v8 256-bit SIMD (8× f32, one YMM): sentinel -2153, EMIT_F32V8_LOOP = f32v4 loop + 2-byte VEX prefix (vaddps/vsubps/vmulps ymm, tokens 147-149, first VEX/AVX in the toolchain); 256-bit value-return ABI generalized to _is_simd256 (byte-id f64v4); simd_has_avx2() CPUID probe + 2×SSE runtime fallback; x86 arith first landed at Phase 4 R1, v6.4.8. Phase 4 R2 (v6.4.9): f32v8_fma (vfmadd231ps ymm = C4 E2 7D B8 D1 — FMA3, the toolchain's FIRST 3-byte VEX; token 150) + f32v8_dot (token 151: 8-lane reduce via vextractf128 + L=0 vaddps fold, two-haddps can't cross the 128-bit split); simd_has_fma() = leaf-1 ECX bit 12 CPUID probe (a DIFFERENT bit than AVX2's leaf-7 EBX bit 5); PHASE 5 COMPLETE — f32v8 arith now runs on all four backends (aarch64 v6.4.29 via 2×128-bit NEON fallback = EMIT_F32V_LOOP, the aarch64 256-bit emitters staying return-0 stubs never reached at runtime; cx per-lane v6.4.32; simd_f32v8 XFAIL removed at v6.4.29). Native 256-bit stays x86-AVX2-only
 # overload_dispatch_pointer_vs_value — `f64v2_add(&x, &y)` auto-routes to f64v2_add_ptr; value-form base for `f64v2_add(x, y)` (v5.10.39)
+# f64_named_type_and_operators — `var x: f64` / `var x: f32` give bare `+ - * /` + REAL float comparisons (f64 v6.2.19, f32 ARITHMETIC v6.4.56 on x86/PE/Mach-O/aarch64-NEON/cx); scalar `f64` is a legal fn RETURN type (xmm0, sentinel -9, v6.4.55) but `f32` is NOT; float params + compound assign + a WARN-only typecheck (v6.4.57). Construct an f32 with `f32_from(f64_from(int))`, extract with `f64_to(f32_to(x))`
+# reserved_word_class_toknames — reserved words are a CLASS of 67 builtin/intrinsic names (TOKNAME_BUILTIN in src/common/util.cyr) + the ~25 statement keywords; IS_KEYWORD_TOK DERIVES from the name table so the two sets can't drift; since v6.4.77 the parser NAMES the collision instead of "got unknown" (toks 79 and 111 are double-assigned and print both spellings)
+# diagnostics_column_caret_multierror — `line:COLUMN` + source excerpt + caret on every error/warning (v6.4.60, packed into tok_lines' high 32 bits, zero new heap); MANY errors per compile via panic-mode recovery (v6.4.62); no output file if any error fired; PEEKT watchdog + EOF clamp so hostile/truncated input never hangs (v6.4.62/.78)
+# cap_raises_v51118_v51119 — compiler capacity caps + history. CURRENT: identifier pool 524288 B (512 KB, v6.4.76, LEX guard 524016), fn_table init 8192 growable to a 32768 hard ceiling with the warning measured against the CEILING (v6.4.75), var_table 8192, fixup_table 1048576, code buffer 64 MiB growable
 
-# ─── Stdlib Modules (stdlib_modules.cyml) ─── 12 entries ───────────
-# Per-module usage (APIs, gotchas, idioms).
+# ─── Stdlib Modules (stdlib_modules.cyml) ─── 20 entries ───────────
+# Per-module usage (APIs, gotchas, idioms). (The list below names the
+# long-standing entries; the file also carries per-release module
+# entries the index does not enumerate.)
 
 # atoi_stdlib                   — Decimal string → integer
 # f64_atan_and_math_lib         — f64_atan builtin and lib/math.cyr transcendentals
 # base64_module                 — RFC 4648 encode/decode
-# chrono_module                 — Time, duration, sleep, ISO-8601
-# file_locking                  — flock(2) wrappers in lib/io.cyr
+# chrono_module                 — Clocks, sleep, ISO-8601 + the v6.4.67 DateTime handle / Duration API / strftime dt_format + dt_strptime (UTC only, bare epoch-ns i64)
+# file_locking                  — flock(2) wrappers in lib/io.cyr + the v6.4.57 crash-safe write set (file_write_atomic / file_rename / xfsync / file_create_exclusive)
+# thread_local_slot_allocator   — thread_local_alloc() (v6.4.65): allocate a per-thread slot, never hardcode an index; slots 0-15 frozen for legacy, allocated slots start at 16
 # csv_module                    — RFC 4180 parse/write
 # http_module                   — HTTP/1.0 client
 # patra_stdlib_module           — Sovereign SQL database in stdlib
@@ -362,11 +430,15 @@
 # fncall_ceiling                — fncall0..fncall8 ABI rules and C-shim decision table
 # identity_lookups_musl_pattern — pwd/grp/shadow/pam (NSS-free)
 
-# ─── Tooling & Formats (tooling.cyml) ─── 14 entries ───────────────
+# ─── Tooling & Formats (tooling.cyml) ─── 15 entries ───────────────
 # Compiler binaries, CLI driver, dev tools, helper scripts, formats,
-# env vars, flags, plugin/LSP wiring. Refreshed at v5.8.19; compiler_flags
-# extended at v6.0.63 with the cyrlint `--strict-deferrals` deferral-language
-# gate (flags untracked TODO/SCAFFOLD/NOT_IMPLEMENTED/... not cross-referenced).
+# env vars, flags, plugin/LSP wiring. Refreshed at v6.4.82 (cycc
+# 1,108,368 B; crosses cycc_aarch64 651,904 / cycc_win 984,064 /
+# cycc_cx 572,704; `cyrius coverage` project-scope + --full/--min
+# v6.4.72; `cyrius audit` vendored-lib scope fix v6.4.78; `cyrius lib
+# sync` refuses in-repo v6.4.77; ach is a first-class release gate
+# since v6.4.59). compiler_flags was extended at v6.0.63 with the
+# cyrlint `--strict-deferrals` deferral-language gate.
 
 # compiler_binaries              — cycc + cross-compilers (aarch64, Mach-O, PE, cyrius-x)
 # cyrius_cli                     — Top-level CLI driver verbs
@@ -389,3 +461,34 @@
 # cyrius_for_agents       — Top-level rules every agent must know first
 # tcyr_test_conventions   — How to write a .tcyr that passes both check.sh and CI
 # agent_anti_patterns     — Recurring agent moves the user has called out as wrong
+
+# ─── Language Field Notes (field_notes/language/) ─── 43 entries ───
+# User-facing gotchas that bite at parse time, at runtime, at the
+# platform/ABI boundary, or in the stdlib. Refreshed at v6.4.82.
+
+# parser_syntax.cyml       — 12 entries. `>>` is LOGICAL / `>>>` arithmetic;
+#     bitwise_ops_share_the_additive_tier (VERIFIED tier table — `&`,`|`,`^`
+#     on the +/- tier, `1 | 2 + 1` == 4, comparisons LOOSER than bitwise);
+#     float_bit_intrinsics_cannot_flank_term_operators (`a * f64_from(2)` is
+#     a parse ERROR — parenthesize or bind to a var); caret/minus (explanation
+#     corrected, unary `~` DOES exist); var-redecl + comparisons-in-args (both
+#     long since FIXED); var-bracket-must-be-literal; struct/enum bodies.
+# semantics_runtime.cyml   — 11 entries. var_name_bracket_is_bytes_not_elements
+#     (fn-local = N BYTES, TOP LEVEL = N i64 SLOTS — the CVE-34 shape; use
+#     `var a: i64[N]`); string_literal_to_str_coercion_is_annotation_only (a
+#     bare literal into an UNTYPED param is a raw cstr and every str_* call on
+#     it silently returns nothing — annotate `: Str`); fn main is not the entry
+#     point; global init order; bump-allocator lifetime.
+# diagnostics_caps.cyml    — 6 entries. live_compiler_capacity_ceilings (the
+#     numbers that are actually live: identifier pool 524288 B, fn_table
+#     8192→32768, and why a blanket 8192→32768 sweep is WRONG);
+#     diagnostics_carry_column_excerpt_and_dont_stop_at_the_first_error;
+#     the gvar wall; the output-buffer ceiling; --strict.
+# platform_abi.cyml        — 6 entries. Per-OS target flags; struct-by-value
+#     return; varargs; the fncall6-into-extern-C ceiling (PREMISE-CHECK
+#     banner — predates the v6.4.64 Win64 stack-arg fix, and pure cyrius has
+#     NO arity limit); aarch64 clobber + immediate limits; the agnos mirror.
+# stdlib_format.cyml       — 5 entries. str_data is NOT NUL-terminated (+ the
+#     `: Str` coercion rule); toml quote stripping; cstr-key migration; CYML
+#     format; the sandhi service-layer dep.
+# shell_runtime.cyml       — 3 entries. Bash gotchas hit during content work.

@@ -14,7 +14,10 @@ category = "cyrius"
 TCC stores types in a single int with bitfields: low 4 bits = base type,
 upper bits = qualifiers/modifiers. Cyrius can use the same approach.
 
-ENCODING (fits in var_types[] which already exists at 0x8DE30):
+ENCODING (fits in var_types[], live initial base 0x13A000 — one of the
+7 vcnt-indexed GROWABLE var-family tables since v6.3.0; the offset is the
+under-cap home, `_var_grow` relocates the whole family 2x past 8192 and
+hard-errors at 1,048,576 entries. Historical: this entry read 0x8DE30):
   0          = untyped / i64 (default, backward compatible)
   1          = i8
   2          = i16
@@ -590,7 +593,10 @@ name = "fixup_indirect_calls"
 description = "Extend fixup tables for indirect calls and function pointer resolution"
 category = "cyrius"
 ---
-Cyrius fixup_tbl (0x8A000) stores forward references: when a function
+Cyrius fixup_tbl (live initial base 0x107B000, 16 MB = 1,048,576 entries
+x 16 bytes; GROWABLE since v6.2.0 via `_fixup_base` / `_fixup_cap`, which
+relocate the table off-heap and double the cap. Historical: this entry
+read 0x8A000) stores forward references: when a function
 is called before it is defined, the call instruction gets a placeholder
 offset, and a fixup entry records (call_site, function_name). After all
 functions are compiled, fixups are resolved.
@@ -780,7 +786,8 @@ PHASE 4 — Type annotation parsing extension
   Note: pointer types (negative values) already work. Struct types already work.
 
 PHASE 5 — Expression type propagation
-  New state: expr_width (i64 at heap offset, e.g. 0x903F0)
+  New state: expr_width (i64 at a heap offset; SHIPPED, live at 0x1903F0
+  — this plan proposed 0x903F0)
   PARSE_FACTOR sets expr_width from variable type on load.
   Arithmetic operators check both sides:
     - Wider type wins (i8 + i32 → i32)
@@ -814,8 +821,31 @@ description = "Heap regions + accessor fns supporting v5.8.21–v5.8.27 sum type
 category = "cyrius"
 ---
 v5.8.22 added 3 heap regions, v5.8.22 bite #2 added 1 more,
-v5.8.24 grew 2 of them. All in the metadata band, extending
-past `fn_flags` (0x1FC000+0x8000 = 0x204000).
+v5.8.24 grew 2 of them. All in the metadata band, starting at
+0x204000 — immediately past the 8 KB region at 0x1FC000 that was
+`fn_flags` when this band was carved.
+
+CURRENCY (v6.5.0): the four offsets below are still the live ones,
+but see also the two visibility side tables added at v6.5.0, which
+follow the same lazy-alloc pattern rather than taking fixed bands:
+`_fnt_fileid` (fn-indexed, alloc-at-32768 like the six v6.4.75
+tables) and `_var_fileid` (vcnt-indexed, alloc-at-1048576). Both
+record the ORIGIN FILE of each item so `private` can be enforced
+across a textually-included translation unit; visibility itself is
+fn_flags bit 6 (= 64). Choosing lazy-alloc over new fixed regions is
+deliberate — it keeps the change off the heap map entirely, so no
+layout change and therefore no two-step bootstrap.
+
+Two framing details from the v6.4.82 stamp still apply:
+but two framing details have moved on. (1) `fn_flags` no longer lives
+at 0x1FC000 — that band was freed at v5.11.19 and is now the lex_pp
+`#derive` field-name scratch; fn_flags then sat at 0x17A000 until
+v6.4.75 freed THAT too, in favour of the lazy-alloc `_fnflg_base`
+(one of the six fn-indexed side tables migrated to alloc-at-32768).
+(2) `var_enum_id` is vcnt-indexed, so since v6.3.0 it is one of the 7
+GROWABLE var-family tables — 0x204000 is its INITIAL base, valid only
+under the 8192 cap; `_var_grow` relocates the family off-heap on the
+first overflow. The other three are fixed at the offsets shown.
 
 == HEAP LAYOUT ==
 
@@ -950,3 +980,147 @@ descriptor encoding precisely to stay OUT of the struct-id / tagged-union
 machinery — the tag-in-first-field approach (oberon_type_descriptors
 entry) is for heap records; vectors are flat, register-resident, and
 sized entirely by their descriptor.
+
+[[entries]]
+name = "compiler_structural_facts_v6482"
+description = "Live structural facts at cycc 6.4.82 (the v6.4.x closeout): heap map, growable-table caps, identifier pool, fixup table, IR opcode set, backend modules, and the 7 per-target main forks — the numbers the design entries above are written against"
+category = "cyrius"
+---
+The design entries in this file describe MECHANISM. This entry pins the
+NUMBERS, so a reader can tell which caps a pattern was written against.
+Refreshed at the v6.4.x closeout; re-verify against live code before
+relying on any of it (`sh tests/heapmap.sh`, `src/main.cyr` heap map,
+`src/common/util.cyr` accessors, `src/common/ir.cyr`).
+
+== TOOLCHAIN ==
+
+  cycc 6.4.82 — x86_64 self-host 1,108,368 B, byte-identical.
+  check.sh    — 150 gates passed / 0 failed.
+  self_compile ~622 ms.
+  Corpus: 251 tests/tcyr/*.tcyr, 99 lib/*.cyr, 83 programs/*.cyr,
+  18 benches/*.bcyr, 6 fuzz/*.fcyr, api-surface 4749 public fns.
+
+== HEAP MAP: 100 REGIONS, 0 OVERLAPS ==
+
+`sh tests/heapmap.sh` parses the authoritative heap map out of the
+`#   0xOFFSET  name  [BYTES]` comment block at the top of src/main.cyr —
+one "region" per such line — sorts them and reports any pair whose
+[base, base+size) ranges intersect. It is a MAP audit, not a runtime
+audit: it proves the documented layout is self-consistent, not that
+code writes where the map says (v6.4.81 found a smashed scratch buffer
+documented at an address no code had ever written).
+
+The count went 100 (through 6.4.74) → 94 (at .75, when six fn-indexed
+side tables moved to lazy alloc and their offsets became FREED markers)
+→ 100 again (at .81, when the auditor's size parser was fixed to see
+unit-suffixed entries it had been silently dropping). Same number by a
+DIFFERENT route — the pre-.75 100 and today's 100 are not the same set.
+
+== GROWABLE TABLE CAPS ==
+
+Four families are grow-on-demand; the heap-map offset is the INITIAL
+base, valid only under the first cap.
+
+  fn table       init 8192, `_fnt_grow` doubles, CEILING 32768.
+                 The ceiling is structural: the fn-name / fn-start hash
+                 slots are 2 bytes and store fi+1, so fi+1 <= 65535.
+                 The capacity warning fires at 85% of 32768 (v6.4.75 —
+                 it used to divide by the LIVE cap, so it screamed at
+                 8191 and went silent the instant the table grew).
+                 Six fn-indexed SIDE tables (fn_deprecated_msg,
+                 fn_regalloc, fn_ret_sid, fn_variadic, fn_flags,
+                 fn_var_bytes) were left behind at fixed 8192-slot bands
+                 by the v6.2.0 migration — index 8192 aliased index 0 of
+                 the neighbour. v6.4.75 gave each a lazy `alloc(32768*8)`
+                 on first write, so they can never desync the grow chain.
+
+  var family     7 vcnt-indexed parallel tables (var_noffs, var_sizes,
+                 var_types, gvar_byte_off, enum_const_val, gvar_initval,
+                 var_enum_id). init 8192, `_var_grow` doubles, hard error
+                 at 1,048,576 entries. v6.3.0.
+
+  fixup table    0x107B000, 1,048,576 entries x 16 bytes = 16 MB init;
+                 `_fixup_base` / `_fixup_cap` relocate + double. v6.2.0.
+
+  codebuf        0x41A000, 3 MB init; EB relocates off-heap 2x to a
+                 64 MiB ceiling. The cx backend is the exception — a
+                 FIXED 512 KiB region at 0x54A000 that never grows.
+
+== FIXED CAPS ==
+
+  identifier pool (tok_names)  512 KB at 0x60000-0xE0000 since v6.4.76
+                               (was 256 KB). LEX refuses past 524016,
+                               leaving 272 B of slack for the inner
+                               write loop. The pool END must stay
+                               <= 0x100000 — above that the compiler
+                               HANGS, so the 0xE0000-0x100000 gap is
+                               the whole remaining headroom.
+  tokens                       1,048,576 slots each for tok_types /
+                               tok_values / tok_lines (8 MB apiece).
+                               Since v6.4.60 tok_lines packs the token
+                               BYTE OFFSET into its high 32 bits — that
+                               is where column + caret diagnostics come
+                               from, at zero new heap.
+  struct ids                   1024 (struct_names at 0x1A6018). This is
+                               the cap the `<= -2048` SIMD descriptor
+                               band must be guarded against — see the
+                               type_id_encoding entry.
+  enums                        1024 enum decls, 1024 per-enum variant
+                               counts (v5.8.24; stdlib alone was at 299).
+  input_buf                    1 MB raw stdin.
+  output_buf                   16 MB ELF output.
+
+== IR OPCODE SET (src/common/ir.cyr, `enum IROp`) ==
+
+63 opcodes, numbered 0..99 with deliberate gaps so a class can grow
+without renumbering:
+
+  0-9    values      NOP, LOAD_IMM, LOAD/STORE_LOCAL, LOAD/STORE_GLOBAL,
+                     LOAD_ADDR_L/_G, LOAD_STR, LOAD_ADDR_G_X1
+  10-15  arithmetic  ADD SUB MUL DIV MOD NEG
+  20-26  bitwise     AND OR XOR NOT SHL SHR ASHR
+                     (SHR is LOGICAL, ASHR is `>>>` — the reverse of
+                     JS/Java; never flip it)
+  30-33  stack       PUSH, POP_RAX, POP_RCX, MOV_CA
+  40-47  memory      LOAD8/16/32/64, STORE8/16/32/64
+  50-52  compare     CMP, SETCC, TEST_AZ
+  60-66  calls       CALL, CALL_KNOWN, CALL_POPS, CALL_CLEAN, TAIL_JMP,
+                     SYSCALL, CALL_INDIRECT
+  70-74  control     JMP, JCC, RET, JMP_BACK, SWITCH
+  80-83  frame       PROLOGUE, ALLOC_FRAME, EPILOGUE, PATCH_FRAME
+  90-99  misc        RAW_BYTE, MOV_RDX_RAX, MOV_RAX_RDX, XOR_AA,
+                     STORE_PARM, ADD_IMM_X1, RAX_CLOBBER, RAW_EMIT,
+                     ELIMINATED (LASE-eliminated, NOP-filled)
+
+== BACKEND MODULES (src/backend/) ==
+
+  x86/       emit.cyr, jump.cyr, fixup.cyr, decode.cyr (length-decoder),
+             float.cyr — SSE/AVX scalar FP **and ALL SIMD emitters**,
+             including the first VEX-encoding emitters the toolchain
+             ever had (the v6.4.x arc)
+  aarch64/   emit.cyr, jump.cyr, fixup.cyr (NEON SIMD lives in emit.cyr)
+  cx/        emit.cyr — cyrius-x portable bytecode; runner is
+             programs/cxvm.cyr
+  js/        emit.cyr — TS/TSX -> JS (`cycc --emit-js`)
+  macho/     emit.cyr — Mach-O container (arm64 + x86_64)
+  pe/        emit.cyr — Windows PE container
+  common/    tokens.cyr, runtime.cyr — shared across every fork
+
+== PER-TARGET FORKS: 7 ==
+
+  src/main.cyr                  x86_64 Linux (also drives macho/pe/js)
+  src/main_aarch64.cyr          x86-hosted aarch64 cross
+  src/main_aarch64_macho.cyr    macOS arm64
+  src/main_aarch64_native.cyr   aarch64-hosted native
+  src/main_win.cyr              Windows PE
+  src/main_x86_macho.cyr        Intel-Mac x86_64 Mach-O
+  src/main_cx.cyr               cx bytecode
+
+plus src/version_str.cyr (generated by version-bump.sh).
+
+WHY 7 FORKS MATTER TO TYPE WORK: a new type-system feature that touches
+codegen has to be added to the emitters of every fork that can reach it,
+and a fork that only ever gets a return-0 stub will compile and pass
+tests while silently emitting nothing. The v6.4.26 trap: a new PE-only
+reroute needed return-0 stubs in the aarch64 AND cx forks, and only the
+cx build on real Windows hardware caught the miss.

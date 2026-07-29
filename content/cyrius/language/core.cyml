@@ -1,6 +1,15 @@
 # Cyrius — Core Reference
 # Overview, syntax, compiler architecture, dev loop, current limitations,
 # porting guide, stdlib catalog.
+# Refreshed 2026-07-29 at v6.5.0 (the v6.5.x OPENER): overview headline
+# re-stamped (cycc 1,124,968 B · check.sh 150 · 100 heap regions · 253 .tcyr
+# · 4755 public fns) for the public/private visibility release.
+# Previously refreshed 2026-07-27 at v6.4.82 (the v6.4.x CLOSEOUT): the "up to 6 register params" note rewritten so it can
+# no longer be read as an arity LIMIT (v6.4.64 fixed the Win64 codegen bug
+# that shape was really describing); a verified PRECEDENCE tier table added
+# to `syntax` (bitwise shares the +/- tier — NOT C's); and three live
+# limitations added (#19 precedence, #20 float/bit intrinsics can't flank a
+# TERM operator, #21 string-literal → Str coerces only at a `: Str` param).
 # 7 entries.
 
 [[entries]]
@@ -19,7 +28,10 @@ remain i64. f64 supported as bit patterns via 28+ f64_* builtins
 (SSE2/SSE4.1/x87 + 10 SIMD packed-double primitives via
 SSE2 / NEON `.2D` — `f64v_add/sub/mul/div/sqrt/abs/fmadd`
 since v1.9.0, `f64v_dot/scale/axpy` added at v5.10.17 for
-hisab gap-close).
+hisab gap-close). `var x: f64` / `var x: f32` additionally give
+you bare `+ - * /` and real float comparisons (f64 v6.2.19, f32
+v6.4.56) — and `f64` is a legal fn RETURN type (xmm0, v6.4.55);
+`f32` is NOT (return the bits as i64).
 
 THE COMPILER BINARY:
 - `cycc` is the current generation (renamed from cc3 at v5.0.0,
@@ -35,11 +47,23 @@ THE COMPILER BINARY:
 - 11 modules (frontend/lex + frontend/parse + frontend/ts/* +
   backend/x86/* + backend/aarch64/* + backend/cx + backend/macho
   + backend/pe + backend/js + common/ir + cc compatibility layer).
-- As of v6.4.72 (SIMD Phase 5 complete on all four backends —
-  x86 SSE+AVX2, aarch64 NEON, Win64 PE value-form, cx bytecode;
-  v6.4.0 opened the minor, v6.3.45 was the prior closeout):
-  cycc self-hosts byte-identical at ~1,103,512 B; self_compile
-  ~620 ms; check.sh 147 gates; heap map 100 regions / 0 overlaps.
+- As of v6.5.0 (the v6.5.x OPENER — v6.4.85 was the v6.4.x
+  closeout, v6.4.86 the sandhi fold): cycc self-hosts
+  byte-identical at 1,124,968 B; check.sh 150 gates; heap map
+  100 regions / 0 overlaps; 253 .tcyr; 99 lib/*.cyr;
+  api-surface 4755 public fns.
+  v6.5.0 is the `public`/`private` visibility release — the
+  language's first enforced encapsulation boundary. See the
+  `visibility_public_private_v650` entry in language/features.
+  NOTE on the region count: it read 100 through v6.4.74, dropped
+  to 94 at v6.4.75 when six fn-indexed side tables went
+  lazy-alloc, and reads 100 again at v6.4.81 — but by a DIFFERENT
+  route, because the auditor's size parser was fixed to see
+  unit-suffixed entries it had been silently skipping. Same
+  number, different arithmetic; the old 100 was not "right all
+  along".
+  Cross-builds at the v6.4.82 gate run: cycc_aarch64 651,904 B /
+  cycc_win 984,064 B / cycc_cx 572,704 B.
 
 BUILD / COMPILE / TEST:
 - Bootstrap:   `sh bootstrap/bootstrap.sh` (~40ms)
@@ -116,6 +140,27 @@ LANGUAGE FEATURES SHIPPED (not exhaustive):
   route to FindFirstFileW on PE (v6.1.18; `lib/fs_win.cyr`) —
   completing the Windows file surface (process / thread / TLS / env
   / file-I/O / directory-enumeration, v6.1.16–.18).
+- Scalar f32 arithmetic + comparison (v6.4.56) and scalar `f64`
+  as a fn return type (v6.4.55), plus float params + compound
+  assign and a WARN-only float typecheck (v6.4.57).
+- `>>>` — a native arithmetic (sign-preserving) right shift
+  (v6.4.46). `>>` stays LOGICAL. This is the REVERSE of the
+  JS/Java convention; see the OPERATORS block below.
+- Diagnostics carry `line:COLUMN` + a source excerpt with a caret
+  (v6.4.60); one compile reports MANY errors via panic-mode
+  recovery, emits no output file if any error fired, and never
+  hangs on hostile or truncated input (v6.4.62 / v6.4.78).
+- Reserved words are a 67-name CLASS (`TOKNAME_BUILTIN`), and the
+  parser NAMES the one you collided with (v6.4.77) instead of
+  reporting `got unknown`.
+- `thread_local_alloc()` — a real allocator for thread-local
+  slots (v6.4.65), so two libraries can no longer collide on a
+  hardcoded slot index. `TLOCAL_MAX_SLOTS` 16 → 128.
+- Crash-safe file writes: `file_write_atomic` / `file_rename` /
+  `xfsync` / `file_create_exclusive`, portable across Linux /
+  macOS / Windows (MoveFileExW) / AGNOS (v6.4.57).
+- `lib/chrono.cyr` gained a `DateTime` handle, a Rust-chrono-shaped
+  `Duration` API, and strftime `dt_format` / `dt_strptime` (v6.4.67).
 
 OPTIMIZATIONS LANDED:
 - Constant folding (parse-time + IR-level).
@@ -140,7 +185,13 @@ VARIABLES:
 FUNCTIONS:
     fn add(a, b) { return a + b; }
     var r = add(20, 22);
-    # Up to 6 register params, 7+ on stack
+    # ANY number of args. First 6 in registers, 7+ on the stack.
+    # Verified 5-20 args on real Windows / Linux / aarch64 (v6.4.64,
+    # which fixed a Win64 codegen bug that silently corrupted arg 1
+    # at 10+ args). Do NOT restructure code around an arity limit —
+    # there isn't one. (Calling an extern-C fn through fncall* IS
+    # capped — that's an FFI ABI boundary, not a cyrius limit; see
+    # field_notes/language/platform_abi.cyml.)
     # Forward calls work (call functions defined later)
 
 CONTROL FLOW:
@@ -156,6 +207,29 @@ OPERATORS:
     & | ^ ~ << >> >>>      # bitwise (>>> = arithmetic/sign-preserving right shift; >> is LOGICAL — REVERSE of JS/Java, v6.4.46)
     && ||                  # logical (short-circuit, chainable)
     += -= *= /= %= &= |= ^= <<= >>=   # compound assignment
+
+PRECEDENCE — NOT C's. Four tiers, each LEFT-associative
+(re-verified by running the compiler at the v6.4.82 closeout):
+
+    1  unary / factor    - x   ~ x   & x   * p   (call)   (paren)
+    2  TERM              *  /  %  <<  >>  >>>
+    3  EXPR              +  -  &  |  ^          <-- SAME TIER
+    4  comparison        == != < > <= >=
+    5  logical           &&   then   ||         (split at v6.3.36)
+
+Consequences that bite C programmers:
+    1 | 2 + 1   == 4     # (1|2)+1  — C gives 3
+    5 & 3 + 1   == 2     # (5&3)+1  — C gives 4
+    3 | 1 & 2   == 2     # (3|1)&2  — C gives 3
+    x ^ 0 - 1            # (x^0)-1  — NOT x ^ -1; write `x ^ -1`
+    4 & 6 == 4  == 1     # (4&6)==4 — comparison is LOOSER than
+                         #   bitwise here, so the classic C
+                         #   `x & MASK == 0` foot-gun does the
+                         #   RIGHT thing in cyrius
+    1 + 2 << 1  == 5     # shifts are TERM tier, tighter than +
+Parenthesize anything you would have parenthesized in C, and then
+some. See field_notes/language/parser_syntax.cyml
+`bitwise_ops_share_the_additive_tier`.
 
 OVERFLOW-EXPLICIT (lib/overflow.cyr):
     +% -% *%               # wrapping
@@ -404,6 +478,34 @@ CURRENT LIMITATIONS (active — work around these):
     counters), prefer the stdlib's `u64_mulmod` / `u64_powmod`
     / `u128_divmod` — they handle unsigned semantics internally.
 
+19. PRECEDENCE IS NOT C's: `&`, `|`, `^` sit on the SAME tier as
+    `+` and `-`, left-associative — so `1 | 2 + 1` is 4, not 3.
+    See the PRECEDENCE block in the `syntax` entry for the full
+    tier table and the C-programmer trap list.
+
+20. A FLOAT/BIT INTRINSIC CALL CANNOT FLANK A TERM OPERATOR:
+    `a * f64_from(2)` and `f64_from(2) * a` are both PARSE
+    ERRORS ("unexpected f64_from" / "expected ';', got '*'"),
+    and the same holds for `/ % << >> >>>`. The `f64_*`, `f32_*`,
+    `f64v_*`, `iv_*`, `bitget/bitset/bitclr`, `u128` and
+    `ret2/rethi` intrinsics are dispatched at the head of
+    PARSE_TERM and `return` before the term loop, so they neither
+    continue into `*` nor are recognised by the factor tier below.
+    `+ - & | ^` and the comparisons ARE fine, and `load*` /
+    `syscall` / `sizeof` are fine everywhere.
+    WORKAROUND: parenthesize — `a * (f64_from(2))` — or bind to a
+    var first. Confirmed live at v6.4.82 (this is a parser gap,
+    not a design choice).
+
+21. STRING LITERAL → `Str` COERCES ONLY AT A `: Str` PARAM: passing
+    a bare `"..."` to an UNTYPED param hands over a raw cstr
+    pointer, and any `str_*` call on it reads `load64(ptr+8)` as
+    garbage — a silent empty/0 result, never an error. Annotate
+    `: Str` on the param, or wrap the call site in `str_from(...)`.
+    Shipped undetected for ~a year across 11 `lib/fs.cyr` fns
+    (fixed v6.4.72). See field_notes/language/semantics_runtime.cyml
+    `string_literal_to_str_coercion_is_annotation_only`.
+
 GOTCHAS (expected behavior, not bugs):
 
 15. DYNAMIC LOOP BOUNDS: `for (var i = 0; i < GLOBAL; i = i + 1)`
@@ -487,7 +589,7 @@ string.cyr      — strlen, streq, memeq, memcpy, memset, memchr, strchr, strstr
 alloc.cyr       — alloc_init, alloc, alloc_reset, alloc_used (bump from brk; routes to alloc_macos.cyr mmap on macOS, alloc_windows.cyr VirtualAlloc on Windows)
 str.cyr         — Str struct (data+len): str_from, str_len, str_eq, str_cat, str_sub, str_contains, str_split, str_trim
 vec.cyr         — Dynamic array: vec_new, vec_push, vec_pop, vec_get, vec_set, vec_len, vec_find, vec_remove
-io.cyr          — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists, plus flock(2) wrappers (file_lock, file_trylock, file_lock_shared, file_append_locked)
+io.cyr          — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists, plus flock(2) wrappers (file_lock, file_trylock, file_lock_shared, file_append_locked) and the crash-safe set file_write_atomic / file_rename / xfsync / file_create_exclusive (v6.4.57; portable to Windows via MoveFileExW)
 fmt.cyr         — Formatting: fmt_int, fmt_hex, fmt_hex0x, fmt_bool, fmt_byte, fmt_pad, fmt_int_buf, sprintf, fmt_float
 args.cyr        — CLI args: args_init, argc, argv (Linux: /proc/self/cmdline)
 fnptr.cyr       — Function pointers: fncall0–fncall8 (see "fncall_ceiling" entry for ABI rules)
@@ -514,7 +616,7 @@ callback.cyr    — Callback patterns: fork_with_pre_exec
 thread.cyr      — Threads (clone+mmap), mutex (futex), MPSC channels
 async.cyr       — Async primitives
 freelist.cyr    — Freelist allocator (O(1) alloc/free)
-chrono.cyr      — Time: ISO-8601 format/parse, epoch↔date, leap year, sleep_ms, monotonic clocks
+chrono.cyr      — Time: ISO-8601 format/parse, epoch↔date, leap year, sleep_ms, monotonic clocks, plus the v6.4.67 DateTime handle (dt_now / dt_from_epoch_* / UTC field accessors), Rust-chrono-shaped Duration (dur_seconds..dur_weeks + dur_num_* + dur_add/sub), dt_add/dt_sub/dt_diff, and strftime dt_format / dt_strptime
 log.cyr         — Structured logging wrapper over sakshi (ISO-8601 timestamps, level filtering)
 audio.cyr       — ALSA PCM audio via direct ioctls (no libasound, no C FFI)
 mmap.cyr        — Memory-mapped I/O: cyr_mmap, cyr_munmap, cyr_mprotect, mmap_file_ro/rw/anon
@@ -543,13 +645,24 @@ syscalls_macos.cyr / syscalls_windows.cyr
 alloc_macos.cyr (mmap) / alloc_windows.cyr (VirtualAlloc)
 args_macos.cyr (x28 entry-prologue argc/argv reader)
 
-DEP BUNDLES (fetched via `cyrius deps` from cyrius.cyml):
-sakshi   — Tracing/logging (slim + full profiles)
-patra    — SQL database (B-tree, WAL, transactions; bundle via `cyrius distlib`)
-sigil    — Ed25519, SHA-256/512, HMAC, HKDF, SHAKE-128/256, AES-NI
-yukti    — Device abstraction (USB, optical, block, GPU via /sys/class/drm, network, udev)
-mabda    — GPU foundation via wgpu-native C shim
-sankoch  — Lossless compression (LZ4, DEFLATE, zlib, gzip)
+DEP BUNDLES (fetched via `cyrius deps` from cyrius.cyml). These are the
+language's OWN stdlibs, not third-party upstreams — full stdlib
+discipline applies, and a fix goes to the SOURCE repo, never to the
+vendored `lib/<name>.cyr` fold. Versions vendored at v6.4.82 (verified
+against each file's own header — note sakshi uses a DIFFERENT format,
+`# Bundled distribution of sakshi vX`, which is how an earlier sweep
+skipped it):
+sakshi   2.4.6   — Tracing/logging (slim + full profiles)
+patra    1.12.12 — SQL database (B-tree, WAL, transactions; bundle via `cyrius distlib`)
+sigil    3.12.1  — Ed25519, SHA-256/512, HMAC, HKDF, SHAKE-128/256, AES-NI
+yukti    2.2.10  — Device abstraction (USB, optical, block, GPU via /sys/class/drm, network, udev)
+mabda    4.0.7   — GPU foundation via wgpu-native C shim
+sankoch  2.7.6   — Lossless compression (LZ4, DEFLATE, zlib, gzip)
+sandhi   1.9.3   — Service-boundary stdlib (HTTP / TLS / discovery)
+bayan    1.2.1   — Data formats + big-int (json/toml/cyml/csv/base64/bigint/u128)
+ganita   1.0.4   — Linear algebra + advanced math
+niyama   1.0.6   — 5 regex engines (bre, re2, pcre, fuzzy, vim)
+vani     1.1.2   — Terminal / text presentation
 
 USAGE PATTERN:
     include "lib/alloc.cyr"

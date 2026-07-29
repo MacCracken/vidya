@@ -1,6 +1,15 @@
 # Cyrius — Agent Guides
 # Read-this-first rules for AI agents writing or modifying Cyrius code.
 # Plus tcyr/test conventions and known anti-patterns.
+# Refreshed 2026-07-27 at v6.4.82 (the v6.4.x CLOSEOUT). Two rules here
+# were ACTIVELY WRONG and were corrected by RUNNING the compiler, not by
+# re-reading the doc: mixed `&&`/`||` parses fine (fixed v6.3.36; this
+# file still told agents it "fails to parse"), and `str_from` lives in
+# `lib/str.cyr`, not `lib/string.cyr`. Added: bitwise precedence is NOT
+# C's, `var buf[N]` means two different sizes by position, `: Str` must
+# be annotated on public string params, and reserved words are a 67-name
+# CLASS. A rule in this file that tells you to code around the compiler
+# is a bug report about the compiler — treat it as one.
 # 3 entries.
 
 [[entries]]
@@ -82,23 +91,74 @@ read it.
 reassignment: `var x = 1; x = 2;`. Or open a new scope
 with `{ var x = 2; }` if you want shadowing.
 
-== MIXED `&&` / `||` REQUIRES PARENS ==
+== MIXED `&&` / `||` PARSES CORRECTLY (since v6.3.36) ==
 
-`a > 0 && b > 0 || c > 0` fails to parse — no
-precedence-based disambiguation. Always parenthesize:
-`a > 0 && (b > 0 || c > 0)` or `(a > 0 && b > 0) || c > 0`.
+This rule used to say `a > 0 && b > 0 || c > 0` "fails to
+parse". It does NOT — re-verified at v6.4.82. `&&` binds
+TIGHTER than `||` (two precedence levels since v6.3.36), so
+that expression means `(a>0 && b>0) || c>0`, which is what
+C would say too. Parens are still the clearest style for
+comparison-heavy mixes, but they are no longer required.
 
-== `var buf[N]` IS BYTES, NOT i64 SLOTS ==
+== PRECEDENCE IS NOT C's FOR BITWISE OPS ==
 
-`var buf[8]` is 8 bytes (1 i64 slot). For an N-element
-i64 array, write `var buf[N * 8]`. Easy mistake.
+`&`, `|` and `^` share ONE tier with `+` and `-`,
+left-associative. `1 | 2 + 1` is **4**, not 3. `5 & 3 + 1`
+is **2**, not 4. Shifts (`<< >> >>>`) sit on the `*` tier.
+Comparisons are LOOSER than bitwise, so `x & MASK == 0`
+does the right thing here (unlike C). Parenthesize every
+mixed arithmetic/bitwise expression you port in. See
+field_notes/language/parser_syntax.cyml
+`bitwise_ops_share_the_additive_tier` for the verified table.
+
+== `var buf[N]` MEANS TWO DIFFERENT SIZES ==
+
+Inside a fn, `var buf[8]` is 8 BYTES (1 i64 slot). At TOP
+LEVEL the same `var buf[8]` is 8 i64 SLOTS = 64 bytes. An
+8× difference decided by position — this bit CVE-34, where
+`var _cyrius_lib[256]` is 2048 bytes.
+
+Write the size you mean: `var a: i64[N]` is N i64 slots in
+BOTH positions, `var a: u8[N]` is N bytes in both (v6.2.1).
+Prefer the annotated form in new code.
 
 == STRINGS ARE C-STRINGS BY DEFAULT ==
 
 `"hello"` is a 6-byte buffer (5 chars + null terminator).
 Functions like `strlen` give the un-null-counted length.
 For a heap-allocated counted string with O(1) length, use
-`Str` from `lib/string.cyr` (`var s = str_from("hello");`).
+`Str` from **`lib/str.cyr`** (`var s = str_from("hello");`).
+(This rule used to point at `lib/string.cyr` — wrong file;
+`str_from` lives in `lib/str.cyr`.)
+
+== ANNOTATE `: Str` ON EVERY PUBLIC STRING PARAM ==
+
+The literal → `Str` coercion fires ONLY when the receiving
+param is annotated `: Str`. Pass a bare `"..."` to an
+UNTYPED param and it arrives as a raw cstr pointer; the
+first `str_*` call then reads `load64(ptr+8)` as garbage
+and returns an empty/zero result. **No error, no warning.**
+
+    fn find(path, ext) { ... }     # WRONG — silently broken
+    fn find(path: Str, ext: Str)   # RIGHT
+
+An unannotated string param is an API defect. It shipped
+undetected for ~a year across 11 `lib/fs.cyr` fns and was
+found only when `cyrius coverage` reported `0/1097`.
+Existing `str_from(...)`-wrapped callers are byte-identical
+after you add the annotation, so there is no cost.
+
+== RESERVED WORDS ARE A 67-NAME CLASS ==
+
+You cannot name a variable / field / fn after any builtin
+or intrinsic: `syscall`, `load*`/`store*`, every `f64_*` /
+`f64v_*` / `f32_*` / `f32v_*` / `f32v8_*` / `iv_*`, plus
+`union`, `defer`, `secret`, `async`, `await`, `u128`,
+`bitget/bitset/bitclr`, `ret2/rethi` — 67 in all, enumerated
+by `TOKNAME_BUILTIN` in `src/common/util.cyr`. Do NOT trust
+a short list in any doc; read the table or just compile
+`var <name> = 1;` and see. Since v6.4.77 the error NAMES
+the collision instead of saying `got unknown`.
 
 == `\n` IS ONE BYTE ==
 
