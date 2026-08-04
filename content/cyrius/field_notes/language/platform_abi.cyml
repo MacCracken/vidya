@@ -8,7 +8,7 @@
 # stack-arg codegen fix, and PURE cyrius has no arity limit at all
 # (5-20 args verified on real hardware). A rule that tells you to
 # restructure code around codegen is a bug report, not a rule.
-# 6 entries.
+# 7 entries.
 
 [[entries]]
 name = "per_os_target_flags_win_vs_linux"
@@ -394,3 +394,32 @@ THE a4=r10 5-ARG FORM. agnos's 4-arg syscalls pass the 4th arg in r10 (§1a). In
 
 The band: `SND_OPEN=64, SND_CONFIG=65, SND_WRITE=66, SND_CLOSE=67, SND_DRAIN=68, SND_AVAIL=69`; seven wrappers (write + write_nb share #66). Frozen ABI is a single 48000 Hz / 16-bit / stereo S16-interleaved output stream, slot 0..3, and #65–#69 reject a slot not owned by the caller (-1).
 
+
+[[entries]]
+name = "sys_exit_is_per_thread_use_sys_exit_group"
+description = "`sys_exit` is exit(2) and ends only the CALLING THREAD — a threaded program's epilogue must call `sys_exit_group` (v6.5.6, all 3 peer families). SYS_EXIT_GROUP is absent on agnos, unrouted on PE, and was an untranslated SIGSYS on macOS-x86."
+category = "cyrius"
+---
+**v6.5.6** — filed by agnosai after a ported server would not terminate. `sys_exit` wraps **exit(2)**, which ends only the calling thread. In a single-threaded program that ends the process, so the idiomatic epilogue looked correct for years:
+
+    var r = main();
+    syscall(SYS_EXIT, r);       # ends ONE thread
+
+The moment the program spawns its first worker — `thread_create`, a pooled server, any `chan_*` fan-out — the same line stops terminating the process: the main thread dies, the workers keep running, and it **hangs with no diagnostic**. Measured, one token apart: `syscall(SYS_EXIT, r)` → timed out (124); `sys_exit_group(r)` → 42.
+
+WHY IT SURVIVED SO LONG. `cyrius init` shipped that epilogue in **seven** templates, so it was the default a consumer copied and then stopped looking at — and the failure only appears long after the epilogue was written, when the program grows a thread. The bug is in the *interaction*, not the line, which is why nothing flagged it.
+
+WHY THE WRAPPER NEEDED THREE DEFINITIONS, NOT ONE. `lib/syscalls_linux_common.cyr` is included by only three peers — Linux-x86, Linux-aarch64, and **macOS-x86** (`syscalls_macos.cyr:306`). Windows and agnos are STANDALONE. A single definition there would have left `sys_exit_group` undefined on two targets, so a portable epilogue could not name it:
+
+    syscalls_linux_common  -> SYS_EXIT_GROUP   231 x86 / 94 aarch64
+    syscalls_windows       -> SYS_EXIT         ExitProcess ALREADY ends every thread;
+                                               231 has no PE reroute and would emit a
+                                               raw 0F 05 (illegal instruction)
+    syscalls_x86_64_agnos  -> SYS_EXIT         agnos defines no exit_group; #0 tears
+                                               down the whole proc
+
+macOS-arm64 needs nothing: `lib/syscalls.cyr` routes it to the **aarch64** peer, so it resolves 94, and `src/backend/aarch64/emit.cyr` already maps `94 -> BSD 1`.
+
+THE HOLE THIS EXPOSED. macOS-**x86** resolves `SYS_EXIT_GROUP` to 231 and `EMACHO_SYSXLAT` had **no 231 entry**, so the raw number reached Darwin *unclassed* (class 0 = `SYSCALL_CLASS_NONE`) and the kernel killed the process with SIGSYS. It was silent at compile time as well: the "syscall not routed" warning is gated on `_TARGET_MACHO == 2`, i.e. **arm64 only**, so an x86-Mach-O build compiled clean and died at runtime. Fixed with one table entry (`231 -> 0x2000001`) beside the existing `60 -> 1`. The general lesson: a constant being *defined* on a target does not mean it is *routed* there — for Mach-O and PE, grep the translation table, not the enum.
+
+Gate: `tests/exit_group_wrapper.sh`. Its axis 2 asserts the OLD epilogue **still hangs** — without that, axis 1 would silently stop proving anything the day the premise changed.

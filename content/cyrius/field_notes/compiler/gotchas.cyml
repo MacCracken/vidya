@@ -12,6 +12,13 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
+# 107 entries (v6.5.6 — +1 gotcha: an identical cycc byte-SIZE is not byte-identity;
+#   ELF padding absorbed a one-line xlat entry while 872,790 bytes moved, so `cmp`,
+#   never `ls -l`. Running-count correction: the header below claimed 104 while the
+#   file already held 106 — two entries landed between .82 and 6.5.5 without bumping it,
+#   the same drift the .82 block below documents. Live state: cycc x86_64 1,133,440 B ·
+#   check.sh 153 passed / 0 failed · 254 .tcyr · 99 lib/*.cyr · api-surface 4783.)
+#
 # 104 entries (v6.4.82 CLOSEOUT — the v6.4.x doc-rot repair: +15 gotchas covering
 #   .53–.82, the 30 releases this file had no entry for. Running-count correction:
 #   the .49–.52 entries landed WITHOUT a header block, so the file was already at
@@ -4491,3 +4498,32 @@ tags = ["identifier-pool", "tok_names", "LEXID", "NPOS_GUARD", "524016", "0x1000
 name = "textual_includes_mean_per_item_file_identity_must_be_stamped_at_preprocess_time_and_the_parser_is_two_pass"
 description = "Per-item FILE IDENTITY is the whole substrate under `public`/`private` (v6.5.0), and cyrius includes are TEXTUAL — by parse time there is one flat expanded buffer and the origin file of each fn/var has to have been recorded on the way through. Three traps, all of which shipped green before being caught. (1) **The preprocessor must emit a RESUME marker after an include closes, not just an ENTER marker before it opens.** With enter-only markers every fn declared in the enclosing file AFTER an include is attributed to the INCLUDED file, so `alloc_init` and `atomic_cas` — different files — collided on id 19 and were mutually visible under `private`. **My Phase 1 gate passed anyway because the fixture put its includes first and declared nothing after them**, which is the shape that cannot observe the bug; the rebuilt gate uses a nested include AND code-before-include, and was run RED first to prove it. If you add file tracking to a textual-include preprocessor, the fixture must have code after an include or the gate is decorative. (2) **The parser is TWO-PASS and a pending-modifier flag leaks across the boundary.** `_pub_pending` was consumed in `PARSE_FN_DEF` (pass 2) but not in `_prescan_fn_sig` (pass 1), so the flag set by a `public` in pass 1 survived into the next file — `private` worked in a main source and SILENTLY did nothing when the file arrived via an include. Any per-item modifier needs consuming in BOTH passes; stamp the fileid in both too. (3) **A byte-identical binary is a TELL, not a reassurance.** The Phase 2b var stamp was inserted inside the annotated-only branch (`ann_scalar < 8`), so it fired only for `var x: i32` and never for a bare `var x = 7;`. Nothing failed — the rebuild just came back byte-identical when a real behaviour change had been made, which is the signal that the edit is on a path the compiler's own source never takes. Move the stamp before the width branch (`SVCNT`) and it changes. RECOGNITION for the class: when adding cross-file semantics to a language whose includes are textual, every question of the form 'which file did this come from' is answered at PREPROCESS time or not at all — the parser cannot recover it later. See CHANGELOG [6.5.0]."
 category = "cyrius"
+
+[[entries]]
+name = "parse_return_tail_path_is_the_third_place_found_missing_what_parse_fncall_has"
+description = "The overload-suffix dispatch carried TWO independent defects from v5.10.25 to v6.5.1, and the pair is a lesson about WHERE to look rather than about overloads. (1) **The redirect never checked the TARGET's arity** — it decided on argument 1's type alone, so `base(oneArg)` could be rewritten into a call to a two-parameter `base_str`, surplus parameter bound to whatever occupied the register, reported as a WARNING with the binary emitted anyway. (2) **`PARSE_RETURN`'s tail-call fast path never consulted the overload tables at all** — it emits epilogue+jmp itself — so `var r = println(myStr)` routed to `println_str` while `return println(myStr)` silently called the cstr base. **The same call, spelled two ways, ran two different functions.** RECOGNITION: when a transformation lives in ONE call-parsing function, enumerate every path that emits a call without going through it — cyrius has at least three (normal `PARSE_FNCALL`, the `PARSE_RETURN` tail path, inline replay), and this is the THIRD time the tail path was found missing something the normal path had (v6.3.36 plain-struct params, v6.4.53 value-form SIMD params, now overload dispatch). The fix is the same each time and it is NOT to duplicate the logic: set `tc_has_addr = 1` to divert onto the normal path. **THE MEASUREMENT THAT MATTERS**: the arity fix changes **0 of 253** .tcyr while the tail divert changes **81** — attribute a differential per-fix instead of reporting one total, because '0 files changed' is not reassurance that the fix is inert, it is proof the CORPUS HAD ZERO COVERAGE OF THE SHAPE, which is exactly why the defect survived five minors. Identical lesson to v6.4.80 (251/251 byte-identical across a real wrong-answer fix). Also: escalating the arity check from warning to error was verified safe by measuring FIRST — the whole repo (253 .tcyr, all 7 main forks, programs/) emits zero such warnings — and it deliberately does NOT set `_panic`, since an arity mismatch is not a token-stream desync and all bad sites should report in one compile. See CHANGELOG [6.5.1]."
+category = "cyrius"
+
+[[entries]]
+name = "identical_binary_size_is_not_byte_identity"
+description = "An UNCHANGED cycc byte-size after a real compiler edit proves nothing — ELF padding absorbs small additions. `cmp`, never `ls -l`. At v6.5.6 a one-line xlat entry left cycc at exactly 1,133,440 B while 872,790 bytes moved."
+category = "cyrius"
+---
+**v6.5.6.** The standing trap "a byte-identical rebuild after a real behaviour change is a TELL — the edit is on a path cycc's own source never takes" has a sibling that reads the same and means the opposite:
+
+    old cycc  1,133,440 B
+    new cycc  1,133,440 B      <- looks byte-identical
+    cmp       differ at byte 97; 872,790 bytes differ
+
+Adding one `_msx(S, 231, 0x2000001);` entry to `EMACHO_SYSXLAT` produced a compiler of **exactly** the same size. Section padding/alignment absorbed the added instructions, and a large fraction of the file shifted underneath. Size equality carried zero information.
+
+WHY THIS IS DANGEROUS SPECIFICALLY HERE. The TELL heuristic is real and worth keeping — but it is stated in terms of *byte-identity*, and the cheapest way to check "did my change land" is `ls -l`. Those two are not the same test. Reading an unchanged size as "the edit is on a dead path" leads directly to the wrong conclusion: reverting a correct fix, or hunting for a reason the code is unreachable when it is reached fine.
+
+THE RULE. Prove the change landed **two** ways, neither of them size:
+
+1. `cmp old new` — do the bytes differ at all?
+2. A *functional* probe of the changed path. For the 231 entry: compile `syscall(231, r)` with `CYRIUS_MACHO=1` and disassemble — the translation chain must now contain `cmpq $0xe7, %rax` / `movq $0x2000001, %rax`. The old compiler's chain has no `0xe7` compare anywhere.
+
+Only step 2 distinguishes "the bytes moved" from "the bytes moved *for the reason I intended*". A rebuild is nondeterministic in neither direction here, so `cmp` differing is necessary but not sufficient.
+
+COROLLARY for the release notes: "cycc size unchanged" is a legitimate and interesting thing to report (it means the compiler's own output did not grow), but it must never be offered as evidence that a change is inert. Those are different claims about different binaries.
