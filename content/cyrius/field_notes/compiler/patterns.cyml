@@ -58,7 +58,21 @@ the swap.
 library and would otherwise block downstream consumers for
 months waiting for a sovereign port. mabda (GPU foundation
 via wgpu-native) is the canonical example. tls.cyr (libssl
-via dynlib bridge) followed the same shape.
+via fdlopen bridge) followed the same shape.
+
+**⭐ THE tls.cyr SWAP ACTUALLY COMPLETED — this pattern has a
+finished instance, not just an intention.** `lib/tls.cyr`'s
+default backend has been the NATIVE stack (sigil X.509 +
+crypto chain) with no flag at all since **v6.1.21**
+(2026-06-09), the culmination of the v6.1.x TLS arc; the
+libssl fdlopen bridge is now the deprecated OPT-OUT, reached
+only via `-D CYRIUS_TLS_LIBSSL`. The public verbs
+(`tls_connect`, `tls_read`, `tls_write`, …) did not change
+across the swap, which is the whole claim this pattern makes.
+⚠ `lib/tls.cyr`'s own line-1 header still describes the file
+as "TLS client via libssl.so.3 (fdlopen bridge)" while line
+~74 correctly says native-by-default — read the backend
+selection code, not the header.
 
 **When NOT to use**: APIs simple enough to native-port
 directly (more cyrius effort up front; fewer transitional
@@ -75,7 +89,10 @@ files to retire later). Don't add bridge scaffolding for a
 - Swap breaking consumers silently → the consumer example
   test catches this on every release.
 
-Full backstory: retros/v3.cyml `ship_now_swap_backend_later_pattern`.
+Full backstory: retros/v3.cyml (`v3_7_v4_0_release_arc`); the
+completed swap is CHANGELOG [6.1.21]. (This line used to point
+at a `ship_now_swap_backend_later_pattern` entry in that retro
+— no such entry exists; corrected 2026-08-07.)
 """
 
 [[entries]]
@@ -124,7 +141,19 @@ avoided by dep-name prefix.
 follow this. Each lives in its own repo, ships dist/<name>.cyr
 at every tag, fetched into cyrius's lib/ via cyrius deps.
 
-Full backstory: retros/v3.cyml `dist_bundle_stdlib_dep_convention`.
+Full backstory: retros/v3.cyml (`v3_5_v3_6_release_arc`).
+(Was pointed at a same-named entry in that retro; no such
+entry exists — corrected 2026-08-07.)
+
+⚠ **`cyrius distlib` regenerates ONLY the bundle you name.**
+`--all` and `--check` landed at v6.5.8 precisely because the
+N+1 hand-ritual nearly shipped sankoch 2.7.6's gzip fix with
+all nine sub-bundles still carrying the buggy encoder under a
+fresh version string; `--check` compares BYTES, not version
+strings. And the per-bundle `dist/<lib>.deps` sidecar was
+under-reporting until v6.5.10 — it scanned includes and never
+read the `[deps] stdlib` declaration, which silently switched
+OFF `cyrius deps`'s own consumer validation. See gotchas.cyml.
 """
 
 [[entries]]
@@ -140,11 +169,33 @@ to raise the cap — not trim the input, not shard the file, not
 suggest the consumer "use less."
 
 **Caps that get raised**:
-- Preprocessor expanded-source buffer (currently 2 MB, was 1 MB
-  pre-v5.6.40 then crossed by patra 1.8.3 + full stdlib).
-- output_buf (currently 16 MB at heap-top S+0x4D9D000, was
-  2 MB at v5.6.43, raised at v6.1.27 when phylax hit the 2 MB
+- Preprocessor expanded-source buffer `preprocess_out`
+  (currently **8 MB** @ S+0x459D000; was 1 MB pre-v5.6.40,
+  then 2 MB, raised to 8 MB at v5.11.33 after sit v0.7.6 hit
+  2,099,593 bytes — 2,441 over the cap — on a stock
+  sandhi-folded [deps].stdlib. The v5.11.68 reorg shifted the
+  base 0x4EAD000 → 0x459D000, -9.06 MB).
+- output_buf — **no longer a heap region at all.** It is
+  `alloc(1073741824)`, a **1 GiB** buffer on ALL platforms
+  since v6.4.52, guarded by a hard error on true OOM. It was
+  16 MB at heap-top S+0x4D9D000 through v6.4.51 (2 MB at
+  v5.6.43, raised at v6.1.27 when phylax hit the 2 MB
   ELF-output wall pulling bayan).
+  ⚠ 0x4D9D000 is now a RESERVED-BUT-UNUSED band — nothing
+  writes it. `tok_types` briefly lived there and has since
+  moved to 0x2D7C000 (the map line still records "was
+  0x4D9D000"), so do NOT repeat the plausible-sounding claim
+  that a stale 0x4D9D000 reference lands in live token
+  storage — it lands in dead space. The band is kept in the
+  heap map only so the overlap audit is unchanged; a closeout
+  may reclaim it. This is the cap-growth pattern's endpoint:
+  past a certain size the answer stops being "raise the
+  region" and becomes "stop reserving a region".
+- Identifier pool `tok_names` (currently **512 KB**,
+  0x60000–0xE0000; raised in place from 256 KB at v6.4.76.
+  0x100000 is a PHYSICAL ceiling — `fn_name_hash`'s base —
+  and above ~640 KB the compiler HANGS rather than erroring;
+  see gotchas.cyml).
 - Fixup table (currently 1 M entries, was 32 K → 1 M at v5.7.7).
 - Codebuf (8 MiB off-heap initial + 8 MiB linear grow to a 64 MiB
   ceiling @ v6.4.49; growable-by-doubling since v6.2.0; was fixed
@@ -199,12 +250,15 @@ src/main.cyr)" is hours of debugging time.
 **When the user says "trim the test fixture to fit"**: REJECT
 that. The compiler grows to fit the language. Always.
 
-**Anti-pattern**: see retros/v3.cyml's
-`stale_fixed_cap_pattern` for the recurring "cap was raised
-in the allocation but not in the cap-check" bug class.
-Cross-ref: see gotchas.cyml's
-`stale_fixed_cap_drift` entry for the dual: one buffer with
-the cap-check stale relative to the actual size.
+**Anti-pattern**: the recurring "cap was raised in the
+allocation but not in the cap-check" bug class — see
+gotchas.cyml's `stale_fixed_cap_drift` entry (the dual: one
+buffer with the cap-check stale relative to the actual size),
+and `_cap_drift_gate` (v5.11.50), which cross-checks the
+heap-map comment against the inline threshold and exists for
+exactly this. (This paragraph also pointed at a
+`stale_fixed_cap_pattern` entry in retros/v3.cyml; no such
+entry exists — removed 2026-08-07.)
 
 Full backstory: retros/v3.cyml + v5.6.x narratives.
 """
@@ -264,8 +318,32 @@ include the generated file. The bump script's correctness is
 verified by `--version` round-trip in CI, not by trusting sed.
 
 **Anti-pattern alert**: see methodology.cyml's
-`exact_match_sed_is_fragile` entry for the broader rule
-("verify outputs, not just exit codes").
+`verify_outputs_not_just_exit_codes` entry for the broader
+rule. (This pointed at `exact_match_sed_is_fragile`, which is
+not the name of any entry — corrected 2026-08-07.)
+
+⚠ **`version-bump.sh` skips its doc rewrites when it sees no
+version CHANGE.** Do NOT hand-write `VERSION` before running
+it: with `NEW == OLD` the script takes the same-version path,
+which deliberately skips the `VERSION` write and the
+doc/CHANGELOG/roadmap rewrites — which is how CLAUDE.md sat at
+6.5.0 while three releases shipped. Run
+`sh scripts/version-bump.sh <new>` and let it write `VERSION`.
+Two live corrections worth carrying, both verified against the
+script rather than against the older prose: **(a)** since
+v6.5.3 the same-version path no longer `exit 0`s early —
+everything from the force-rebuild onward runs unconditionally,
+because regenerating `version_str.cyr` without rebuilding its
+consumers is not a meaningful operation (at 6.5.2 the CLI
+reported `cyrius 6.5.1` against a `manifest-pin: 6.5.2`, i.e.
+the wrapper's own drift detector firing on drift the script
+caused). **(b)** install.sh **no longer has a hardcoded
+fallback version** — retired at v6.5.4; it reads the `VERSION`
+file or resolves the latest tag, so any doc still listing
+"install.sh's fallback" among the things a bump rewrites is
+describing a `sed` that matched nothing for an unknown number
+of releases. The generated-source contract above is only ever
+as good as the script that regenerates it.
 
 Full backstory: retros/v3.cyml `version_string_silent_drift`
 + v5.6.39 ship notes.

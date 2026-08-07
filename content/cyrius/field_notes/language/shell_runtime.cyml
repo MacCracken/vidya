@@ -1,8 +1,9 @@
 # Cyrius Field Notes — Language Gotchas (shell runtime)
-# Bash gotchas surfaced repeatedly during vidya content backfill: subshell
-# scoping clobbering stateful helpers, `(( i++ ))` returning the old value
-# under set -e, and `bc` not being POSIX-mandatory.
-# 3 entries.
+# Bash gotchas surfaced repeatedly during vidya content backfill and in the
+# cyrius shell gates: subshell scoping clobbering stateful helpers,
+# `(( i++ ))` returning the old value under set -e, `bc` not being
+# POSIX-mandatory, and `grep -c` exiting 1 on a legitimate count of 0.
+# 4 entries.
 
 [[entries]]
 name = "bash_subshell_clobbers_stateful_helpers"
@@ -148,6 +149,69 @@ GENERAL RULE for bash ports in vidya: **never use `(( i++ ))`
 or `(( i-- ))` as a standalone statement**. Use
 `i=$((i+1))` / `i=$((i-1))`. It's two extra characters and
 it's safe under any `set` flags.
+
+[[entries]]
+name = "grep_dash_c_prints_zero_and_exits_one"
+description = "`grep -c` on no match PRINTS `0` and EXITS 1 — the two are not alternatives. So the reflex `$(grep -c … || echo 0)` yields the two-line string \"0\\n0\" and every comparison against it fails. Use `|| true`, not `|| echo 0`."
+category = "cyrius"
+---
+THE TRAP:
+
+    n=$(grep -c "pattern" file || echo 0)
+    if [ "$n" -eq 0 ]; then ...     # integer expression expected
+
+`grep -c` is a COUNTER, not a matcher: on no match it still does its job
+and prints `0`. But it ALSO reports "nothing matched" through its exit
+status, which is 1. Those are two independent channels, and the `|| echo
+0` reflex assumes they are alternatives — that a failing grep printed
+nothing. It printed `0`, then `echo` printed `0` again, and the capture
+is the two-line string `0\n0`.
+
+MEASURED (bash, GNU grep, 2026-08-07):
+
+    $ grep -c zzz f.txt ; echo "exit=$?"
+    0
+    exit=1
+
+    a=$(grep -c zzz f.txt || true)      # a = "0"          ← CORRECT
+    b=$(grep -c zzz f.txt) || true      # b = "0"          ← also correct
+    c=$(grep -c zzz f.txt || echo 0)    # c = "0\n0"       ← THE BUG
+    d=$(grep zzz f.txt | wc -l)         # d = "0"          ← no -c, no exit-1
+
+CORRECT SHAPES — pick one:
+
+  1. `n=$(grep -c "pat" file || true)` — swallow the status, keep the
+     count. Shortest and says what it means.
+  2. `n=$(grep -c "pat" file) || true` — same result; the `|| true`
+     applies to the assignment rather than inside the substitution.
+  3. `n=$(grep "pat" file | wc -l)` — sidesteps it entirely, since
+     `wc` always exits 0. (Under `set -o pipefail` grep's 1 still
+     propagates, so this one needs its own `|| true` there.)
+
+Never `|| echo 0`. It is only correct for a command that prints
+NOTHING when it fails, and `grep -c` is precisely not that.
+
+WHY YOU NEED THE `|| true` AT ALL: under `set -e`, `n=$(failing_cmd)`
+takes the substitution's exit status as the assignment's, so the script
+aborts on a legitimate count of zero — which for a gate is the *normal*
+case ("assert this pattern is absent"). This is the same class as
+`(( i++ ))` above: a command whose exit status encodes data, meeting a
+`set -e` that reads exit status as failure.
+
+WHERE THIS BIT US:
+
+  v6.5.10  a cyrius release gate counted occurrences in generated
+           output with `$(grep -c … || echo 0)`. Every comparison
+           against the count failed with "integer expression expected",
+           and the two-line value is invisible in an unquoted echo.
+           Cost one debug cycle; noted in the gate.
+
+GENERAL RULE for cyrius shell gates: the gates run under
+`bash -eo pipefail`, so ANY bookkeeping command whose exit status carries
+information — `grep`, `diff`, `cmp`, `test` — needs an explicit `|| true`
+(or an `if`) at the capture site. See also the CI shell-loop rule in
+CLAUDE.md: `var=$(failing_cmd)` trips `set -e` before the bookkeeping
+runs, which is how SKIP/XFAIL accounting goes silently missing.
 
 [[entries]]
 name = "bash_bc_not_posix_mandatory"

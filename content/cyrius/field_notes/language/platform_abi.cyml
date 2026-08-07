@@ -2,13 +2,18 @@
 # Per-OS preprocessor target flags, struct return by value, variadic fns,
 # the fncall6-into-extern-C arg-count ceiling, AArch64 cross-`bl`
 # register clobber + immediate-encoding limits, and the agnos
-# two-sided ABI syscall-wrapper mirror.
-# Refreshed 2026-07-27 at v6.4.82: `fncall6_ceiling_into_extern_c`
+# two-sided ABI syscall-wrapper mirror, plus the aarch64 private-alias
+# band and the Darwin AT_* flag divergence.
+# Refreshed 2026-08-07 at v6.5.10: added the aarch64 ≥1000 private-alias
+# band + the Darwin AT_* divergence from v6.5.7 — the release where ONE
+# `vr01_` test finally RUN on ecb / ach turned up seven wrapper defects
+# that five targets' worth of compile-only checks could not see.
+# Prior refresh 2026-07-27 at v6.4.82: `fncall6_ceiling_into_extern_c`
 # carries a premise-check banner — it predates the v6.4.64 Win64
 # stack-arg codegen fix, and PURE cyrius has no arity limit at all
 # (5-20 args verified on real hardware). A rule that tells you to
 # restructure code around codegen is a bug report, not a rule.
-# 7 entries.
+# 8 entries.
 
 [[entries]]
 name = "per_os_target_flags_win_vs_linux"
@@ -423,3 +428,98 @@ macOS-arm64 needs nothing: `lib/syscalls.cyr` routes it to the **aarch64** peer,
 THE HOLE THIS EXPOSED. macOS-**x86** resolves `SYS_EXIT_GROUP` to 231 and `EMACHO_SYSXLAT` had **no 231 entry**, so the raw number reached Darwin *unclassed* (class 0 = `SYSCALL_CLASS_NONE`) and the kernel killed the process with SIGSYS. It was silent at compile time as well: the "syscall not routed" warning is gated on `_TARGET_MACHO == 2`, i.e. **arm64 only**, so an x86-Mach-O build compiled clean and died at runtime. Fixed with one table entry (`231 -> 0x2000001`) beside the existing `60 -> 1`. The general lesson: a constant being *defined* on a target does not mean it is *routed* there — for Mach-O and PE, grep the translation table, not the enum.
 
 Gate: `tests/exit_group_wrapper.sh`. Its axis 2 asserts the OLD epilogue **still hangs** — without that, axis 1 would silently stop proving anything the day the premise changed.
+
+[[entries]]
+name = "raw_syscall_numbers_on_aarch64_and_the_darwin_at_flag_divergence"
+description = "On aarch64, a raw `syscall(N, …)` is NOT the number the kernel sees — ESYSXLAT rewrites a band of x86-compat numbers, so the native `chdir` (49) ran `bind` and the native `fchownat` (54) ran `setsockopt`. v6.5.7 opened a cyrius-private alias band at **≥1000** (`1000 + native number`) for the cases where BOTH the native and the x86 number are already owned. Separately, the `AT_*` FLAGS diverge on Darwin — only `AT_FDCWD` had ever been corrected — so a Linux-valued flag reaching Darwin is simply invalid: EINVAL, forever, silently."
+category = "cyrius"
+---
+**v6.5.7.** Two distinct traps, found the same way: by adding ONE
+`vr01_syscall_wrappers.tcyr` to the release gate's cross-OS leg so the
+wrappers were finally RUN on ecb / ach instead of only compiled.
+
+═══════════════════════════════════════════════════════════════
+1. A raw `syscall(N, …)` on aarch64 is not the number the kernel sees
+═══════════════════════════════════════════════════════════════
+
+`ESYSXLAT` (`src/backend/aarch64/emit.cyr`) rewrites a chain of
+x86-compat source numbers so that 51 ecosystem repos emitting raw
+`syscall(54, …)` and friends keep working on ARM. The consequence is
+that some **aarch64-NATIVE** numbers are already spoken for as x86
+source numbers, and a native-numbered call is silently re-aimed:
+
+    source 49  → 200   # x86-compat bind      — so native chdir(49)     ran bind
+    source 54  → 208   # x86-compat setsockopt— so native fchownat(54)  ran setsockopt
+
+The documented escape has always been "use the OTHER architecture's
+number plus a pure-renumber ESYSXLAT row". For these two there was no
+number left to borrow: x86's 80 is this peer's own `SYS_FSTAT`, and
+x86's 260 is its own `SYS_WAIT4` (native, must pass through
+untranslated).
+
+THE ANSWER — **the private alias band.** Source numbers **≥1000** are
+cyrius-private aliases no OS will ever mint (Linux is in the 400s and
+grows ~5/yr; Darwin is routed separately), renumbered to their true
+target by ESYSXLAT. Convention is `1000 + the native aarch64 number`,
+so the alias documents itself:
+
+    SYS_FCHOWNAT = 1054     # → 54 on aarch64-Linux, → 468 on Darwin
+    SYS_CHDIR    = 1049     # → 49 on aarch64-Linux, → 12  on Darwin
+
+⛔ **Adding an alias needs THREE edits, not one**: an ESYSXLAT arm on
+the aarch64-**Linux** branch, one on the **macho** branch, AND a
+`_macho_arm_routes` row — because macOS-arm64 resolves this same peer.
+Two out of three is a stale-`x16` garbage call.
+
+⚠ **The aarch64-Linux arm MUST sit LAST in its chain.** It produces
+`x8 = 54`, and the `setsockopt` entry earlier in that chain compares
+against 54 and would re-catch it — every `fchownat` silently reissued
+as `setsockopt`. Mutation-verified: the misordered build returns
+`ENOPROTOOPT`. Same ordering trap already documented on flock / poll /
+epoll_wait.
+
+PRACTICAL RULE FOR CONSUMERS: **do not emit raw `syscall(N, …)` with a
+number you read off a Linux man page.** Use the named `SYS_*` constant
+from the peer, or a `sys_*` wrapper. The constant is the only thing
+that knows about the translation chain — and note the failure mode is
+never a compile error and never a signal, just a different syscall
+returning a plausible errno.
+
+═══════════════════════════════════════════════════════════════
+2. The `AT_*` flags diverge on Darwin — and only the dirfd was fixed
+═══════════════════════════════════════════════════════════════
+
+`AT_FDCWD` was corrected to **-2** on macOS when ports found it. The
+FLAGS were left Linux-valued for another two-and-a-half minors. Live
+values (`lib/syscalls_linux_common.cyr`, read off Darwin's
+`sys/fcntl.h` on ecb):
+
+    constant              Darwin   Linux
+    AT_FDCWD                  -2    -100
+    AT_SYMLINK_NOFOLLOW     0x20   0x100
+    AT_SYMLINK_FOLLOW       0x40   0x400
+    AT_REMOVEDIR            0x80   0x200
+    AT_EMPTY_PATH          (none)  0x1000   ← Darwin has NO equivalent
+
+The at-family entries are **pure renumbers** — they pass their flags
+straight through — so a Linux value on Darwin is not "wrong-ish", it is
+an invalid flag: EINVAL, no warning, no fault, forever. Measured on
+real ecb: `xrmdir` had **never** worked on macOS-arm64 since it shipped
+at v6.5.2, and `sys_fchownat` returned -22 the first time it was ever
+run there.
+
+⭐ **THE THROUGH-LINE, worth more than either fact.** Five of the seven
+defects that release were **half-fixes that stopped at the first
+symptom**: `AT_FDCWD` without its flags; `STAT_SIZE` corrected without
+its sibling offsets (so every `STAT_MODE` test on Intel-Mac was
+silently false, reading the low half of `st_ino`); `unlink` mapped
+without `rmdir`, which is the SAME syscall distinguished only by
+`AT_REMOVEDIR`; three of four link syscalls mapped. Each looked
+finished because the thing that prompted it started working. When you
+fix one constant or one route in a family, fix the family.
+
+AND THE COMPANION RULE, from the entry above: **a constant being
+DEFINED on a target does not mean it is ROUTED there.** For Mach-O and
+PE, grep the translation table, not the enum. The "syscall not routed"
+warning is gated on `_TARGET_MACHO == 2` — arm64 only — so an
+x86-Mach-O build compiles clean and dies at runtime.

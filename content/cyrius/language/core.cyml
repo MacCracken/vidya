@@ -1,9 +1,17 @@
 # Cyrius — Core Reference
 # Overview, syntax, compiler architecture, dev loop, current limitations,
 # porting guide, stdlib catalog.
-# Refreshed 2026-07-29 at v6.5.0 (the v6.5.x OPENER): overview headline
-# re-stamped (cycc 1,124,968 B · check.sh 150 · 100 heap regions · 253 .tcyr
-# · 4755 public fns) for the public/private visibility release.
+# Refreshed 2026-08-07 at v6.5.10: overview headline re-stamped
+# (cycc 1,141,792 B · check.sh 162 · 100 heap regions / 0 overlaps ·
+# 260 .tcyr · 99 lib/*.cyr · 4817 public fns · self_compile 648/652 ms);
+# cross-build sizes re-measured; the vendored dep-pin table in `stdlib`
+# re-derived from live lib/ headers (7 of 11 had drifted); LANGUAGE
+# FEATURES gained the v6.5.7-.10 user-facing surface (the x* syscall
+# wrapper family + sys_chdir / signal_default, `#@incdir` include
+# resolution, thread_create_detached / thread_is_done, the growable
+# arena + ARENA_FULL_* exhaustion policy).
+# Previously refreshed 2026-07-29 at v6.5.0 (the v6.5.x OPENER): overview
+# headline re-stamped for the public/private visibility release.
 # Previously refreshed 2026-07-27 at v6.4.82 (the v6.4.x CLOSEOUT): the "up to 6 register params" note rewritten so it can
 # no longer be read as an arity LIMIT (v6.4.64 fixed the Win64 codegen bug
 # that shape was really describing); a verified PRECEDENCE tier table added
@@ -47,13 +55,15 @@ THE COMPILER BINARY:
 - 11 modules (frontend/lex + frontend/parse + frontend/ts/* +
   backend/x86/* + backend/aarch64/* + backend/cx + backend/macho
   + backend/pe + backend/js + common/ir + cc compatibility layer).
-- As of v6.5.0 (the v6.5.x OPENER — v6.4.85 was the v6.4.x
-  closeout, v6.4.86 the sandhi fold): cycc self-hosts
-  byte-identical at 1,124,968 B; check.sh 150 gates; heap map
-  100 regions / 0 overlaps; 253 .tcyr; 99 lib/*.cyr;
-  api-surface 4755 public fns.
-  v6.5.0 is the `public`/`private` visibility release — the
-  language's first enforced encapsulation boundary. See the
+- As of v6.5.10 (2026-08-07): cycc self-hosts byte-identical at
+  1,141,792 B; check.sh 162 gates / 0 failed; heap map 100
+  regions / 0 overlaps; 260 .tcyr; 99 lib/*.cyr; api-surface
+  4817 public fns; self_compile 648 / 652 ms. 41 shell gate
+  scripts live under `tests/*.sh` (31 registered by exact path
+  in `programs/checks/main.cyr`, the rest via named gate fns
+  such as `_heapmap_gate` — all 41 run).
+  v6.5.0 opened the minor with `public`/`private` visibility —
+  the language's first enforced encapsulation boundary. See the
   `visibility_public_private_v650` entry in language/features.
   NOTE on the region count: it read 100 through v6.4.74, dropped
   to 94 at v6.4.75 when six fn-indexed side tables went
@@ -62,8 +72,8 @@ THE COMPILER BINARY:
   unit-suffixed entries it had been silently skipping. Same
   number, different arithmetic; the old 100 was not "right all
   along".
-  Cross-builds at the v6.4.82 gate run: cycc_aarch64 651,904 B /
-  cycc_win 984,064 B / cycc_cx 572,704 B.
+  Cross-builds at the v6.5.10 gate run: cycc_aarch64 685,312 B /
+  cycc_win 1,021,440 B / cycc_cx 606,104 B.
 
 BUILD / COMPILE / TEST:
 - Bootstrap:   `sh bootstrap/bootstrap.sh` (~40ms)
@@ -161,6 +171,35 @@ LANGUAGE FEATURES SHIPPED (not exhaustive):
   macOS / Windows (MoveFileExW) / AGNOS (v6.4.57).
 - `lib/chrono.cyr` gained a `DateTime` handle, a Rust-chrono-shaped
   `Duration` API, and strftime `dt_format` / `dt_strptime` (v6.4.67).
+- `sys_exit_group` — end EVERY thread, on all three syscall peer
+  families (v6.5.6). `sys_exit` is exit(2) and ends only the
+  CALLING thread, so a threaded program's `syscall(SYS_EXIT, r)`
+  epilogue hangs; use `sys_exit_group(r)`.
+- `sys_chdir` + `signal_default` (the SIG_DFL counterpart to
+  `signal_ignore` — SIG_IGN is inherited across execve), plus the
+  portable `x*` file family: `xmkdir` / `xmkdir_p` / `xsymlink` /
+  `xreadlink` / `xlink` joining `xopen` / `xstat` / `xunlink` /
+  `xrmdir` / `xgetdents` / `xlseek` / `xflock` / `xfsync`
+  (v6.5.7). Use these instead of hand-rolling a Linux syscall
+  number — agnos, Darwin and Windows all diverge.
+- `include` now resolves relative to the ENTRY FILE's directory as
+  well as the CWD, via the in-band `#@incdir` marker `cyrius build`
+  writes on line 1 (v6.5.7). CWD-first, so nothing that resolves
+  today changes meaning.
+- `thread_create_detached(fp, arg)` + `thread_is_done(t)`
+  (v6.5.8) — a fire-and-forget worker that frees its own stack
+  and TLS (100 unjoined threads leaked 210,124,800 B of VA;
+  now 0), and a non-blocking "has it finished?" probe for
+  reaper loops. `thread_is_done` is valid only BEFORE
+  `thread_join` — join consumes the handle.
+- Growable / policy-driven arenas (v6.5.9): `arena_new_growable`,
+  `arena_allocator_growable`, `arena_set_on_full` /
+  `arena_on_full` over `ARENA_FULL_NULL|GROW|SPILL|ABORT`, and
+  `arena_capacity_total`. Default is unchanged (`NULL` = return 0).
+- The Linux mutex in `lib/sync.cyr` is three-state (0 free /
+  1 held / 2 held-with-waiters), so an uncontended
+  `mutex_lock`+`mutex_unlock` pair no longer enters the kernel:
+  392 → 48 ns (v6.5.9). `MUTEX_SIZE` stays 8; no ABI change.
 
 OPTIMIZATIONS LANDED:
 - Constant folding (parse-time + IR-level).
@@ -278,7 +317,17 @@ SYSCALLS:
     syscall(60, code);         # exit
 
 INCLUDES:
-    include "lib/string.cyr"   # textual inclusion (relative to cwd)
+    include "lib/string.cyr"   # textual inclusion, CWD-relative first
+    # v6.5.7: if CWD-relative resolution fails, cycc retries against
+    # the ENTRY FILE's directory, so `src/sub/a.cyr` can
+    # `include "b.cyr"` for its neighbour. The directory rides
+    # in-band as `#@incdir <dir>` on line 1, written by
+    # `cyrius build` (`#` opens a comment, so older cycc / cybs /
+    # the cx + JS forks skip it untaught). The marker is honoured
+    # ONLY at byte 0 and ONLY when the directory is relative and
+    # `..`-free — a hostile .cyr can write one, so it may never
+    # name an absolute path. `cyrius build /abs/dir/x.cyr` gets no
+    # marker and keeps the old CWD-only behaviour.
 
 INLINE ASM:
     asm { 0x90; }              # raw bytes
@@ -586,10 +635,10 @@ CORE LIBRARIES (lib/) — first-party stdlib modules + per-arch/OS
 variants + dep bundles. All ship in the toolchain.
 
 string.cyr      — strlen, streq, memeq, memcpy, memset, memchr, strchr, strstr, print_num, println
-alloc.cyr       — alloc_init, alloc, alloc_reset, alloc_used (bump from brk; routes to alloc_macos.cyr mmap on macOS, alloc_windows.cyr VirtualAlloc on Windows)
+alloc.cyr       — alloc_init, alloc, alloc_reset, alloc_used (bump from brk; routes to alloc_macos.cyr mmap on macOS, alloc_windows.cyr VirtualAlloc on Windows). Also the allocator vtable (allocator_new / alloc_via) and arenas: arena_new / arena_alloc / arena_reset / arena_free plus the v6.5.9 growable + exhaustion-policy set (arena_new_growable, arena_set_on_full over ARENA_FULL_NULL|GROW|SPILL|ABORT, arena_capacity_total, arena_allocator_growable). NOTE: alloc_reset INVALIDATES every pointer it has handed out — including, pre-v6.5.7, the memoized default allocator itself (fixed: the vtable now lives outside any resettable region)
 str.cyr         — Str struct (data+len): str_from, str_len, str_eq, str_cat, str_sub, str_contains, str_split, str_trim
 vec.cyr         — Dynamic array: vec_new, vec_push, vec_pop, vec_get, vec_set, vec_len, vec_find, vec_remove
-io.cyr          — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists, plus flock(2) wrappers (file_lock, file_trylock, file_lock_shared, file_append_locked) and the crash-safe set file_write_atomic / file_rename / xfsync / file_create_exclusive (v6.4.57; portable to Windows via MoveFileExW)
+io.cyr          — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists, plus flock(2) wrappers (file_lock, file_trylock, file_lock_shared, file_append_locked), the crash-safe set file_write_atomic / file_rename / xfsync / file_create_exclusive (v6.4.57; portable to Windows via MoveFileExW), and the portable x* wrapper family (xopen/xstat/xunlink/xgetdents/xlseek/xflock; xrmdir v6.5.2; xmkdir/xmkdir_p/xsymlink/xreadlink/xlink v6.5.7)
 fmt.cyr         — Formatting: fmt_int, fmt_hex, fmt_hex0x, fmt_bool, fmt_byte, fmt_pad, fmt_int_buf, sprintf, fmt_float
 args.cyr        — CLI args: args_init, argc, argv (Linux: /proc/self/cmdline)
 fnptr.cyr       — Function pointers: fncall0–fncall8 (see "fncall_ceiling" entry for ABI rules)
@@ -613,8 +662,9 @@ assert.cyr      — Test assertions: assert_eq, assert_ne, assert, assert_summar
 bench.cyr       — Benchmarking: bench_start/end/report + bench_batch_start/stop (sub-µs)
 bounds.cyr      — Array bounds checking
 callback.cyr    — Callback patterns: fork_with_pre_exec
-thread.cyr      — Threads (clone+mmap), mutex (futex), MPSC channels
-async.cyr       — Async primitives
+thread.cyr      — Threads (clone+mmap): thread_create / thread_join, thread_create_detached + thread_is_done (v6.5.8), MPSC channels (chan_send / chan_recv / chan_try_recv / chan_close)
+sync.cyr        — Portable mutex (MUTEX_SIZE=8; three-state futex on Linux since v6.5.9 — uncontended lock/unlock never enters the kernel)
+async.cyr       — Async primitives (cooperative Future runtime; async_await_readable / async_await_readable_ms v6.5.6, async_with_timeout, combinators)
 freelist.cyr    — Freelist allocator (O(1) alloc/free)
 chrono.cyr      — Time: ISO-8601 format/parse, epoch↔date, leap year, sleep_ms, monotonic clocks, plus the v6.4.67 DateTime handle (dt_now / dt_from_epoch_* / UTC field accessors), Rust-chrono-shaped Duration (dur_seconds..dur_weeks + dur_num_* + dur_add/sub), dt_add/dt_sub/dt_diff, and strftime dt_format / dt_strptime
 log.cyr         — Structured logging wrapper over sakshi (ISO-8601 timestamps, level filtering)
@@ -648,21 +698,21 @@ args_macos.cyr (x28 entry-prologue argc/argv reader)
 DEP BUNDLES (fetched via `cyrius deps` from cyrius.cyml). These are the
 language's OWN stdlibs, not third-party upstreams — full stdlib
 discipline applies, and a fix goes to the SOURCE repo, never to the
-vendored `lib/<name>.cyr` fold. Versions vendored at v6.4.82 (verified
-against each file's own header — note sakshi uses a DIFFERENT format,
-`# Bundled distribution of sakshi vX`, which is how an earlier sweep
-skipped it):
-sakshi   2.4.6   — Tracing/logging (slim + full profiles)
+vendored `lib/<name>.cyr` fold. Versions vendored at v6.5.10, each
+re-derived from the live `# Version:` line in `lib/<name>.cyr` — note
+sakshi uses a DIFFERENT header format (`# Bundled distribution of
+sakshi vX`), which is how sweep after sweep has skipped it:
+sakshi   2.4.8   — Tracing/logging (slim + full profiles)
 patra    1.12.12 — SQL database (B-tree, WAL, transactions; bundle via `cyrius distlib`)
-sigil    3.12.1  — Ed25519, SHA-256/512, HMAC, HKDF, SHAKE-128/256, AES-NI
-yukti    2.2.10  — Device abstraction (USB, optical, block, GPU via /sys/class/drm, network, udev)
-mabda    4.0.7   — GPU foundation via wgpu-native C shim
+sigil    3.12.2  — Ed25519, SHA-256/512, HMAC, HKDF, SHAKE-128/256, AES-NI
+yukti    2.3.2   — Device abstraction (USB, optical, block, GPU via /sys/class/drm, network, udev)
+mabda    4.0.8   — GPU foundation via wgpu-native C shim
 sankoch  2.7.6   — Lossless compression (LZ4, DEFLATE, zlib, gzip)
-sandhi   1.9.3   — Service-boundary stdlib (HTTP / TLS / discovery)
-bayan    1.2.1   — Data formats + big-int (json/toml/cyml/csv/base64/bigint/u128)
+sandhi   1.9.9   — Service-boundary stdlib (HTTP / TLS / discovery; cooperative stop-flag on all five serve loops since 1.9.9)
+bayan    1.4.1   — Data formats + big-int (json/toml/cyml/csv/base64/bigint/u128)
 ganita   1.0.4   — Linear algebra + advanced math
 niyama   1.0.6   — 5 regex engines (bre, re2, pcre, fuzzy, vim)
-vani     1.1.2   — Terminal / text presentation
+vani     1.1.3   — Terminal / text presentation
 
 USAGE PATTERN:
     include "lib/alloc.cyr"

@@ -1,7 +1,11 @@
 # Cyrius Field Notes — Language Gotchas (parser & syntax)
-# Operator precedence, var/scope/bracket parser rules, and shift semantics that
-# bite at parse time or at the lexer.
-# 12 entries.
+# Operator precedence, var/scope/bracket parser rules, `include` resolution,
+# and shift semantics that bite at parse time or at the lexer.
+# Refreshed 2026-08-07 at v6.5.10, by running the compiler:
+# `float_bit_intrinsics_cannot_flank_term_operators` is ✅ FIXED (v6.4.83 —
+# found by the v6.4.82 sweep that this entry's own examples failed), and
+# `include` resolution gained the entry-file-relative fallback at v6.5.7.
+# 13 entries.
 
 [[entries]]
 name = "the_logical_shift_trap"
@@ -635,11 +639,91 @@ RELATED: `caret_binds_tighter_than_binary_minus` (the keccak bug this
 tier layout caused, and the correction to its explanation).
 
 [[entries]]
-name = "float_bit_intrinsics_cannot_flank_term_operators"
-description = "`a * f64_from(2)` and `f64_from(2) * a` are PARSE ERRORS — the f64_*/f32_*/f64v_*/iv_*/bitget/u128/ret2 intrinsics cannot appear on either side of `* / % << >> >>>`. `+ - & | ^` and comparisons are fine. Parenthesize or bind to a var. Confirmed live at v6.4.82."
+name = "include_resolves_cwd_first_then_the_entry_files_own_directory"
+description = "`include \"b.cyr\"` resolves against the process CWD first; since v6.5.7 a LAST-RESORT retry also tries the entry file's own directory, so `cyrius build src/sub/a.cyr out` can include a sibling. ⛔ The retry is OFF for an ABSOLUTE source path — `cyrius build /abs/dir/a.cyr out` still fails on the sibling include, deliberately. Raw `cat … | cycc` gets no directory at all, because cycc compiles from STDIN."
 category = "cyrius"
 ---
-WHAT HAPPENS:
+THE RULE, verified by running it at v6.5.10:
+
+    $ cd proj && cyrius build src/sub/a.cyr out      # a.cyr: include "b.cyr"
+    compile src/sub/a.cyr -> out [x86_64] OK          ✓ finds src/sub/b.cyr
+
+    $ cd / && cyrius build /abs/proj/src/sub/a.cyr out
+    error: cannot open include file: b.cyr            ✗ FAIL — by design
+
+WHY IT WAS BROKEN AT ALL. `cycc` compiles from **stdin**, so it cannot
+know where its input lives; before v6.5.7 every `include` resolved
+against the process CWD only, and a source in a subfolder could not
+include a file sitting next to it. agnos was driving a shell workaround
+around this.
+
+HOW IT WORKS — and why the mechanism leaks into your source. The entry
+file's directory rides **in-band**, as a `#@incdir <dir>` marker that
+`cyrius build` writes on **line 1** of what it hands the compiler. `#`
+opens a comment in cyrius, so an older `cycc`, `cybs` and the cx / JS
+forks skip it untaught. Both out-of-band channels were dead here:
+`chdir` breaks the root-relative dep prepend, and `_read_env` is stubbed
+on Windows and cx.
+
+⛔ **AN ABSOLUTE `<source>` GETS NO MARKER, ON PURPOSE.** The marker is
+in-band, so a hostile `.cyr` can write one; honouring an absolute
+directory would rebuild the read-anything primitive CVE-16 removed. Two
+rules close it — the directory must be **relative and `..`-free**, and
+it is read **only at byte 0** (the CLI writes it ahead of the dep
+prepend, so a marker further down stays an ordinary comment). So
+`cyrius build /abs/dir/x.cyr` keeps today's CWD behaviour. If your
+sibling include fails, check whether you passed an absolute path — that
+is the whole fix.
+
+⚠ **CWD-FIRST, and the retry is LAST.** The entry-dir attempt sits after
+every existing resolution step, so no include that resolves today can
+change meaning — it can only turn an error into a success. If a
+same-named file exists in both the CWD and the entry file's directory,
+**the CWD one wins**. Do not rely on the retry to shadow anything.
+
+⚠ **RAW `cat x.cyr | cycc` HAS NO MARKER AT ALL** and never will —
+that path is for the compiler's own self-host, and the CLI is what
+writes the marker. This is one more reason the repo rule says to invoke
+`cyrius build` for projects rather than piping into `cycc`.
+
+[[entries]]
+name = "float_bit_intrinsics_cannot_flank_term_operators"
+description = "✅ FIXED in v6.4.83 — an intrinsic call now parses on EITHER side of `* / % << >> >>>`, same as `+ - & | ^` always did. The entry name is a misnomer kept for link stability. Pre-fix behaviour + the workarounds preserved below for pre-v6.4.83 toolchains."
+category = "cyrius"
+---
+✅ **FIXED at v6.4.83 (2026-07-28).** Re-verified by running the compiler
+at v6.5.10 — `var e: f64 = d / f64_from(2)` compiles and evaluates
+correctly, as do `a * bitget(7,0,1)`, `bitget(7,0,1) << a` and
+`a % bitget(4,1,2)`:
+
+    var d: f64 = f64_from(84);
+    var e: f64 = d / f64_from(2);
+    f64_to(e) == 42                  # ✓
+
+**Root cause, for anyone reading the parser:** the extended builtins were
+dispatched inline at the head of `PARSE_TERM`, each arm ending in an early
+`return`. As a LEFT operand the parse exited `PARSE_TERM` before reaching
+that function's own `*` loop; as a RIGHT operand that loop parses with
+`PARSE_FACTOR`, one tier DOWN, which had never known these tokens. Both
+halves had to be fixed for either direction to work. The dispatch is now
+extracted into `PARSE_INTRIN(S, ptyp)` and called from BOTH tiers, so
+there is exactly one list of intrinsic tokens and the two cannot drift
+apart again. Gated by `tests/tcyr/intrinsic_flanks_term_operator.tcyr`
+(19 assertions, both operand positions across the whole tier), which
+asserts VALUES rather than "it compiles" — the first cut of the fix
+compiled and was wrong.
+
+⭐ **This was found by the v6.4.82 vidya sweep** — by an agent that
+verified this entry's own examples by RUNNING the compiler instead of
+re-reading them. The first draft of the neighbouring f32/f64 entry used
+`x / f64_from(2)` and did not compile. That is the habit worth copying:
+the third live compiler bug in four releases came out of a doc sweep.
+
+⚠ If you are on a pre-v6.4.83 toolchain, everything below still applies.
+
+PRE-v6.4.83 BEHAVIOUR (kept for historical context + the workarounds):
+
+WHAT HAPPENED:
 
     var a: f64 = f64_from(84);
     var c: f64 = a / f64_from(2);
@@ -676,16 +760,14 @@ as a RIGHT operand that loop calls `PARSE_FACTOR`, one tier DOWN, which
 has never known these tokens. `+`/`-` work because `PEXPR`'s loop calls
 `PARSE_TERM` — the tier that does know them.
 
-WORKAROUNDS (both produce correct code today):
+WORKAROUNDS (needed only on pre-v6.4.83 toolchains; both still compile):
 
     var c: f64 = a * (f64_from(2));      # parens re-enter at the top
     var two: f64 = f64_from(2);          # or just bind it
     var c: f64 = a * two;
 
-WHY THIS ENTRY EXISTS RATHER THAN A WORKAROUND RULE: this is a parser
+WHY THIS ENTRY EXISTED RATHER THAN A WORKAROUND RULE: this was a parser
 gap, not a design choice, and per the repo's own standing rule a
 codegen/parser defect must never be written down as a language rule for
-users to code around. Treat the workaround as temporary. Found by
-running the compiler during the v6.4.82 vidya closeout while checking
-that the f32/f64 entry's examples actually compiled — the first draft
-of that entry used `x / f64_from(2)` and did not.
+users to code around. It was treated as temporary, and it was — the
+compiler was fixed one release later rather than the rule being kept.

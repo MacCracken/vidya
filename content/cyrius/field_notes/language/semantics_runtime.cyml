@@ -1,7 +1,12 @@
 # Cyrius Field Notes — Language Gotchas (semantics & runtime)
 # Var lifetime + scope, struct locals, init order, fn main, static `var buf[N]`
-# inside library fns, and the bump allocator's process-lifetime persistence.
-# 13 entries.
+# inside library fns, the allocator's process-lifetime persistence + arena
+# exhaustion policy, i64::MIN arithmetic, and thread handle lifetime.
+# Refreshed 2026-08-07 at v6.5.10: the global bump allocator has CHAINED
+# CHUNKS since v6.1.19 (measured — 400 MB in 100 MB bites succeeds), so the
+# old "exhaust the heap segment in 9 allocs" story no longer describes it;
+# three entries added from v6.5.8/.9.
+# 16 entries.
 
 [[entries]]
 name = "heap_allocation_patterns"
@@ -61,7 +66,11 @@ description = "Using enums as zero-cost namespaced constants"
 category = "cyrius"
 ---
 Enums in Cyrius are compile-time integer constants. They don't consume
-gvar_toks slots. They have a separate initialization path in cc2.
+gvar_toks slots — they const-fold, and only NON-literal top-level
+`var X = expr;` inits take a gvar_toks slot at all. (This line used to
+say "a separate initialization path in cc2"; `cc2` has not been the
+compiler since the v3.x era — the current one is `cycc`. See
+`diagnostics_caps.cyml::the_gvar_wall` for the live table.)
 
 This makes them perfect for constants that would otherwise eat your
 global variable budget:
@@ -415,9 +424,55 @@ ability" pattern.
 
 [[entries]]
 name = "bump_allocator_exhaustion_in_tests"
-description = "Cyrius bump allocator persists allocations for the process lifetime; large test files exhaust the heap → silent alloc(N) returning 0 → segfault on store"
+description = "The stdlib bump allocator never frees during process lifetime — but since v6.1.19 it CHAINS fresh 256 MB chunks instead of failing, so the DOOM/mabda-era 'exhausted at the 9th alloc(112)' symptom is retired. alloc() returns 0 only for size<=0, size>ALLOC_MAX (2 GiB), or a failed mmap. The no-free property is still real; use an arena when you need to reclaim."
 category = "cyrius"
 ---
+⚠ **CORRECTED 2026-08-07 (v6.5.10), by running it.** The MECHANISM
+below is out of date and the numbers with it. `lib/alloc.cyr` has
+been a CHUNKED bump allocator since **v6.1.19**: it bumps inside the
+current chunk and, on overflow, `mmap`s a FRESH 256 MB chunk
+(`_LINUX_CHUNK = 0x10000000`) and continues there. Old chunks stay
+mapped and valid; a single allocation never spans two. Measured on
+this box: 4 × `alloc(100000000)` = 400 MB, crossing the first chunk,
+all non-zero.
+
+So today `alloc(N)` returns 0 in exactly three cases:
+
+    N <= 0                       # rejected
+    N  > ALLOC_MAX (0x80000000)  # 2 GiB single-allocation cap
+    the mmap for a new chunk failed
+
+"Ran out of heap after nine 112-byte contexts" is no longer reachable.
+If you are chasing a null from `alloc` today, check the SIZE first —
+a negative or overflowed size argument is the live cause, not
+cumulative pressure.
+
+⛔ **What IS still true, and is the reason to keep reading:** nothing
+is ever freed. `alloc` has no `free`. A long-running process that
+allocates per request grows without bound, and the only batch release
+is `alloc_reset()`, which **invalidates EVERY pointer the allocator
+has ever handed out** — including ones the stdlib itself is holding.
+Any `Str`, `Vec`, `HashMap`, arena or struct built before the reset is
+dangling afterwards, and the span is zeroed AND re-issuable, so a
+stale pointer reads zeros until something else is allocated over it
+and then reads that. v6.5.7 fixed one instance of this *inside the
+stdlib* — `default_alloc()` memoized its vtable in the very arena it
+describes, so `alloc_reset()` invalidated the allocator itself and
+every later `default_alloc()` returned a dangling pointer
+(reproducible SIGSEGV, hisab-filed). The vtable now lives in a
+dedicated `_default_allocator_storage` global outside any resettable
+region. **Consumer-held pointers are still the caller's problem.**
+Reset only when nothing from the previous epoch will be read again.
+
+For per-request memory you actually want reclaimed, use an ARENA
+(`arena_new` / `arena_new_growable` / `arena_reset`) rather than
+leaning on the global bump — and read
+`arena_exhaustion_is_silent_because_a_zero_str_looks_valid` in this
+file before you size one.
+
+ORIGINAL (DOOM/mabda-era, kept for historical context — the WRITE
+IDIOM at the bottom is still good advice, the diagnosis is not):
+
 The Cyrius stdlib `alloc` is a bump allocator: each `alloc(N)`
 moves a global pointer forward by N bytes; allocations are
 NEVER freed during process lifetime. This is fine for short-
@@ -614,3 +669,174 @@ EINTR. A signal-interrupted wait reports `0`, the same as a timeout. That is del
 SCOPE. `lib/async.cyr`'s epoll body is gated NOT-agnos AND NOT-win, so this pair is Linux-path only by construction (Windows has `lib/async_win.cyr`, agnos `lib/async_agnos.cyr`). On the **cx** target no syscall peer is included at all, so the body does not even compile there — no cross-target work is owed.
 
 THE TESTING LESSON. Both directions need pinning. A variant hardwired to `1` passes an "it returned instead of hanging" test; a variant hardwired to `0` — the *old* contract — passes that one too. `tests/async_await_readable_ms.sh` asserts an idle fd reports 0 **and** a readable fd reports 1; each mutation fails exactly one axis.
+
+[[entries]]
+name = "i64_min_negation_is_a_noop_and_division_truncates_toward_zero"
+description = "`n = 0 - n` is a NO-OP at i64::MIN (two's-complement abs overflows back to itself), so `n == 0` and `n > 0` are BOTH false and any `while (n > 0)` digit loop runs zero times. That is why every decimal formatter in the stdlib emitted a bare `-` for i64::MIN until v6.5.8. The fix is a sign FLAG + a `!= 0` loop + per-digit negation — which is safe because `/` and `%` truncate toward zero on x86, aarch64 AND cx."
+category = "cyrius"
+---
+**v6.5.8** — 12 sites, not the 7 the roadmap named.
+
+THE ARITHMETIC (all four probed by running the compiler at v6.5.10):
+
+    var m  = 1 << 63;        # i64::MIN
+    0 - m  == m              # TRUE  — negation is a NO-OP here
+    m > 0                    # FALSE — so a `while (n > 0)` loop never runs
+    (0 - 7) / 2 == 0 - 3     # TRUE  — truncates TOWARD ZERO, not floor
+    (0 - 7) % 2 == 0 - 1     # TRUE  — remainder takes the DIVIDEND's sign
+
+i64 is two's complement, so the magnitude of `i64::MIN` is one larger
+than `i64::MAX` and has no positive representation. `0 - n` overflows
+straight back to `n`. There is no error, no trap, no diagnostic.
+
+THE SHAPE THAT BREAKS. Every hand-rolled decimal formatter is written
+this way, in every language:
+
+    if (n < 0) { write('-'); n = 0 - n; }    # ← NO-OP at i64::MIN
+    if (n == 0) { write('0'); }              # ← skipped, n is not 0
+    while (n > 0) { ... }                    # ← skipped, n is not > 0
+
+At `i64::MIN` the sign byte is written and then NOTHING. `fmt_int`
+printed `-`. `str_from_int(i64::MIN)` was the one-character string
+`"-"`, and bayan then serialised `{"n":-}` — not JSON — with no error
+raised at any layer.
+
+THE FIX — keep the sign as a FLAG, never negate `n`:
+
+    var neg: i64 = 0;
+    if (n < 0) { neg = 1; }
+    if (n == 0) { store8(&buf + bi, 48); bi = bi - 1; }
+    while (n != 0) {                     # `!= 0`, NOT `> 0`
+        var d = n % 10;
+        if (d < 0) { d = 0 - d; }        # negate the DIGIT, not n
+        store8(&buf + bi, 48 + d); bi = bi - 1; n = n / 10;
+    }
+    if (neg == 1) { store8(&buf + bi, 45); bi = bi - 1; }
+
+`!= 0` is the load-bearing half. Extracting digits from a negative
+value only works because `/` and `%` truncate toward zero on **all
+three** cyrius backends — that was verified on x86_64, aarch64 and cx
+before the fix relied on it, not assumed. (Under floor division
+`(0-7)/2` would be `-4` and the digits would come out wrong.)
+
+WHERE IT WAS. Four in `lib/fmt.cyr` (`fmt_int`, `fmt_int_fd`,
+`fmt_int_buf`, and a sibling), plus `lib/string.cyr`, `lib/log.cyr`,
+sakshi (fixed upstream at 2.4.8 and re-vendored), **two inside the
+compiler itself** (`PRNUM`, `_emit_decimal`) that no roadmap entry
+listed, and three shipped demos.
+
+⭐ **THE LESSON IS THE HALF-FIX.** `fmt_hex`, sitting directly below
+`fmt_int` in the same file, had already been corrected for this exact
+`> 0` vs `!= 0` reason at **v6.4.69**. The decimal siblings were never
+brought along. When you fix a loop-bound predicate in one formatter,
+grep the file for every other `while (n > 0)` before you close it.
+
+REVIEW RULE for your own code: any `while (x > 0)` over an i64 that
+came from user data is suspect, and any `x = 0 - x` "take the absolute
+value" is a bug at exactly one input. Test formatters and parsers at
+`1 << 63`, not just at `-1`.
+
+[[entries]]
+name = "arena_exhaustion_is_silent_because_a_zero_str_looks_valid"
+description = "An exhausted arena returns 0 from `arena_alloc` / `str_from_a` — correct behaviour — but a `Str` of 0 is INDISTINGUISHABLE from a valid `Str`, there is no option type and no error channel through the `_a` families, so it flows on and faults layers away. v6.5.9 adds a per-arena exhaustion POLICY (ARENA_FULL_NULL / GROW / SPILL / ABORT) precisely because returning 0 correctly was never enough."
+category = "cyrius"
+---
+**v6.5.9** — filed from agnosai.
+
+THE PRIMITIVES WERE ALREADY RIGHT, AND THAT WAS THE PROBLEM.
+`arena_alloc` returns 0 when the chunk cannot serve the request,
+`str_from_a` returns 0, `vec_push_a` returns -1. None of that is the
+bug. The bug is what the 0 does next: **a `Str` of 0 is
+indistinguishable from a valid `Str`** — there is no option type, and
+the `_a` (allocator-threaded) families have no error channel — so it
+flows onward and the first thing that dereferences it faults. "Arena
+too small" was observable as a SIGSEGV several layers away, in a JSON
+walker, with no indication which allocator ran out.
+
+⭐ **THE REGRESSION DIRECTION IS WHAT MAKES IT SERIOUS.** Before
+threading a route onto an arena, an oversized response was a *leak* on
+the no-free global bump. After threading — a change whose entire
+purpose is to stop leaking — the same response is a *crash*. Adopting
+the feature correctly made the failure worse and quieter. A
+5,500-assertion suite missed it because allocation tests are
+small-fixture by nature: they assert `bytes == 0` over a handful of
+items, and nothing about that shape probes the ceiling.
+
+THE POLICY (one field on the arena header, set at creation or later):
+
+    ARENA_FULL_NULL  = 0    return 0 — TODAY'S BEHAVIOUR, still the
+                            default, so no existing arena moves
+    ARENA_FULL_GROW  = 1    chain another chunk
+    ARENA_FULL_SPILL = 2    serve overflow from the global allocator
+                            (weaker — spilled bytes are never reclaimed
+                            by reset — but the crash becomes the
+                            pre-arena cost)
+    ARENA_FULL_ABORT = 3    die loudly AT the allocation instead of
+                            faulting three layers away
+
+    var a  = arena_new_growable(65536);        # policy = GROW
+    var al = arena_allocator_growable(65536);  # the allocator-interface form
+    arena_set_on_full(a, ARENA_FULL_ABORT);    # or change it later
+    arena_on_full(a)                           # read it back, -1 if a == 0
+
+⚠ **GROW RETAINS ITS CHUNKS ACROSS `arena_reset`.** The bump allocator
+underneath has no `free()`, so releasing them is not expressible — and
+it is not what an arena wants anyway. Reset rewinds to the FIRST chunk
+and re-uses the chain, so a request loop converges on its high-water
+mark and then allocates nothing. Use `arena_capacity_total(a)` for the
+whole chain; `arena_used(a)` cannot show it once the arena has grown.
+
+⚠ `arena_free(a)` used to clear only base/ptr/end and LEAVE THE POLICY
+SET, so a "freed" growable arena would take the grow path and succeed.
+Fixed in the same release — but if you are on an older toolchain, do
+not reuse a freed arena handle.
+
+PRACTICAL RULE: if you cannot bound the allocation from the input,
+either use `arena_new_growable` and stop guessing a capacity, or set
+`ARENA_FULL_ABORT` so a wrong guess is a diagnosable death rather than
+a mystery segfault in whatever code touched the pointer next. Sizing an
+arena and hoping is the shape this entry exists to stop.
+
+[[entries]]
+name = "thread_is_done_is_valid_only_before_thread_join"
+description = "`thread_is_done(t)` (v6.5.8) is a non-blocking poll of the handle `thread_create` returned — valid ONLY BEFORE `thread_join`, because join CONSUMES the handle (on Windows it CloseHandle()s it) and a post-join query reports \"not done\" forever. A detached thread has no handle at all, by design."
+category = "cyrius"
+---
+**v6.5.8** — the reaper primitives.
+
+    var t = thread_create(&worker, arg);
+    while (thread_is_done(t) == 0) { ... keep serving ... }
+    thread_join(t);                     # then join once — and STOP asking
+
+`thread_join` blocks unconditionally, which made a reaper — "collect
+whichever workers have finished, keep serving the rest" — impossible to
+write without a detached thread plus a side channel. `thread_is_done`
+reads the same `CLONE_CHILD_CLEARTID` slot `thread_join`'s loop already
+tests, so it adds no new state: **1** = done, **0** = still running,
+**-1** = null handle.
+
+⛔ **VALID ONLY BEFORE `thread_join`.** Join CONSUMES the handle — on
+Windows it `CloseHandle()`s it — so a post-join query inspects a closed
+handle and reports "not done", forever. That is not a bug to work
+around; after joining, the thread is finished by definition and there is
+nothing left to ask. Caught on real cass hardware, by a test that
+asserted the wrong contract.
+
+⛔ **A DETACHED THREAD HAS NO HANDLE.** `thread_create_detached(fp,
+arg)` returns 1/0 (spawned or not), not a handle, and there is nothing
+to poll or join — the child unmaps its own stack in the trampoline tail
+and the TLS block is carved from the top of that same mapping so one
+`munmap` frees both. Use it for fire-and-forget work; use
+`thread_create` + `thread_is_done` + `thread_join` when you need to know
+it finished. (Before .8 the only fire-and-forget shape was an unjoined
+`thread_create`, which leaked **2,101,248 bytes of VA per thread** —
+100 unjoined threads = 210,124,800 B, now 0.)
+
+⚠ RELATED, SAME RELEASE: `thread_join` itself had a lost-wakeup
+deadlock — it read the tid word TWICE per iteration, once for the loop
+condition and once as the `FUTEX_WAIT` expected value, so a worker
+exiting between the two loads let the kernel's one-shot wake fire with
+nobody parked and the joiner then parked on an address that would never
+be woken again. Permanent, silent, log-less, ~1 join in 150k, SIGKILL
+the only recovery. Fixed in v6.5.8. If you are on ≤6.5.7 and a
+long-running server wedges in a join, this is it.

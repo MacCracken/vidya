@@ -1,8 +1,14 @@
 # Cyrius — Stdlib Modules (per-module usage)
 # How to use specific stdlib modules — APIs, conventions, gotchas.
 # 20 entries — a CURATED subset of the 99 lib/*.cyr modules (not the
-# full surface). Header refreshed 2026-07-27 at v6.4.82 (the v6.4.x
-# CLOSEOUT): chrono_module rewritten for the v6.4.67 DateTime/Duration/
+# full surface). Header refreshed 2026-08-07 at v6.5.10: `file_locking`
+# gained the v6.5.7 additions to the portable x* wrapper set
+# (xmkdir / xmkdir_p / xsymlink / xreadlink / xlink, joining the v6.5.2
+# xrmdir) plus the found-by-ports Darwin routing traps that came with
+# them. Vendored dep pins RE-DERIVED from the live `# Version:` line in
+# each `lib/<name>.cyr` — 7 of the 11 had drifted since the last sweep.
+# Prior refresh 2026-07-27 at v6.4.82 (the v6.4.x CLOSEOUT):
+# chrono_module rewritten for the v6.4.67 DateTime/Duration/
 # strftime surface; file_locking gained the v6.4.57 crash-safe write set
 # (file_write_atomic / file_rename / xfsync / file_create_exclusive);
 # +1 entry thread_local_slot_allocator (v6.4.65 — stop hardcoding slot
@@ -11,9 +17,9 @@
 # literal arrives as a raw cstr and every `str_*` call on it silently
 # returns nothing — see field_notes/language/semantics_runtime.cyml
 # `string_literal_to_str_coercion_is_annotation_only`.
-# Vendored dep pins at v6.4.82: sandhi 1.9.3 · sankoch 2.7.6 ·
-# sigil 3.12.1 · patra 1.12.12 · yukti 2.2.10 · mabda 4.0.7 ·
-# bayan 1.2.1 · ganita 1.0.4 · niyama 1.0.6 · vani 1.1.2 · sakshi 2.4.6.
+# Vendored dep pins at v6.5.10: sandhi 1.9.9 · sankoch 2.7.6 ·
+# sigil 3.12.2 · patra 1.12.12 · yukti 2.3.2 · mabda 4.0.8 ·
+# bayan 1.4.1 · ganita 1.0.4 · niyama 1.0.6 · vani 1.1.3 · sakshi 2.4.8.
 # Prior header refresh 2026-07-03 (v6.4.0); some entries
 # below still carry their carve-origin version notes. Since the 2026-06-12
 # sync this file gained protobuf (v6.2.17) + tls_native ALPN (v6.2.22)
@@ -168,7 +174,7 @@ ISO-8601:
 
 [[entries]]
 name = "file_locking"
-description = "flock(2) wrappers + the v6.4.57 crash-safe write set (file_write_atomic / file_rename / xfsync / file_create_exclusive) in lib/io.cyr — concurrency- and crash-safe file I/O"
+description = "lib/io.cyr — flock(2) wrappers, the v6.4.57 crash-safe write set (file_write_atomic / file_rename / xfsync / file_create_exclusive), and the portable x* syscall-wrapper family (xopen/xstat/xunlink/xgetdents/xlseek/xflock, xrmdir v6.5.2, xmkdir/xmkdir_p/xsymlink/xreadlink/xlink v6.5.7). Concurrency-, crash- and cross-target-safe file I/O."
 category = "cyrius"
 ---
 CRASH-SAFE WRITE SET (v6.4.57) — reach for this before `file_write_all`
@@ -215,11 +221,13 @@ without a database, without a server, without a dependency.
 Two functions. Two syscalls. That is the entire concurrency-safe
 append-only log foundation.
 
-PORTABLE x* WRAPPER SET (cross-target ABI bridge, use on agnos-bound
-code): file_open and the file_* fns above bottom out on per-target
-syscall ABIs that DIFFER on agnos (length-carrying names, AO_* flag
-bits, distinct numbers). lib/io.cyr exposes a thin portable set so a
-caller never hand-rolls a Linux number that traps off-Linux:
+PORTABLE x* WRAPPER SET (cross-target ABI bridge — use it for ANY
+filesystem call, not just agnos-bound code): file_open and the file_*
+fns above bottom out on per-target syscall ABIs that DIFFER on agnos
+(length-carrying names, AO_* flag bits, distinct numbers) and on Darwin
+(different numbers AND different AT_* flag VALUES). lib/io.cyr exposes a
+thin portable set so a caller never hand-rolls a Linux number that traps
+off-Linux:
   fn xopen(path, flags)        — namelen-bridged open (agnos AO_* map)
   fn xstat(path, buf)          — length-carrying stat
   fn xunlink(path)             — length-carrying unlink
@@ -228,7 +236,71 @@ caller never hand-rolls a Linux number that traps off-Linux:
   fn xflock(fd, op)            — centralizes the per-target flock number
                                  (peer carries SYS_FLOCK ONLY on agnos; Linux
                                  x86#73 / aarch64#32 / macos#92 live in xflock)
-xopen/xstat/xunlink/xgetdents landed v6.2.26; xlseek/xflock v6.2.33.
+  fn xfsync(fd)                — see the crash-safe set above
+  fn xrmdir(path)              — unlinkat + AT_REMOVEDIR
+  fn xmkdir(path, mode)        — Windows DOES route here (83 is in the PE
+                                 reroute set), unlike xrmdir
+  fn xmkdir_p(path, mode)      — `mkdir -p`. Tries the FULL path first and
+                                 walks parents only on failure (Rust's
+                                 create_dir_all ordering), so the common case
+                                 is ONE syscall. An existing directory is
+                                 SUCCESS. Paths bounded at 1023 bytes —
+                                 longer returns -1 rather than truncating,
+                                 since a truncated mkdir creates the WRONG
+                                 directory.
+  fn xsymlink(target, linkpath)
+  fn xreadlink(path, buf, bufsize)
+  fn xlink(oldpath, newpath)
+xopen/xstat/xunlink/xgetdents landed v6.2.26; xlseek/xflock v6.2.33;
+xrmdir v6.5.2; xmkdir / xmkdir_p / xsymlink / xreadlink / xlink v6.5.7.
+
+⛔ WHY THIS SET EXISTS, restated by v6.5.7: `tests/syscall_wrapper_pass.sh`
+proves these wrappers COMPILE on five targets, which is most of the risk
+and NOT most of the bugs. Adding `tests/tcyr/vr01_syscall_wrappers.tcyr`
+— which actually RUNS them, on real hardware, via the release gate's
+`vr01_` glob — turned the gate RED on ecb and then on ach, and every red
+was a real defect no host test could see. Five of the seven were HALF-FIXES
+that stopped at the first symptom:
+  - `xrmdir` never worked on macOS-arm64 from the day it shipped: the
+    macho branch mapped `unlinkat(35)` to Darwin `unlink(10)` with an
+    arg-shift that DROPPED the dirfd and the flag. Right for `unlink`,
+    fatal for `rmdir` — the same syscall distinguished only by
+    AT_REMOVEDIR.
+  - The Darwin `AT_*` FLAG VALUES diverge and only the dirfd half had
+    ever been fixed: AT_SYMLINK_NOFOLLOW 0x20 vs 0x100, AT_SYMLINK_FOLLOW
+    0x40 vs 0x400, AT_REMOVEDIR 0x80 vs 0x200. The at-family entries are
+    pure renumbers that pass flags straight through, so a Linux value is
+    simply an invalid flag: EINVAL, forever, silently.
+  - `chdir` and `link(86)` were unmapped on macOS-x86 — an untranslated
+    number reaches Darwin unclassed and SIGSYSes, killing the process
+    with no output at all rather than returning an error.
+  - `SYS_CHDIR = 49` on aarch64 ran `bind` (native 49 is eaten by the
+    x86-compat bind shim). Fixed via the ≥1000 PRIVATE ALIAS band
+    introduced at v6.5.7: source numbers ≥1000 are cyrius-private, minted
+    by no OS, renumbered by ESYSXLAT — `SYS_CHDIR = 1049`,
+    `SYS_FCHOWNAT = 1054` (= 1000 + the native number, so the alias
+    documents itself).
+General rule, worth more than the list: a constant being DEFINED on a
+target does not mean it is ROUTED there. For Mach-O and PE, grep the
+translation table, not the enum.
+
+PROCESS + SIGNAL WRAPPERS worth knowing (lib/syscalls*.cyr):
+  fn sys_exit(code)        — exit(2): ends the CALLING THREAD ONLY
+  fn sys_exit_group(code)  — exit_group(2): the correct program epilogue
+                             once any thread exists (v6.5.6)
+  fn sys_chdir(path)       — v6.5.7. Was CALLED by lib/regression.cyr and
+                             DEFINED NOWHERE, so any consumer reaching
+                             `regression_exec_in_dir3` could not compile
+                             that stdlib file at all.
+  fn signal_ignore(signum) — SIG_IGN
+  fn signal_default(signum)— SIG_DFL (v6.5.7). NOT optional alongside
+                             signal_ignore: SIG_IGN is INHERITED across
+                             execve (a handler is reset, an ignore is
+                             not), so a process that ignores a signal and
+                             then fork+execve's hands the child a
+                             disposition its own code never chose. Call it
+                             between fork and execve — what
+                             std::process::Command does for SIGPIPE.
 
 [[entries]]
 name = "csv_module"

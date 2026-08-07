@@ -1,7 +1,16 @@
 # Cyrius Field Notes — Language Gotchas (diagnostics & fixed caps)
 # Initialized-global-var slot ceiling, cc2 output buffer ceiling, preprocessed
-# line-number reporting, the undefined-fn warning vs `--strict`, the LIVE
+# line-number reporting, the undefined-fn HARD ERROR (default-on since
+# v6.3.2 — `--strict` no longer has anything to do with it), the LIVE
 # capacity ceilings, and what a v6.4.60+ diagnostic actually looks like.
+# Refreshed 2026-08-07 at v6.5.10 by RUNNING the compiler:
+#  · `undefined_fn_warning_vs_strict` was inverted — a reachable undefined fn
+#    has been a hard error BY DEFAULT since v6.3.2, `--allow-undef` downgrades
+#    it, and `_strict_mode` is now assigned in all 7 forks and read NOWHERE.
+#  · the transcripts here put the parenthetical note on its own line; the
+#    compiler appends it to the `error:` line. Corrected in both entries.
+#  · every capacity figure re-verified against `_capacity_warnings` and the
+#    `src/main.cyr` heap map; the code-buffer warning fires at 75 %, not 85 %.
 # 6 entries.
 
 [[entries]]
@@ -9,6 +18,9 @@ name = "the_gvar_wall"
 description = "The initialized global variable limit and how to work within it (refreshed v5.8.47 audit; cap raised pre-v5.8.x)"
 category = "cyrius"
 ---
+**Re-verified 2026-08-07 (v6.5.10)** against the `src/main.cyr` heap
+map — offset and count both unchanged since the v6.4.2 pass below.
+
 **Refreshed 2026-07-04 (v6.4.2 vidya audit)**: cap-bump history.
 At cyrius v6.4.2 the gvar_toks table lives at heap offset
 **0x729000** and holds **4096 entries** — relocated + grown from
@@ -78,6 +90,21 @@ name = "the_256kb_ceiling"
 description = "Output-buffer ceiling and why static arrays destroy your binary size (refreshed v6.1.27; ceiling raised 256K→2M pre-v5.8.x→16M at v6.1.27; var buf[N] static-array semantics unchanged)"
 category = "cyrius"
 ---
+**CORRECTED 2026-08-07 (v6.5.10): the 16 MiB ceiling below is GONE.**
+Since **v6.4.52** the output buffer is a **1 GiB off-heap allocation**
+on every platform — `src/main.cyr:776` `_output_base =
+alloc(1073741824)`, `_output_cap = 1073741824` — not a heap region at
+all. There is no 16 MiB output ceiling to hit.
+
+⛔ AND NOTE HOW THIS ENTRY WENT WRONG, because it is the failure this
+whole file exists to prevent. An earlier pass on this same day stamped
+it "re-verified against the `src/main.cyr` heap map — still 16 MiB,
+unchanged". The heap map is a COMMENT, and that comment was itself
+stale: it still documented `0x4D9D000 output_buf [16777216]` as live
+while nothing had written there since v6.4.52. Verifying a doc against
+another doc reproduces the error with a fresh timestamp on it, which is
+worse than leaving it unstamped. Read the CODE.
+
 **Refreshed 2026-06-10 (v6.1.27)**: ceiling moved.
 At cyrius v6.1.27 the output_buf region is **16 MiB (16,777,216
 bytes)** at S+0x4D9D000 (heap-top, per `src/main.cyr` heap map),
@@ -127,14 +154,15 @@ name = "the_preprocessed_line_number_problem"
 description = "Error messages report preprocessed line numbers, not source file + line — STILL ACTIVE at v5.8.46 (re-confirmed at v5.8.47 vidya audit; partially mitigated by the lex.cyr file_map but not surfaced in the error path)"
 category = "cyrius"
 ---
-**Status (2026-07-27, v6.4.82)**: PARTIALLY MITIGATED. The line
-number is still the PREPROCESSED-stream line and the filename still
-collapses to literal `<source>` — but since v6.4.60 the diagnostic
-also carries a **column** and prints the **offending source line with
-a caret under it**, which in practice removes most of the counting
-work below:
+**Status (2026-08-07, v6.5.10 — re-run, unchanged)**: PARTIALLY
+MITIGATED. The line number is still the PREPROCESSED-stream line and
+the filename still collapses to literal `<source>` — but since v6.4.60
+the diagnostic also carries a **column** and prints the **offending
+source line with a caret under it**, which in practice removes most of
+the counting work below:
 
-    error:<source>:1:5: expected identifier, got reserved keyword 'iv_add'
+    $ echo 'var iv_add = 1;' | build/cycc > /dev/null
+    error:<source>:1:5: expected identifier, got reserved keyword 'iv_add' (cannot be used as an identifier; rename the variable/field/fn)
         var iv_add = 1;
             ^
 
@@ -190,51 +218,71 @@ then narrow down. This is faster than counting.
 
 [[entries]]
 name = "undefined_fn_warning_vs_strict"
-description = "Undefined-function references compile as warnings by default; use --strict (v5.4.19+) to escalate to errors"
+description = "⚠ INVERTED SINCE v6.3.2 — a REACHABLE undefined-function call is a HARD ERROR by DEFAULT and no binary is emitted; `--allow-undef` downgrades it to a warning. `--strict` is NOT what turns it on any more (and is now read nowhere). Entry name kept for link stability."
 category = "cyrius"
 ---
-Calling a function that doesn't exist (typo, forgotten include,
-renamed API) produces a warning + "will crash at runtime" note,
-NOT a compile error, by default. The binary is emitted; the call
-site has an unresolved fixup that segfaults when reached.
+⚠ **CORRECTED 2026-08-07 (v6.5.10) — the default flipped at v6.3.2 and
+this entry taught the OPPOSITE for two minors.** Measured on the live
+compiler, no flags:
 
-    $ cat foo.cyr | build/cycc > foo
+    $ printf 'var r = bench_print_all();\n' | build/cycc > foo
     warning: undefined function 'bench_print_all'
-    error: undefined function 'bench_print_all' (will crash at runtime)
-    $ ./foo
-    [no output, hangs or SIGSEGVs]
-
-v5.4.19 added `cycc --strict` which hard-fails instead:
-
-    $ cat foo.cyr | build/cycc --strict > foo
-    error: undefined function 'bench_print_all'
-    error: --strict: refusing to emit binary with 1 undefined function(s)
-    $ echo $?
+    warning: undefined function 'bench_print_all' (call site may be unreachable)
+    error: refusing to emit binary with 1 reachable undefined function(s) (pass --allow-undef to downgrade)
+    $ echo $? ; stat -c%s foo
     1
+    0
 
-RECOMMENDED: enable `--strict` in CI. The class of bug this
-catches is typo-in-fn-name, forgotten include, or API rename
-that the caller wasn't updated for. Surfaced at v5.4.15 when
-`bench_print_all` (should have been `bench_report_all`) cost a
-full debug cycle before someone noticed the warning in the
-compile output.
+**No binary. Zero bytes. Exit 1 — by default.** That closes the "ships a
+successful build of a crashing binary" class: the old behaviour emitted a
+`ud2` / `UDF` at the call site, which SIGILLs at runtime and was
+repeatedly misdiagnosed as a toolchain bug.
 
-`cyrius build --strict` now forwards the flag to cycc (added
-v5.11.63 — cbt/build.cyr injects the `--strict` token into argv
-when the wrapper flag is set). Enabling it in CI catches
-typo-in-fn-name / forgotten-include / API-rename-without-caller
-breakage at compile time instead of runtime. (Piping to
-`build/cycc --strict` directly still works for compiler-internal
-self-host.)
+⛔ **`--strict` IS NOT THE SWITCH, and does nothing here.** The gate reads
+a separate `_allow_undef` global (default 0 = hard error), not
+`_strict_mode`. Measured: `build/cycc --strict` and `build/cycc` produce
+byte-identical output on the case above. `_strict_mode` is still declared
+in six of the seven `src/main*.cyr` forks (not `main_cx.cyr`) and
+assigned by their argv parses, and is **read nowhere** in `src/` — the
+remaining mentions are comments. Do not add `--strict` to CI expecting it
+to do this; it is already done.
+
+TO OPT OUT (rarely correct):
+
+    cycc --allow-undef      # or --al
+
+Downgrades the error back to a warning and emits the binary. The repo's
+own builds use **zero** `--allow-undef`; every reachable undef in the
+tree is a real fn via includes, or a documented stub/guard.
+
+⚠ **"REACHABLE" IS LOAD-BEARING.** The check runs AFTER the DCE pass and
+consults the reachability bitmap, so a fixup whose host fn is unreachable
+from entry warns but does NOT count toward the error (v5.11.59). That is
+why you can see a `warning: undefined function 'X'` line and still get a
+binary — the two `warning:` lines above are the same symbol reported by
+both paths. Top-level / entry-block code is always treated as live.
+
+THE BUG CLASS IT CATCHES is typo-in-fn-name, forgotten include, and API
+rename without the caller updated. Surfaced at v5.4.15 when
+`bench_print_all` (should have been `bench_report_all`) cost a full debug
+cycle because the warning scrolled past in the compile output. Nothing
+scrolls past now.
+
+HISTORY, for anyone on an older toolchain: warn-and-emit was the default
+through v6.3.1; `--strict` (v5.4.19) was the opt-in hard-fail, and
+`cyrius build --strict` forwarded it (v5.11.63). v6.3.2 made the hard
+error unconditional and moved the escape hatch to `--allow-undef`.
 
 [[entries]]
 name = "live_compiler_capacity_ceilings"
-description = "The capacity ceilings a consumer can actually hit, as of v6.4.82 — identifier pool 524288 B (512 KB, v6.4.76), fn_table init 8192 growing to a 32768 hard ceiling, var_table 8192, fixup_table 1048576, string_data 2097152, code buffer 64 MiB growable. Read this instead of any older 262144 / 8192-ceiling figure."
+description = "The capacity ceilings a consumer can actually hit — re-verified live at v6.5.10 against `_capacity_warnings` and the src/main.cyr heap map: identifier pool 524288 B (512 KB, v6.4.76), fn_table init 8192 growing to a 32768 hard ceiling, var_table 8192, fixup_table 1048576, string_data 2097152, code buffer 64 MiB growable (512 KiB on cx). Read this instead of any older 262144 / 8192-ceiling figure."
 category = "cyrius"
 ---
 THE LIVE NUMBERS (source of truth: `src/common/util.cyr::_capacity_warnings`
 plus the `CYRIUS_STATS=1` meter in `src/main.cyr` — go read them, do not
-trust a doc that hasn't been premise-checked):
+trust a doc that hasn't been premise-checked. Every line below was
+re-read out of those two files on 2026-08-07 at v6.5.10; all unchanged
+since the v6.4.82 pass):
 
     fn_table        8192 INITIAL, doubles to a 32768 HARD ceiling
     identifier pool 524288 bytes (512 KB) at heap 0x60000-0xE0000
@@ -242,17 +290,25 @@ trust a doc that hasn't been premise-checked):
     fixup_table     1048576
     string_data     2097152
     code buffer     67108864 (64 MiB, growable off-heap since v6.4.49)
-    output buffer   16777216 (16 MiB, since v6.1.27)
+                    — but only 524288 (512 KiB) on the cx target, which
+                      is NOT growable; the warning text differs there
+    output buffer   1073741824 (1 GiB, off-heap alloc, since v6.4.52)
+    gvar_toks       4096 deferred non-literal global inits, at 0x729000
 
 HOW TO SEE YOUR OWN NUMBERS:
 
     CYRIUS_STATS=1 cyrius build ...      # full meter on stderr
 
-  Without `CYRIUS_STATS`, the compiler emits an 85%-of-cap WARNING per
+  Without `CYRIUS_STATS`, the compiler emits an over-cap WARNING per
   table at end of compile. Since v6.4.50 all SEVEN drivers share one
   implementation — before that, only the x86-Linux and Win64 drivers
   warned at all, which is why a codebuf warning would appear on x86 and
   vanish on aarch64/macho/cx for the same program.
+
+  ⚠ The threshold is **85 % for five of the six tables and 75 % for the
+  code buffer** — a detail this entry used to flatten into "an 85 %
+  warning per table". If you are calibrating against the warning, use
+  the right number for the table you are near.
 
 TWO TRAPS IN THE OLDER DOCUMENTATION:
 
@@ -280,33 +336,41 @@ TWO TRAPS IN THE OLDER DOCUMENTATION:
      A blanket 8192 → 32768 find-and-replace INTRODUCES bugs. Check each
      site.
 
-WARN THRESHOLDS (85%, integer arithmetic — `count * 100 / cap >= 85`):
-fn_table fires at 27853 fns (of 32768); identifier pool at 445645
-bytes (of 524288).
+WARN THRESHOLDS (integer arithmetic — `count * 100 / cap >= 85`, and
+`>= 75` for the code buffer): fn_table fires at 27853 fns (of 32768);
+identifier pool at 445645 bytes (of 524288).
 
 WHAT TO DO WHEN YOU HIT ONE: the standing rule is grow the cap, not
 trim the program — but the identifier pool no longer has room to grow
 in place, and past 32768 fns the honest answer is splitting into
-compilation units. A consumer roughly 750 fns from the fn ceiling
-(stiva, v6.4.73) is the current high-water mark.
+compilation units. The known high-water consumer is **stiva**, which at
+v6.4.73 sat ~750 fns below the then-**8192** cliff — i.e. ~7,400 fns,
+roughly 23 % of today's 32768 ceiling. ⚠ That distance has NOT been
+re-measured since the ceiling moved at v6.4.75; read it as "the biggest
+consumer we know of is nowhere near the current ceiling", not as a live
+margin.
 
 [[entries]]
 name = "diagnostics_carry_column_excerpt_and_dont_stop_at_the_first_error"
 description = "Since v6.4.60 every error/warning prints `line:COLUMN` plus the source line with a caret; since v6.4.62 one compile reports MANY errors (panic-mode recovery), writes NO output file if any error fired, and cannot hang on hostile or truncated input."
 category = "cyrius"
 ---
-WHAT YOU SEE NOW:
+WHAT YOU SEE NOW (both transcripts re-run at v6.5.10 — the
+parenthetical note is APPENDED to the `error:` line, it is not on a
+line of its own; an earlier revision of this entry showed it wrapped):
 
     $ echo 'var iv_add = 1;' | cycc > /dev/null
-    error:<source>:1:5: expected identifier, got reserved keyword 'iv_add'
-        (cannot be used as an identifier; rename the variable/field/fn)
+    error:<source>:1:5: expected identifier, got reserved keyword 'iv_add' (cannot be used as an identifier; rename the variable/field/fn)
         var iv_add = 1;
             ^
 
     $ printf 'var a: f64 = f64_from(3);\nvar b = a + 1;\n' | cycc > /dev/null
     warning:<source>:2:14: f64 arithmetic with a non-f64 right operand
 
-THREE BEHAVIOURS WORTH RELYING ON:
+THREE BEHAVIOURS WORTH RELYING ON (all three re-measured at v6.5.10 —
+two missing-`;` errors reported in ONE compile from a two-fn file, a
+0-byte output with exit 1, and a source truncated mid-expression
+terminating in 2 stderr lines rather than hanging):
 
   1. **Many errors per compile.** A syntax error puts the parser into
      panic mode; it skips to the next statement boundary and continues.

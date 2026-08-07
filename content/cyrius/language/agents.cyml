@@ -10,6 +10,13 @@
 # be annotated on public string params, and reserved words are a 67-name
 # CLASS. A rule in this file that tells you to code around the compiler
 # is a bug report about the compiler — treat it as one.
+# Re-swept 2026-08-07 at v6.5.10, again by checking live code rather than
+# re-reading: `lib/u128.cyr` DOES NOT EXIST (carved into `lib/bayan.cyr`
+# at v6.1.25 — the pointer here had been dangling for four minors);
+# `tests/regression-*.sh` gates DO NOT EXIST (the .sh-conversion arc
+# closed at v5.9.41, and the 41 live shell gates under `tests/*.sh` carry
+# topic names); the CLAUDE.md closeout pass is 12 steps, not 11. Added a
+# threaded-exit rule (`sys_exit` ends only the calling thread).
 # 3 entries.
 
 [[entries]]
@@ -59,6 +66,29 @@ status. Tests must explicitly use it as the exit code:
     # RIGHT — exit 0 on full pass, non-zero on failure:
     var r = assert_summary();
     syscall(60, r);
+
+Two refinements the scaffold template picked up at v6.5.6:
+CLAMP the count (`if (r > 0) { r = 1; }`) because a wait
+status is 8 bits, so exactly 256 failures exits 0 and scores
+PASS; and exit through `sys_exit_group(r)` if the program
+ever spawns a thread (see the next rule).
+
+== `sys_exit` ENDS ONE THREAD, NOT THE PROCESS ==
+
+`syscall(SYS_EXIT, r)` is exit(2). In a single-threaded
+program that ends the process; the moment the program has
+spawned ANY worker it does not — the main thread dies, the
+workers keep running, and the process hangs with no
+diagnostic. Use `sys_exit_group(r)` (v6.5.6), which is
+defined on all three syscall peer families.
+
+    syscall(SYS_EXIT, r);   # measured: exit 124 (hung)
+    sys_exit_group(r);      # measured: exit 42
+
+This is the shape to watch for: the bug is in the
+INTERACTION, not the line, so it bites long after the
+epilogue was written and nothing flags it. `cyrius init`
+shipped the old form in seven templates.
 
 == MISSING `lib/foo.cyr` INCLUDE = UD2 SIGILL ==
 
@@ -188,7 +218,10 @@ The `/` operator lowers to `idiv`, not `div`. For unsigned
 operations where the high bit matters (cryptographic
 mulmod, hash mixing, high-entropy counters), use the stdlib's
 `u64_mulmod` / `u64_powmod` / `u128_divmod` from
-`lib/u128.cyr` — they handle unsigned semantics internally.
+**`lib/bayan.cyr`** — they handle unsigned semantics
+internally. (This rule used to name `lib/u128.cyr`; that file
+has not existed since the v6.1.25 bayan carve. The `u128_*`
+names survive there as thin aliases over `bayan_u128_*`.)
 
 == FUNCTION ORDERING IS RELAXED ==
 
@@ -338,14 +371,30 @@ section "Test suite (.tcyr)" is the source of truth.
 
 == CHECK.SH-ONLY GATES (NOT IN .tcyr) ==
 
-`tests/regression-*.sh` files (ending in `.sh`, not `.tcyr`)
-are shell-driven gates wired directly into `check.sh`.
-They have their own exit-code conventions (0 = PASS, non-0
-= FAIL) and don't go through `lib/assert.cyr`.
+`tests/*.sh` files (ending in `.sh`, not `.tcyr`) are
+shell-driven gates wired into the `programs/checks/*.cyr`
+driver. They have their own exit-code conventions (0 = PASS,
+non-0 = FAIL) and don't go through `lib/assert.cyr`.
 
-Use `.tcyr` for assertion-driven correctness tests; use
-`tests/regression-*.sh` for environment / external-tool
-regression gates.
+41 of them at v6.5.10, ALL live: 31 registered by exact path
+in `programs/checks/main.cyr`, the other 10 via named gate fns
+such as `_heapmap_gate`. ⚠ Several docs have said "10" or
+"19" — that number was wrong and kept being incremented
+instead of re-derived. `ls tests/*.sh | wc -l` is the answer.
+
+They are NOT named `regression-*.sh` — this rule used to say
+they were, but the .sh-conversion arc closed at v5.9.41 with
+zero such files remaining. Live names are topical:
+`heapmap.sh`, `sync_mutex_three_state.sh`,
+`syscall_wrapper_pass.sh`, `distlib_deps_sidecar.sh`, …
+
+Use `.tcyr` for assertion-driven correctness tests; use a
+`tests/<topic>.sh` gate for environment / external-tool /
+structural regressions. Name it topically, never temporally.
+
+⚠ A shell gate must be tested under `bash -eo pipefail`:
+`var=$(failing_cmd)` trips `set -e` before your bookkeeping
+runs, which is how SKIP/XFAIL gates go quietly vacuous.
 
 [[entries]]
 name = "agent_anti_patterns"
@@ -428,10 +477,12 @@ CLAUDE.md spells this out:
 
 == ANTI-PATTERN: SKIP THE CLAUDE.MD CLOSEOUT STEPS ==
 
-CLAUDE.md spells out an 11-step closeout pass before every
-minor/major bump. Steps 1-3 are mechanical, 4-8 are
+CLAUDE.md spells out a 12-step closeout pass (plus step 3b)
+before every minor/major bump. Steps 1-3 + 3b are mechanical
+(3b = cross-OS self-host on REAL hardware), 4-8 are
 judgment-call, 9 is security re-scan, 10 is downstream
-check, 11 is vidya sync.
+check, 11 is CHANGELOG/roadmap/vidya sync, 12 is the backlog
+re-triage / rot sweep.
 
 Hand-waving the judgment-call passes ("heap-map audit
 clean", "refactor: no candidates") is where bugs hide.

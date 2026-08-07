@@ -825,19 +825,27 @@ v5.8.24 grew 2 of them. All in the metadata band, starting at
 0x204000 — immediately past the 8 KB region at 0x1FC000 that was
 `fn_flags` when this band was carved.
 
-CURRENCY (v6.5.0): the four offsets below are still the live ones,
-but see also the two visibility side tables added at v6.5.0, which
-follow the same lazy-alloc pattern rather than taking fixed bands:
-`_fnt_fileid` (fn-indexed, alloc-at-32768 like the six v6.4.75
-tables) and `_var_fileid` (vcnt-indexed, alloc-at-1048576). Both
-record the ORIGIN FILE of each item so `private` can be enforced
-across a textually-included translation unit; visibility itself is
-fn_flags bit 6 (= 64). Choosing lazy-alloc over new fixed regions is
-deliberate — it keeps the change off the heap map entirely, so no
-layout change and therefore no two-step bootstrap.
+CURRENCY (re-verified at v6.5.10): the four offsets below are still
+the live ones, but see also the two visibility side tables added at
+v6.5.0, which follow the same lazy-alloc pattern rather than taking
+fixed bands: `_fnt_fileid` (fn-indexed, alloc-at-32768 like the six
+v6.4.75 tables) and `_var_fileid` (vcnt-indexed, alloc-at-1048576).
+They are NOT symmetrical, and the asymmetry is the design:
+`_fnt_fileid` stores `FM_FILEID + 1` for EVERY registered fn (0 =
+unrecorded, which is the fail-closed direction — an unrecorded fn
+can never be proven same-file), while `_var_fileid` stores
+`origin_fileid + 1` ONLY for a var that is private and 0 otherwise,
+so one table carries both the private marker and the owning file and
+locals are free — they are never stamped. For fns the private marker
+is separate: `fn_flags` bit 6 (= 64). Choosing lazy-alloc over new
+fixed regions is deliberate — it keeps the change off the heap map
+entirely, so no layout change and therefore no two-step bootstrap.
+⚠ `_var_fileid` must NEVER join the `_grow_g1..g7` chain: adding an
+8th link DESYNCED cybs (gen1 mis-grew the var tables into the
+adjacent enum table and died with "enum table full").
 
-Two framing details from the v6.4.82 stamp still apply:
-but two framing details have moved on. (1) `fn_flags` no longer lives
+Two framing details from the older stamp have MOVED ON.
+(1) `fn_flags` no longer lives
 at 0x1FC000 — that band was freed at v5.11.19 and is now the lex_pp
 `#derive` field-name scratch; fn_flags then sat at 0x17A000 until
 v6.4.75 freed THAT too, in favour of the lazy-alloc `_fnflg_base`
@@ -982,23 +990,35 @@ entry) is for heap records; vectors are flat, register-resident, and
 sized entirely by their descriptor.
 
 [[entries]]
-name = "compiler_structural_facts_v6482"
-description = "Live structural facts at cycc 6.4.82 (the v6.4.x closeout): heap map, growable-table caps, identifier pool, fixup table, IR opcode set, backend modules, and the 7 per-target main forks — the numbers the design entries above are written against"
+name = "compiler_structural_facts_v6510"
+description = "Live structural facts at cycc 6.5.10: heap map, growable-table caps, identifier pool, fixup table, IR opcode set, backend modules, and the 7 per-target main forks — the numbers the design entries above are written against"
 category = "cyrius"
 ---
 The design entries in this file describe MECHANISM. This entry pins the
 NUMBERS, so a reader can tell which caps a pattern was written against.
-Refreshed at the v6.4.x closeout; re-verify against live code before
+Refreshed at v6.5.10; re-verify against live code before
 relying on any of it (`sh tests/heapmap.sh`, `src/main.cyr` heap map,
 `src/common/util.cyr` accessors, `src/common/ir.cyr`).
 
 == TOOLCHAIN ==
 
-  cycc 6.4.82 — x86_64 self-host 1,108,368 B, byte-identical.
-  check.sh    — 150 gates passed / 0 failed.
-  self_compile ~622 ms.
-  Corpus: 251 tests/tcyr/*.tcyr, 99 lib/*.cyr, 83 programs/*.cyr,
-  18 benches/*.bcyr, 6 fuzz/*.fcyr, api-surface 4749 public fns.
+  cycc 6.5.10 — x86_64 self-host 1,141,792 B, byte-identical.
+  seed        — bootstrap/asm 29,024 B → cybs → cycc, byte-identical.
+  check.sh    — 162 gates passed / 0 failed.
+  self_compile 648 / 652 ms. ⚠ Two figures, because the run-to-run
+  spread on this box is WIDER than the release-over-release delta
+  (6.5.7 posted 649 / 670 / 701 ms for the SAME binary). A single
+  self_compile number from this series carries no signal.
+  Corpus: 260 tests/tcyr/*.tcyr, 99 lib/*.cyr, 97 programs/**/*.cyr,
+  18 benches/*.bcyr, 6 fuzz/*.fcyr, api-surface 4817 public fns,
+  41 shell gate scripts in tests/*.sh (31 registered by exact path in
+  programs/checks/main.cyr, the other 10 via named gate fns such as
+  `_heapmap_gate` — ALL 41 are live; several docs have said "10" or
+  "19", a number that was wrong and then kept being incremented).
+  Cross-OS: ecb (macOS-arm64) · ach (Intel-Mac x86-macho) · cass
+  (Windows PE) · pi (aarch64), all SELFHOST_OK + VR-01 LIBTEST_OK on
+  REAL hardware.
+  Backlog: 16 open issues · 2 proposals · 295 archived.
 
 == HEAP MAP: 100 REGIONS, 0 OVERLAPS ==
 
@@ -1015,6 +1035,13 @@ side tables moved to lazy alloc and their offsets became FREED markers)
 → 100 again (at .81, when the auditor's size parser was fixed to see
 unit-suffixed entries it had been silently dropping). Same number by a
 DIFFERENT route — the pre-.75 100 and today's 100 are not the same set.
+
+It has held at 100 across the whole of v6.5.x so far (.0 through .10),
+and NOT by accident: v6.5.0's two visibility side tables deliberately
+lazy-alloc at their table's max cap instead of taking a heap band, so
+they add no map line, no layout change, and therefore no two-step
+bootstrap. That is now the default shape for a new fn- or vcnt-indexed
+table (see the exhaustive_match entry's CURRENCY note).
 
 == GROWABLE TABLE CAPS ==
 

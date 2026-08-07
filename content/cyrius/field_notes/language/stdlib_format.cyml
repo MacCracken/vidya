@@ -1,11 +1,16 @@
 # Cyrius Field Notes — Language Gotchas (stdlib & file format)
-# str/cstr boundary surprises, toml + cyml format quirks, and the sandhi
-# service-layer stdlib dep.
-# Refreshed 2026-07-27 at v6.4.82: `str_data_not_nul_terminated` now
+# str/cstr boundary surprises, toml + cyml format quirks, the sandhi
+# service-layer stdlib dep, and the `dist/<pkg>.deps` sidecar.
+# Refreshed 2026-08-07 at v6.5.10: vendored sandhi re-stamped 1.9.3 → 1.9.9
+# (verified against `lib/sandhi.cyr`'s own header, not against a doc), the
+# `[deps] stdlib` example lost `"json"` and `"toml"` — neither `lib/json.cyr`
+# nor `lib/toml.cyr` exists, both were carved into bayan at v6.1.25 — and the
+# `.deps` sidecar entry was added from v6.5.10.
+# Prior refresh 2026-07-27 at v6.4.82: `str_data_not_nul_terminated` now
 # states the literal → Str coercion RULE (it fires only for a param
 # annotated `: Str`), and the two entries that were missing their
 # `category = "cyrius"` line got it.
-# 5 entries.
+# 6 entries.
 
 [[entries]]
 name = "str_data_not_nul_terminated"
@@ -230,14 +235,14 @@ matches `---` at column 0.
 
 [[entries]]
 name = "sandhi_service_layer_dep"
-description = "sandhi (सन्धि — junction) is the cyrius service-boundary stdlib: HTTP client/server, TLS, service discovery. Ships with the toolchain (vendored at 1.9.3 as of v6.4.82) — declare as `\"sandhi\"` in `[deps] stdlib = [...]`"
+description = "sandhi (सन्धि — junction) is the cyrius service-boundary stdlib: HTTP client/server, TLS, service discovery. Ships with the toolchain (vendored at 1.9.9 as of v6.5.10) — declare as `\"sandhi\"` in `[deps] stdlib = [...]`"
 category = "cyrius"
 ---
 WHAT IT IS:
 
 sandhi composes the thin network primitives in stdlib (`http.cyr`,
-`net.cyr`, `tls.cyr`, `json.cyr`, `ws.cyr`) into the full client +
-server patterns AGNOS consumers actually need. Same architectural
+`net.cyr`, `tls.cyr`, `ws.cyr`, plus `bayan.cyr` for JSON) into the
+full client + server patterns AGNOS consumers actually need. Same architectural
 shape as sakshi (logging primitives → tracing layer) and mabda
 (GPU primitives → render foundation): a curated layer above the
 raw kernel-syscall stdlib.
@@ -272,15 +277,22 @@ it by name in `[deps] stdlib = [...]`:
     [deps]
     stdlib = [
         "syscalls", "string", "alloc", "str", "fmt", "vec",
-        "hashmap", "io", "fs", "tagged", "json", "fnptr", "args",
-        "toml", "regex", "net",
+        "hashmap", "io", "fs", "tagged", "fnptr", "args",
+        "regex", "net",
         "sandhi",
     ]
 
+⚠ There is no `"json"` and no `"toml"` to list — `lib/json.cyr` and
+`lib/toml.cyr` were carved into the **bayan** sibling at v6.1.25 and
+neither file exists any more (verified 2026-08-07). The `json_*` /
+`toml_*` names still work, as thin wrappers over `bayan_*` inside
+`lib/bayan.cyr`; list `"bayan"` (or `include "lib/bayan.cyr"`
+explicitly — bayan is opt-in, not auto-prepended) instead.
+
 `cyrius deps` reads the manifest and copies the listed modules
 from `~/.cyrius/lib/` into the project's `lib/` directory. Stdlib
-modules are versioned by the cyrius toolchain (`cyrius = "5.8.27"`
-in `[package]`), not by per-module pins, so they don't appear in
+modules are versioned by the cyrius toolchain (the `cyrius = "X.Y.Z"`
+pin in `[package]`), not by per-module pins, so they don't appear in
 `cyrius.lock` — only `[deps.<name>]` git stanzas (e.g. sakshi,
 patra) get hashed.
 
@@ -307,6 +319,60 @@ vendored include, swap the `http_*` callers to `sandhi_server_*`
 (the constants `HTTP_OK` / `HTTP_NOT_FOUND` / etc. are re-exposed
 by sandhi for source-compat), and add `"sandhi"` to the stdlib
 list.
+
+[[entries]]
+name = "distlib_deps_sidecar_is_a_machine_check_not_a_readme"
+description = "`dist/<pkg>.deps` is the file `cyrius deps` validates a CONSUMER's `[deps] stdlib` against — so an under-reporting sidecar does not merely mislead a reader, it switches the check OFF and the consumer builds green while under-declaring. Until v6.5.10 it was built only by scanning bundled sources for literal `include \"lib/X.cyr\"` lines, so it captured what a module INCLUDES and never what it REFERENCES through the declaration. Now it is the declared `[deps] stdlib` UNIONED with that scan — base bundle only; profiles keep the pruned inference on purpose."
+category = "cyrius"
+---
+WHAT THE FILE IS. `cyrius distlib` emits `dist/<pkg>.deps` beside the
+bundle: one stdlib leaf per line, `#` for comments. Its header says it
+lists "stdlib leaves this fold requires in scope", and it is read by
+machine — `cyrius deps` validates a consumer's `[deps] stdlib` array
+against the dep's sidecar and hard-errors, naming the missing leaves.
+
+THE DEFECT (filed from setu 0.8.2, fixed v6.5.10). It was built ONLY by
+scanning the bundled module sources for literal `include "lib/X.cyr"`
+lines. So it captured what a module **includes** and never what it
+**references** through the manifest declaration. setu emitted **8**
+leaves against a declared **12**; the four missing — `result`, `net`,
+`chrono`, `args` — are all referenced at top level in `src/client.cyr`
+with no `include` line of their own.
+
+⭐ **THE PART THAT MAKES IT MORE THAN A DOC BUG.** Both directions were
+measured before filing: with a corrected 12-leaf sidecar an
+under-declaring consumer got a hard error naming `chrono` and `args`;
+with the raw 8-leaf one the **same** consumer built `OK`, silently. A
+wrong sidecar disables the machine check that exists to catch exactly
+that mistake. If you ship a fold, its sidecar is load-bearing.
+
+THE RULE NOW: the sidecar is the declared `[deps] stdlib` **unioned**
+with the include-scan, never either alone. The scan can legitimately
+catch a leaf the author forgot to declare, so the union can never
+under-report relative to either source.
+
+⚠ **BASE BUNDLE ONLY.** A `[lib.X]` profile is a narrow subset of
+modules, so its true dep set is a subset of the declaration; unioning
+the whole declaration into a `sha` profile would OVER-report and could
+fail a legitimately-narrow consumer against the very check this
+re-enables. Profiles keep the pruned inference. Do not "fix" that to
+match the base bundle.
+
+⚠ **REGENERATE EVERY PROFILE, NOT JUST THE BUNDLE.** `cyrius distlib`
+used to regenerate exactly one bundle per invocation, which is how
+sankoch 2.7.6's gzip fix nearly shipped with all nine sub-bundles still
+carrying the buggy encoder under a fresh version string. Use
+`cyrius distlib --all`; `--check` compares **bytes**, not version
+strings, which is precisely what let those profiles look fresh.
+(⛔ Before v6.5.8 both flags were swallowed by the arg loop and ran the
+base-bundle-only path exiting 0 — the command the issue told people to
+reach for already "succeeded" while doing the wrong thing.)
+
+THREE HYPOTHESES ALREADY FALSIFIED, recorded so nobody re-investigates:
+it is NOT the declaration (deleting `assert` from `[deps] stdlib` left
+it in the sidecar), NOT an inline-comment parse bug (adding a comment to
+`vec` left it present), and NOT a direct-symbol scan. It was simply a
+different, smaller thing than its own header claimed.
 
 # NOTE: the "adding public stdlib fns trips lint + api-surface + cyrdoc"
 # process rule lives as a single canonical entry in

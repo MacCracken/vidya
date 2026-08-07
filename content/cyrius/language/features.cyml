@@ -43,7 +43,16 @@
 # the v6.4.77 naming diagnostic), diagnostics_column_caret_multierror
 # (v6.4.60 column/caret, v6.4.62 multi-error + no-output-on-error +
 # anti-hang, v6.4.78 EOF clamp).
-# 64 entries.
+# v6.5.10 (2026-08-07) doc-currency sweep for .6-.10:
+#   * arena_lifecycle_v51114 rewritten — the v6.5.9 growable arena +
+#     ARENA_FULL_* exhaustion policy (one policy field, not three
+#     features). The old entry described a FIXED arena whose only
+#     exhaustion behaviour was a 0 return, which is now the default
+#     rather than the whole story.
+#   * +1 entry threads_detached_and_is_done_v658 — thread_create_detached
+#     / thread_is_done, and why sys_exit_group (v6.5.6) is the correct
+#     epilogue once any thread exists.
+# 66 entries.
 
 [[entries]]
 name = "byte_array_literal"
@@ -1971,11 +1980,11 @@ lib/async.cyr.
 
 [[entries]]
 name = "arena_lifecycle_v51114"
-description = "arena_free(a) lifecycle terminator + per-frame reuse pattern docs in lib/alloc.cyr"
+description = "Arena lifecycle in lib/alloc.cyr — arena_new/alloc/reset/free (v5.11.14) + the v6.5.9 growable arena and ARENA_FULL_* exhaustion policy"
 category = "cyrius"
 ---
 SYNTAX:
-    var a = arena_new(SIZE);      # allocate arena
+    var a = arena_new(SIZE);      # fixed-capacity arena
     var p = arena_alloc(a, n);    # bump-pointer alloc
     arena_reset(a);               # rewind to start (per-frame reuse)
     arena_free(a);                # FINAL release (v5.11.14)
@@ -1996,11 +2005,68 @@ LOAD-BEARING USE CASE (bote per-frame reuse):
     }
     arena_free(a);
 
-PREMISE-CHECK NOTE: bote's filing was titled "fl_free" — premise
-check showed `arena_reset` (the load-bearing per-frame reuse
-primitive) already shipped at v5.5.x; the actual missing surface
-was the terminal `arena_free`. v5.11.14 added the terminator +
-refreshed docstring with the bote pattern shape.
+== EXHAUSTION IS A POLICY, NOT A RETURN VALUE (v6.5.9) ==
+
+What an exhausted arena DOES was the gap, not what it returns.
+`arena_alloc` returning 0 was always correct; the problem is that
+a `Str` of 0 is indistinguishable from a valid `Str`, there is no
+option type and no error channel through the `_a` families, so
+the 0 flows on and the first thing that touches it dereferences
+it. "Arena too small" was observable as a SIGSEGV several layers
+away, in a JSON walker, with no indication which allocator ran out.
+
+⭐ THE REGRESSION DIRECTION IS THE POINT. Before threading a route
+onto an arena, an oversized response was a LEAK on the no-free
+global bump. After threading — a change whose whole purpose is to
+stop leaking — the same response is a CRASH. Adopting the feature
+correctly made the failure worse and quieter.
+
+Four behaviours, one field on the arena header:
+
+    ARENA_FULL_NULL  = 0   return 0 — TODAY'S BEHAVIOUR, still the
+                           DEFAULT, so no existing arena moves
+    ARENA_FULL_GROW  = 1   chain another chunk
+    ARENA_FULL_SPILL = 2   serve overflow from the global allocator
+                           (weaker — spilled bytes are never
+                           reclaimed by reset — but the crash
+                           becomes the pre-arena cost)
+    ARENA_FULL_ABORT = 3   die loudly AT the allocation instead of
+                           faulting three layers away
+
+    var a = arena_new_growable(64 * 1024);   # = new + policy GROW
+    arena_set_on_full(a, ARENA_FULL_ABORT);  # or set it explicitly
+    var pol = arena_on_full(a);              # read it back (-1 if a == 0)
+    var cap = arena_capacity_total(a);       # whole chain, which
+                                             # arena_used cannot show
+                                             # once it has grown
+
+Allocator-vtable form: `arena_allocator_growable(initial)` and
+`arena_allocator_set_on_full(al, policy)` (the vtable's state
+pointer IS the arena handle, so the setter reaches through).
+
+⚠ GROW RETAINS ITS CHUNKS ACROSS `arena_reset`. The bump allocator
+underneath has no free(), so releasing them is not expressible —
+and it is not what an arena wants anyway. Reset rewinds to the
+FIRST chunk and re-uses the chain, so a request loop converges on
+its high-water mark and then allocates nothing.
+
+⚠ `arena_free` previously cleared only base/ptr/end, leaving the
+policy set — so a "freed" growable arena took the grow path and
+SUCCEEDED. It now resets the policy to `ARENA_FULL_NULL`, which is
+what makes "further allocs fail" true again.
+
+Header layout is `{ base, ptr, end, policy, first_chunk, cur_chunk,
+chunk_size }` = 56 bytes; base/end mirror the CURRENT chunk so the
+hot path stays two loads.
+
+PREMISE-CHECK NOTE: bote's original filing was titled "fl_free" —
+premise check showed `arena_reset` (the load-bearing per-frame
+reuse primitive) already shipped at v5.5.x; the actual missing
+surface was the terminal `arena_free`. v5.11.14 added the
+terminator. The v6.5.9 filing (from agnosai) likewise asked for
+THREE things — a growable arena, a spilling arena, and an
+exhaustion policy — which collapse into the one policy field
+above, which is why all three shipped together.
 
 [[entries]]
 name = "sock_set_recv_timeout_v51113"
@@ -3109,3 +3175,76 @@ private for both reasons.
 RESERVED WORDS: `public`, `pub` and `private` cannot be used as identifiers.
 They are part of the `TOKNAME_BUILTIN` reserved CLASS (see the reserved-word
 entry) — do not treat this as a three-name list.
+
+[[entries]]
+name = "threads_detached_and_is_done_v658"
+description = "lib/thread.cyr — thread_create_detached / thread_is_done (v6.5.8), and why sys_exit_group (v6.5.6) is the epilogue once any thread exists"
+category = "cyrius"
+---
+== THE EPILOGUE COMES FIRST (v6.5.6) ==
+
+`sys_exit` is exit(2) — it ends the CALLING THREAD, not the process. A
+program that has spawned any worker and exits through the idiomatic
+`syscall(SYS_EXIT, r)` does not terminate: the main thread dies, the
+workers keep running, and the process hangs with no diagnostic. Measured,
+one token apart:
+
+    syscall(SYS_EXIT, r);      # exit 124 (hung)
+    sys_exit_group(r);         # exit 42
+
+`sys_exit_group` is defined on all three syscall peer families (Linux
+common routes SYS_EXIT_GROUP; Windows routes SYS_EXIT because
+ExitProcess already ends every thread; agnos routes SYS_EXIT because `#0`
+tears down the whole proc). `cyrius init` shipped the old epilogue in
+seven templates — it only bites once a program grows its FIRST thread,
+long after the epilogue was written, which is why nothing flagged it.
+
+== FIRE-AND-FORGET WORKERS (v6.5.8) ==
+
+    var ok = thread_create_detached(&worker, arg);   # 1 = spawned, 0 = failed
+
+No handle is allocated at all: CLONE_PARENT_SETTID /
+CLONE_CHILD_CLEARTID exist so a joiner can wait on the tid word, and
+nobody waits here, so both flags come off. The child unmaps its own
+stack in the trampoline tail (musl's `__unmapself` shape), and the TLS
+block is carved from the TOP of that same mapping so ONE munmap frees
+stack and TLS together.
+
+Measured: 100 unjoined threads leaked **210,124,800 B** of VA — exactly
+100 × 2,101,248 — now **0**. Freeing only the 2 MiB and leaving the 4 KB
+TLS behind would have been the same half-fix shape that cost v6.5.7 seven
+found-by-ports defects.
+
+== NON-BLOCKING COMPLETION PROBE (v6.5.8) ==
+
+    var t = thread_create(&worker, arg);
+    while (thread_is_done(t) == 0) { ... keep serving ... }
+    thread_join(t);
+
+`thread_is_done(t)` returns 1 = done, 0 = still running, -1 on a null
+handle. It reads the same CLONE_CHILD_CLEARTID slot `thread_join`'s loop
+already tests, so it adds no state. It exists because `thread_join`
+blocks unconditionally, which made a reaper — "collect whichever workers
+have finished, keep serving the rest" — impossible to write without a
+detached thread plus a side channel.
+
+⛔ VALID ONLY BEFORE `thread_join`. Join CONSUMES the handle — on Windows
+it CloseHandle()s it — so a post-join query inspects a closed handle and
+reports "not done". Caught on real cass hardware by a test that asserted
+the wrong contract. A detached thread has no handle by design, so it
+cannot be probed this way.
+
+== THE JOIN DEADLOCK THAT PROMPTED ALL OF THIS ==
+
+`thread_join` used to read the tid word TWICE per iteration — once for
+the loop condition, once as the `FUTEX_WAIT` expected value — under a
+comment asserting the two were "in lockstep". They are the opposite: a
+worker exiting between the loads let the kernel's one-shot
+`CLONE_CHILD_CLEARTID` wake fire with nobody parked, after which the
+second load returned 0 and `FUTEX_WAIT(t, 0)` parked on an address that
+would never be woken again. Permanent, silent, log-less; ~1 join in 150k;
+SIGKILL the only recovery. Fixed v6.5.8 — one load now feeds both uses,
+so the joiner can only park on a tid it positively observed live.
+
+Gates: `tests/thread_join_single_load.sh`, plus the `vr01_` corpus on
+real hardware.
