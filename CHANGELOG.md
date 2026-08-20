@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `tests/vidya.bcyr` no longer inlines its own copies of `to_cstr` and
+  `cstr_contains`; it includes `src/vidya_core.cyr` like the test suite.
 - **Search no longer allocates per field.** `str_has` copied every field into
   a fresh null-terminated buffer via `to_cstr` before scanning; `str_has_ci`
   folds the query once per search and scans the field's bytes in place. On the
@@ -53,6 +55,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `search_tags` groups covering both regressions, the ASCII-only fold boundary
   (`@`/`[`/digits/UTF-8 lead bytes untouched), and the leading-byte fast path's
   false-start cases.
+
+- **`/info/{topic}` reported `1` for every section count.** The HTTP
+  builder emitted `str_builder_add_int(sb, bps != 0 && vec_len(bps))`
+  for `best_practices`, `gotchas` and `performance_notes`. Cyrius `&&`
+  is a logical operator yielding `0`/`1`, so the null-vec guard silently
+  became the value and every topic reported `1`. `/info/strings` said
+  `"best_practices":1,"gotchas":1,"performance_notes":1` where the
+  concept actually holds 5 / 4 / 4. The CLI path was never affected — it
+  uses the same `&&` as a *guard* (`bps != 0 && vec_len(bps) > 0`), never
+  as the value. Counts now go through a `vec_count()` helper that branches
+  explicitly. **This was consumer-visible**: agnoshi and hoosh read these
+  three fields.
+- **`/search?q=` allowed JSON structure injection.** The query was spliced
+  into the response body with `str_builder_add_cstr` and no escaping, and
+  sandhi percent-decodes params before the builder sees them
+  (`sandhi_server_get_param_a` → `sandhi_server_url_decode_a`), so `%22`,
+  `%5C` and `%0A` arrived as raw bytes. `?q=a%22b` produced unparseable
+  output; a crafted query produced a *parseable* document carrying
+  attacker-chosen keys alongside a duplicated `count`/`results` pair.
+  Every user- and content-derived string in every `json_*_response` now
+  goes through `sandhi_json_escape` (already vendored, and already used
+  correctly for `source` in `json_code_response` — it was simply unapplied
+  everywhere else). Concept ids, titles, descriptions, tags and example
+  paths were spliced unescaped too; latent only because no concept in
+  `content/` currently contains a quote or a backslash.
+
+### Added
+
+- **`src/vidya_core.cyr`** — the domain + JSON layer split out of
+  `src/main.cyr` (types, registry, TOML loader, hot-reload, search,
+  compare, code, validate, and the `json_*_response` builders). Included
+  by `main.cyr`, `tests/vidya.tcyr` and `tests/vidya.bcyr`, so tests and
+  benchmarks now run the same code the binary serves. This is the trigger
+  named in decision 4 of [`docs/architecture/overview.md`](docs/architecture/overview.md)
+  finally firing: `tcyr` cannot bind a port and could not reach into a
+  file whose only entry point is `main()`.
+- **55 new tests (41 → 96), all against the real builders.** Golden bodies
+  for `/info`, `/stats`, `/list`, `/compare`, `/gaps` and `/search` against
+  a fixture concept whose section counts are 3 / 2 / 4 — distinct from each
+  other and none equal to `1`, so a boolean collapse fails loudly. Plus:
+  escaping unit tests (quote, backslash, newline, tab, `\u0001` control
+  byte, null and length-borrowed `Str`), injection round-trip tests
+  asserting a hostile query comes back verbatim as a *value* with no
+  attacker key at structure level, a content-derived hostile fixture
+  (bare `"` and `\` reaching the builder from TOML), and a corpus sweep
+  that checks all 77 `/info` bodies are structurally sound and report
+  counts equal to the registry's real vector lengths.
+- **Test fixtures under `tests/fixtures/`** (`json_golden`, `json_hostile`).
+  Outside `content/` on purpose — `load_all` and the content gate never
+  see them.
+- **5 new benchmarks (6 → 11)** over the real builders:
+  `json_info_response` 10.0µs, `json_search_response` 300.0µs (dominated by
+  the 77-concept scan, not by escaping), `json_list_response` 120.1µs. The
+  escaping cost is isolated by a paired micro-benchmark on one real
+  130-byte description: `field_escaped` 3.59µs vs `field_raw_splice` 620ns,
+  i.e. **+3.0µs per escaped field** — the price of the injection fix. In
+  context: a whole `/info` body costs 10µs against an ~84µs request. The
+  six pre-existing benchmarks are unchanged and within noise
+  (`load_all` 6.03ms → 5.97ms, `reg_get_hit` 31ns → 32ns).
 
 ## [2.8.1] — 2026-08-20
 

@@ -1,8 +1,17 @@
 # vidya.tcyr — vidya library tests
-# Tests: loader, registry, search, compare, language enum
+# Tests: loader, registry, search, compare, language enum, JSON builders
 #
 # Run: cyrius test tests/vidya.tcyr
 #   or: cyrius build tests/vidya.tcyr /tmp/vidya_test && /tmp/vidya_test
+#
+# 2.8.1: this file used to re-implement lang_stem/lang_extension/lang_parse
+# locally and exercised ZERO functions from src/main.cyr — which is exactly
+# how two shipped bugs in the HTTP surface survived to release (/info
+# reporting boolean 1 instead of real counts, and /search splicing the raw
+# query into the response body). The testable half of main.cyr now lives in
+# src/vidya_core.cyr and is included here, so the assertions below run the
+# same code the binary serves. DCE strips whatever this file's main() never
+# reaches.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -15,98 +24,143 @@ include "lib/hashmap.cyr"
 include "lib/bayan.cyr"   # cyrius 6.1.x: json + toml + base64 bundled here
 include "lib/regex.cyr"
 include "lib/syscalls.cyr"
+include "lib/tagged.cyr"
+include "lib/net.cyr"
+include "lib/fnptr.cyr"
+include "lib/sandhi.cyr"
+include "lib/vyakarana.cyr"
+include "lib/sakshi.cyr"
 include "lib/assert.cyr"
 
-# Pull in vidya types + functions from main (we re-include the core parts)
-# For now, inline the helpers we need since main.cyr is a full CLI binary.
+include "src/vidya_core.cyr"
 
 # ================================================================
-# Language helpers (subset from main.cyr)
+# Test helpers
 # ================================================================
 
-fn lang_stem(lang) {
-    if (lang == 0) { return "rust"; }
-    if (lang == 1) { return "python"; }
-    if (lang == 2) { return "c"; }
-    if (lang == 3) { return "go"; }
-    if (lang == 4) { return "typescript"; }
-    if (lang == 5) { return "shell"; }
-    if (lang == 6) { return "zig"; }
-    if (lang == 7) { return "asm_x86_64"; }
-    if (lang == 8) { return "asm_aarch64"; }
-    if (lang == 9) { return "openqasm"; }
-    if (lang == 10) { return "cyrius"; }
-    return "";
-}
-
-fn lang_extension(lang) {
-    if (lang == 0) { return "rs"; }
-    if (lang == 1) { return "py"; }
-    if (lang == 2) { return "c"; }
-    if (lang == 3) { return "go"; }
-    if (lang == 4) { return "ts"; }
-    if (lang == 5) { return "sh"; }
-    if (lang == 6) { return "zig"; }
-    if (lang == 7) { return "s"; }
-    if (lang == 8) { return "s"; }
-    if (lang == 9) { return "qasm"; }
-    if (lang == 10) { return "cyr"; }
-    return "";
-}
-
-fn lang_parse(s) {
-    if (streq(s, "rust") == 1 || streq(s, "rs") == 1) { return 0; }
-    if (streq(s, "python") == 1 || streq(s, "py") == 1) { return 1; }
-    if (streq(s, "c") == 1) { return 2; }
-    if (streq(s, "go") == 1) { return 3; }
-    if (streq(s, "cyrius") == 1 || streq(s, "cyr") == 1) { return 10; }
-    return 0 - 1;
-}
-
-# ================================================================
-# Search helpers (subset from main.cyr — kept byte-identical)
-# ================================================================
-
-fn ascii_fold(b) {
-    if (b >= 65 && b <= 90) { return b + 32; }
-    return b;
-}
-
-fn cstr_lower(c) {
-    if (c == 0) { return ""; }
-    var len = strlen(c);
-    var buf = alloc(len + 1);
-    var i = 0;
-    while (i < len) {
-        store8(buf + i, ascii_fold(load8(c + i)));
-        i = i + 1;
-    }
-    store8(buf + len, 0);
-    return buf;
-}
-
-fn str_has_ci(s, folded) {
+# Structure-level JSON check: every string terminated, brackets
+# balanced, no raw control byte inside a string. NOT a full parser —
+# it cannot tell a legitimate document from an injected-but-balanced
+# one, which is why the escaping tests below also assert exact bytes
+# and round-trips. What it does buy is a cheap net that can be swept
+# across the whole corpus.
+fn json_wellformed(s) {
     if (s == 0) { return 0; }
-    var hd = str_data(s);
-    var hlen = str_len(s);
-    var nlen = strlen(folded);
-    if (nlen == 0) { return 1; }
-    if (nlen > hlen) { return 0; }
-    var f0 = load8(folded);
-    var last = hlen - nlen;
+    var depth = 0;
+    var in_str = 0;
+    var esc = 0;
     var i = 0;
-    while (i <= last) {
-        if (ascii_fold(load8(hd + i)) == f0) {
-            var j = 1;
-            while (j < nlen && ascii_fold(load8(hd + i + j)) == load8(folded + j)) {
-                j = j + 1;
+    var ok = 1;
+    while (load8(s + i) != 0 && ok == 1) {
+        var c = load8(s + i);
+        if (in_str == 1) {
+            if (esc == 1) { esc = 0; }
+            elif (c == 92) { esc = 1; }
+            elif (c == 34) { in_str = 0; }
+            elif (c < 32) { ok = 0; }
+        } else {
+            if (c == 34) { in_str = 1; }
+            elif (c == 123 || c == 91) { depth = depth + 1; }
+            elif (c == 125 || c == 93) {
+                depth = depth - 1;
+                if (depth < 0) { ok = 0; }
             }
-            if (j == nlen) { return 1; }
         }
         i = i + 1;
     }
+    if (in_str == 1) { ok = 0; }
+    if (depth != 0) { ok = 0; }
+    return ok;
+}
+
+# Index of needle in haystack, or -1. (cstr_contains in vidya_core
+# answers yes/no; the decoder below needs the position.)
+fn cstr_find(h, n) {
+    var hl = strlen(h);
+    var nl = strlen(n);
+    var i = 0;
+    var at = 0 - 1;
+    while (i + nl <= hl && at < 0) {
+        if (memeq(h + i, n, nl) == 1) { at = i; }
+        i = i + 1;
+    }
+    return at;
+}
+
+fn hexval(c) {
+    if (c >= 48 && c <= 57) { return c - 48; }
+    if (c >= 97 && c <= 102) { return c - 87; }
+    if (c >= 65 && c <= 70) { return c - 55; }
     return 0;
 }
+
+# Decode the JSON string value that follows "<key>": in `json`, undoing
+# the escapes sandhi_json_escape emits (\" \\ \b \t \n \f \r \u00XX).
+# Returns 0 if the key is absent. This is the consumer's-eye view: what
+# agnoshi or hoosh would actually read back out of the field.
+fn json_value_of(json, key) {
+    var kb = str_builder_new();
+    str_builder_add_cstr(kb, "\"");
+    str_builder_add_cstr(kb, key);
+    str_builder_add_cstr(kb, "\":\"");
+    var needle = str_data(str_builder_build(kb));
+    var at = cstr_find(json, needle);
+    if (at < 0) { return 0; }
+
+    var i = at + strlen(needle);
+    var out = str_builder_new();
+    var done = 0;
+    while (done == 0) {
+        var c = load8(json + i);
+        if (c == 0) { done = 1; }
+        elif (c == 34) { done = 1; }
+        elif (c == 92) {
+            var e = load8(json + i + 1);
+            if (e == 110) { str_builder_add_byte(out, 10); i = i + 2; }
+            elif (e == 116) { str_builder_add_byte(out, 9); i = i + 2; }
+            elif (e == 114) { str_builder_add_byte(out, 13); i = i + 2; }
+            elif (e == 98) { str_builder_add_byte(out, 8); i = i + 2; }
+            elif (e == 102) { str_builder_add_byte(out, 12); i = i + 2; }
+            elif (e == 117) {
+                # \u00XX — vidya only ever emits control bytes this way,
+                # so the two low hex digits carry the whole value.
+                var hi = hexval(load8(json + i + 4));
+                var lo = hexval(load8(json + i + 5));
+                str_builder_add_byte(out, hi * 16 + lo);
+                i = i + 6;
+            }
+            else { str_builder_add_byte(out, e); i = i + 2; }
+        }
+        else { str_builder_add_byte(out, c); i = i + 1; }
+    }
+    return str_data(str_builder_build(out));
+}
+
+# Finish a str_builder and hand back its bytes. Goldens below are
+# assembled across several calls: cyrius string literals cannot wrap,
+# and a one-line golden blows the 120-column lint budget.
+fn built(sb) {
+    return str_data(str_builder_build(sb));
+}
+
+# Escape a cstr the way the JSON builders do, and hand back the bytes.
+fn escaped_cstr(c) {
+    var sb = str_builder_new();
+    json_add_cstr(sb, c);
+    return str_data(str_builder_build(sb));
+}
+
+fn escaped_str(s) {
+    var sb = str_builder_new();
+    json_add_str(sb, s);
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+# Search helpers now come from src/vidya_core.cyr (included above).
+# They were inlined copies here until the extraction landed; the
+# suite asserts on the same code the binary runs.
+# ================================================================
 
 # Tag-array parser (subset from main.cyr load path) — ["a", "b"] -> vec of Str.
 # NB: each Str points into the raw TOML buffer and is NOT null-terminated;
@@ -150,17 +204,19 @@ fn tags_have_ci(tags, query) {
 fn main() {
     alloc_init();
 
-    # --- Language enum ---
+    # --- Language enum (now the real functions from vidya_core) ---
     test_group("language");
     assert(streq(lang_stem(0), "rust") == 1, "rust stem");
     assert(streq(lang_extension(0), "rs") == 1, "rust ext");
     assert(streq(lang_stem(10), "cyrius") == 1, "cyrius stem");
     assert(streq(lang_extension(10), "cyr") == 1, "cyrius ext");
+    assert(streq(lang_name(7), "x86_64 Assembly") == 1, "x86_64 display name");
     assert_eq(lang_parse("rust"), 0, "parse rust");
     assert_eq(lang_parse("rs"), 0, "parse rs");
     assert_eq(lang_parse("cyrius"), 10, "parse cyrius");
     assert_eq(lang_parse("cyr"), 10, "parse cyr");
     assert_eq(lang_parse("unknown"), 0 - 1, "parse unknown");
+    assert(str_eq_cstr(lang_filename(1), "python.py") == 1, "python filename");
 
     # --- TOML loading ---
     test_group("toml_loader");
@@ -314,6 +370,199 @@ fn main() {
     assert(streq("/gaps", "/gaps") == 1, "/gaps exact match");
     assert(memeq("/info/algorithms", "/info/", 6) == 1, "/info/ prefix");
     assert(memeq("/search?q=x", "/search", 7) == 1, "/search prefix");
+
+    # --- vec_count: the root cause of the /info count bug ---
+    test_group("vec_count");
+    assert_eq(vec_count(0), 0, "null vec counts 0");
+    var v5 = vec_new();
+    vec_push(v5, 10);
+    vec_push(v5, 20);
+    vec_push(v5, 30);
+    vec_push(v5, 40);
+    vec_push(v5, 50);
+    assert_eq(vec_count(v5), 5, "vec_count returns the real length");
+    # Executable field-note. This is the expression that shipped in
+    # json_info_response: cyrius `&&` is a logical operator yielding
+    # 0/1, so it can guard a count but never carry one.
+    assert_eq((v5 != 0 && vec_len(v5)), 1, "cyrius && collapses a count to a boolean");
+
+    # --- JSON escaping primitives ---
+    test_group("json_escape");
+    assert_streq(escaped_cstr("plain"), "\"plain\"", "plain string is quoted");
+    assert_streq(escaped_cstr(""), "\"\"", "empty string");
+    assert_streq(escaped_cstr(0), "\"\"", "null cstr renders as empty string");
+    assert_streq(escaped_cstr("a\"b"), "\"a\\\"b\"", "double quote escaped");
+    assert_streq(escaped_cstr("a\\b"), "\"a\\\\b\"", "backslash escaped");
+    assert_streq(escaped_cstr("a\nb"), "\"a\\nb\"", "newline escaped");
+    assert_streq(escaped_str(0), "\"\"", "null Str renders as empty string");
+    assert_streq(escaped_str(str_from("a\"b")), "\"a\\\"b\"", "Str quote escaped");
+    # A Str is a borrowed (data, len) pair with no NUL — the escaper has
+    # to go through to_cstr or it walks off the end of the file buffer.
+    var borrowed = str_new(str_data(str_from("abcdef")), 3);
+    assert_streq(escaped_str(borrowed), "\"abc\"", "un-terminated Str stops at its length");
+    # Raw control bytes must not reach the wire unescaped.
+    var ctl = str_builder_new();
+    str_builder_add_cstr(ctl, "a");
+    str_builder_add_byte(ctl, 1);
+    str_builder_add_cstr(ctl, "b");
+    assert_streq(escaped_cstr(str_data(str_builder_build(ctl))), "\"a\\u0001b\"", "control byte escaped");
+    var tabbed = str_builder_new();
+    str_builder_add_cstr(tabbed, "a");
+    str_builder_add_byte(tabbed, 9);
+    str_builder_add_cstr(tabbed, "b");
+    assert_streq(escaped_cstr(str_data(str_builder_build(tabbed))), "\"a\\tb\"", "tab escaped");
+
+    # --- Golden bodies for every JSON builder ---
+    # Registry holds exactly one concept here (the fixture), so /stats,
+    # /list and /gaps are deterministic. The hostile fixture is added
+    # afterwards on purpose — adding it earlier would move these goldens.
+    test_group("json_golden");
+    reg_init();
+    var gold = load_concept(str_from("tests/fixtures/json_golden"));
+    assert(gold != 0, "golden fixture loads");
+    reg_add(gold);
+    assert_eq(reg_count(), 1, "registry holds only the fixture");
+
+    var g_info = json_info_response("json_golden");
+    assert(g_info != 0, "info body built");
+    var want_info = str_builder_new();
+    str_builder_add_cstr(want_info, "{\"id\":\"json_golden\",\"title\":\"JSON Golden\",");
+    str_builder_add_cstr(want_info, "\"topic\":\"Testing\",");
+    str_builder_add_cstr(want_info, "\"description\":\"Fixture concept for the JSON response builders.\",");
+    str_builder_add_cstr(want_info, "\"tags\":[\"golden\",\"json\"],\"languages\":[\"Python\"],");
+    str_builder_add_cstr(want_info, "\"best_practices\":3,\"gotchas\":2,\"performance_notes\":4}");
+    assert_streq(str_data(g_info), built(want_info),
+      "/info golden — counts are 3/2/4, not 1/1/1");
+
+    var g_stats = json_stats_response();
+    assert_streq(str_data(g_stats),
+      "{\"topics\":1,\"complete\":0,\"examples\":1,\"languages\":11}",
+      "/stats golden");
+
+    var g_list = json_list_response();
+    assert_streq(str_data(g_list),
+      "[{\"id\":\"json_golden\",\"topic\":\"Testing\",\"languages\":1}]",
+      "/list golden");
+
+    var g_cmp = json_compare_response("json_golden", "python", "rust");
+    var want_cmp = str_builder_new();
+    str_builder_add_cstr(want_cmp, "{\"topic\":\"json_golden\",\"title\":\"JSON Golden\",");
+    str_builder_add_cstr(want_cmp, "\"left\":{\"language\":\"Python\",\"present\":true,");
+    str_builder_add_cstr(want_cmp, "\"path\":\"json_golden/python.py\"},");
+    str_builder_add_cstr(want_cmp, "\"right\":{\"language\":\"Rust\",\"present\":false}}");
+    assert_streq(str_data(g_cmp), built(want_cmp), "/compare golden");
+    assert_eq(json_compare_response("json_golden", "python", "klingon"), 0 - 1, "/compare unknown language sentinel");
+    assert_eq(json_compare_response("no_such_topic", "python", "rust"), 0, "/compare unknown topic sentinel");
+
+    var g_gaps = json_gaps_response();
+    var want_gaps = str_builder_new();
+    str_builder_add_cstr(want_gaps, "{\"topics\":1,\"languages\":11,\"gaps\":[");
+    str_builder_add_cstr(want_gaps, "{\"id\":\"json_golden\",\"covered\":1,\"of\":11,\"missing\":[");
+    str_builder_add_cstr(want_gaps, "\"Rust\",\"C\",\"Go\",\"TypeScript\",\"Shell\",\"Zig\",");
+    str_builder_add_cstr(want_gaps, "\"x86_64 Assembly\",\"AArch64 Assembly\",\"OpenQASM\",\"Cyrius\"");
+    str_builder_add_cstr(want_gaps, "]}],\"total_missing\":10}");
+    assert_streq(str_data(g_gaps), built(want_gaps), "/gaps golden");
+
+    var g_langs = json_languages_response();
+    assert(json_wellformed(str_data(g_langs)) == 1, "/languages well-formed");
+    assert(cstr_contains(str_data(g_langs), "{\"name\":\"Cyrius\",\"extension\":\"cyr\"}") == 1,
+      "/languages lists cyrius");
+
+    var g_code = json_code_response("json_golden", "python");
+    assert(g_code != 0, "code body built");
+    assert(json_wellformed(str_data(g_code)) == 1, "/code well-formed with quotes in the source");
+    assert(cstr_contains(str_data(g_code), "\"path\":\"json_golden/python.py\"") == 1,
+      "/code reports the example path");
+    # The fixture source contains `print("json golden fixture")` — the
+    # quotes must arrive escaped, never raw.
+    assert(cstr_contains(str_data(g_code), "print(\\\"json golden fixture\\\")") == 1,
+      "/code escapes quotes in source");
+
+    # --- Query-string injection (/search) ---
+    test_group("json_search_injection");
+    var s_plain = json_search_response("json");
+    var want_search = str_builder_new();
+    str_builder_add_cstr(want_search, "{\"query\":\"json\",\"count\":1,\"results\":[");
+    str_builder_add_cstr(want_search, "{\"id\":\"json_golden\",");
+    str_builder_add_cstr(want_search, "\"description\":\"Fixture concept for the JSON response builders.\"}]}");
+    assert_streq(str_data(s_plain), built(want_search), "/search golden");
+
+    var s_quote = json_search_response("a\"b");
+    assert_streq(str_data(s_quote),
+      "{\"query\":\"a\\\"b\",\"count\":0,\"results\":[]}",
+      "/search escapes a bare quote in the query");
+
+    # sandhi percent-decodes params before the builder sees them, so this
+    # is exactly what arrives from ?q=x%22%2C%22count%22%3A42...
+    var inj = "x\",\"count\":42,\"injected\":\"yes";
+    var s_inj = json_search_response(inj);
+    assert(json_wellformed(str_data(s_inj)) == 1, "injected query keeps the body well-formed");
+    assert_streq(json_value_of(str_data(s_inj), "query"), inj, "injected query round-trips verbatim as a value");
+    assert(cstr_contains(str_data(s_inj), "\"injected\":\"yes\"") == 0,
+      "no attacker-controlled key at structure level");
+    assert(cstr_contains(str_data(s_inj), "\"count\":0") == 1, "real count survives the injection attempt");
+
+    var s_nl = json_search_response("nl\nhere");
+    assert(json_wellformed(str_data(s_nl)) == 1, "newline in query stays escaped");
+    assert_streq(json_value_of(str_data(s_nl), "query"), "nl\nhere", "newline round-trips");
+
+    # --- Content-derived hostile bytes ---
+    test_group("json_hostile_content");
+    var hostile = load_concept(str_from("tests/fixtures/json_hostile"));
+    assert(hostile != 0, "hostile fixture loads");
+    # bayan's TOML reader does not expand escapes in ''' literals, so the
+    # description really is `q:" b:\ end` on the way in.
+    assert(str_eq_cstr(concept_desc(hostile), "q:\" b:\\ end") == 1, "hostile description arrives raw");
+    reg_add(hostile);
+
+    var h_info = json_info_response("json_hostile");
+    assert(h_info != 0, "hostile info body built");
+    assert(json_wellformed(str_data(h_info)) == 1, "hostile /info stays well-formed");
+    assert_streq(json_value_of(str_data(h_info), "description"), "q:\" b:\\ end", "hostile description round-trips");
+    assert_streq(json_value_of(str_data(h_info), "title"), "hostile \"title\"", "hostile title round-trips");
+    assert(cstr_contains(str_data(h_info), "\"back\\\\slash\"") == 1, "hostile tag escapes its backslash");
+    assert(json_wellformed(str_data(json_list_response())) == 1, "hostile /list stays well-formed");
+
+    # --- Corpus sweep: every real topic, every /info body ---
+    test_group("json_corpus_sweep");
+    reg_init();
+    var loaded = load_all();
+    assert(loaded >= 35, "corpus loaded");
+    var entries = reg_list();
+    var bad_shape = 0;
+    var bad_counts = 0;
+    var multi = 0;
+    var ci = 0;
+    while (ci < vec_len(entries)) {
+        var c = vec_get(entries, ci);
+        var nbp = vec_count(concept_best_practices(c));
+        if (nbp > 1) { multi = multi + 1; }
+        var body = json_info_response(to_cstr(concept_id(c)));
+        if (body == 0) {
+            bad_shape = bad_shape + 1;
+        } else {
+            if (json_wellformed(str_data(body)) == 0) { bad_shape = bad_shape + 1; }
+            # The counts in the body must equal the registry's real
+            # vector lengths — drift-proof, unlike a hard-coded number.
+            var want = str_builder_new();
+            str_builder_add_cstr(want, "\"best_practices\":");
+            str_builder_add_int(want, nbp);
+            str_builder_add_cstr(want, ",\"gotchas\":");
+            str_builder_add_int(want, vec_count(concept_gotchas(c)));
+            str_builder_add_cstr(want, ",\"performance_notes\":");
+            str_builder_add_int(want, vec_count(concept_perf_notes(c)));
+            if (cstr_contains(str_data(body), str_data(str_builder_build(want))) == 0) {
+                bad_counts = bad_counts + 1;
+            }
+        }
+        ci = ci + 1;
+    }
+    assert_eq(bad_shape, 0, "every /info body is structurally sound");
+    assert_eq(bad_counts, 0, "every /info body reports real section counts");
+    assert(multi > 1, "corpus has multi-item topics (else the count check is vacuous)");
+    assert(json_wellformed(str_data(json_stats_response())) == 1, "corpus /stats well-formed");
+    assert(json_wellformed(str_data(json_list_response())) == 1, "corpus /list well-formed");
+    assert(json_wellformed(str_data(json_gaps_response())) == 1, "corpus /gaps well-formed");
 
     return assert_summary();
 }

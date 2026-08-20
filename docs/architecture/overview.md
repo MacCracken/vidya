@@ -43,9 +43,13 @@ See [content-format.md](../development/content-format.md) for the spec.
 
 ```
 src/
-└── main.cyr           # Entry point — registry, loader, search,
-                       # compare, validate, gaps, serve, all CLI
-                       # dispatch. Single-file by intent.
+├── main.cyr           # Entry point — CLI dispatch, the HTTP route
+│                      # table, the send_* leaves, and main().
+└── vidya_core.cyr     # Domain + JSON layer — language enum, concept
+                       # types, registry, TOML loader, hot-reload,
+                       # search, compare, code, validate, and the
+                       # json_*_response builders. Included by
+                       # main.cyr and by both test entry points.
 
 lib/                   # Vendored Cyrius stdlib snapshot (62 modules).
                        # Rehydrate with `cyrius lib sync` then
@@ -62,10 +66,15 @@ lib/                   # Vendored Cyrius stdlib snapshot (62 modules).
                        # cyml), fnptr, args, regex, net, fs, io, ...
 
 tests/
-├── vidya.tcyr         # 41 tests — language enum, TOML loading,
-                       # registry, file discovery, content scanning
-└── vidya.bcyr         # 6 benchmarks — load_concept, load_all,
-                       # reg_get, search, ...
+├── vidya.tcyr         # 96 tests — language enum, TOML loading,
+│                      # registry, file discovery, content scanning,
+│                      # JSON builder goldens, escaping, corpus sweep
+├── vidya.bcyr         # 11 benchmarks — load_concept, load_all,
+│                      # reg_get, search, JSON builders, field escape
+└── fixtures/          # json_golden + json_hostile concepts backing
+                       # the JSON goldens. They sit outside content/
+                       # on purpose: load_all and the content gate
+                       # never see them.
 ```
 
 Build: `cyrius build src/main.cyr build/vidya`. Test: `cyrius test`.
@@ -167,7 +176,7 @@ detects a content change — see "Hot-reload contract" below.
   processes accumulate per-response allocations until restart.
   See "Known limits" below.
 
-**Verified by** `grep -E "read_file|file_read|dir_list|load_concept|fopen|open\(" src/main.cyr` over the line range of `http_route` and `json_*_response` — empty match as of v2.3.6. (`handle_request` itself does call `inotify_drain`/`do_reload`, but those are explicitly part of the contract; the prohibition is on the routing branches that follow.) Re-run after any edit to the serve path.
+**Verified by** `grep -E "read_file|file_read|dir_list|load_concept|fopen|open\(" src/main.cyr src/vidya_core.cyr` over the line range of `http_route` and `json_*_response` — empty match as of 2.8.1 (the builders moved to `src/vidya_core.cyr`; `/code` reads its source from the in-memory `Example`, never from disk). (`handle_request` itself does call `inotify_drain`/`do_reload`, but those are explicitly part of the contract; the prohibition is on the routing branches that follow.) Re-run after any edit to the serve path.
 
 ## Hot-reload contract (P0B-4)
 
@@ -259,16 +268,24 @@ succeeds). Reload latency: 17–22ms, measured at 60 topics (pre-2.5; the corpus
    has the same data view, the same latency profile, and the
    `serve` path can re-use the same loader without a code split.
 
-4. **Single-file `src/main.cyr`.** ~1500 LOC. Splitting into
-   modules is feasible but unmotivated — Cyrius's module story
-   is `include` + namespacing-by-prefix, and the win at this size
-   is small. Will revisit when the file crosses ~3000 LOC or when
-   the registry/serve halves diverge enough to test independently.
+4. **Two files: `src/vidya_core.cyr` + `src/main.cyr`.** Single-file
+   until 2.8.1, when the trigger this entry had named actually fired:
+   the JSON builders needed testing independently of the serve loop.
+   A `tcyr` cannot bind a port, and it could not reach into a file
+   whose only entry point is `main()` — so the test suite had been
+   re-implementing helpers locally and asserting on the copies, which
+   is how the `/info` count bug and the `/search` injection bug both
+   shipped. `vidya_core.cyr` now holds everything computable and is
+   included by `main.cyr`, `tests/vidya.tcyr`, and `tests/vidya.bcyr`;
+   `main.cyr` keeps CLI presentation, the route table, the `send_*`
+   leaves, and `main()`. Cyrius compiles in two passes, so include
+   order never affects resolution, and DCE strips whatever a given
+   entry point does not reach.
 
 5. **TOML keys are bare cstr literals.** Cyrius 5.x stdlib
    `toml_get*` helpers compare via `str_eq_cstr`; passing a `Str`
    silently returns 0 (the v2.3.0 dangling-pointer bug). All
-   lookups in `src/main.cyr` use `toml_get(pairs, "key")`, never
+   lookups in `src/vidya_core.cyr` use `toml_get(pairs, "key")`, never
    `toml_get(pairs, str_from("key"))`. See field note
    `stdlib_str_to_cstr_key_migration`.
 
