@@ -18,32 +18,11 @@ include "lib/bench.cyr"
 include "lib/regex.cyr"
 include "lib/syscalls.cyr"
 
-# ================================================================
-# Helpers — inline from main.cyr
-# ================================================================
-
-fn to_cstr(s) {
-    if (s == 0) { return ""; }
-    var len = str_len(s);
-    var buf = alloc(len + 1);
-    memcpy(buf, str_data(s), len);
-    store8(buf + len, 0);
-    return buf;
-}
-
-fn cstr_contains(haystack, needle) {
-    if (haystack == 0 || needle == 0) { return 0; }
-    var hlen = strlen(haystack);
-    var nlen = strlen(needle);
-    if (nlen == 0) { return 1; }
-    if (nlen > hlen) { return 0; }
-    var i = 0;
-    while (i <= hlen - nlen) {
-        if (memeq(haystack + i, needle, nlen) == 1) { return 1; }
-        i = i + 1;
-    }
-    return 0;
-}
+# 2.8.1: to_cstr and cstr_contains used to be inlined here as copies of
+# the main.cyr originals. They now come from src/vidya_core.cyr along
+# with the JSON builders benchmarked below — same source as the binary
+# serves and the test suite asserts on.
+include "src/vidya_core.cyr"
 
 # ================================================================
 # Globals for benchmark callbacks
@@ -51,6 +30,7 @@ fn cstr_contains(haystack, needle) {
 
 var _b_reg = 0;
 var _b_sections = 0;
+var _b_desc = 0;      # a real corpus description Str, for the field benches
 
 # ================================================================
 # Benchmark functions
@@ -117,6 +97,47 @@ fn bench_toml_sections() {
 }
 
 # ================================================================
+# JSON response builders (added 2.8.1)
+# ================================================================
+# These call the real builders in src/vidya_core.cyr against the real
+# corpus registry, so the per-field escaping the injection fix added
+# is measured here rather than only observed on the wire.
+
+fn bench_json_info() {
+    json_info_response("strings");
+    return 0;
+}
+
+fn bench_json_search() {
+    json_search_response("string");
+    return 0;
+}
+
+fn bench_json_list() {
+    json_list_response();
+    return 0;
+}
+
+# Escaping overhead in isolation: the same description Str emitted with
+# the escape path and with the old bare-quote splice. The delta is what
+# JSON-safety costs per field.
+fn bench_field_escaped() {
+    var sb = str_builder_new();
+    json_add_str(sb, _b_desc);
+    str_builder_build(sb);
+    return 0;
+}
+
+fn bench_field_raw() {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\"");
+    str_builder_add(sb, _b_desc);
+    str_builder_add_cstr(sb, "\"");
+    str_builder_build(sb);
+    return 0;
+}
+
+# ================================================================
 # Main
 # ================================================================
 
@@ -151,6 +172,12 @@ fn main() {
     # Setup: load strings sections for TOML bench
     _b_sections = toml_parse_file("content/strings/concept.toml");
 
+    # Setup: a real registry for the JSON builder benches
+    reg_init();
+    load_all();
+    var strings_c = reg_get("strings");
+    if (strings_c != 0) { _b_desc = concept_desc(strings_c); }
+
     # Run benchmarks
     var benches = vec_new();
 
@@ -177,6 +204,26 @@ fn main() {
     var b6 = bench_new("toml_sections");
     bench_run(b6, &bench_toml_sections, 1000);
     vec_push(benches, b6);
+
+    var b7 = bench_new("json_info_response");
+    bench_run(b7, &bench_json_info, 1000);
+    vec_push(benches, b7);
+
+    var b8 = bench_new("json_search_response");
+    bench_run(b8, &bench_json_search, 200);
+    vec_push(benches, b8);
+
+    var b9 = bench_new("json_list_response");
+    bench_run(b9, &bench_json_list, 100);
+    vec_push(benches, b9);
+
+    var b10 = bench_new("field_escaped");
+    bench_run(b10, &bench_field_escaped, 10000);
+    vec_push(benches, b10);
+
+    var b11 = bench_new("field_raw_splice");
+    bench_run(b11, &bench_field_raw, 10000);
+    vec_push(benches, b11);
 
     bench_report_all(benches);
     return 0;
