@@ -23,6 +23,10 @@ include "lib/hashmap.cyr"
 include "lib/bayan.cyr"   # cyrius 6.1.x: json + toml + base64 bundled here
 include "lib/regex.cyr"
 include "lib/syscalls.cyr"
+# process.cyr — exec_cmd() for `vidya validate`. Declared in cyrius.cyml
+# [deps] stdlib: an undeclared module survives only as someone else's
+# transitive, and that is the class of dep that fails at RUNTIME.
+include "lib/process.cyr"
 include "lib/tagged.cyr"
 include "lib/net.cyr"
 include "lib/fnptr.cyr"
@@ -908,34 +912,109 @@ fn cmd_code(topic_id, lang_str) {
 # ================================================================
 # Validate — compile/run examples
 # ================================================================
+#
+# DIAGNOSTIC surface, not the gate. `scripts/validate-content.sh` is what
+# CI runs and what a release blocks on; this subcommand mirrors its
+# commands so the two agree, and prints that reminder in its summary.
+#
+# Post-2.8.1 fix — this reported 462 false FAILs of 847 on a box with
+# every toolchain installed. Three independent bugs in the old
+# hand-rolled fork/exec, all fixed here:
+#   1. `sys_execve(..., 0)` handed the child an EMPTY environment. sh
+#      synthesises a default PATH for its own lookups but exports
+#      nothing, so: rustc (rustup, ~/.cargo/bin) was not on the default
+#      PATH, gcc could not exec cc1, go had no GOCACHE/HOME, zig had no
+#      cache dir, npx had no HOME, and the cyrius template's $HOME
+#      expanded to "". Every failure message was an unset-env symptom.
+#   2. `var sh_argv[4]` / `var status_buf[1]` — `var buf[N]` reserves N
+#      BYTES, so a 4-pointer argv needs 32 and a wait status needs 4.
+#      Both under-reserved and scribbled over neighbouring stack slots
+#      (same class as the cyrius stdlib's own v5.11.60 _exec3 fix).
+#   3. the asm templates ended `... ; rm -f {out}.o`, so `sh` exited with
+#      rm's status — a failing assembly example reported PASS.
+# Exec now runs through the stdlib's `exec_cmd` (lib/process.cyr), which
+# sizes its buffers correctly and forwards /proc/self/environ to the
+# child; temp-file cleanup moved out of the templates into validate_one.
 
+var VALIDATE_SKIP = 0 - 1;      # no example on disk / no command template
+var VALIDATE_NO_TOOL = 0 - 2;   # language toolchain not installed
+
+# Toolchain probe cache, one slot per Lang: 0 = unprobed, 1 = present,
+# 2 = missing. `var buf[N]` is N BYTES — LANG_COUNT × 8 B.
+var _tool_probe[88];
+
+# Shell command that exits 0 iff this language's toolchain is installed.
+# A missing toolchain is a SKIP, not a FAIL — same contract as
+# scripts/validate-content.sh, which counts them separately.
+fn validate_probe(lang) {
+    if (lang == RUST) { return "command -v rustc >/dev/null 2>&1"; }
+    if (lang == PYTHON) { return "command -v python3 >/dev/null 2>&1"; }
+    if (lang == C_LANG) { return "command -v gcc >/dev/null 2>&1"; }
+    if (lang == GO) { return "command -v go >/dev/null 2>&1"; }
+    if (lang == TYPESCRIPT) { return "command -v npx >/dev/null 2>&1"; }
+    if (lang == SHELL) { return "command -v bash >/dev/null 2>&1"; }
+    if (lang == ZIG) { return "command -v zig >/dev/null 2>&1"; }
+    if (lang == ASM_X86_64) { return "command -v as >/dev/null 2>&1 && command -v ld >/dev/null 2>&1"; }
+    # binutils ships as+ld together, so probing the assembler covers the
+    # linker; qemu is the part that is separately packaged.
+    if (lang == ASM_AARCH64) {
+        return "command -v aarch64-linux-gnu-as >/dev/null 2>&1 && command -v qemu-aarch64 >/dev/null 2>&1";
+    }
+    if (lang == OPENQASM) { return "python3 -c \"import qiskit\" >/dev/null 2>&1"; }
+    if (lang == CYRIUS) { return "command -v cyrius >/dev/null 2>&1"; }
+    return 0;
+}
+
+# Probe once per language per process, then serve from the cache.
+fn toolchain_present(lang) {
+    var slot = &_tool_probe + lang * 8;
+    var cached = load64(slot);
+    if (cached == 1) { return 1; }
+    if (cached == 2) { return 0; }
+    var probe = validate_probe(lang);
+    if (probe == 0) { store64(slot, 2); return 0; }
+    if (exec_cmd(probe) == 0) { store64(slot, 1); return 1; }
+    store64(slot, 2);
+    return 0;
+}
+
+# Command template. {file} = example path, {out} = scratch binary,
+# {content} = content root. Kept in lockstep with the per-language
+# commands in scripts/validate-content.sh — no cleanup verbs here, the
+# caller unlinks {out} and {out}.o so a trailing `rm` can never mask a
+# non-zero exit status.
 fn validate_command(lang) {
     if (lang == RUST) { return "rustc --edition 2024 {file} -o {out} && {out}"; }
-    if (lang == PYTHON) { return "python3 -c \"exec(open('{file}').read())\""; }
+    if (lang == PYTHON) { return "python3 {file}"; }
     if (lang == C_LANG) { return "gcc -std=c17 -Wall -Werror {file} -o {out} -lm -lpthread && {out}"; }
     if (lang == GO) { return "go run {file}"; }
     if (lang == TYPESCRIPT) { return "npx tsx {file}"; }
     if (lang == SHELL) { return "bash {file}"; }
     if (lang == ZIG) { return "zig build-exe {file} -femit-bin={out} && {out}"; }
-    if (lang == ASM_X86_64) { return "as --64 {file} -o {out}.o && ld {out}.o -o {out} && {out} ; rm -f {out}.o"; }
-    if (lang == ASM_AARCH64) { return "aarch64-linux-gnu-as {file} -o {out}.o && aarch64-linux-gnu-ld {out}.o -o {out} && qemu-aarch64 {out} ; rm -f {out}.o"; }
-    if (lang == CYRIUS) { return "CYR_HOME=${CYRIUS_HOME:-$HOME/Repos/cyrius} && CYR_FILE=$(realpath {file}) && cd \"$CYR_HOME\" && cat \"$CYR_FILE\" | ./build/cc2 > {out} && chmod +x {out} && {out}"; }
+    if (lang == ASM_X86_64) { return "as --64 {file} -o {out}.o && ld {out}.o -o {out} && {out}"; }
+    if (lang == ASM_AARCH64) {
+        return "aarch64-linux-gnu-as {file} -o {out}.o && aarch64-linux-gnu-ld {out}.o -o {out} && qemu-aarch64 {out}";
+    }
+    if (lang == OPENQASM) {
+        return "python3 -c \"from qiskit import qasm2; qasm2.load('{file}', include_path=['{content}'])\"";
+    }
+    if (lang == CYRIUS) { return "cyrius run {file}"; }
     return 0;
 }
 
 fn validate_one(concept, lang) {
     var ex = get_example(concept, lang);
-    if (ex == 0) { return 0 - 1; }
+    if (ex == 0) { return VALIDATE_SKIP; }
 
     var path = example_path(ex);
-    if (path == 0) { return 0 - 1; }
+    if (path == 0) { return VALIDATE_SKIP; }
 
     var cmd_template = validate_command(lang);
-    if (cmd_template == 0) { return 0 - 1; }
+    if (cmd_template == 0) { return VALIDATE_SKIP; }
+    if (toolchain_present(lang) == 0) { return VALIDATE_NO_TOOL; }
 
     # Build file path: content_dir / relative_path
     var file_path = path_join(_content_dir, path);
-    var file_cstr = str_data(file_path);
 
     # Build output path
     var sb = str_builder_new();
@@ -945,30 +1024,30 @@ fn validate_one(concept, lang) {
     str_builder_add_cstr(sb, lang_stem(lang));
     var out_path = str_builder_build(sb);
 
-    # Substitute {file} and {out} in template
+    # ... and the object file the two assembly templates emit next to it
+    var sbo = str_builder_new();
+    str_builder_add(sbo, out_path);
+    str_builder_add_cstr(sbo, ".o");
+    var obj_path = str_builder_build(sbo);
+
+    # Substitute {file}, {out} and {content} in the template
     var cmd = str_replace_all(str_from(cmd_template), str_from("{file}"), file_path);
     cmd = str_replace_all(cmd, str_from("{out}"), out_path);
+    cmd = str_replace_all(cmd, str_from("{content}"), _content_dir);
 
-    # Execute via sh -c
-    var cmd_cstr = str_data(cmd);
-    var pid = sys_fork();
-    if (pid == 0) {
-        var sh_argv[4];
-        store64(&sh_argv, "/bin/sh");
-        store64(&sh_argv + 8, "-c");
-        store64(&sh_argv + 16, cmd_cstr);
-        store64(&sh_argv + 24, 0);
-        sys_execve("/bin/sh", &sh_argv, 0);
-        sys_exit(127);
-    }
-    var status_buf[1];
-    sys_waitpid(pid, &status_buf, 0);
-    var status = load32(&status_buf);
+    # exec_cmd: /bin/sh -c with the parent's environment forwarded.
+    var rc = exec_cmd(str_data(cmd));
+
     # Clean up
     sys_unlink(str_data(out_path));
+    sys_unlink(str_data(obj_path));
 
-    if (WIFEXITED(status) == 1) { return WEXITSTATUS(status); }
-    return 1;
+    # exec_cmd returns -1 for fork failure or a signal-killed child
+    # (SIGSEGV/SIGABRT are ordinary outcomes for a broken C or asm
+    # example) — those are failures, and must not alias the skip
+    # sentinel.
+    if (rc < 0) { return 1; }
+    return rc;
 }
 
 fn cmd_validate(topic_filter) {
@@ -1000,8 +1079,16 @@ fn cmd_validate(topic_filter) {
                 var ex = vec_get(examples, ei);
                 var lang = example_lang(ex);
                 var r = validate_one(c, lang);
-                if (r == 0 - 1) {
+                if (r == VALIDATE_SKIP) {
                     skip = skip + 1;
+                }
+                elif (r == VALIDATE_NO_TOOL) {
+                    skip = skip + 1;
+                    syscall(1, 1, "  SKIP: ", 8);
+                    str_print(id);
+                    syscall(1, 1, "/", 1);
+                    syscall(1, 1, lang_name(lang), strlen(lang_name(lang)));
+                    println(" (toolchain not installed)");
                 }
                 elif (r == 0) {
                     pass = pass + 1;
@@ -1029,6 +1116,7 @@ fn cmd_validate(topic_filter) {
     syscall(1, 1, " failed, ", 9);
     fmt_int(skip);
     println(" skipped");
+    println("note: authoritative content gate is scripts/validate-content.sh");
     return fail;
 }
 
