@@ -149,7 +149,7 @@ fn testIntegerOverflow() !void {
 // ── Path traversal prevention ─────────────────────────────────────────
 fn pathIsSafe(user_input: []const u8) bool {
     // Reject ".." components
-    if (mem.indexOf(u8, user_input, "..") != null) return false;
+    if (mem.find(u8, user_input, "..") != null) return false;
     // Reject absolute paths
     if (user_input.len > 0 and user_input[0] == '/') return false;
     return true;

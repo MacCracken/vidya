@@ -8,7 +8,7 @@
 //   - SYSCALL clobbers RCX and R11
 //   - Stack alignment requirements
 
-// _GNU_SOURCE exposes the libc `syscall(2)` wrapper under -std=c17.
+// _GNU_SOURCE exposes the libc `syscall(2)` wrapper under -std=c23.
 #define _GNU_SOURCE
 
 #include <assert.h>

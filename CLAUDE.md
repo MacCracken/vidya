@@ -83,7 +83,7 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 |---|---|---|
 | Rust | `.rs` | `rustc --edition 2024 <file> -o X && X` |
 | Python | `.py` | `python3 <file>` |
-| C | `.c` | `gcc -std=c17 -Wall -Werror <file> -lm -lpthread -o X && X` |
+| C | `.c` | `gcc -std=c23 -Wall -Werror <file> -lm -lpthread -o X && X` |
 | Go | `.go` | `go run <file>` |
 | TypeScript | `.ts` | `npx tsx <file>` |
 | Shell | `.sh` | `bash <file>` |

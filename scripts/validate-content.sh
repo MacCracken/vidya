@@ -110,7 +110,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
         bin=/tmp/vidya_test_$$
         # -fno-stack-protector? No — keep -Wall -Werror semantics. Pipe through tee
         # gives us the captured output even when assert→abort drops buffered stdout.
-        run_lang "C" "$topic/c.c" bash -c "gcc -std=c17 -Wall -Werror '$topic_dir/c.c' -o $bin -lm -lpthread && $bin"
+        run_lang "C" "$topic/c.c" bash -c "gcc -std=c23 -Wall -Werror '$topic_dir/c.c' -o $bin -lm -lpthread && $bin"
         rm -f "$bin"
     fi
 

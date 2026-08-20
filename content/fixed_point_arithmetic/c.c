@@ -15,7 +15,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-// M_PI is a POSIX/GNU extension, not in strict C17 — define inline.
+// M_PI is a POSIX/GNU extension, not in strict C23 — define inline.
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif

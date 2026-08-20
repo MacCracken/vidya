@@ -49,7 +49,7 @@ pub fn main() !void {
     // See error_handling topic for full example
 
     // ── ArrayList: dynamic array with allocator ────────────────────
-    var list: std.ArrayListUnmanaged(i32) = .empty;
+    var list: std.ArrayList(i32) = .empty;
     defer list.deinit(allocator);
 
     try list.append(allocator, 1);

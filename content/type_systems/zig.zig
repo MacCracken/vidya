@@ -57,7 +57,7 @@ fn sum(comptime T: type, items: []const T) T {
 
 fn Stack(comptime T: type) type {
     return struct {
-        items: std.ArrayListUnmanaged(T) = .empty,
+        items: std.ArrayList(T) = .empty,
         allocator: std.mem.Allocator,
 
         const Self = @This();

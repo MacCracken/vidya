@@ -112,7 +112,7 @@ Requirements:
 |----------|----------------|-------|
 | Rust | `rustc --edition 2024` | |
 | Python | `python3` | |
-| C | `gcc -std=c17 -Wall -Werror` | `-lm -lpthread` |
+| C | `gcc -std=c23 -Wall -Werror` | `-lm -lpthread` |
 | Go | `go run` | |
 | TypeScript | `npx tsx` | |
 | Shell | `bash` | `set -euo pipefail` |

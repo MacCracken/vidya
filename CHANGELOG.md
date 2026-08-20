@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **C standard C17 → C23** (`ISO/IEC 9899:2024`). gcc 16.2.1 already defaults
+  to `gnu23`, so the corpus was pinned one revision behind its own compiler.
+  Moved at all six config/doc sites plus four in-example prose mentions;
+  `scripts/validate-content.sh` and `src/vidya_core.cyr`'s `validate_command`
+  were changed together to keep the two validators byte-identical. Verified
+  before and after: all **77 C examples compile *and run*** under
+  `-std=c23 -Wall -Werror`, identical to c17 — zero source changes were
+  needed for the standard move itself.
+- **Zig: two deprecated stdlib names retired.** `std.ArrayListUnmanaged` →
+  `std.ArrayList` (6 files) and `mem.indexOf` → `mem.find` (4 files, 11 sites).
+  Both are bare aliases the installed 0.16.0 stdlib marks `/// Deprecated`
+  (`std.zig:58`, `mem.zig:1413`). Established by cross-referencing **all 192**
+  `/// Deprecated` names in the installed stdlib against the corpus — those two
+  were the only genuine hits; the ELF-constant and `path` matches were
+  corpus-local identifiers, not stdlib uses. All 77 Zig examples rebuild, rerun,
+  and produce **byte-identical output**.
+- **`docs/sources.md` version table corrected.** TypeScript was listed as
+  "ES2024 / TS 5.x"; npm `dist-tags.latest` is **7.0.2**, and the installed
+  compiler's own `TS6046` error names **es2025** as its highest target — so the
+  row is now "TS 7.0.2 / ES2025". (A first pass had this as ES2026; the compiler
+  rejects that target, which is why the number came from `tsc` rather than from
+  release notes.) The Cyrius row still read "Pinned at 6.4.2" — now 6.5.31.
 - **Cyrius toolchain 6.5.29 → 6.5.31.** A pure compiler-side bump: diffing
   the two snapshots' `lib/` sets shows **no module added, none removed, and
   none of the 25 modules vidya declares changed content** (verified by

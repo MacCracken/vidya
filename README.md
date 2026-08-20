@@ -53,7 +53,7 @@ build/vidya serve 8080                     # HTTP service: GET /stats, /code/{to
 | Cyrius | `.cyr` | **Primary**. Vidya itself is written in Cyrius; the corpus is the live reference for Cyrius/AGNOS patterns. |
 | Rust | `.rs` | Full coverage, edition 2024. |
 | Python | `.py` | Full coverage, stdlib only. |
-| C | `.c` | C17 with `_GNU_SOURCE`. |
+| C | `.c` | C23 with `_GNU_SOURCE`. |
 | Go | `.go` | Full coverage. |
 | TypeScript | `.ts` | Node.js runtime via `tsx`. |
 | Shell | `.sh` | Bash with `set -euo pipefail`. |

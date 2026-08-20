@@ -54,8 +54,8 @@ pub fn main() !void {
     try expect(mem.order(u8, "abc", "abc") == .eq);
 
     // ── Searching ──────────────────────────────────────────────────
-    try expect(mem.indexOf(u8, "hello world", "world") == 6);
-    try expect(mem.indexOf(u8, "hello world", "missing") == null);
+    try expect(mem.find(u8, "hello world", "world") == 6);
+    try expect(mem.find(u8, "hello world", "missing") == null);
     try expect(mem.startsWith(u8, "hello world", "hello"));
     try expect(mem.endsWith(u8, "hello world", "world"));
 

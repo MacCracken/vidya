@@ -1,4 +1,4 @@
-/* Vidya — Reproducible Builds — C port (C17). Fixed arrays mirror the
+/* Vidya — Reproducible Builds — C port (C23). Fixed arrays mirror the
  * Cyrius reference.
  *
  * A reproducible build is a pure function of its inputs: the same sources

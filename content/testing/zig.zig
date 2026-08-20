@@ -12,7 +12,7 @@ const expect = std.testing.expect;
 // ── Code under test ────────────────────────────────────────────────
 
 fn parseKV(line: []const u8) !struct { key: []const u8, value: []const u8 } {
-    const eq_pos = std.mem.indexOf(u8, line, "=") orelse return error.NoEquals;
+    const eq_pos = std.mem.find(u8, line, "=") orelse return error.NoEquals;
 
     const key = std.mem.trim(u8, line[0..eq_pos], " ");
     if (key.len == 0) return error.EmptyKey;

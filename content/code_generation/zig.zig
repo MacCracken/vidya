@@ -62,7 +62,7 @@ fn makeLine(comptime fmt: []const u8, args: anytype) AsmLine {
 
 // ── Code Generator ───────────────────────────────────────────────────
 const CodeGen = struct {
-    lines: std.ArrayListUnmanaged(AsmLine) = .empty,
+    lines: std.ArrayList(AsmLine) = .empty,
     alloc: Allocator,
 
     fn init(alloc: Allocator) CodeGen {
@@ -195,8 +195,8 @@ fn testCodegenLiteral() !void {
 
     // Should emit: mov rax, 42 / push rax
     try expect(cg.lines.items.len == 2);
-    try expect(mem.indexOf(u8, cg.lines.items[0].slice(), "42") != null);
-    try expect(mem.indexOf(u8, cg.lines.items[1].slice(), "push rax") != null);
+    try expect(mem.find(u8, cg.lines.items[0].slice(), "42") != null);
+    try expect(mem.find(u8, cg.lines.items[1].slice(), "push rax") != null);
 }
 
 fn testCodegenAdd() !void {
@@ -215,7 +215,7 @@ fn testCodegenAdd() !void {
     // The add instruction should be present
     var found_add = false;
     for (cg.lines.items) |line| {
-        if (mem.indexOf(u8, line.slice(), "add rax, rcx") != null) {
+        if (mem.find(u8, line.slice(), "add rax, rcx") != null) {
             found_add = true;
         }
     }
@@ -239,11 +239,11 @@ fn testCodegenPrecedence() !void {
     defer std.heap.page_allocator.free(output);
 
     // Verify prologue and epilogue present
-    try expect(mem.indexOf(u8, output, "evaluate:") != null);
-    try expect(mem.indexOf(u8, output, "push rbp") != null);
-    try expect(mem.indexOf(u8, output, "ret") != null);
+    try expect(mem.find(u8, output, "evaluate:") != null);
+    try expect(mem.find(u8, output, "push rbp") != null);
+    try expect(mem.find(u8, output, "ret") != null);
     // Verify imul appears (for the multiplication)
-    try expect(mem.indexOf(u8, output, "imul rax, rcx") != null);
+    try expect(mem.find(u8, output, "imul rax, rcx") != null);
 }
 
 fn testStackFrameLayout() !void {

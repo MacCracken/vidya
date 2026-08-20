@@ -27,7 +27,7 @@ pub fn main() !void {
     try expect(table[128] == 0); // wrapping multiply
 
     // ── Pre-allocated ArrayList ────────────────────────────────────
-    var list: std.ArrayListUnmanaged(i32) = .empty;
+    var list: std.ArrayList(i32) = .empty;
     defer list.deinit(allocator);
 
     try list.ensureTotalCapacity(allocator, 10000);

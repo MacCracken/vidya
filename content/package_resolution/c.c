@@ -1,4 +1,4 @@
-/* Vidya — Package Resolution — C port (C17). Mirrors the Cyrius
+/* Vidya — Package Resolution — C port (C23). Mirrors the Cyrius
  * reference: semver-as-integer, caret ranges, range intersection for
  * diamond dependencies, highest-version selection, bounded backtracking,
  * and Kahn-scan dependency-cycle detection.

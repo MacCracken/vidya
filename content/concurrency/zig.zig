@@ -38,7 +38,7 @@ const AtomicCounter = struct {
 // ── Mutex-protected data ───────────────────────────────────────────
 
 const SharedList = struct {
-    items: std.ArrayListUnmanaged(i32) = .empty,
+    items: std.ArrayList(i32) = .empty,
     mutex: std.Io.Mutex = .init,
     allocator: std.mem.Allocator,
     io: std.Io,

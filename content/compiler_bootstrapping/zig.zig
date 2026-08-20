@@ -63,7 +63,7 @@ const SourceLine = struct {
 // ── Two-Pass Assembler ───────────────────────────────────────────────
 const Assembler = struct {
     symbols: std.StringHashMap(u16),
-    code: std.ArrayListUnmanaged(u8) = .empty,
+    code: std.ArrayList(u8) = .empty,
     alloc: Allocator,
 
     fn init(alloc: Allocator) Assembler {
