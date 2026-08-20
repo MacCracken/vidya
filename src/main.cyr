@@ -683,30 +683,74 @@ fn do_reload() {
 # Search — full-text across id, title, description, tags
 # ================================================================
 
-# Substring search on C strings (null-terminated)
-fn cstr_contains(haystack, needle) {
-    if (haystack == 0 || needle == 0) { return 0; }
-    var hlen = strlen(haystack);
-    var nlen = strlen(needle);
+# ASCII case fold for one byte: A-Z (65-90) -> a-z (97-122).
+# Every other byte passes through untouched, so UTF-8 continuation
+# bytes (>= 0x80) are never mangled — folding is ASCII-only by design.
+# Non-ASCII queries stay byte-exact, which is the older behavior.
+fn ascii_fold(b) {
+    if (b >= 65 && b <= 90) { return b + 32; }
+    return b;
+}
+
+# ASCII-fold a C string into a fresh buffer. Called once per query,
+# not once per field.
+fn cstr_lower(c) {
+    if (c == 0) { return ""; }
+    var len = strlen(c);
+    var buf = alloc(len + 1);
+    var i = 0;
+    while (i < len) {
+        store8(buf + i, ascii_fold(load8(c + i)));
+        i = i + 1;
+    }
+    store8(buf + len, 0);
+    return buf;
+}
+
+# Case-insensitive substring match of an already-folded query against a
+# Str's raw bytes. `folded` must be lowercased by the caller (see
+# cstr_lower) — folding it per field would repeat the same work.
+#
+# Scans str_data/str_len directly rather than materializing a
+# null-terminated copy. That drops the alloc the old str_has made for
+# every field of every concept on every query — serve() paid 4x77 of
+# them per request against a bump allocator that never frees. It is
+# also what makes tag search safe without a terminator: tag Strs point
+# into the raw TOML buffer, which is exactly what the removed
+# "pending Str null-termination fix" deferral was waiting on.
+#
+# The leading-byte check keeps the inner loop off all but the few
+# positions that can actually start a match.
+fn str_has_ci(s, folded) {
+    if (s == 0) { return 0; }
+    var hd = str_data(s);
+    var hlen = str_len(s);
+    var nlen = strlen(folded);
     if (nlen == 0) { return 1; }
     if (nlen > hlen) { return 0; }
+    var f0 = load8(folded);
+    var last = hlen - nlen;
     var i = 0;
-    while (i <= hlen - nlen) {
-        if (memeq(haystack + i, needle, nlen) == 1) { return 1; }
+    while (i <= last) {
+        if (ascii_fold(load8(hd + i)) == f0) {
+            var j = 1;
+            while (j < nlen && ascii_fold(load8(hd + i + j)) == load8(folded + j)) {
+                j = j + 1;
+            }
+            if (j == nlen) { return 1; }
+        }
         i = i + 1;
     }
     return 0;
 }
 
-# Search a Str for a C string query
-fn str_has(s, query) {
-    if (s == 0) { return 0; }
-    var cstr = to_cstr(s);
-    return cstr_contains(cstr, query);
-}
-
+# Case-insensitive substring match across id, title, description, tags.
+# Matching is ASCII-case-insensitive: `tcp`, `TCP`, and `Tcp` are the
+# same query. This was previously a byte-exact scan, and the tag
+# branch was commented out entirely.
 fn search(query) {
     var results = vec_new();
+    var folded = cstr_lower(query);
     var entries = reg_list();
     var count = vec_len(entries);
     var i = 0;
@@ -715,12 +759,27 @@ fn search(query) {
         var found = 0;
 
         # Check id
-        if (found == 0) { if (str_has(concept_id(c), query) == 1) { found = 1; } }
+        if (found == 0) { if (str_has_ci(concept_id(c), folded) == 1) { found = 1; } }
         # Check title
-        if (found == 0) { if (str_has(concept_title(c), query) == 1) { found = 1; } }
+        if (found == 0) { if (str_has_ci(concept_title(c), folded) == 1) { found = 1; } }
         # Check description
-        if (found == 0) { if (str_has(concept_desc(c), query) == 1) { found = 1; } }
-        # Tags search disabled pending Str null-termination fix
+        if (found == 0) { if (str_has_ci(concept_desc(c), folded) == 1) { found = 1; } }
+        # Check tags — content-format.md documents these as "Search tags"
+        if (found == 0) {
+            var tags = concept_tags(c);
+            if (tags != 0) {
+                var tcount = vec_len(tags);
+                var ti = 0;
+                while (ti < tcount) {
+                    if (str_has_ci(vec_get(tags, ti), folded) == 1) {
+                        found = 1;
+                        ti = tcount;
+                    } else {
+                        ti = ti + 1;
+                    }
+                }
+            }
+        }
         if (found == 1) { vec_push(results, c); }
         i = i + 1;
     }

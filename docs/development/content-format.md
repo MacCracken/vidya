@@ -57,7 +57,7 @@ Machine-readable metadata. This is the source of truth for the `Concept` struct.
 
 | Field               | Type              | Description                         |
 |---------------------|-------------------|-------------------------------------|
-| `tags`              | Array of strings  | Search tags                         |
+| `tags`              | Array of strings  | Search tags — matched case-insensitively by `vidya search`, alongside `id` / `title` / `description`. Use them for terms a reader would search for that the prose does not contain. |
 | `best_practices`    | Array of tables   | Best practice entries               |
 | `gotchas`           | Array of tables   | Gotcha entries                      |
 | `performance_notes` | Array of tables   | Performance note entries            |
