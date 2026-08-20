@@ -15,13 +15,13 @@ const (
 )
 
 type Ipc struct {
-	Shm        [ShmRegionCap][ShmBytes]byte
-	PipeBuf    [PipeCap]byte
-	PipeHead   int
-	PipeCount  int
-	ChanOpen   [ChanCap]bool
-	ChanQueue  [ChanCap][ChanQueueCap]uint64
-	ChanCount  [ChanCap]int
+	Shm       [ShmRegionCap][ShmBytes]byte
+	PipeBuf   [PipeCap]byte
+	PipeHead  int
+	PipeCount int
+	ChanOpen  [ChanCap]bool
+	ChanQueue [ChanCap][ChanQueueCap]uint64
+	ChanCount [ChanCap]int
 }
 
 func (i *Ipc) ShmWrite(region, offset int, b byte) bool {
@@ -97,33 +97,73 @@ func (i *Ipc) ChanRecv(endpoint int) int64 {
 func main() {
 	var ipc Ipc
 
-	if !ipc.ShmWrite(1, 5, 0xA1) { panic("shm_write") }
-	if ipc.ShmRead(1, 5) != 0xA1 { panic("shm_read") }
-	if ipc.ShmRead(2, 5) != 0 { panic("other region") }
-	if ipc.ShmWrite(1, 99, 0xFF) { panic("oob write") }
-	if ipc.ShmRead(1, 99) != -1 { panic("oob read") }
+	if !ipc.ShmWrite(1, 5, 0xA1) {
+		panic("shm_write")
+	}
+	if ipc.ShmRead(1, 5) != 0xA1 {
+		panic("shm_read")
+	}
+	if ipc.ShmRead(2, 5) != 0 {
+		panic("other region")
+	}
+	if ipc.ShmWrite(1, 99, 0xFF) {
+		panic("oob write")
+	}
+	if ipc.ShmRead(1, 99) != -1 {
+		panic("oob read")
+	}
 
-	ipc.PipeWrite(65); ipc.PipeWrite(66); ipc.PipeWrite(67)
-	if ipc.PipeRead() != 65 { panic("pipe1") }
-	if ipc.PipeRead() != 66 { panic("pipe2") }
-	if ipc.PipeRead() != 67 { panic("pipe3") }
-	if ipc.PipeRead() != -1 { panic("pipe empty") }
+	ipc.PipeWrite(65)
+	ipc.PipeWrite(66)
+	ipc.PipeWrite(67)
+	if ipc.PipeRead() != 65 {
+		panic("pipe1")
+	}
+	if ipc.PipeRead() != 66 {
+		panic("pipe2")
+	}
+	if ipc.PipeRead() != 67 {
+		panic("pipe3")
+	}
+	if ipc.PipeRead() != -1 {
+		panic("pipe empty")
+	}
 
 	var ipc2 Ipc
-	for k := 0; k < PipeCap; k++ { ipc2.PipeWrite(byte(k + 100)) }
-	if ipc2.PipeWrite(99) { panic("pipe full not rejected") }
+	for k := 0; k < PipeCap; k++ {
+		ipc2.PipeWrite(byte(k + 100))
+	}
+	if ipc2.PipeWrite(99) {
+		panic("pipe full not rejected")
+	}
 	ipc2.PipeRead()
-	if !ipc2.PipeWrite(99) { panic("post-drain failed") }
+	if !ipc2.PipeWrite(99) {
+		panic("post-drain failed")
+	}
 
 	var ipc3 Ipc
-	if ipc3.ChanSend(1, 0xDEADBEEF) { panic("send to closed accepted") }
+	if ipc3.ChanSend(1, 0xDEADBEEF) {
+		panic("send to closed accepted")
+	}
 	ipc3.ChanListen(1)
-	if !ipc3.ChanSend(1, 0xCAFE) { panic("send 1") }
-	if !ipc3.ChanSend(1, 0xBABE) { panic("send 2") }
-	if ipc3.ChanRecv(1) != 0xCAFE { panic("recv 1") }
-	if ipc3.ChanRecv(1) != 0xBABE { panic("recv 2") }
-	if ipc3.ChanRecv(1) != -1 { panic("recv empty") }
-	if ipc3.ChanRecv(2) != -1 { panic("recv unopened") }
+	if !ipc3.ChanSend(1, 0xCAFE) {
+		panic("send 1")
+	}
+	if !ipc3.ChanSend(1, 0xBABE) {
+		panic("send 2")
+	}
+	if ipc3.ChanRecv(1) != 0xCAFE {
+		panic("recv 1")
+	}
+	if ipc3.ChanRecv(1) != 0xBABE {
+		panic("recv 2")
+	}
+	if ipc3.ChanRecv(1) != -1 {
+		panic("recv empty")
+	}
+	if ipc3.ChanRecv(2) != -1 {
+		panic("recv unopened")
+	}
 
 	fmt.Println("ipc: 18/18 ok")
 }

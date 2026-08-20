@@ -14,6 +14,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -81,11 +82,11 @@ type Symbol struct {
 // "Patch the bytes at Section[Offset] using Symbol's address."
 
 type Relocation struct {
-	Section   string
-	Offset    uint64
-	Symbol    string
-	Type      RelocType
-	Addend    int64 // for RELA-style (addend stored in reloc, not in instruction)
+	Section string
+	Offset  uint64
+	Symbol  string
+	Type    RelocType
+	Addend  int64 // for RELA-style (addend stored in reloc, not in instruction)
 }
 
 // ── Object File ──────────────────────────────────────────────────────
@@ -149,12 +150,49 @@ func NewLinker(baseAddr uint64) *Linker {
 	}
 }
 
+// sectionOrder returns an object's section names in canonical link order:
+// .text, .rodata, .data, .bss, then anything else alphabetically. This is the
+// order a linker actually emits, and it keeps Pass1 deterministic.
+func sectionOrder(m map[string]*Section) []string {
+	canonical := []string{".text", ".rodata", ".data", ".bss"}
+	rank := make(map[string]int, len(canonical))
+	for i, n := range canonical {
+		rank[n] = i
+	}
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		ri, oki := rank[names[i]]
+		rj, okj := rank[names[j]]
+		if oki && okj {
+			return ri < rj
+		}
+		if oki != okj {
+			return oki // known sections come first
+		}
+		return names[i] < names[j]
+	})
+	return names
+}
+
 // Pass 1: Scan all objects, build global symbol table.
 // Strong definitions win over weak. Multiple strong = error.
 func (l *Linker) Pass1(objects []*ObjectFile) {
 	for _, obj := range objects {
-		// Merge sections — append each object's section data
-		for name, sec := range obj.Sections {
+		// Merge sections — append each object's section data.
+		//
+		// Iterate in a CANONICAL order, not map order. Go randomises map
+		// iteration deliberately, so ranging obj.Sections directly assigned
+		// base addresses in a different order on every run — this file was the
+		// only nondeterministic example in the corpus (6 runs produced 2
+		// distinct outputs). A real linker lays out .text first, then
+		// read-only data, then writable data, then .bss; sorting the names
+		// alphabetically would put .data before .text and teach the layout
+		// backwards, which is why this is an explicit order rather than a sort.
+		for _, name := range sectionOrder(obj.Sections) {
+			sec := obj.Sections[name]
 			if existing, ok := l.Sections[name]; ok {
 				// Record base address for this chunk
 				sec.BaseAddr = uint64(len(existing.Data)) + existing.BaseAddr
@@ -213,8 +251,15 @@ func (l *Linker) Pass1(objects []*ObjectFile) {
 	}
 
 	// Check for unresolved symbols
-	for name, sym := range l.GlobalSymbols {
-		if !sym.IsDefined {
+	// Sorted for the same reason: error order should not depend on map
+	// randomisation, or the same broken link reports differently each run.
+	undefNames := make([]string, 0, len(l.GlobalSymbols))
+	for n := range l.GlobalSymbols {
+		undefNames = append(undefNames, n)
+	}
+	sort.Strings(undefNames)
+	for _, name := range undefNames {
+		if !l.GlobalSymbols[name].IsDefined {
 			l.Errors = append(l.Errors, fmt.Sprintf("undefined reference to '%s'", name))
 		}
 	}
@@ -340,7 +385,17 @@ func (dl *DynamicLinker) CallPLT(pltIdx int) (uint64, bool) {
 func printSymbolTable(l *Linker) {
 	fmt.Printf("  %-15s %-10s %s\n", "Symbol", "Address", "Binding")
 	fmt.Printf("  %-15s %-10s %s\n", "------", "-------", "-------")
-	for name, sym := range l.GlobalSymbols {
+	// Sorted, not map order: this loop PRINTS, and Go randomises map
+	// iteration, so ranging directly made the symbol table come out in a
+	// different order on different runs. A linker's symbol dump is expected
+	// to be reproducible.
+	symNames := make([]string, 0, len(l.GlobalSymbols))
+	for n := range l.GlobalSymbols {
+		symNames = append(symNames, n)
+	}
+	sort.Strings(symNames)
+	for _, name := range symNames {
+		sym := l.GlobalSymbols[name]
 		binding := "global"
 		if sym.Binding == BindWeak {
 			binding = "weak"
@@ -354,7 +409,7 @@ func printSymbolTable(l *Linker) {
 }
 
 func main() {
-	fmt.Println("Linking and Loading — Go demonstration:\n")
+	fmt.Printf("Linking and Loading — Go demonstration:\n\n")
 
 	// ── 1. Build two object files ────────────────────────────────────
 	fmt.Println("1. Two-pass linking:")
@@ -362,18 +417,18 @@ func main() {
 	// Object 1: main.o — defines main, references add and data
 	main_o := NewObject("main.o")
 	main_o.AddSection(".text", []byte{
-		0x55,                         // push rbp
-		0x48, 0x89, 0xe5,             // mov rbp, rsp
+		0x55,             // push rbp
+		0x48, 0x89, 0xe5, // mov rbp, rsp
 		0xe8, 0x00, 0x00, 0x00, 0x00, // call add (needs relocation at offset 5)
-		0x48, 0x8b, 0x05,             // mov rax, [rip+disp32]
-		0x00, 0x00, 0x00, 0x00,       // displacement for data (offset 12)
-		0x5d,                         // pop rbp
-		0xc3,                         // ret
+		0x48, 0x8b, 0x05, // mov rax, [rip+disp32]
+		0x00, 0x00, 0x00, 0x00, // displacement for data (offset 12)
+		0x5d, // pop rbp
+		0xc3, // ret
 	})
 	main_o.AddSection(".data", []byte{0x2a, 0x00, 0x00, 0x00}) // int 42
 
 	main_o.AddSymbol("main", ".text", 0, true, BindGlobal)
-	main_o.AddSymbol("add", "", 0, false, BindGlobal)   // undefined
+	main_o.AddSymbol("add", "", 0, false, BindGlobal) // undefined
 	main_o.AddSymbol("data", ".data", 0, true, BindGlobal)
 	main_o.AddRelocation(".text", 5, "add", RelocPC32, -4)
 	main_o.AddRelocation(".text", 12, "data", RelocPC32, -4)
@@ -383,7 +438,7 @@ func main() {
 	math_o.AddSection(".text", []byte{
 		0x48, 0x01, 0xf7, // add rdi, rsi
 		0x48, 0x89, 0xf8, // mov rax, rdi
-		0xc3,             // ret
+		0xc3, // ret
 	})
 	math_o.AddSymbol("add", ".text", 0, true, BindGlobal)
 

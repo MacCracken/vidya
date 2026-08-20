@@ -21,11 +21,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 	"strings"
 	"text/template"
-	"bytes"
 )
 
 func main() {
@@ -195,9 +195,9 @@ func (e {{.Name}}) String() string {
 
 func testReflectMetaprogramming() {
 	type Config struct {
-		Host    string `json:"host" env:"APP_HOST"`
-		Port    int    `json:"port" env:"APP_PORT"`
-		Debug   bool   `json:"debug" env:"APP_DEBUG"`
+		Host  string `json:"host" env:"APP_HOST"`
+		Port  int    `json:"port" env:"APP_PORT"`
+		Debug bool   `json:"debug" env:"APP_DEBUG"`
 	}
 
 	// Inspect struct tags at runtime (like Rust's #[derive] at compile time)
@@ -291,8 +291,8 @@ func (m *MockLogger) Log(msg string) { m.calls = append(m.calls, msg) }
 func testCompilerDirectives() {
 	// Model the directives and what they do:
 	type Directive struct {
-		Name    string
-		Purpose string
+		Name      string
+		Purpose   string
 		RustEquiv string
 	}
 

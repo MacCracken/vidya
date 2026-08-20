@@ -65,7 +65,7 @@ type LoadConst struct {
 	Value int64
 }
 
-func (i LoadConst) Dest() Reg    { return i.Dst }
+func (i LoadConst) Dest() Reg      { return i.Dst }
 func (i LoadConst) String() string { return fmt.Sprintf("  %s = const %d", i.Dst, i.Value) }
 
 // BinInst: dst = lhs op rhs
@@ -109,7 +109,7 @@ type Neg struct {
 	Src Reg
 }
 
-func (i Neg) Dest() Reg    { return i.Dst }
+func (i Neg) Dest() Reg      { return i.Dst }
 func (i Neg) String() string { return fmt.Sprintf("  %s = neg %s", i.Dst, i.Src) }
 
 // Return: return value
@@ -117,7 +117,7 @@ type Return struct {
 	Value Reg
 }
 
-func (i Return) Dest() Reg    { return Reg(0xFFFFFFFF) } // no def
+func (i Return) Dest() Reg      { return Reg(0xFFFFFFFF) } // no def
 func (i Return) String() string { return fmt.Sprintf("  ret %s", i.Value) }
 
 // Jump: unconditional branch
@@ -125,7 +125,7 @@ type Jump struct {
 	Target int
 }
 
-func (i Jump) Dest() Reg    { return Reg(0xFFFFFFFF) }
+func (i Jump) Dest() Reg      { return Reg(0xFFFFFFFF) }
 func (i Jump) String() string { return fmt.Sprintf("  jmp bb%d", i.Target) }
 
 // Branch: conditional branch
@@ -194,13 +194,13 @@ func (ra *RegAllocator) Alloc() Reg {
 // This verifies SSA form is semantically correct.
 
 type SSAInterpreter struct {
-	Regs     map[Reg]int64
+	Regs      map[Reg]int64
 	PrevBlock int
 }
 
 func NewSSAInterpreter() *SSAInterpreter {
 	return &SSAInterpreter{
-		Regs:     make(map[Reg]int64),
+		Regs:      make(map[Reg]int64),
 		PrevBlock: -1,
 	}
 }
@@ -316,7 +316,7 @@ func constantFold(f *Function) int {
 }
 
 func main() {
-	fmt.Println("Intermediate Representations — Go demonstration:\n")
+	fmt.Printf("Intermediate Representations — Go demonstration:\n\n")
 
 	// ── 1. Three-address code ────────────────────────────────────────
 	// Express: result = (a + b) * (c - d)
@@ -365,11 +365,11 @@ func main() {
 	fmt.Println("\n2. Basic blocks and CFG:")
 
 	ra2 := &RegAllocator{}
-	x := ra2.Alloc()       // v0 = input
-	res1 := ra2.Alloc()    // v1 = x * 2 (then branch)
-	two := ra2.Alloc()     // v2 = 2
-	res2 := ra2.Alloc()    // v3 = -x (else branch)
-	merged := ra2.Alloc()  // v4 = phi(v1, v3)
+	x := ra2.Alloc()      // v0 = input
+	res1 := ra2.Alloc()   // v1 = x * 2 (then branch)
+	two := ra2.Alloc()    // v2 = 2
+	res2 := ra2.Alloc()   // v3 = -x (else branch)
+	merged := ra2.Alloc() // v4 = phi(v1, v3)
 
 	cfgFunc := &Function{
 		Name: "abs_double",
@@ -471,9 +471,9 @@ func main() {
 	fmt.Println("\n5. Constant folding on SSA form:")
 
 	ra5 := &RegAllocator{}
-	ca := ra5.Alloc() // v0 = 10
-	cb := ra5.Alloc() // v1 = 20
-	cc := ra5.Alloc() // v2 = 3
+	ca := ra5.Alloc()  // v0 = 10
+	cb := ra5.Alloc()  // v1 = 20
+	cc := ra5.Alloc()  // v2 = 3
 	ct1 := ra5.Alloc() // v3 = v0 + v1 → 30
 	ct2 := ra5.Alloc() // v4 = v3 * v2 → 90
 

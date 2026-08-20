@@ -1,9 +1,17 @@
 // Vidya — Concurrency in Zig
 //
 // Zig provides std.Thread for OS threads and std.atomic for lock-free
-// operations. No async/await runtime in the standard library (removed
-// in 0.14+). Concurrency is explicit: spawn threads, use atomics or
+// operations. Concurrency is explicit: spawn threads, use atomics or
 // mutexes, join when done. No hidden allocations or GC pauses.
+//
+// NB: async/await WAS removed in 0.14, but it came back in 0.16 as part of
+// the std.Io interface — `Io.zig` documents "async, await, concurrent, and
+// cancel", and this file itself uses `std.Io.Threaded` (line 81) and
+// `std.Io.Mutex` further down. The
+// difference from the old language-level async is that it is now an
+// interface you pass in, so the caller chooses the execution model
+// (threaded, blocking, event loop) rather than the compiler colouring
+// every function.
 
 const std = @import("std");
 const expect = std.testing.expect;

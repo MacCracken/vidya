@@ -18,12 +18,12 @@ import (
 )
 
 const (
-	recSZ        = 24
-	logCapBytes  = 6144
-	opInvalid    = int64(0)
-	opSet        = int64(1)
-	opDel        = int64(2)
-	storeKeys    = 16
+	recSZ       = 24
+	logCapBytes = 6144
+	opInvalid   = int64(0)
+	opSet       = int64(1)
+	opDel       = int64(2)
+	storeKeys   = 16
 )
 
 type Wal struct {

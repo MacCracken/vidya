@@ -17,13 +17,13 @@ import (
 )
 
 const (
-	GW        = 8
-	GH        = 8
-	GN        = GW * GH
-	WN  uint8 = 1
-	WS  uint8 = 2
-	WE  uint8 = 4
-	WW  uint8 = 8
+	GW             = 8
+	GH             = 8
+	GN             = GW * GH
+	WN       uint8 = 1
+	WS       uint8 = 2
+	WE       uint8 = 4
+	WW       uint8 = 8
 	WallsAll uint8 = 15
 
 	pcgMult uint64 = 6364136223846793005

@@ -209,7 +209,7 @@ func (b *BitmapAllocator) String() string {
 // ── Main ──────────────────────────────────────────────────────────────
 
 func main() {
-	fmt.Println("Allocators — three strategies for different patterns:\n")
+	fmt.Printf("Allocators — three strategies for different patterns:\n\n")
 
 	// Bump allocator
 	fmt.Println("1. Bump Allocator (arena):")

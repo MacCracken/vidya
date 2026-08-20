@@ -72,8 +72,8 @@ func emitCode(insts []Instruction, labels map[string]int) []byte {
 			code = append(code, imm...)
 			offset += 10
 		case OpAdd:
-			code = append(code, 0x48) // REX.W
-			code = append(code, 0x01) // ADD opcode
+			code = append(code, 0x48)                        // REX.W
+			code = append(code, 0x01)                        // ADD opcode
 			code = append(code, 0xC0|(inst.Src<<3)|inst.Reg) // ModR/M
 			offset += 3
 		case OpJump:

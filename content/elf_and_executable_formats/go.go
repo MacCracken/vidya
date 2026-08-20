@@ -47,10 +47,10 @@ var elfMagic = [4]byte{0x7F, 'E', 'L', 'F'}
 
 // ELF ident field indices
 const (
-	eiClass   = 4  // 1=32-bit, 2=64-bit
-	eiData    = 5  // 1=little-endian, 2=big-endian
-	eiVersion = 6  // 1=EV_CURRENT
-	eiOSABI   = 7  // 0=ELFOSABI_NONE (System V)
+	eiClass   = 4 // 1=32-bit, 2=64-bit
+	eiData    = 5 // 1=little-endian, 2=big-endian
+	eiVersion = 6 // 1=EV_CURRENT
+	eiOSABI   = 7 // 0=ELFOSABI_NONE (System V)
 )
 
 // ELF type constants
@@ -86,12 +86,12 @@ type Elf64Phdr struct {
 
 // Program header types
 const (
-	ptNull    = 0 // Unused entry
-	ptLoad    = 1 // Loadable segment (mapped by kernel)
-	ptDynamic = 2 // Dynamic linking info
-	ptInterp  = 3 // Path to dynamic linker (/lib64/ld-linux-x86-64.so.2)
-	ptNote    = 4 // Auxiliary info (build-id, ABI version)
-	ptPhdr    = 6 // Program header table itself
+	ptNull       = 0          // Unused entry
+	ptLoad       = 1          // Loadable segment (mapped by kernel)
+	ptDynamic    = 2          // Dynamic linking info
+	ptInterp     = 3          // Path to dynamic linker (/lib64/ld-linux-x86-64.so.2)
+	ptNote       = 4          // Auxiliary info (build-id, ABI version)
+	ptPhdr       = 6          // Program header table itself
 	ptGnuEhFrame = 0x6474E550 // Exception handling frame
 	ptGnuStack   = 0x6474E551 // Stack executability (NX bit)
 	ptGnuRelro   = 0x6474E552 // Read-only after relocation (RELRO)
@@ -166,9 +166,9 @@ func buildMinimalELF() []byte {
 		PhOff:     64,       // program headers right after ELF header
 		ShOff:     0,        // no section headers (stripped binary)
 		EhSize:    64,
-		PhEntSize: 56,       // sizeof(Elf64Phdr)
-		PhNum:     1,        // one PT_LOAD segment
-		ShEntSize: 64,       // sizeof(Elf64Shdr)
+		PhEntSize: 56, // sizeof(Elf64Phdr)
+		PhNum:     1,  // one PT_LOAD segment
+		ShEntSize: 64, // sizeof(Elf64Shdr)
 		ShNum:     0,
 		ShStrNdx:  0,
 	}
@@ -187,7 +187,7 @@ func buildMinimalELF() []byte {
 		Offset: 0x1000, // file offset (page-aligned)
 		VAddr:  0x401000,
 		PAddr:  0x401000,
-		FileSz: 7,      // tiny program: just syscall exit(0)
+		FileSz: 7, // tiny program: just syscall exit(0)
 		MemSz:  7,
 		Align:  0x1000,
 	}
@@ -207,7 +207,7 @@ type fieldInfo struct {
 }
 
 func main() {
-	fmt.Println("ELF and Executable Formats — Go demonstration:\n")
+	fmt.Printf("ELF and Executable Formats — Go demonstration:\n\n")
 
 	// ── 1. ELF header structure and sizes ────────────────────────────
 	fmt.Println("1. ELF64 header structure:")
@@ -449,7 +449,7 @@ func main() {
 		Offset: 0x2000,
 		VAddr:  0x402000,
 		PAddr:  0x402000,
-		FileSz: 256,       // .data: 256 bytes of initialized data
+		FileSz: 256,        // .data: 256 bytes of initialized data
 		MemSz:  256 + 4096, // .data + .bss: 4096 bytes of zeros
 		Align:  0x1000,
 	}

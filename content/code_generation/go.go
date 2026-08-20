@@ -91,18 +91,18 @@ func (cg *Codegen) GenExpr(expr Expr) {
 		cg.emit(fmt.Sprintf("mov rax, [rbp%d]", offset))
 
 	case Add:
-		cg.GenExpr(e.Left)    // rax = left
-		cg.emit("push rax")   // save left on stack
-		cg.GenExpr(e.Right)   // rax = right
-		cg.emit("pop rcx")    // rcx = left
+		cg.GenExpr(e.Left)  // rax = left
+		cg.emit("push rax") // save left on stack
+		cg.GenExpr(e.Right) // rax = right
+		cg.emit("pop rcx")  // rcx = left
 		cg.emit("add rax, rcx")
 
 	case Sub:
 		cg.GenExpr(e.Left)
 		cg.emit("push rax")
 		cg.GenExpr(e.Right)
-		cg.emit("pop rcx")         // rcx = left, rax = right
-		cg.emit("sub rcx, rax")    // rcx = left - right
+		cg.emit("pop rcx")      // rcx = left, rax = right
+		cg.emit("sub rcx, rax") // rcx = left - right
 		cg.emit("mov rax, rcx")
 
 	case Mul:
@@ -117,7 +117,7 @@ func (cg *Codegen) GenExpr(expr Expr) {
 		cg.emit("push rax")
 		cg.GenExpr(e.Right)
 		cg.emit("mov rcx, rax") // divisor in rcx
-		cg.emit("pop rax")     // dividend in rax
+		cg.emit("pop rax")      // dividend in rax
 		// CRITICAL: cqo sign-extends rax into rdx:rax
 		// Using xor rdx,rdx before idiv gives wrong results
 		// for negative dividends (-10/3 = 82, not -3)
@@ -218,7 +218,7 @@ func computeFrameLayout(numParams, numLocals int) FrameLayout {
 
 	// Locals after register params
 	for i := 0; i < numLocals; i++ {
-		layout.LocalOffsets[fmt.Sprintf("local_%d", i)] = -(regParams+i+1) * 8
+		layout.LocalOffsets[fmt.Sprintf("local_%d", i)] = -(regParams + i + 1) * 8
 	}
 
 	// Frame size (16-byte aligned)

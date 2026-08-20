@@ -118,7 +118,7 @@ func testBlockBitmap() {
 type FileType int
 
 const (
-	TypeRegular   FileType = iota
+	TypeRegular FileType = iota
 	TypeDirectory
 	TypeSymlink
 	TypeBlockDev
@@ -165,8 +165,8 @@ type Inode struct {
 	UID        uint32
 	GID        uint32
 	Size       uint64
-	Links      uint16   // hard link count
-	Blocks     []int    // data block numbers (direct pointers)
+	Links      uint16 // hard link count
+	Blocks     []int  // data block numbers (direct pointers)
 	CreateTime time.Time
 	ModifyTime time.Time
 	AccessTime time.Time
@@ -222,7 +222,7 @@ func testInodeStructure() {
 		Number: 2,
 		Type:   TypeDirectory,
 		Mode:   PERM_OWNER_R | PERM_OWNER_W | PERM_OWNER_X | PERM_GROUP_R | PERM_GROUP_X | PERM_OTHER_R | PERM_OTHER_X, // 755
-		Links:  3, // . + parent + one subdirectory
+		Links:  3,                                                                                                      // . + parent + one subdirectory
 		Blocks: []int{5},
 	}
 	assert(dir.Type == TypeDirectory, "directory")

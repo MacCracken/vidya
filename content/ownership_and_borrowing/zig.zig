@@ -81,13 +81,16 @@ pub fn main() !void {
     //       preventing leaks on error paths.
     print("\n3. errdefer — cleanup on error path only:\n", .{});
     {
-        const result = buildResource(true);
-        assert(result != null);
-        print("   buildResource(true)  -> got resource (no errdefer)\n", .{});
+        const before = cleanup_count;
+        const result = try buildResource(true);
+        assert(result.stage == 2);
+        assert(cleanup_count == before); // success path: errdefer did NOT run
+        print("   buildResource(true)  -> stage 2, errdefer skipped\n", .{});
 
         const failed = buildResource(false);
-        assert(failed == null);
-        print("   buildResource(false) -> null (errdefer cleaned up)\n", .{});
+        assert(std.meta.isError(failed));
+        assert(cleanup_count == before + 1); // error path: errdefer DID run
+        print("   buildResource(false) -> error, errdefer ran cleanup\n", .{});
     }
 
     // ── 4. Optionals — no null pointer derefs ────────────────────
@@ -182,7 +185,8 @@ pub fn main() !void {
 
     // ── 8. No use-after-free at language level ───────────────────
     // Rust: borrow checker prevents use-after-free at compile time.
-    // Zig: no compile-time prevention, but GeneralPurposeAllocator
+    // Zig: no compile-time prevention, but DebugAllocator
+    // (`GeneralPurposeAllocator` was renamed in 0.16 and no longer exists)
     //       detects use-after-free in debug/safe builds at runtime.
     // Zig's philosophy: use tools (GPA, sanitizers) not type systems.
     print("\n8. Runtime safety (debug mode):\n", .{});
@@ -228,17 +232,25 @@ fn mutatePoint(p: *Point) void {
 }
 
 /// Demonstrates errdefer: if construction fails, partial work is cleaned up.
-fn buildResource(succeed: bool) ?Resource {
+// Returns an ERROR UNION, not an optional — `errdefer` only runs when a
+// function returns an error, so a `?Resource` version cannot use one at all.
+// The previous shape returned `?Resource`, contained no errdefer, and faked
+// the cleanup with a manual assignment while printing "errdefer cleaned up".
+// `cleanup_count` makes the real thing observable: the caller asserts it.
+var cleanup_count: usize = 0;
+
+fn buildResource(succeed: bool) !Resource {
     var r = Resource{ .stage = 0 };
 
     r.stage = 1; // step 1 done
-    // If we fail after this, errdefer would clean up stage 1 work.
-    // (In real code, this might be freeing allocated memory.)
-
-    if (!succeed) {
-        r.stage = 0; // simulate errdefer cleanup
-        return null;
+    errdefer {
+        // Runs ONLY on an error return from this point on. On the success
+        // path it never executes — that is the whole distinction from `defer`.
+        r.stage = 0;
+        cleanup_count += 1;
     }
+
+    if (!succeed) return error.BuildFailed;
 
     r.stage = 2; // fully constructed
     return r;

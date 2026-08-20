@@ -128,8 +128,8 @@ func main() {
 	assert(initCount == 1, "once ran exactly once")
 
 	// ── Buffered vs unbuffered channels ────────────────────────────
-	unbuffered := make(chan int)    // blocks until receiver ready
-	buffered := make(chan int, 10)  // can hold 10 values without blocking
+	unbuffered := make(chan int)   // blocks until receiver ready
+	buffered := make(chan int, 10) // can hold 10 values without blocking
 
 	// Buffered: send doesn't block until full
 	buffered <- 1

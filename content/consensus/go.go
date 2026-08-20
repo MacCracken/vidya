@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	NNodes  = 3
-	MaxLog  = 8
-	Quorum  = 2
+	NNodes = 3
+	MaxLog = 8
+	Quorum = 2
 )
 
 const (

@@ -95,7 +95,7 @@ func main() {
 	type Point struct{ X, Y int }
 
 	p1 := Point{1, 2}
-	p2 := p1  // copy, not reference
+	p2 := p1 // copy, not reference
 	p2.X = 99
 	assert(p1.X == 1, "struct copy independence")
 

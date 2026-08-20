@@ -89,10 +89,10 @@ func (g *GateDescriptor) Selector() uint16 {
 	return uint16(g.raw[2]) | uint16(g.raw[3])<<8
 }
 
-func (g *GateDescriptor) IST() uint8     { return g.raw[4] & 0x07 }
+func (g *GateDescriptor) IST() uint8      { return g.raw[4] & 0x07 }
 func (g *GateDescriptor) GateType() uint8 { return g.raw[5] & 0x0F }
-func (g *GateDescriptor) DPL() uint8     { return (g.raw[5] >> 5) & 0x03 }
-func (g *GateDescriptor) Present() bool  { return g.raw[5]&0x80 != 0 }
+func (g *GateDescriptor) DPL() uint8      { return (g.raw[5] >> 5) & 0x03 }
+func (g *GateDescriptor) Present() bool   { return g.raw[5]&0x80 != 0 }
 
 func testIDTGateDescriptor() {
 	fmt.Println("1. IDT gate descriptor encoding (16 bytes):")
@@ -156,16 +156,16 @@ func (c ExceptionClass) String() string {
 }
 
 type ExceptionInfo struct {
-	Vector    uint8
-	Mnemonic  string
-	Name      string
-	Class     ExceptionClass
-	HasError  bool // CPU pushes error code onto stack
+	Vector   uint8
+	Mnemonic string
+	Name     string
+	Class    ExceptionClass
+	HasError bool // CPU pushes error code onto stack
 }
 
 var exceptions = []ExceptionInfo{
 	{0, "#DE", "Divide Error", Fault, false},
-	{1, "#DB", "Debug", Fault, false},         // fault or trap depending on cause
+	{1, "#DB", "Debug", Fault, false}, // fault or trap depending on cause
 	{2, "NMI", "Non-Maskable Interrupt", Interrupt, false},
 	{3, "#BP", "Breakpoint", Trap, false},
 	{4, "#OF", "Overflow", Trap, false},
@@ -238,10 +238,10 @@ func testExceptionTable() {
 
 type PIC8259A struct {
 	name       string
-	baseVector uint8  // first interrupt vector
-	imr        uint8  // Interrupt Mask Register (1=masked)
-	isr        uint8  // In-Service Register (1=being serviced)
-	irr        uint8  // Interrupt Request Register (1=pending)
+	baseVector uint8 // first interrupt vector
+	imr        uint8 // Interrupt Mask Register (1=masked)
+	isr        uint8 // In-Service Register (1=being serviced)
+	irr        uint8 // Interrupt Request Register (1=pending)
 }
 
 func NewPIC(name string, baseVector uint8) *PIC8259A {
@@ -371,11 +371,11 @@ type PageFaultInfo struct {
 	CR2       uint64 // faulting virtual address
 }
 
-func (pf PageFaultInfo) IsPresent() bool    { return pf.ErrorCode&PF_PRESENT != 0 }
-func (pf PageFaultInfo) IsWrite() bool      { return pf.ErrorCode&PF_WRITE != 0 }
-func (pf PageFaultInfo) IsUser() bool       { return pf.ErrorCode&PF_USER != 0 }
-func (pf PageFaultInfo) IsReserved() bool   { return pf.ErrorCode&PF_RESERVED != 0 }
-func (pf PageFaultInfo) IsInsnFetch() bool  { return pf.ErrorCode&PF_INSN_FETCH != 0 }
+func (pf PageFaultInfo) IsPresent() bool   { return pf.ErrorCode&PF_PRESENT != 0 }
+func (pf PageFaultInfo) IsWrite() bool     { return pf.ErrorCode&PF_WRITE != 0 }
+func (pf PageFaultInfo) IsUser() bool      { return pf.ErrorCode&PF_USER != 0 }
+func (pf PageFaultInfo) IsReserved() bool  { return pf.ErrorCode&PF_RESERVED != 0 }
+func (pf PageFaultInfo) IsInsnFetch() bool { return pf.ErrorCode&PF_INSN_FETCH != 0 }
 
 func (pf PageFaultInfo) Describe() string {
 	cause := "not-present"

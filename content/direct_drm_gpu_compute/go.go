@@ -12,14 +12,14 @@ const (
 )
 
 type Device struct {
-	fd            int64
-	boSize        [BoCap]uint64
-	nextBO        uint32
-	vaAddr        [VaCap]uint64
-	vaBO          [VaCap]uint32
-	vaCount       int
-	nextSeq       uint64
-	completedSeq  uint64
+	fd           int64
+	boSize       [BoCap]uint64
+	nextBO       uint32
+	vaAddr       [VaCap]uint64
+	vaBO         [VaCap]uint32
+	vaCount      int
+	nextSeq      uint64
+	completedSeq uint64
 }
 
 func newDevice() *Device { return &Device{nextBO: 1, nextSeq: 1} }

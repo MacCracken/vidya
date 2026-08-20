@@ -5,7 +5,10 @@
 // of fixed-step updates fired this frame. Zig's `i64` (with no implicit
 // conversions) makes the monotonic-time math explicit at every step —
 // no surprises from u32 wrap or signed/unsigned mixups. A real game
-// would source deltas from std.time.nanoTimestamp(); tests below use
+// would source deltas from the clock. NB: `std.time.nanoTimestamp()` no
+// longer exists in Zig 0.16 — `std.time` is duration constants now, and
+// the clock moved behind the Io interface (`std.Io.Clock.Timestamp.now`).
+// Tests below use
 // deterministic deltas to stay reproducible across CI.
 
 const std = @import("std");

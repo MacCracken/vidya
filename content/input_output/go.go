@@ -115,9 +115,13 @@ func main() {
 }
 
 func assert(cond bool, msg string) {
-	if !cond { panic("assertion failed: " + msg) }
+	if !cond {
+		panic("assertion failed: " + msg)
+	}
 }
 
 func assertNoErr(err error) {
-	if err != nil { panic("unexpected error: " + err.Error()) }
+	if err != nil {
+		panic("unexpected error: " + err.Error())
+	}
 }

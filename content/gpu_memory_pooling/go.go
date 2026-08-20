@@ -10,9 +10,9 @@ const PoolSize int64 = 1024
 
 type Pool struct{ bump int64 }
 
-func (p *Pool) Reset()         { p.bump = 0 }
-func (p *Pool) Used() int64    { return p.bump }
-func (p *Pool) Free() int64    { return PoolSize - p.bump }
+func (p *Pool) Reset()      { p.bump = 0 }
+func (p *Pool) Used() int64 { return p.bump }
+func (p *Pool) Free() int64 { return PoolSize - p.bump }
 
 func (p *Pool) Alloc(size int64) int64 {
 	if size == 0 {

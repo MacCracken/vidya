@@ -11,13 +11,17 @@ package main
 import "fmt"
 
 type Action int
+
 const (
 	ActShoot Action = iota
-	ActDunk; ActPass; ActDrive; ActSteal
+	ActDunk
+	ActPass
+	ActDrive
+	ActSteal
 )
 
 type Stats struct {
-	Speed, Shooting, Dunking, Passing  int64
+	Speed, Shooting, Dunking, Passing      int64
 	Stealing, Blocking, Clutch, Rebounding int64
 }
 

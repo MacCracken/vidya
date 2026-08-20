@@ -10,21 +10,40 @@ package main
 import "fmt"
 
 type PlayerState int
+
 const (
 	PSIdle PlayerState = iota
-	PSRun; PSShoot; PSDunk; PSPass; PSSteal; PSBlock; PSFall; PSRebound
+	PSRun
+	PSShoot
+	PSDunk
+	PSPass
+	PSSteal
+	PSBlock
+	PSFall
+	PSRebound
 )
 
 type GameState int
+
 const (
 	GSMenu GameState = iota
-	GSSelect; GSTipoff; GSPlaying; GSHalftime; GSOvertime; GSGameOver; GSAttract
+	GSSelect
+	GSTipoff
+	GSPlaying
+	GSHalftime
+	GSOvertime
+	GSGameOver
+	GSAttract
 )
 
 type Input int
+
 const (
 	InNone Input = iota
-	InMove; InShoot; InPass; InSteal
+	InMove
+	InShoot
+	InPass
+	InSteal
 )
 
 const (
@@ -122,12 +141,18 @@ func main() {
 	mustEq(didTransition(&p), false, "run->run no transition")
 
 	g := GSMenu
-	g = GSSelect;   mustEq(g, GSSelect, "menu->select")
-	g = GSTipoff;   mustEq(g, GSTipoff, "select->tipoff")
-	g = GSPlaying;  mustEq(g, GSPlaying, "tipoff->playing")
-	g = GSHalftime; mustEq(g, GSHalftime, "playing->halftime")
-	g = GSPlaying;  mustEq(g, GSPlaying, "halftime->playing")
-	g = GSGameOver; mustEq(g, GSGameOver, "playing->gameover")
+	g = GSSelect
+	mustEq(g, GSSelect, "menu->select")
+	g = GSTipoff
+	mustEq(g, GSTipoff, "select->tipoff")
+	g = GSPlaying
+	mustEq(g, GSPlaying, "tipoff->playing")
+	g = GSHalftime
+	mustEq(g, GSHalftime, "playing->halftime")
+	g = GSPlaying
+	mustEq(g, GSPlaying, "halftime->playing")
+	g = GSGameOver
+	mustEq(g, GSGameOver, "playing->gameover")
 	_ = g
 
 	p = newPlayer()

@@ -63,7 +63,7 @@ func testPageTableEntry() {
 // ── Virtual Address Decomposition ─────────────────────────────────────
 type VAddrParts struct {
 	PML4, PDPT, PD, PT uint16
-	Offset              uint16
+	Offset             uint16
 }
 
 func DecomposeVAddr(vaddr uint64) VAddrParts {
@@ -94,8 +94,8 @@ type MmioRegister struct {
 	value uint32
 }
 
-func (r *MmioRegister) Read() uint32       { return r.value }
-func (r *MmioRegister) Write(val uint32)   { r.value = val }
+func (r *MmioRegister) Read() uint32          { return r.value }
+func (r *MmioRegister) Write(val uint32)      { r.value = val }
 func (r *MmioRegister) SetBits(mask uint32)   { r.Write(r.Read() | mask) }
 func (r *MmioRegister) ClearBits(mask uint32) { r.Write(r.Read() & ^mask) }
 

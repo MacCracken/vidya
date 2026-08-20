@@ -210,8 +210,8 @@ type Span struct {
 }
 
 type SpanEvent struct {
-	Name string
-	Time time.Time
+	Name  string
+	Time  time.Time
 	Attrs map[string]any
 }
 

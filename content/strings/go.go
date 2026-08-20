@@ -29,8 +29,8 @@ line two`
 
 	// ── Byte length vs rune count ──────────────────────────────────
 	cafe := "café"
-	assert(len(cafe) == 5, "byte length")                    // 5 bytes (é is 2 bytes)
-	assert(utf8.RuneCountInString(cafe) == 4, "rune count")  // 4 runes
+	assert(len(cafe) == 5, "byte length")                   // 5 bytes (é is 2 bytes)
+	assert(utf8.RuneCountInString(cafe) == 4, "rune count") // 4 runes
 
 	// ── Iterating runes (characters), not bytes ────────────────────
 	runes := []rune(cafe)
@@ -85,7 +85,7 @@ line two`
 
 	// ── Byte slice conversion ──────────────────────────────────────
 	bytes := []byte("hello")
-	bytes[0] = 'H'                          // mutable!
+	bytes[0] = 'H' // mutable!
 	assert(string(bytes) == "Hello", "byte slice mutation")
 
 	// ── String comparison ──────────────────────────────────────────

@@ -35,10 +35,10 @@ type Server struct {
 
 type ServerOption func(*Server)
 
-func WithHost(h string) ServerOption       { return func(s *Server) { s.Host = h } }
-func WithPort(p int) ServerOption          { return func(s *Server) { s.Port = p } }
-func WithMaxConns(n int) ServerOption      { return func(s *Server) { s.MaxConnections = n } }
-func WithTimeout(ms int) ServerOption      { return func(s *Server) { s.TimeoutMs = ms } }
+func WithHost(h string) ServerOption  { return func(s *Server) { s.Host = h } }
+func WithPort(p int) ServerOption     { return func(s *Server) { s.Port = p } }
+func WithMaxConns(n int) ServerOption { return func(s *Server) { s.MaxConnections = n } }
+func WithTimeout(ms int) ServerOption { return func(s *Server) { s.TimeoutMs = ms } }
 
 func NewServer(opts ...ServerOption) (*Server, error) {
 	s := &Server{MaxConnections: 100, TimeoutMs: 5000}

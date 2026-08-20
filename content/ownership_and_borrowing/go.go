@@ -40,8 +40,8 @@ func main() {
 // the value to the heap. The GC keeps it alive.
 
 func createPointer() *int {
-	x := 42       // escape analysis moves x to heap
-	return &x     // safe — GC ensures x lives as long as the pointer
+	x := 42   // escape analysis moves x to heap
+	return &x // safe — GC ensures x lives as long as the pointer
 }
 
 func testNoDanglingPointers() {
@@ -61,14 +61,14 @@ type Point struct{ X, Y int }
 
 func testValueSemantics() {
 	a := Point{1, 2}
-	b := a       // copy, not move — Go structs are always copyable
+	b := a // copy, not move — Go structs are always copyable
 	b.X = 99
 	assert(a.X == 1, "original unchanged after copy")
 	assert(b.X == 99, "copy modified independently")
 
 	// With pointers: shared mutation (like Rust's &mut, but unchecked)
 	c := &Point{10, 20}
-	d := c       // d and c point to the same value
+	d := c // d and c point to the same value
 	d.X = 0
 	assert(c.X == 0, "pointer aliasing — both see mutation")
 }
@@ -146,14 +146,23 @@ func testClosureCapture() {
 	inc()
 	assert(x == 12, "closure captured by reference")
 
-	// Gotcha: loop variable capture
+	// Historical gotcha: loop variable capture.
+	//
+	// Through Go 1.21 a loop variable was ONE variable reused across
+	// iterations, so every closure captured the same storage and they all
+	// returned the final value. The fix was to shadow it — `i := i` — and
+	// that shadow is still widely taught as "the Go idiom".
+	//
+	// Go 1.22 (Feb 2024) changed the spec: each iteration gets a FRESH
+	// variable, for both 3-clause and range loops. The shadow is now
+	// redundant. Verified on this toolchain — these closures capture
+	// per-iteration values with no shadow present.
 	funcs := make([]func() int, 5)
 	for i := 0; i < 5; i++ {
-		i := i // shadow i to capture current value (Go idiom)
 		funcs[i] = func() int { return i }
 	}
-	assert(funcs[0]() == 0, "loop var shadowed correctly")
-	assert(funcs[4]() == 4, "each closure got its own i")
+	assert(funcs[0]() == 0, "each closure captured its own i (Go 1.22+)")
+	assert(funcs[4]() == 4, "no i := i shadow needed")
 }
 
 // ── sync.Pool: Object Reuse Without Ownership ───────────────────────

@@ -72,7 +72,16 @@ void value_print(const Value *v, char *buf, size_t buflen) {
 typedef int (*Comparator)(const void *, const void *);
 
 int int_cmp(const void *a, const void *b) {
-    return *(const int *)a - *(const int *)b;
+    /* Three-way compare, NOT subtraction. `*a - *b` overflows for operands
+     * far apart — with INT_MIN and INT_MAX the difference is not
+     * representable, the result wraps, and qsort receives a comparator that
+     * contradicts itself. Measured at -O2 on {2000000000, -2000000000, 0,
+     * 1000000, -1000000}: the subtracting form leaves the array NOT SORTED,
+     * with -2000000000 last. This is the same overflow class that
+     * content/algorithms/concept.toml warns about for binary-search
+     * midpoints. */
+    int x = *(const int *)a, y = *(const int *)b;
+    return (x > y) - (x < y);
 }
 
 int str_cmp(const void *a, const void *b) {

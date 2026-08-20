@@ -129,44 +129,74 @@ func (h *Handshake) Advance(srv, cli []uint16, chain, trust []Cert, hostname uin
 func main() {
 	srv := []uint16{TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384}
 	cli := []uint16{TLS_AES_128_GCM_SHA256, TLS_CHACHA20_POLY1305_SHA256}
-	if pickCipher(srv, cli) != TLS_AES_128_GCM_SHA256 { panic("pick") }
-	if pickCipher([]uint16{TLS_RSA_AES_128_CBC_SHA}, cli) != 0 { panic("legacy") }
+	if pickCipher(srv, cli) != TLS_AES_128_GCM_SHA256 {
+		panic("pick")
+	}
+	if pickCipher([]uint16{TLS_RSA_AES_128_CBC_SHA}, cli) != 0 {
+		panic("legacy")
+	}
 
 	leaf := Cert{100, 200}
 	inter := Cert{200, 300}
 	root := Cert{300, 300}
 	chain := []Cert{leaf, inter, root}
 	trust := []Cert{root}
-	if !verifyChain(chain, trust) { panic("chain") }
-	if verifyChain(chain, []Cert{{999, 999}}) { panic("bad trust") }
-	if verifyChain([]Cert{{100, 100}}, trust) { panic("ss leaf") }
+	if !verifyChain(chain, trust) {
+		panic("chain")
+	}
+	if verifyChain(chain, []Cert{{999, 999}}) {
+		panic("bad trust")
+	}
+	if verifyChain([]Cert{{100, 100}}, trust) {
+		panic("ss leaf")
+	}
 
 	pt := []byte("secret message")
 	ct, tag := aeadSeal(pt, 42, 7)
 	dec := aeadOpen(ct, 42, 7, tag)
-	if !bytes.Equal(dec, pt) { panic("roundtrip") }
+	if !bytes.Equal(dec, pt) {
+		panic("roundtrip")
+	}
 	tampered := append([]byte{}, ct...)
 	tampered[5] ^= 1
-	if aeadOpen(tampered, 42, 7, tag) != nil { panic("tampered") }
-	if aeadOpen(ct, 42, 7, tag^1) != nil { panic("wrong tag") }
+	if aeadOpen(tampered, 42, 7, tag) != nil {
+		panic("tampered")
+	}
+	if aeadOpen(ct, 42, 7, tag^1) != nil {
+		panic("wrong tag")
+	}
 
 	hs := Handshake{State: StInit}
-	if hs.State != StInit { panic("init") }
+	if hs.State != StInit {
+		panic("init")
+	}
 	hs.Advance(srv, cli, chain, trust, 100)
-	if hs.State != StHelloSent { panic("hello sent") }
+	if hs.State != StHelloSent {
+		panic("hello sent")
+	}
 	hs.Advance(srv, cli, chain, trust, 100)
-	if hs.State != StServerHello { panic("server hello") }
-	if hs.Negotiated != TLS_AES_128_GCM_SHA256 { panic("negotiated") }
+	if hs.State != StServerHello {
+		panic("server hello")
+	}
+	if hs.Negotiated != TLS_AES_128_GCM_SHA256 {
+		panic("negotiated")
+	}
 	hs.Advance(srv, cli, chain, trust, 100)
-	if hs.State != StCertVerified { panic("cert verified") }
+	if hs.State != StCertVerified {
+		panic("cert verified")
+	}
 	hs.Advance(srv, cli, chain, trust, 100)
-	if hs.State != StEstablished { panic("established") }
+	if hs.State != StEstablished {
+		panic("established")
+	}
 
 	hs2 := Handshake{State: StInit}
 	hs2.Advance(srv, cli, chain, trust, 100)
 	hs2.Advance(srv, cli, chain, trust, 100)
 	hs2.Advance(srv, cli, chain, trust, 999)
-	if hs2.State != StFailed { panic("hostname mismatch") }
+	if hs2.State != StFailed {
+		panic("hostname mismatch")
+	}
 
 	fmt.Println("tls_and_encryption: 16/16 ok")
 }

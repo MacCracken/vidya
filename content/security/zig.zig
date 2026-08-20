@@ -56,7 +56,8 @@ fn testInputValidation() !void {
 }
 
 // ── Constant-time comparison ──────────────────────────────────────────
-// Zig's std.crypto.utils provides constant-time operations
+// Zig's std.crypto.timing_safe provides constant-time operations
+// (it was `std.crypto.utils` before 0.16; that path is gone)
 fn constantTimeEq(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
 

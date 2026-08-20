@@ -145,7 +145,7 @@ type Named struct {
 func (n Named) String() string { return n.Name }
 
 type Animal struct {
-	Named      // embedded — Animal gets String() for free
+	Named // embedded — Animal gets String() for free
 	Legs  int
 }
 
@@ -156,8 +156,8 @@ type Vehicle struct {
 
 func testEmbeddingComposition() {
 	a := Animal{Named: Named{Name: "dog"}, Legs: 4}
-	assert(a.String() == "dog", "promoted method")  // calls Named.String()
-	assert(a.Name == "dog", "promoted field")        // direct field access
+	assert(a.String() == "dog", "promoted method") // calls Named.String()
+	assert(a.Name == "dog", "promoted field")      // direct field access
 
 	v := Vehicle{Named: Named{Name: "car"}, Wheels: 4}
 	assert(v.String() == "car", "vehicle string")
@@ -232,7 +232,7 @@ func testInterfaceComposition() {
 type Counter struct{ count int }
 
 func (c *Counter) Increment() { c.count++ }
-func (c Counter) Value() int   { return c.count }
+func (c Counter) Value() int  { return c.count }
 
 type Incrementable interface {
 	Increment()
@@ -240,7 +240,7 @@ type Incrementable interface {
 }
 
 func testMethodSets() {
-	c := &Counter{}  // pointer — satisfies Incrementable
+	c := &Counter{} // pointer — satisfies Incrementable
 	var inc Incrementable = c
 	inc.Increment()
 	inc.Increment()

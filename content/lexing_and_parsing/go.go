@@ -33,9 +33,9 @@ const (
 )
 
 type Token struct {
-	Kind  TokenKind
-	Text  string
-	Pos   int
+	Kind TokenKind
+	Text string
+	Pos  int
 }
 
 // ── Lexer ─────────────────────────────────────────────────────────────

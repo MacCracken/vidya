@@ -53,7 +53,7 @@ func neighbours(curr int, out *[4]int) int {
 	return n
 }
 
-func gridClear() *[GN]byte { return &[GN]byte{} }
+func gridClear() *[GN]byte            { return &[GN]byte{} }
 func gridBlock(g *[GN]byte, x, y int) { g[idx(x, y)] = 1 }
 
 func bfs(grid *[GN]byte, start, goal int) int64 {

@@ -140,7 +140,7 @@ func (e *Encoder) emitImm64(v int64) {
 }
 
 func (e *Encoder) Bytes() []byte { return e.buf }
-func (e *Encoder) Reset()       { e.buf = e.buf[:0] }
+func (e *Encoder) Reset()        { e.buf = e.buf[:0] }
 
 // ── MOV Instructions ─────────────────────────────────────────────────
 
@@ -286,15 +286,15 @@ func bytesEqual(a, b []byte) bool {
 }
 
 func main() {
-	fmt.Println("Instruction Encoding — Go demonstration:\n")
+	fmt.Printf("Instruction Encoding — Go demonstration:\n\n")
 
 	// ── 1. REX prefix construction ───────────────────────────────────
 	fmt.Println("1. REX prefix bit layout: 0100 WRXB")
 
 	rexTests := []struct {
 		w, r, x, b bool
-		expected    uint8
-		desc        string
+		expected   uint8
+		desc       string
 	}{
 		{false, false, false, false, 0x40, "bare REX (no extensions)"},
 		{true, false, false, false, 0x48, "REX.W (64-bit operand size)"},
@@ -487,13 +487,13 @@ func main() {
 	fmt.Println("\n7. Complete function prologue/epilogue:")
 
 	enc.Reset()
-	enc.PushReg(RBP)                 // push rbp
-	enc.MovRegReg(RBP, RSP)          // mov rbp, rsp
-	enc.AddRegImm32(RSP, -16)        // sub rsp, 16 (via add -16)
+	enc.PushReg(RBP)          // push rbp
+	enc.MovRegReg(RBP, RSP)   // mov rbp, rsp
+	enc.AddRegImm32(RSP, -16) // sub rsp, 16 (via add -16)
 	// ... function body would go here ...
-	enc.MovRegReg(RSP, RBP)          // mov rsp, rbp (or use 'leave')
-	enc.PopReg(RBP)                  // pop rbp
-	enc.Ret()                        // ret
+	enc.MovRegReg(RSP, RBP) // mov rsp, rbp (or use 'leave')
+	enc.PopReg(RBP)         // pop rbp
+	enc.Ret()               // ret
 
 	fmt.Printf("  prologue+epilogue → %s\n", hexBytes(enc.Bytes()))
 	fmt.Printf("  Total: %d bytes\n", len(enc.Bytes()))

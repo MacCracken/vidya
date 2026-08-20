@@ -49,14 +49,14 @@ const (
 )
 
 type Adsr struct {
-	state           int
-	level           int64
-	stageSamples    int64
-	releaseStart    int64
-	attackSamples   int64
-	decaySamples    int64
-	sustainLevel    int64
-	releaseSamples  int64
+	state          int
+	level          int64
+	stageSamples   int64
+	releaseStart   int64
+	attackSamples  int64
+	decaySamples   int64
+	sustainLevel   int64
+	releaseSamples int64
 }
 
 func (a *Adsr) SetParams(attack, decay, sustain, release int64) {

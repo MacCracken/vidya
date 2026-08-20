@@ -14,11 +14,11 @@ import (
 )
 
 const (
-	PageSz     = 4096
-	Magic      = uint32(0x50415452)
-	HPgCount   = 8
-	HFreeHead  = 16
-	FPNext     = 8
+	PageSz    = 4096
+	Magic     = uint32(0x50415452)
+	HPgCount  = 8
+	HFreeHead = 16
+	FPNext    = 8
 )
 
 type Header struct {

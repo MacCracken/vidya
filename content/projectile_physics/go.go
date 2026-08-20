@@ -108,8 +108,8 @@ func testEnergyDecay() {
 }
 
 func testSemiImplicitStability() {
-	startY := FloorY - 655360               // 10.0 above floor
-	b := Ball{0, startY, 0, -655360}        // vy=-10.0 upward
+	startY := FloorY - 655360        // 10.0 above floor
+	b := Ball{0, startY, 0, -655360} // vy=-10.0 upward
 	minY := startY
 
 	for i := 0; i < 500; i++ {

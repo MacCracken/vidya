@@ -20,12 +20,12 @@ const (
 )
 
 type Net struct {
-	state       [SockCap]int
-	port        [SockCap]uint16
-	peer        [SockCap]int
-	rxbuf       [SockCap][]byte
-	portToSock  map[uint16]int
-	nextFree    int
+	state      [SockCap]int
+	port       [SockCap]uint16
+	peer       [SockCap]int
+	rxbuf      [SockCap][]byte
+	portToSock map[uint16]int
+	nextFree   int
 }
 
 func newNet() *Net {

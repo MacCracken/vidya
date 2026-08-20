@@ -27,17 +27,17 @@ import (
 // These are stable kernel ABI — they never change.
 
 const (
-	SYS_READ    = 0
-	SYS_WRITE   = 1
-	SYS_OPEN    = 2
-	SYS_CLOSE   = 3
-	SYS_BRK     = 12
-	SYS_GETPID  = 39
-	SYS_EXIT    = 60
+	SYS_READ   = 0
+	SYS_WRITE  = 1
+	SYS_OPEN   = 2
+	SYS_CLOSE  = 3
+	SYS_BRK    = 12
+	SYS_GETPID = 39
+	SYS_EXIT   = 60
 )
 
 func main() {
-	fmt.Println("Syscalls and ABI — Go demonstration:\n")
+	fmt.Printf("Syscalls and ABI — Go demonstration:\n\n")
 
 	// ── Syscall number table ──────────────────────────────────────
 	fmt.Println("1. Linux x86_64 syscall number table:")
@@ -101,7 +101,7 @@ func main() {
 	// write to bad fd — error demonstration
 	_, _, errno = syscall.Syscall(
 		syscall.SYS_WRITE,
-		uintptr(999),                     // bad fd
+		uintptr(999), // bad fd
 		uintptr(unsafe.Pointer(&msg[0])),
 		uintptr(len(msg)),
 	)

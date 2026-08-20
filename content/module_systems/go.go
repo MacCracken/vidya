@@ -44,22 +44,22 @@ func main() {
 // Unlike Cargo.toml, go.mod is minimal — no [features], no [profile].
 
 type GoMod struct {
-	Module  string            // module path (e.g., github.com/user/repo)
-	Go      string            // minimum Go version
+	Module  string // module path (e.g., github.com/user/repo)
+	Go      string // minimum Go version
 	Require []Dependency
 	Replace []ReplaceRule
-	Exclude []string          // rarely used — exclude specific versions
+	Exclude []string // rarely used — exclude specific versions
 }
 
 type Dependency struct {
-	Path    string
-	Version string
+	Path     string
+	Version  string
 	Indirect bool // transitive dependency (not directly imported)
 }
 
 type ReplaceRule struct {
-	Old     string
-	New     string // can be a version or a local path
+	Old string
+	New string // can be a version or a local path
 }
 
 func testGoModStructure() {
@@ -116,12 +116,12 @@ func testVisibilityRules() {
 	}
 
 	symbols := []Symbol{
-		{"Handler", true},     // starts with uppercase → exported
-		{"handler", false},    // starts with lowercase → unexported
-		{"HTTPClient", true},  // acronyms: all caps (Go convention)
-		{"xmlParser", false},  // unexported
-		{"X", true},           // single letter, uppercase → exported
-		{"x", false},          // single letter, lowercase → unexported
+		{"Handler", true},    // starts with uppercase → exported
+		{"handler", false},   // starts with lowercase → unexported
+		{"HTTPClient", true}, // acronyms: all caps (Go convention)
+		{"xmlParser", false}, // unexported
+		{"X", true},          // single letter, uppercase → exported
+		{"x", false},         // single letter, lowercase → unexported
 	}
 
 	for _, sym := range symbols {
@@ -308,9 +308,9 @@ func testVendoring() {
 
 func testPackageOrganization() {
 	type DirPackage struct {
-		Dir      string
-		Package  string
-		Purpose  string
+		Dir     string
+		Package string
+		Purpose string
 	}
 
 	// Standard project layout (not enforced, but conventional)
@@ -377,12 +377,12 @@ func testInitFunctions() {
 
 func testWorkspaces() {
 	type GoWork struct {
-		Go   string
-		Use  []string // module directories
+		Go  string
+		Use []string // module directories
 	}
 
 	workspace := GoWork{
-		Go:  "1.22",
+		Go: "1.22",
 		Use: []string{
 			"./cmd/server",
 			"./pkg/lib",

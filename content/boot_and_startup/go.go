@@ -119,8 +119,8 @@ func testGdtEntryEncoding() {
 type IdtGate struct {
 	OffsetLow  uint16
 	Selector   uint16
-	IST        uint8  // bits [2:0] = IST index (0 = no IST)
-	TypeAttrs  uint8  // P(1) DPL(2) 0(1) Type(4)
+	IST        uint8 // bits [2:0] = IST index (0 = no IST)
+	TypeAttrs  uint8 // P(1) DPL(2) 0(1) Type(4)
 	OffsetMid  uint16
 	OffsetHigh uint32
 	Reserved   uint32

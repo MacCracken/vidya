@@ -60,12 +60,12 @@ func (op OpCode) String() string {
 
 // Inst is a three-address instruction in SSA form.
 type Inst struct {
-	Op    OpCode
-	Dst   Reg
-	Lhs   Reg   // first source operand (or src for unary)
-	Rhs   Reg   // second source operand
-	Imm   int64 // immediate value (for OpConst)
-	Dead  bool  // marked for removal by DCE
+	Op   OpCode
+	Dst  Reg
+	Lhs  Reg   // first source operand (or src for unary)
+	Rhs  Reg   // second source operand
+	Imm  int64 // immediate value (for OpConst)
+	Dead bool  // marked for removal by DCE
 }
 
 func (i Inst) String() string {
@@ -394,7 +394,7 @@ func (ra *RegAlloc) Alloc() Reg {
 }
 
 func main() {
-	fmt.Println("Optimization Passes — Go demonstration:\n")
+	fmt.Printf("Optimization Passes — Go demonstration:\n\n")
 
 	// ── 1. Constant Folding ──────────────────────────────────────────
 	// Expression: (3 + 4) * (10 - 2)  →  7 * 8  →  56
@@ -471,7 +471,7 @@ func main() {
 	fmt.Println("\n3. Strength reduction:")
 
 	ra3 := &RegAlloc{}
-	sx := ra3.Alloc()    // x = 7
+	sx := ra3.Alloc()     // x = 7
 	seight := ra3.Alloc() // 8
 	sprod := ra3.Alloc()  // x * 8
 
@@ -509,17 +509,17 @@ func main() {
 	fmt.Println("  Expression: (5 * 1) + (0 * x) + (y * 4)")
 
 	ra4 := &RegAlloc{}
-	five := ra4.Alloc()   // v0 = 5
-	one := ra4.Alloc()    // v1 = 1
-	zero := ra4.Alloc()   // v2 = 0
-	px := ra4.Alloc()     // v3 = 42 (stand-in for runtime x)
-	py := ra4.Alloc()     // v4 = 3  (stand-in for runtime y)
-	four := ra4.Alloc()   // v5 = 4
-	t1 := ra4.Alloc()     // v6 = 5 * 1
-	t2 := ra4.Alloc()     // v7 = 0 * x
-	t3 := ra4.Alloc()     // v8 = y * 4
-	t4 := ra4.Alloc()     // v9 = t1 + t2
-	t5 := ra4.Alloc()     // v10 = t4 + t3
+	five := ra4.Alloc() // v0 = 5
+	one := ra4.Alloc()  // v1 = 1
+	zero := ra4.Alloc() // v2 = 0
+	px := ra4.Alloc()   // v3 = 42 (stand-in for runtime x)
+	py := ra4.Alloc()   // v4 = 3  (stand-in for runtime y)
+	four := ra4.Alloc() // v5 = 4
+	t1 := ra4.Alloc()   // v6 = 5 * 1
+	t2 := ra4.Alloc()   // v7 = 0 * x
+	t3 := ra4.Alloc()   // v8 = y * 4
+	t4 := ra4.Alloc()   // v9 = t1 + t2
+	t5 := ra4.Alloc()   // v10 = t4 + t3
 
 	prog4 := &Program{Insts: []Inst{
 		{Op: OpConst, Dst: five, Imm: 5},
@@ -528,11 +528,11 @@ func main() {
 		{Op: OpConst, Dst: px, Imm: 42},
 		{Op: OpConst, Dst: py, Imm: 3},
 		{Op: OpConst, Dst: four, Imm: 4},
-		{Op: OpMul, Dst: t1, Lhs: five, Rhs: one},     // 5*1
-		{Op: OpMul, Dst: t2, Lhs: zero, Rhs: px},      // 0*x
-		{Op: OpMul, Dst: t3, Lhs: py, Rhs: four},      // y*4
-		{Op: OpAdd, Dst: t4, Lhs: t1, Rhs: t2},        // 5 + 0
-		{Op: OpAdd, Dst: t5, Lhs: t4, Rhs: t3},        // 5 + 12
+		{Op: OpMul, Dst: t1, Lhs: five, Rhs: one}, // 5*1
+		{Op: OpMul, Dst: t2, Lhs: zero, Rhs: px},  // 0*x
+		{Op: OpMul, Dst: t3, Lhs: py, Rhs: four},  // y*4
+		{Op: OpAdd, Dst: t4, Lhs: t1, Rhs: t2},    // 5 + 0
+		{Op: OpAdd, Dst: t5, Lhs: t4, Rhs: t3},    // 5 + 12
 		{Op: OpRet, Lhs: t5},
 	}}
 

@@ -7,9 +7,9 @@ package main
 import "fmt"
 
 const (
-	FbW   = 16
-	FbH   = 16
-	FbSz  = FbW * FbH
+	FbW  = 16
+	FbH  = 16
+	FbSz = FbW * FbH
 )
 
 var fb [FbSz]byte
@@ -44,8 +44,21 @@ func countLit() int {
 	return n
 }
 
-func iabs(v int) int { if v < 0 { return -v }; return v }
-func sign(v int) int { if v > 0 { return 1 }; if v < 0 { return -1 }; return 0 }
+func iabs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+func sign(v int) int {
+	if v > 0 {
+		return 1
+	}
+	if v < 0 {
+		return -1
+	}
+	return 0
+}
 
 func drawLine(x0, y0, x1, y1 int, v byte) {
 	dx, dy := iabs(x1-x0), iabs(y1-y0)
@@ -58,8 +71,14 @@ func drawLine(x0, y0, x1, y1 int, v byte) {
 			return
 		}
 		e2 := err * 2
-		if e2 > -dy { err -= dy; x += sx }
-		if e2 < dx  { err += dx; y += sy }
+		if e2 > -dy {
+			err -= dy
+			x += sx
+		}
+		if e2 < dx {
+			err += dx
+			y += sy
+		}
 	}
 }
 
@@ -70,43 +89,50 @@ func eq(got, want int, label string) {
 }
 
 func main() {
-	fbClear(); drawLine(2, 5, 8, 5, 1)
+	fbClear()
+	drawLine(2, 5, 8, 5, 1)
 	eq(countLit(), 7, "h count")
 	eq(int(fbGet(2, 5)), 1, "h L")
 	eq(int(fbGet(8, 5)), 1, "h R")
 	eq(int(fbGet(5, 5)), 1, "h M")
 	eq(int(fbGet(5, 6)), 0, "h off")
 
-	fbClear(); drawLine(5, 2, 5, 8, 1)
+	fbClear()
+	drawLine(5, 2, 5, 8, 1)
 	eq(countLit(), 7, "v count")
 	eq(int(fbGet(5, 2)), 1, "v T")
 	eq(int(fbGet(5, 8)), 1, "v B")
 	eq(int(fbGet(5, 5)), 1, "v M")
 	eq(int(fbGet(6, 5)), 0, "v off")
 
-	fbClear(); drawLine(2, 2, 7, 7, 1)
+	fbClear()
+	drawLine(2, 2, 7, 7, 1)
 	eq(countLit(), 6, "+d count")
 	eq(int(fbGet(2, 2)), 1, "+d S")
 	eq(int(fbGet(7, 7)), 1, "+d E")
 	eq(int(fbGet(5, 5)), 1, "+d M")
 	eq(int(fbGet(5, 4)), 0, "+d off")
 
-	fbClear(); drawLine(2, 7, 7, 2, 1)
+	fbClear()
+	drawLine(2, 7, 7, 2, 1)
 	eq(countLit(), 6, "-d count")
 	eq(int(fbGet(2, 7)), 1, "-d S")
 	eq(int(fbGet(7, 2)), 1, "-d E")
 	eq(int(fbGet(5, 4)), 1, "-d M")
 
-	fbClear(); drawLine(3, 1, 5, 11, 1)
+	fbClear()
+	drawLine(3, 1, 5, 11, 1)
 	eq(countLit(), 11, "steep count")
 	eq(int(fbGet(3, 1)), 1, "steep S")
 	eq(int(fbGet(5, 11)), 1, "steep E")
 
-	fbClear(); drawLine(8, 8, 8, 8, 1)
+	fbClear()
+	drawLine(8, 8, 8, 8, 1)
 	eq(countLit(), 1, "point count")
 	eq(int(fbGet(8, 8)), 1, "point lit")
 
-	fbClear(); drawLine(8, 5, 2, 5, 1)
+	fbClear()
+	drawLine(8, 5, 2, 5, 1)
 	eq(countLit(), 7, "rev count")
 	eq(int(fbGet(2, 5)), 1, "rev L")
 	eq(int(fbGet(8, 5)), 1, "rev R")

@@ -34,7 +34,7 @@ func main() {
 // ── ELF Constants ────────────────────────────────────────────────────
 
 const (
-	EI_NIDENT = 16
+	EI_NIDENT   = 16
 	ELFCLASS64  = 2
 	ELFDATA2LSB = 1
 	EV_CURRENT  = 1
@@ -264,11 +264,11 @@ type CoffHeader struct {
 }
 
 const (
-	PE_MAGIC         = 0x00004550 // "PE\0\0" as little-endian uint32
+	PE_MAGIC                 = 0x00004550 // "PE\0\0" as little-endian uint32
 	IMAGE_FILE_MACHINE_AMD64 = 0x8664
 	IMAGE_FILE_MACHINE_ARM64 = 0xAA64
-	COFF_HEADER_SIZE = 20
-	PE_OPT_HDR64_MAGIC = 0x020B // PE32+ (64-bit)
+	COFF_HEADER_SIZE         = 20
+	PE_OPT_HDR64_MAGIC       = 0x020B // PE32+ (64-bit)
 )
 
 func testPEHeaderLayout() {
@@ -288,8 +288,8 @@ func testPEHeaderLayout() {
 	// COFF header for x86_64
 	coff := CoffHeader{
 		Machine:              IMAGE_FILE_MACHINE_AMD64,
-		NumberOfSections:     3,  // .text, .rdata, .data
-		SizeOfOptionalHeader: 240, // PE32+ optional header
+		NumberOfSections:     3,      // .text, .rdata, .data
+		SizeOfOptionalHeader: 240,    // PE32+ optional header
 		Characteristics:      0x0022, // EXECUTABLE | LARGE_ADDRESS_AWARE
 	}
 	assert(coff.Machine == 0x8664, "AMD64 machine type")
@@ -310,12 +310,12 @@ func testPEHeaderLayout() {
 // macOS/iOS executables: header + load commands + segments
 
 const (
-	MH_MAGIC_64   = 0xFEEDFACF // 64-bit Mach-O
-	MH_CIGAM_64   = 0xCFFAEDFE // 64-bit Mach-O, byte-swapped
-	MH_EXECUTE    = 0x2         // executable type
-	CPU_TYPE_X86_64  = 0x01000007
-	CPU_TYPE_ARM64   = 0x0100000C
-	MACHO_HDR_SIZE   = 32 // Mach-O 64-bit header
+	MH_MAGIC_64     = 0xFEEDFACF // 64-bit Mach-O
+	MH_CIGAM_64     = 0xCFFAEDFE // 64-bit Mach-O, byte-swapped
+	MH_EXECUTE      = 0x2        // executable type
+	CPU_TYPE_X86_64 = 0x01000007
+	CPU_TYPE_ARM64  = 0x0100000C
+	MACHO_HDR_SIZE  = 32 // Mach-O 64-bit header
 )
 
 type MachOHeader struct {
@@ -441,9 +441,9 @@ func testFormatComparison() {
 	fmt.Println("\n7. Format comparison:")
 
 	formats := []FormatInfo{
-		{"ELF",    4, 64, "Linux/BSD/Solaris", "configurable (usually LE)"},
-		{"PE",     2, 24, "Windows",           "little-endian"},
-		{"Mach-O", 4, 32, "macOS/iOS",         "configurable (usually LE)"},
+		{"ELF", 4, 64, "Linux/BSD/Solaris", "configurable (usually LE)"},
+		{"PE", 2, 24, "Windows", "little-endian"},
+		{"Mach-O", 4, 32, "macOS/iOS", "configurable (usually LE)"},
 	}
 
 	// ELF is the largest header but most flexible

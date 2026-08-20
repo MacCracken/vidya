@@ -91,11 +91,21 @@ func headerLookup(req *Request, name string) []byte {
 func main() {
 	req1 := []byte("GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	r1 := parseRequest(req1)
-	if r1 == nil { panic("req1") }
-	if !bytes.Equal(r1.Method, []byte("GET")) { panic("method") }
-	if !bytes.Equal(r1.Path, []byte("/index.html")) { panic("path") }
-	if !bytes.Equal(r1.Version, []byte("HTTP/1.1")) { panic("version") }
-	if len(r1.Headers) != 1 { panic("hdr count") }
+	if r1 == nil {
+		panic("req1")
+	}
+	if !bytes.Equal(r1.Method, []byte("GET")) {
+		panic("method")
+	}
+	if !bytes.Equal(r1.Path, []byte("/index.html")) {
+		panic("path")
+	}
+	if !bytes.Equal(r1.Version, []byte("HTTP/1.1")) {
+		panic("version")
+	}
+	if len(r1.Headers) != 1 {
+		panic("hdr count")
+	}
 
 	for _, n := range []string{"host", "HOST", "Host"} {
 		if !bytes.Equal(headerLookup(r1, n), []byte("example.com")) {
@@ -105,23 +115,39 @@ func main() {
 
 	req3 := []byte("GET / HTTP/1.1\r\nHost: x\r\nUser-Agent: test/1.0\r\nAccept: */*\r\n\r\n")
 	r3 := parseRequest(req3)
-	if len(r3.Headers) != 3 { panic("hdr3") }
-	if !bytes.Equal(headerLookup(r3, "user-agent"), []byte("test/1.0")) { panic("ua") }
+	if len(r3.Headers) != 3 {
+		panic("hdr3")
+	}
+	if !bytes.Equal(headerLookup(r3, "user-agent"), []byte("test/1.0")) {
+		panic("ua")
+	}
 
 	req4 := []byte("POST /api HTTP/1.1\r\nContent-Length: 11\r\n\r\nhello world")
 	r4 := parseRequest(req4)
-	if !bytes.Equal(r4.Method, []byte("POST")) { panic("post") }
-	if !bytes.Equal(r4.Body, []byte("hello world")) { panic("body") }
+	if !bytes.Equal(r4.Method, []byte("POST")) {
+		panic("post")
+	}
+	if !bytes.Equal(r4.Body, []byte("hello world")) {
+		panic("body")
+	}
 
 	req5 := []byte("POST /a HTTP/1.1\r\nContent-Length: 13\r\n\r\nline1\r\nline2!")
 	r5 := parseRequest(req5)
-	if len(r5.Body) != 13 { panic("body5 len") }
-	if !bytes.Equal(r5.Body, []byte("line1\r\nline2!")) { panic("body5") }
+	if len(r5.Body) != 13 {
+		panic("body5 len")
+	}
+	if !bytes.Equal(r5.Body, []byte("line1\r\nline2!")) {
+		panic("body5")
+	}
 
 	req6 := []byte("GET / HTTP/1.1\r\nHost: x\r\n")
-	if parseRequest(req6) != nil { panic("malformed accepted") }
+	if parseRequest(req6) != nil {
+		panic("malformed accepted")
+	}
 
-	if headerLookup(r1, "authorization") != nil { panic("absent") }
+	if headerLookup(r1, "authorization") != nil {
+		panic("absent")
+	}
 
 	fmt.Println("http_and_web_protocols: 24/24 ok")
 }

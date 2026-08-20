@@ -140,32 +140,62 @@ func main() {
 	}
 	r.ZoneAdd(37, RR_A, 60, 0x12345678)
 
-	if r.ZoneLookup(1, RR_A) != 0x7F000001 { panic("a1") }
-	if r.ZoneLookup(2, RR_A) != 0x7F000001 { panic("cname") }
-	if r.ZoneLookup(3, RR_A) != 0x08080808 { panic("cname2") }
-	if r.ZoneLookup(10, RR_A) != NXDOMAIN { panic("loop") }
-	if r.ZoneLookup(20, RR_A) != NXDOMAIN { panic("deep") }
+	if r.ZoneLookup(1, RR_A) != 0x7F000001 {
+		panic("a1")
+	}
+	if r.ZoneLookup(2, RR_A) != 0x7F000001 {
+		panic("cname")
+	}
+	if r.ZoneLookup(3, RR_A) != 0x08080808 {
+		panic("cname2")
+	}
+	if r.ZoneLookup(10, RR_A) != NXDOMAIN {
+		panic("loop")
+	}
+	if r.ZoneLookup(20, RR_A) != NXDOMAIN {
+		panic("deep")
+	}
 
 	r.CacheInit()
 	first := r.Resolve(1, RR_A)
-	if r.LastStatus != 0 { panic("first miss") }
+	if r.LastStatus != 0 {
+		panic("first miss")
+	}
 	second := r.Resolve(1, RR_A)
-	if r.LastStatus != 1 { panic("second hit") }
-	if second != first { panic("same") }
+	if r.LastStatus != 1 {
+		panic("second hit")
+	}
+	if second != first {
+		panic("same")
+	}
 
 	r.AdvanceTime(301)
 	third := r.Resolve(1, RR_A)
-	if r.LastStatus != 0 { panic("expired") }
-	if third != 0x7F000001 { panic("requery") }
+	if r.LastStatus != 0 {
+		panic("expired")
+	}
+	if third != 0x7F000001 {
+		panic("requery")
+	}
 
 	r.CacheInit()
-	if r.Resolve(99, RR_A) != NXDOMAIN { panic("nxdomain") }
+	if r.Resolve(99, RR_A) != NXDOMAIN {
+		panic("nxdomain")
+	}
 	r.Resolve(99, RR_A)
-	if r.LastStatus != 1 { panic("neg cache") }
+	if r.LastStatus != 1 {
+		panic("neg cache")
+	}
 
-	if r.ZoneLookup(1, RR_MX) != 10 { panic("mx") }
-	if r.ZoneLookup(1, RR_TXT) != 99 { panic("txt") }
-	if r.ZoneLookup(1, RR_AAAA) != NXDOMAIN { panic("aaaa") }
+	if r.ZoneLookup(1, RR_MX) != 10 {
+		panic("mx")
+	}
+	if r.ZoneLookup(1, RR_TXT) != 99 {
+		panic("txt")
+	}
+	if r.ZoneLookup(1, RR_AAAA) != NXDOMAIN {
+		panic("aaaa")
+	}
 
 	fmt.Println("dns: 15/15 ok")
 }

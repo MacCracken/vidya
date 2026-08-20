@@ -29,8 +29,8 @@ func main() {
 // ── Constants ────────────────────────────────────────────────────────
 
 const (
-	PageSize       = 4096
-	PageShift      = 12
+	PageSize        = 4096
+	PageShift       = 12
 	EntriesPerTable = 512 // 2^9 entries per level
 
 	// PTE flag bits — matches x86_64 hardware

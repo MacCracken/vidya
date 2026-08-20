@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+Tier 3 of the example review (cross-language).
+
+- **Three C files taught the subtraction `qsort` comparator.**
+  `return *(const int *)a - *(const int *)b` overflows when the operands are
+  far apart, producing a comparator that contradicts itself. Measured at `-O2`
+  on `{2000000000, -2000000000, 0, 1000000, -1000000}`: the array comes back
+  **NOT SORTED**, with `-2000000000` last. Replaced with the three-way
+  `(x > y) - (x < y)` in `algorithms`, `iterators` and `type_systems` — the
+  same overflow class `algorithms/concept.toml` already warns about for
+  binary-search midpoints.
+- **`content/algorithms/cyrius.cyr` used its own topic's `bad_example`.**
+  Line 69 was `var mid = (lo + hi) / 2;` — character-for-character the
+  `bad_example` in `algorithms/concept.toml`, whose `good_example` is
+  `lo + (hi - lo) / 2`. Every other classical port already used the safe form.
+- **`content/linking_and_loading/go.go` was the corpus's only genuinely
+  nondeterministic example.** It assigned section base addresses while ranging
+  a map, and Go randomises map iteration — 6 runs produced 2 distinct outputs.
+  Now iterates a canonical link order (`.text`, `.rodata`, `.data`, `.bss`,
+  then the rest alphabetically). Sorting alphabetically would have put `.data`
+  before `.text` and taught ELF layout backwards. Two symbol-table loops were
+  sorted for the same reason. 10 runs now produce one output.
+- **`content/ownership_and_borrowing/go.go` taught a pre-1.22 workaround as
+  current idiom.** It used `i := i` with the comment "(Go idiom)" and the
+  assertion message "loop var shadowed correctly". Go 1.22 (Feb 2024) gives
+  each iteration a fresh variable for both 3-clause and range loops — verified
+  on this toolchain, closures capture correctly with no shadow. Removed; the
+  history is kept, because *why* the idiom existed is the interesting part.
+- **Four stale Zig API references.** `concurrency/zig.zig` opened with "No
+  async/await runtime in the standard library (removed in 0.14+)" — but 0.16's
+  `std.Io` documents "async, await, concurrent, and cancel", and the file
+  itself uses `std.Io.Threaded` on line 81. Also corrected:
+  `std.time.nanoTimestamp` (gone; `std.time` is duration constants and the
+  clock moved to `std.Io.Clock.Timestamp.now`), `GeneralPurposeAllocator`
+  (renamed `DebugAllocator`), and `std.crypto.utils` (now
+  `std.crypto.timing_safe`). All three were in comments, which is why they
+  compiled.
+- **`content/ownership_and_borrowing/zig.zig`'s errdefer section had no
+  errdefer.** `buildResource` returned `?Resource` — an optional, so `errdefer`
+  could not apply even in principle — contained none, faked the cleanup with a
+  manual assignment, and printed "errdefer cleaned up". Now returns `!Resource`
+  with a real `errdefer` whose effect is observable through a counter the
+  caller asserts on both paths. Neutering the errdefer body now aborts.
+- **`content/pattern_matching/cyrius.cyr` defined `classify` twice.** The
+  compiler warns "last definition wins", but resolution is **positional**: the
+  body a call site gets depends on where it sits relative to the second
+  definition. Moving a test function below it turned 20 passed / 0 failed into
+  17 passed / 3 failed with no assertion edited. Second one renamed
+  `classify_match`.
+
+### Changed
+
+- **Go: `gofmt` sweep (47 files) and `go vet` clean (7 files).** Seven
+  `fmt.Println("…\n")` calls tripped vet's redundant-newline check; rewritten
+  as `fmt.Printf` so the output stays byte-identical. All 77 Go examples now
+  pass `gofmt -l` and `go vet`. Verified by capturing stdout for all 77 before
+  and after: **76 byte-identical**, the one difference being
+  `syscalls_and_abi`, which prints a live PID by design.
+
 Tier 3 of the example review (quantum + validator lockstep). OpenQASM files
 parse cleanly and the gate never **simulates** them, so semantic defects here
 shipped green. Everything below was measured on a simulator.

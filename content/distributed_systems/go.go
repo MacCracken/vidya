@@ -22,7 +22,7 @@ const (
 
 type VClock [NNodes]int64
 
-func (v *VClock) Tick(node int)       { v[node]++ }
+func (v *VClock) Tick(node int) { v[node]++ }
 func (v *VClock) Merge(from *VClock) {
 	for i := 0; i < NNodes; i++ {
 		if from[i] > v[i] {
@@ -124,13 +124,17 @@ func main() {
 	}
 	{
 		var v VClock
-		v.Tick(1); v.Tick(1); v.Tick(2)
+		v.Tick(1)
+		v.Tick(1)
+		v.Tick(2)
 		check(v == VClock{0, 2, 1}, "tick")
 	}
 	{
 		var a, b VClock
-		a.Tick(0); a.Tick(0)
-		b.Tick(1); b.Tick(2)
+		a.Tick(0)
+		a.Tick(0)
+		b.Tick(1)
+		b.Tick(2)
 		a.Merge(&b)
 		check(a == VClock{2, 1, 1}, "merge max")
 	}
@@ -141,17 +145,21 @@ func main() {
 	}
 	{
 		var a, b VClock
-		a.Tick(0); a.Tick(0); b.Tick(0)
+		a.Tick(0)
+		a.Tick(0)
+		b.Tick(0)
 		check(vcCompare(&a, &b) == VCGreater, "greater")
 	}
 	{
 		var a, b VClock
-		a.Tick(1); b.Tick(1)
+		a.Tick(1)
+		b.Tick(1)
 		check(vcCompare(&a, &b) == VCEqual, "equal")
 	}
 	{
 		var a, b VClock
-		a.Tick(0); b.Tick(1)
+		a.Tick(0)
+		b.Tick(1)
 		check(vcCompare(&a, &b) == VCConcurrent, "concurrent")
 		check(vcCompare(&b, &a) == VCConcurrent, "concurrent symmetric")
 	}
@@ -169,20 +177,24 @@ func main() {
 	}
 	{
 		c := NewQCluster()
-		c.Partition(1); c.Partition(2)
+		c.Partition(1)
+		c.Partition(2)
 		check(c.Write(300) == 0, "write fails with 2 partitioned")
 		check(c.accounts[0] == 0, "no replica wrote")
 	}
 	{
 		c := NewQCluster()
-		c.Partition(2); c.Write(500); c.Heal(2)
+		c.Partition(2)
+		c.Write(500)
+		c.Heal(2)
 		c.Partition(0)
 		check(c.Read() == 500, "intersection: read sees latest")
 	}
 	{
 		c := NewQCluster()
 		c.Write(700)
-		c.Partition(0); c.Partition(1)
+		c.Partition(0)
+		c.Partition(1)
 		check(c.Read() == -1, "read sentinel when below R")
 	}
 

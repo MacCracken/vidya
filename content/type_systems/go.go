@@ -45,8 +45,8 @@ type Buffer struct {
 	data string
 }
 
-func (b *Buffer) Read() string    { return b.data }
-func (b *Buffer) Write(s string)  { b.data += s }
+func (b *Buffer) Read() string   { return b.data }
+func (b *Buffer) Write(s string) { b.data += s }
 
 // ── Generics (Go 1.18+) ───────────────────────────────────────────
 

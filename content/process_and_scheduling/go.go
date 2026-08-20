@@ -175,10 +175,10 @@ func testRegisterContext() {
 // interactive workloads.
 
 type RoundRobinScheduler struct {
-	queue    []*Process
-	quantum  int // ticks per time slice
-	current  int // index of running process
-	ticks    int // total ticks elapsed
+	queue   []*Process
+	quantum int // ticks per time slice
+	current int // index of running process
+	ticks   int // total ticks elapsed
 }
 
 func NewRoundRobin(quantum int) *RoundRobinScheduler {
@@ -257,7 +257,7 @@ func testRoundRobin() {
 // in virtual time). Nice 19 has weight ~15 (runs ~68x faster in vtime).
 
 type CFSScheduler struct {
-	tasks      []*Process
+	tasks       []*Process
 	minVruntime uint64
 }
 

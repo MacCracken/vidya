@@ -56,9 +56,9 @@ func main() {
 	// Field ordering affects struct size due to alignment padding
 
 	type BadLayout struct {
-		A bool   // 1 byte + 7 padding
-		B int64  // 8 bytes
-		C bool   // 1 byte + 7 padding
+		A bool  // 1 byte + 7 padding
+		B int64 // 8 bytes
+		C bool  // 1 byte + 7 padding
 	}
 	// Total: 24 bytes
 
@@ -109,9 +109,9 @@ func main() {
 	// Values that don't escape the function stay on the stack (fast)
 	// Use `go build -gcflags='-m'` to see escape analysis decisions
 
-	x := 42           // stays on stack
+	x := 42 // stays on stack
 	_ = x
-	p := newOnHeap()  // escapes to heap (returned pointer)
+	p := newOnHeap() // escapes to heap (returned pointer)
 	assert(*p > 0, "heap alloc")
 
 	// ── Sync.Pool for reducing GC pressure ─────────────────────────
