@@ -11,6 +11,9 @@
 #   - x86_64 instruction formats and sizes
 #   - Stack frame offset calculation
 #   - Register encoding in ModR/M bytes
+#
+# Requires bash >= 4.0 — associative arrays (declare -A). macOS's stock
+# /bin/bash is 3.2.57 and rejects them: "declare: -A: invalid option".
 
 set -euo pipefail
 

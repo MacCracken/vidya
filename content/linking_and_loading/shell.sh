@@ -9,6 +9,9 @@
 #
 # Shell can model this with temp files as "object files", grep for
 # symbol lookup, and arithmetic for address calculation.
+#
+# Requires bash >= 4.0 — associative arrays (declare -A). macOS's stock
+# /bin/bash is 3.2.57 and rejects them: "declare: -A: invalid option".
 
 set -euo pipefail
 

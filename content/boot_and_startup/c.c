@@ -345,7 +345,9 @@ static void test_tss(void) {
 static void test_control_register_bits(void) {
     // CR0 bits
     uint32_t cr0_pe = 1 << 0;   // Protection Enable
-    uint32_t cr0_pg = 1 << 31;  // Paging
+    // Trap: `1 << 31` shifts into the sign bit of a *signed* int — UB, and
+    // -fsanitize=undefined flags it. The `u` suffix makes the operand unsigned.
+    uint32_t cr0_pg = 1u << 31; // Paging
 
     assert(cr0_pe == 0x00000001);
     assert(cr0_pg == 0x80000000);

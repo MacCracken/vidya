@@ -30,8 +30,12 @@ void buffer_append(Buffer *b, const char *s) {
     size_t slen = strlen(s);
     while (b->len + slen + 1 > b->cap) {
         b->cap *= 2;
-        b->data = realloc(b->data, b->cap);
-        assert(b->data != NULL);
+        // Trap: `b->data = realloc(b->data, ...)` leaks the old block when
+        // realloc fails — NULL overwrites the only pointer to it. Land the
+        // result in a temporary first; on failure the original is still ours.
+        char *grown = realloc(b->data, b->cap);
+        assert(grown != NULL);
+        b->data = grown;
     }
     memcpy(b->data + b->len, s, slen);
     b->len += slen;
@@ -74,9 +78,11 @@ int main(void) {
     dynamic[2] = 30;
     dynamic[3] = 40;
 
-    // Grow the allocation
-    dynamic = realloc(dynamic, 8 * sizeof(int));
-    assert(dynamic != NULL);
+    // Grow the allocation — never `p = realloc(p, n)`: if realloc returns
+    // NULL the old block is still allocated but unreachable, i.e. leaked.
+    int *grown = realloc(dynamic, 8 * sizeof(int));
+    assert(grown != NULL); // real code: free(dynamic) here, then bail
+    dynamic = grown;
     assert(dynamic[3] == 40); // old data preserved
     dynamic[4] = 50;
     assert(dynamic[4] == 50);

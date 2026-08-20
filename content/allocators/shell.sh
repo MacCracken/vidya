@@ -8,6 +8,9 @@
 #
 # Note: functions that modify global state use a REPLY variable instead
 # of echo + $(), because $() runs a subshell that cannot update the parent.
+#
+# Requires bash >= 4.3 — negative array subscripts (unset 'arr[-1]').
+# macOS's /bin/bash 3.2.57 fails with "[-1]: bad array subscript".
 
 set -euo pipefail
 

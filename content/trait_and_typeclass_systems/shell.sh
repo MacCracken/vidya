@@ -7,6 +7,9 @@
 #   - Variable indirection for dynamic dispatch
 #   - Associative arrays as vtables
 #   - Convention-based "interface" compliance
+#
+# Requires bash >= 4.3 — namerefs (local -n, bash 4.3) and associative
+# arrays (declare -A, bash 4.0). macOS's /bin/bash 3.2.57 has neither.
 
 set -euo pipefail
 

@@ -10,6 +10,9 @@
 #   - eval (runtime code generation — dangerous)
 #   - source (file inclusion, like C's #include)
 #   - Here-docs and here-strings for templates
+#
+# Requires bash >= 4.0 — case-modifying expansions (${word^}, ${word^^},
+# ${upper,,}). macOS's /bin/bash 3.2.57 answers "bad substitution".
 
 set -euo pipefail
 

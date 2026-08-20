@@ -3,6 +3,14 @@
 # Python I/O uses file objects with read/write methods. The open()
 # function handles text vs binary mode. Context managers (with)
 # ensure files are closed. io.StringIO/BytesIO provide in-memory streams.
+#
+# Every text-mode open() below passes encoding= explicitly. Omitting it
+# does NOT mean UTF-8 — it means locale.getencoding(), which is cp1252
+# on a stock Windows box and ASCII under LC_ALL=C. The same code then
+# round-trips fine on the author's machine and corrupts or raises on
+# someone else's. Run with `python3 -X warn_default_encoding
+# -W error::EncodingWarning` to turn every implicit-encoding site into
+# a hard error (PEP 597). Binary mode ("rb"/"wb") takes no encoding.
 
 import io
 import os
@@ -10,26 +18,27 @@ import tempfile
 
 def main():
     # ── Writing to a file ───────────────────────────────────────────
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                     suffix=".txt", delete=False) as f:
         path = f.name
         f.write("line 1\n")
         f.write("line 2\n")
         f.write("line 3\n")
 
     # ── Reading entire file ─────────────────────────────────────────
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         content = f.read()
     assert content == "line 1\nline 2\nline 3\n", "read all"
 
     # ── Line-by-line reading (streaming) ────────────────────────────
     lines = []
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         for line in f:
             lines.append(line.rstrip("\n"))
     assert lines == ["line 1", "line 2", "line 3"], "line iteration"
 
     # ── readlines vs iteration ──────────────────────────────────────
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         all_lines = f.readlines()
     assert len(all_lines) == 3, "readlines"
 
@@ -71,20 +80,20 @@ def main():
     assert buf.getvalue() == "hello, world!", "print to stream"
 
     # ── Append mode ─────────────────────────────────────────────────
-    with open(path, "a") as f:
+    with open(path, "a", encoding="utf-8") as f:
         f.write("line 4\n")
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         lines = f.readlines()
     assert len(lines) == 4, "append mode"
 
     # ── Context manager ensures close ───────────────────────────────
-    f = open(path, "r")
+    f = open(path, "r", encoding="utf-8")
     assert not f.closed
     f.close()
     assert f.closed, "explicitly closed"
 
     # with statement handles it automatically
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         _ = f.read()
     assert f.closed, "context manager closed"
 

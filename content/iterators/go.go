@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"iter"
 	"slices"
 	"sort"
 	"strings"
@@ -97,6 +98,47 @@ func main() {
 	}
 	assertSliceEq(collected, []int{3, 2, 1}, "closure iterator")
 
+	// ── Range-over-func: iter.Seq (Go 1.23+) ────────────────────────
+	// The closure above is a *pull* iterator: the consumer asks for the
+	// next value. iter.Seq is a *push* iterator: the producer drives, and
+	// `range` over it desugars into the yield callback below. Push
+	// iterators compose without the caller writing a for/ok/break dance.
+
+	var counted []int
+	for v := range countUp(4) {
+		counted = append(counted, v)
+	}
+	assertSliceEq(counted, []int{1, 2, 3, 4}, "iter.Seq range-over-func")
+
+	// `break` in the loop body makes yield return false. That is the whole
+	// early-exit protocol — and honouring it is the producer's job.
+	var partial []int
+	for v := range countUp(1_000_000) {
+		if v > 3 {
+			break
+		}
+		partial = append(partial, v)
+	}
+	assertSliceEq(partial, []int{1, 2, 3}, "iter.Seq honours early break")
+
+	// iter.Seq2 yields pairs; slices.All and maps.All return one.
+	weighted := 0
+	for i, v := range slices.All([]int{10, 20, 30}) {
+		weighted += i * v
+	}
+	assert(weighted == 0*10+1*20+2*30, "iter.Seq2 via slices.All")
+
+	// Seqs compose lazily: filterSeq computes nothing until ranged over,
+	// and the break above still propagates through the wrapper.
+	var evensLazy []int
+	for v := range filterSeq(countUp(10), func(n int) bool { return n%2 == 0 }) {
+		evensLazy = append(evensLazy, v)
+	}
+	assertSliceEq(evensLazy, []int{2, 4, 6, 8, 10}, "lazy iter.Seq filter")
+
+	// slices.Collect drains a Seq into a slice (Go 1.23+).
+	assertSliceEq(slices.Collect(countUp(3)), []int{1, 2, 3}, "slices.Collect")
+
 	// ── strings.NewReader as an io.Reader iterator ──────────────────
 	reader := strings.NewReader("hello")
 	buf := make([]byte, 5)
@@ -140,6 +182,34 @@ func foldInts(s []int, init int, f func(int, int) int) int {
 		acc = f(acc, v)
 	}
 	return acc
+}
+
+// countUp is a push iterator over 1..=n.
+//
+// Trap: yield returning false means the consumer left the loop (break,
+// return, panic). You MUST return immediately — calling yield again after
+// it returned false panics with "range function continued iteration after
+// loop body exit". Every hand-written Seq needs this guard.
+func countUp(n int) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for i := 1; i <= n; i++ {
+			if !yield(i) {
+				return
+			}
+		}
+	}
+}
+
+// filterSeq wraps a Seq lazily — no intermediate slice is built, and a
+// break downstream stops the upstream producer.
+func filterSeq(seq iter.Seq[int], keep func(int) bool) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for v := range seq {
+			if keep(v) && !yield(v) {
+				return
+			}
+		}
+	}
 }
 
 func makeCountdown(n int) func() (int, bool) {

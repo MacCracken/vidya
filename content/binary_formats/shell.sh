@@ -6,6 +6,9 @@
 # identify its format — ELF, PE, Mach-O, shebang, gzip, etc.
 # This file demonstrates reading raw bytes, interpreting magic
 # numbers, and detecting file formats from the command line.
+#
+# Requires bash >= 4.0 — associative arrays (declare -A). macOS's stock
+# /bin/bash is 3.2.57 and rejects them: "declare: -A: invalid option".
 
 set -euo pipefail
 

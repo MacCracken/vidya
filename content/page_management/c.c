@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -20,6 +21,20 @@
 #define FP_NEXT 8
 
 typedef struct { uint64_t page_count; uint64_t freehead; } Header;
+
+/* Every read/write below is routed through this check. Two traps it dodges:
+ *   1. Ignoring the result -- a short or failed read leaves the destination
+ *      buffer stale, and the free-list pointer parsed out of it is garbage.
+ *   2. assert(write(...) == PAGE_SZ) -- under -DNDEBUG the assert expression
+ *      is compiled out *together with the write inside it*, so nothing is
+ *      ever written. Passing the call as an argument keeps it in every build.
+ */
+static void io_ok(int ok, const char *what) {
+    if (!ok) {
+        perror(what);
+        exit(EXIT_FAILURE);
+    }
+}
 
 static off_t page_offset(uint64_t num) { return (off_t)(PAGE_SZ + num * PAGE_SZ); }
 
@@ -58,13 +73,13 @@ static uint64_t page_alloc(int fd, Header *h) {
     if (h->freehead != 0) {
         uint64_t fh = h->freehead;
         uint8_t buf[PAGE_SZ];
-        page_read(fd, fh, buf);
+        io_ok(page_read(fd, fh, buf) == PAGE_SZ, "page_read (free page)");
         memcpy(&h->freehead, buf + FP_NEXT, 8);
         return fh;
     }
     uint64_t num = h->page_count++;
     uint8_t zero[PAGE_SZ] = {0};
-    page_write(fd, num, zero);
+    io_ok(page_write(fd, num, zero) == PAGE_SZ, "page_write (new page)");
     return num;
 }
 
@@ -72,7 +87,7 @@ static void page_free(int fd, Header *h, uint64_t num) {
     uint8_t buf[PAGE_SZ];
     memset(buf, 0, PAGE_SZ);
     memcpy(buf + FP_NEXT, &h->freehead, 8);
-    page_write(fd, num, buf);
+    io_ok(page_write(fd, num, buf) == PAGE_SZ, "page_write (free)");
     h->freehead = num;
 }
 
@@ -86,12 +101,12 @@ int main(void) {
     hdr_init(&h);
     uint8_t hbuf[PAGE_SZ];
     hdr_to_bytes(&h, hbuf);
-    write(fd, hbuf, PAGE_SZ);
+    io_ok(write(fd, hbuf, PAGE_SZ) == PAGE_SZ, "write header");
 
     /* 1-2. header */
-    lseek(fd, 0, SEEK_SET);
+    io_ok(lseek(fd, 0, SEEK_SET) == 0, "lseek header");
     uint8_t rh[PAGE_SZ];
-    read(fd, rh, PAGE_SZ);
+    io_ok(read(fd, rh, PAGE_SZ) == PAGE_SZ, "read header");
     assert(hdr_verify(rh) && "magic ok");
     Header loaded;
     hdr_load(&loaded, rh);
@@ -107,9 +122,9 @@ int main(void) {
     uint8_t buf[PAGE_SZ] = {0};
     uint64_t v = 42;
     memcpy(buf, &v, 8);
-    page_write(fd, p1, buf);
+    io_ok(page_write(fd, p1, buf) == PAGE_SZ, "page_write (roundtrip)");
     uint8_t rb[PAGE_SZ];
-    page_read(fd, p1, rb);
+    io_ok(page_read(fd, p1, rb) == PAGE_SZ, "page_read (roundtrip)");
     uint64_t got;
     memcpy(&got, rb, 8);
     assert(got == 42 && "read back 42");
@@ -119,7 +134,7 @@ int main(void) {
     uint64_t p3 = page_alloc(fd, &h);
     assert(p3 == 2 && "reused freed page");
 
-    close(fd);
+    io_ok(close(fd) == 0, "close");
     unlink(path);
     printf("page_management: 6/6 ok\n");
     return 0;

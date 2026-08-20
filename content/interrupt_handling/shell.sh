@@ -6,6 +6,9 @@
 # /proc/interrupts, express PIC/APIC constants as arithmetic, and
 # model the x86 exception vector table. Understanding interrupts is
 # essential for kernel development and driver writing.
+#
+# Requires bash >= 4.0 — associative arrays (declare -A). macOS's stock
+# /bin/bash is 3.2.57 and rejects them: "declare: -A: invalid option".
 
 set -euo pipefail
 

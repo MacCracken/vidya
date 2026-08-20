@@ -61,12 +61,24 @@ fn main() {
     assert_eq!(largest(&["hello", "world", "abc"]), &"world");
 
     // ── Traits: shared behavior ────────────────────────────────────
+    // TRAP: `&s[..n]` indexes a `str` by *byte* offset, and `n.min(s.len())`
+    // clamps the length without landing on a char boundary — so the obvious
+    // "first n characters" truncation panics the moment the text is not
+    // ASCII. Walk `char_indices` to get a real boundary instead.
+    fn first_chars(s: &str, n: usize) -> &str {
+        match s.char_indices().nth(n) {
+            Some((byte_idx, _)) => &s[..byte_idx], // char_indices only yields boundaries
+            None => s,                             // fewer than n chars — take it all
+        }
+    }
+
     trait Summarize {
         fn summary(&self) -> String;
 
         // Default implementation — can be overridden
         fn brief(&self) -> String {
-            format!("{}...", &self.summary()[..20.min(self.summary().len())])
+            let full = self.summary();
+            format!("{}...", first_chars(&full, 20))
         }
     }
 
@@ -77,7 +89,7 @@ fn main() {
 
     impl Summarize for Article {
         fn summary(&self) -> String {
-            format!("{}: {}", self.title, &self.body[..50.min(self.body.len())])
+            format!("{}: {}", self.title, first_chars(&self.body, 50))
         }
     }
 
@@ -86,6 +98,19 @@ fn main() {
         body: "Rust's type system is one of its greatest strengths.".into(),
     };
     assert!(article.summary().starts_with("Rust Types:"));
+
+    // Non-ASCII body: byte 50 of this text falls inside the 4-byte crab,
+    // so `&self.body[..50]` would panic here. `first_chars` cuts cleanly.
+    let unicode_article = Article {
+        title: "Unicode".into(),
+        body: "Slicing this string by byte offset splits a crab 🦀 in half.".into(),
+    };
+    assert_eq!(
+        unicode_article.summary().chars().count(),
+        "Unicode: ".len() + 50
+    );
+    assert!(unicode_article.summary().ends_with('🦀'));
+    assert_eq!(unicode_article.brief(), "Unicode: Slicing thi...");
 
     // ── impl Trait: simple generic arguments ───────────────────────
     fn print_summary(item: &impl Summarize) -> String {

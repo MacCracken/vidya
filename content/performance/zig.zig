@@ -47,11 +47,22 @@ pub fn main() !void {
     }
     try expect(stack_sum == 523776); // sum 0..1023
 
-    // ── Sentinel slices: avoid bounds checks ───────────────────────
-    // Sentinel-terminated slices let the compiler optimize loops
+    // ── Sentinel slices: a guaranteed terminator ───────────────────
+    // A [:0]const u8 carries a length AND guarantees a 0 element one past
+    // the end, so it can be passed to C APIs with no copy or re-scan, and
+    // a scanning loop can stop on the terminator instead of comparing an
+    // index against len each iteration.
+    //
+    // Trap: this is NOT a bounds-check escape. Safe builds still check
+    // every index. data[len] is in bounds (it yields the sentinel), but
+    // data[len + 1] panics "index out of bounds: index 12, len 11". Only
+    // ReleaseFast/ReleaseSmall or @setRuntimeSafety(false) drop the check.
     const data: [:0]const u8 = "hello world";
     try expect(data.len == 11);
-    try expect(data[11] == 0); // sentinel
+    try expect(data[11] == 0); // index == len reads the sentinel
+    var scan: usize = 0;
+    while (data[scan] != 0) : (scan += 1) {} // terminator ends the loop
+    try expect(scan == data.len);
 
     // ── @Vector: SIMD operations ───────────────────────────────────
     // Zig vectors map to hardware SIMD (SSE, AVX, NEON)

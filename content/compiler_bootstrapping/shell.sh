@@ -11,6 +11,9 @@
 #   - Two-pass assembly: collect labels, then emit
 #   - Idempotency: applying a compiler twice yields same output
 #   - Bootstrap chain: stage0 builds stage1, stage1 builds stage1 again
+#
+# Requires bash >= 4.0 — associative arrays (declare -A). macOS's stock
+# /bin/bash is 3.2.57 and rejects them: "declare: -A: invalid option".
 
 set -euo pipefail
 

@@ -8,6 +8,9 @@
 #   - Subshells for isolation
 #   - export for environment propagation
 #   - local for function-scoped encapsulation
+#
+# Requires bash >= 4.3 — namerefs (local -n, bash 4.3) and case-modifying
+# expansions (${1^^}, bash 4.0). macOS's /bin/bash 3.2.57 has neither.
 
 set -euo pipefail
 

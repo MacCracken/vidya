@@ -188,7 +188,14 @@ func testContextPropagation() {
 }
 
 func handleRequest(ctx context.Context, path string) string {
-	traceID := ctx.Value(traceIDKey).(string)
+	// Trap: `ctx.Value(k).(string)` panics whenever the key is absent —
+	// Value returns a nil any, and a bare assertion on nil panics. The
+	// caller owns the context, so you can never assume the key is there.
+	// Always use the comma-ok form and supply a fallback.
+	traceID, ok := ctx.Value(traceIDKey).(string)
+	if !ok {
+		traceID = "no-trace"
+	}
 	return fmt.Sprintf("[%s] handling %s", traceID, path)
 }
 

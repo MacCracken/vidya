@@ -21,7 +21,11 @@ assert_eq() {
 
 # ── Setup: temp directory as our filesystem ────────────────────────
 FS_ROOT=$(mktemp -d)
-trap "rm -rf $FS_ROOT" EXIT
+# Single quotes: the body expands at EXIT time with "$FS_ROOT" still quoted.
+# Double quotes would bake the path in unquoted, so a TMPDIR with a space
+# splits into several rm arguments — none of which exist, so rm reports
+# success and the temp tree leaks silently.
+trap 'rm -rf "$FS_ROOT"' EXIT
 
 # ── Create files and directories ──────────────────────────────────
 mkdir -p "$FS_ROOT/docs/drafts"

@@ -12,6 +12,9 @@
 #   - Constant folding as text substitution
 #   - Basic block identification
 #   - IR pretty-printing and validation
+#
+# Requires bash >= 4.0 — associative arrays (local -A). macOS's stock
+# /bin/bash is 3.2.57 and rejects them: "local: -A: invalid option".
 
 set -euo pipefail
 

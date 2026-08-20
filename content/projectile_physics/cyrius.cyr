@@ -19,9 +19,24 @@ var RESTITUTION = 45875;         # 0.7 in 16.16
 
 struct Ball { x; y; vx; vy; }
 
+# TRAP: `var b = Ball { … }; return &b;` looks like a constructor and
+# compiles clean, but Cyrius gives every local a FIXED address (static
+# storage, not a stack slot). So the pointer does not dangle in the C
+# sense (it never faults), but the data is NOT safe: two hazards, neither
+# of which crashes. (1) ALIASING — every call returns the same address, so
+# a second call silently overwrites the first call's object. (2) REUSE —
+# the compiler overlays frames, so an unrelated function's local can take
+# the same address. Measured: a helper returning &local read back 4242,
+# then 999888 after one call to an unrelated function. Heap the storage so
+# each call owns its own object.
 fn ball_new(x, y, vx, vy) {
-    var b = Ball { x, y, vx, vy };
-    return &b;
+    var b = alloc(32);              # 4 fields * 8 bytes
+    if (b == 0) { return 0; }
+    store64(b, x);
+    store64(b + 8, y);
+    store64(b + 16, vx);
+    store64(b + 24, vy);
+    return b;
 }
 
 fn asr(v, n) {
@@ -68,6 +83,23 @@ fn bounce_check(b) {
 }
 
 # --- Tests ---
+
+# Proves the heap fix in ball_new above. With the tempting `return &b;`
+# body, these two calls would return the SAME address and the first ball
+# would silently hold the second's values — the trap the note describes.
+fn test_ball_new_distinct() {
+    var a = ball_new(1, 2, 3, 4);
+    var b = ball_new(10, 20, 30, 40);
+    assert(a != 0, "ball_new a allocated");
+    assert(b != 0, "ball_new b allocated");
+    assert(a != b, "two calls return DISTINCT objects (not aliased)");
+    # Explicit byte offsets via load64 — unambiguous for a raw alloc().
+    assert_eq(load64(a + 0), 1, "first ball still holds its own x");
+    assert_eq(load64(b + 0), 10, "second ball holds its own x");
+    assert_eq(load64(a + 8), 2, "first ball kept its own y");
+    assert_eq(load64(b + 8), 20, "second ball kept its own y");
+    return 0;
+}
 
 fn test_gravity() {
     # Ball at rest, one frame of gravity
@@ -207,6 +239,7 @@ fn test_semi_implicit_stability() {
 
 fn main() {
     alloc_init();
+    test_ball_new_distinct();
     test_gravity();
     test_parabolic_arc();
     test_bounce();

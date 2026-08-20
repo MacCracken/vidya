@@ -5,6 +5,9 @@
 # virtual addresses to physical pages through multi-level page tables.
 # Shell can inspect the live virtual memory layout through /proc/self/maps,
 # query page sizes with getconf, and decompose addresses with bit arithmetic.
+#
+# Requires bash >= 4.0 — associative arrays (declare -A). macOS's stock
+# /bin/bash is 3.2.57 and rejects them: "declare: -A: invalid option".
 
 set -euo pipefail
 

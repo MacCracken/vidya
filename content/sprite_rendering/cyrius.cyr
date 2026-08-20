@@ -52,9 +52,23 @@ fn fb_set(x, y, color) {
 # Fields: data (pointer to pixel data), width, height.
 struct SpriteRegion { data; width; height; }
 
+# TRAP: `var s = SpriteRegion { … }; return &s;` compiles clean but is
+# wrong. Cyrius gives every local a FIXED address (static storage, not a
+# stack slot). So the pointer does not dangle in the C
+# sense (it never faults), but the data is NOT safe: two hazards, neither
+# of which crashes. (1) ALIASING — every call returns the same address, so
+# a second call silently overwrites the first call's object. (2) REUSE —
+# the compiler overlays frames, so an unrelated function's local can take
+# the same address. Measured: a helper returning &local read back 4242,
+# then 999888 after one call to an unrelated function. Heap the storage so
+# each call owns its own object.
 fn sprite_region(data, w, h) {
-    var s = SpriteRegion { data, w, h };
-    return &s;
+    var s = alloc(24);              # 3 fields * 8 bytes
+    if (s == 0) { return 0; }
+    store64(s, data);
+    store64(s + 8, w);
+    store64(s + 16, h);
+    return s;
 }
 
 # --- Blit (1:1 with transparency and clipping) ---
@@ -169,6 +183,20 @@ fn init_test_sprite() {
 }
 
 # --- Tests ---
+
+# Proves the heap fix in sprite_region above: two regions are two objects.
+fn test_sprite_region_distinct() {
+    var r1 = sprite_region(100, 8, 8);
+    var r2 = sprite_region(200, 4, 4);
+    assert(r1 != 0, "region 1 allocated");
+    assert(r2 != 0, "region 2 allocated");
+    assert(r1 != r2, "two calls return DISTINCT objects (not aliased)");
+    # load64 with an explicit BYTE offset — `*(p + 1)` would read 8 bytes
+    # starting one byte in, yielding 8<<56 rather than field 1.
+    assert_eq(load64(r1 + 8), 8, "region 1 kept its own width");
+    assert_eq(load64(r2 + 8), 4, "region 2 kept its own width");
+    return 0;
+}
 
 fn test_clear() {
     fb_clear(42);
@@ -288,6 +316,8 @@ fn test_scaled_shrink() {
 fn main() {
     alloc_init();
     fb_init();
+
+    test_sprite_region_distinct();
 
     test_clear();
     test_blit_opaque();

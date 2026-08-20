@@ -6,6 +6,9 @@
 # through register mappings, and demonstrate syscall number arithmetic.
 # This file shows how to inspect the syscall layer from bash without
 # requiring strace or other privileged tools.
+#
+# Requires bash >= 4.0 — associative arrays (declare -A). macOS's stock
+# /bin/bash is 3.2.57 and rejects them: "declare: -A: invalid option".
 
 set -euo pipefail
 

@@ -63,12 +63,15 @@ fn main() {
     assert_eq!(received, vec![0, 1, 2]);
 
     // ── Mutex: shared mutable state ────────────────────────────────
-    let counter = Arc::new(Mutex::new(0u64));
+    // The Mutex lives on this stack frame and the scoped threads borrow it.
+    // Wrapping it in an Arc here would be pure overhead — an atomic refcount
+    // bump and drop per thread to share something the borrow checker already
+    // proves is alive. Arc buys you nothing that `scope` has not given you.
+    let counter = Mutex::new(0u64);
 
     thread::scope(|s| {
         for _ in 0..4 {
-            let counter = Arc::clone(&counter);
-            s.spawn(move || {
+            s.spawn(|| {
                 for _ in 0..1000 {
                     let mut guard = counter.lock().unwrap();
                     *guard += 1;
@@ -80,13 +83,33 @@ fn main() {
 
     assert_eq!(*counter.lock().unwrap(), 4000);
 
+    // ── When Arc IS required: detached threads ─────────────────────
+    // `thread::spawn` has no scope to outlive, so its closure must be
+    // `'static` — it cannot borrow `counter` above. Shared ownership via
+    // Arc is the answer there, and only there.
+    let owned = Arc::new(Mutex::new(0u64));
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let owned = Arc::clone(&owned);
+            thread::spawn(move || {
+                for _ in 0..1000 {
+                    *owned.lock().unwrap() += 1;
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().expect("thread panicked");
+    }
+    assert_eq!(*owned.lock().unwrap(), 4000);
+
     // ── Atomics: lock-free shared state ────────────────────────────
-    let counter = Arc::new(AtomicU64::new(0));
+    // Same rule: scoped threads borrow the atomic directly, no Arc.
+    let counter = AtomicU64::new(0);
 
     thread::scope(|s| {
         for _ in 0..4 {
-            let counter = Arc::clone(&counter);
-            s.spawn(move || {
+            s.spawn(|| {
                 for _ in 0..1000 {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }

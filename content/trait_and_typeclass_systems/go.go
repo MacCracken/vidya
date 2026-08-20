@@ -16,6 +16,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -301,10 +302,23 @@ func testErrorInterface() {
 	assert(err != nil, "validation failed")
 	assert(strings.Contains(err.Error(), "cannot be empty"), "error message")
 
-	// Type assertion to get structured error
-	ve, ok := err.(*ValidationError)
-	assert(ok, "is ValidationError")
+	// Recover the structured error. Use errors.As, never a bare
+	// `err.(*ValidationError)` type assertion: As walks the Unwrap chain,
+	// a type assertion only inspects the outermost error.
+	var ve *ValidationError
+	assert(errors.As(err, &ve), "is ValidationError")
 	assert(ve.Field == "name", "error field")
+
+	// The trap, demonstrated: one %w wrap and the bare assertion goes blind.
+	// Any caller up the stack may add context you never see, so the bare
+	// form is a latent bug even when it happens to work today.
+	wrapped := fmt.Errorf("saving user: %w", err)
+	_, direct := wrapped.(*ValidationError)
+	assert(!direct, "bare type assertion misses the wrapped error")
+
+	var wrappedVE *ValidationError
+	assert(errors.As(wrapped, &wrappedVE), "errors.As unwraps %w")
+	assert(wrappedVE.Field == "name", "unwrapped error field")
 
 	assert(validate("Alice") == nil, "valid input")
 }

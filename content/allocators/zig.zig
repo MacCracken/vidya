@@ -30,7 +30,14 @@ fn BumpAllocator(comptime capacity: usize) type {
 
         /// Allocate size bytes with given alignment. Returns a slice or null.
         pub fn alloc(self: *Self, size: usize, alignment: usize) ?[*]u8 {
-            const aligned = (self.offset + alignment - 1) & ~(alignment - 1);
+            // Trap: rounding the OFFSET up to `alignment` only aligns the
+            // returned pointer when the backing store's base address is
+            // already aligned. A kernel or firmware arena is handed an
+            // arbitrary region, so align the real ADDRESS and convert back
+            // to an offset. With an odd base, offset-only rounding hands
+            // out addr % 8 == 1 for every 8-byte "aligned" allocation.
+            const base = @intFromPtr(&self.memory[0]);
+            const aligned = ((base + self.offset + alignment - 1) & ~(alignment - 1)) - base;
             const end = aligned + size;
             if (end > capacity) return null;
             self.offset = end;

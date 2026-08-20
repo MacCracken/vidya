@@ -110,7 +110,12 @@ void codebuf_emit(CodeBuf *buf, const char *line) {
     // +5 for "    " indent and newline
     while (buf->len + line_len + 6 > buf->cap) {
         buf->cap *= 2;
-        buf->data = realloc(buf->data, buf->cap);
+        // Trap: `buf->data = realloc(buf->data, ...)` leaks the old block if
+        // realloc fails — NULL clobbers the only pointer to it (CWE-401,
+        // which `gcc -fanalyzer` will trace). Grow via a temporary instead.
+        char *grown = realloc(buf->data, buf->cap);
+        assert(grown != NULL);
+        buf->data = grown;
     }
     buf->len += (size_t)sprintf(buf->data + buf->len, "    %s\n", line);
 }
@@ -119,7 +124,9 @@ void codebuf_emit_raw(CodeBuf *buf, const char *text) {
     size_t text_len = strlen(text);
     while (buf->len + text_len + 2 > buf->cap) {
         buf->cap *= 2;
-        buf->data = realloc(buf->data, buf->cap);
+        char *grown = realloc(buf->data, buf->cap);
+        assert(grown != NULL);
+        buf->data = grown;
     }
     buf->len += (size_t)sprintf(buf->data + buf->len, "%s\n", text);
 }
@@ -265,7 +272,9 @@ void gen_function(CodeBuf *buf, const char *name, Expr **stmts, int stmt_count) 
     size_t placeholder_len = strlen(placeholder);
     while (buf->len + placeholder_len + 1 > buf->cap) {
         buf->cap *= 2;
-        buf->data = realloc(buf->data, buf->cap);
+        char *grown = realloc(buf->data, buf->cap);
+        assert(grown != NULL);
+        buf->data = grown;
     }
     memcpy(buf->data + buf->len, placeholder, placeholder_len + 1);
     buf->len += placeholder_len;

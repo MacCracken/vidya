@@ -62,7 +62,10 @@ assert_eq "$result" "hello world" "printf builtin"
 # ── Read entire file at once ────────────────────────────────────────
 # GOOD: read whole file with < redirection
 tmpfile=$(mktemp)
-trap "rm -f $tmpfile" EXIT
+# Single-quoted body expands at EXIT time, keeping "$tmpfile" one word.
+# Double quotes would bake in an unquoted path that word-splits on a spacey
+# TMPDIR — harmless-looking, because rm -f on a missing file exits 0.
+trap 'rm -f "$tmpfile"' EXIT
 printf 'line1\nline2\nline3\n' > "$tmpfile"
 
 content=$(< "$tmpfile")  # bash built-in, no cat subprocess

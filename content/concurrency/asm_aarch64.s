@@ -5,6 +5,13 @@
 // pairs, or the LSE (Large System Extensions) atomics: LDADD, SWPAL,
 // CAS. DMB/DSB/ISB are the memory barrier instructions.
 
+// TRAP: the LSE atomics below are armv8.1-a, not baseline armv8-a. GNU as
+// defaults to the baseline, so LDADD/SWPAL/CAS fail to assemble with
+// "selected processor does not support ..." unless you raise the target
+// first. `.arch armv8.1-a` is a superset of armv8-a, so the LDXR/STXR and
+// barrier code below is unaffected.
+.arch armv8.1-a
+
 .global _start
 
 .section .data
@@ -88,6 +95,57 @@ _start:
     b.ne    fail
     ldr     x0, [x9]
     cmp     x0, #200            // new value should be 200
+    b.ne    fail
+
+    // ── LSE atomics (armv8.1-a): LDADD / SWPAL / CAS ───────────────
+    // Single instructions that replace whole LDXR/STXR retry loops.
+    // They cannot fail spuriously, so there is no `cbnz` retry branch,
+    // and on contended many-core systems they are far cheaper because
+    // the operation is done at the point of coherency instead of
+    // ping-ponging the cache line through an exclusive monitor.
+    // Operand order is: LDADD <Xs>, <Xt>, [<Xn>]  —  Xs is the operand,
+    // Xt receives the PRE-operation value, [Xn] is the target.
+    adr     x9, counter
+    mov     x0, #7
+    str     x0, [x9]
+
+    // LDADD: atomic fetch-add. *x9 += 3, x1 = old value.
+    mov     x0, #3
+    ldadd   x0, x1, [x9]
+    cmp     x1, #7              // returns the value from BEFORE the add
+    b.ne    fail
+    ldr     x2, [x9]
+    cmp     x2, #10
+    b.ne    fail
+
+    // SWPAL: atomic swap with acquire-release ordering.
+    // The A/L suffixes are the ordering, not part of the operation:
+    // SWP (relaxed), SWPA (acquire), SWPL (release), SWPAL (both).
+    mov     x0, #99
+    swpal   x0, x3, [x9]
+    cmp     x3, #10             // x3 = old value
+    b.ne    fail
+
+    // CAS: compare-and-swap in one instruction. If *x9 == x4 then
+    // *x9 = x5. Either way x4 is overwritten with the old *x9, so the
+    // success test is "did x4 come back as what I expected".
+    mov     x4, #99             // expected
+    mov     x5, #123            // new
+    cas     x4, x5, [x9]
+    cmp     x4, #99
+    b.ne    fail
+    ldr     x2, [x9]
+    cmp     x2, #123
+    b.ne    fail
+
+    // CAS that must NOT swap: expected value is wrong.
+    mov     x4, #55             // expected (wrong — memory holds 123)
+    mov     x5, #77             // new
+    cas     x4, x5, [x9]
+    cmp     x4, #123            // x4 = actual old value, proving the miss
+    b.ne    fail
+    ldr     x2, [x9]
+    cmp     x2, #123            // memory unchanged
     b.ne    fail
 
     // ── Spinlock via LDXR/STXR ─────────────────────────────────────

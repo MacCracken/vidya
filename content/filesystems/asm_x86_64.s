@@ -34,7 +34,12 @@
 .equ SEEK_SET,   0
 
 # ── Data constants ───────────────────────────────────────────────────
-.equ WRITE_LEN,  13             # length of write_data
+.equ WRITE_LEN,  14             # length of write_data
+                                # TRAP: count the escape, not the source text.
+                                # "Hello, vidya!\n" is 13 printable chars + one
+                                # 0x0A = 14 bytes. A 13 here writes a short file
+                                # (newline dropped) and every later check still
+                                # passes, because they all use the same constant.
 
 _start:
     # ── Step 1: Create and open file for writing ─────────────────────
@@ -167,7 +172,7 @@ filepath:
     .asciz  "/tmp/vidya_fs_test.tmp"
 
 write_data:
-    .ascii  "Hello, vidya!\n"       # 13 bytes (no null needed for write)
+    .ascii  "Hello, vidya!\n"       # 14 bytes (no null needed for write)
 
 read_buf:
     .skip   64                     # buffer for reading back

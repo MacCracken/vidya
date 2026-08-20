@@ -9,6 +9,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+Tier 4 of the example review — the tail, 27 findings across seven language
+groups. Each was reproduced before being fixed. Highlights:
+
+- **C**: six `p = realloc(p, n)` self-assignments across three files leaked the
+  original block on failure — `gcc -fanalyzer` traced CWE-401 in each, one of
+  them in `memory_management/c.c`, whose subject *is* leak avoidance. Also
+  `boot_and_startup/c.c`'s `1 << 31` (the corpus's only UBSan hit) and ~12
+  unchecked fallible I/O returns in `input_output` / `page_management` —
+  captured into variables rather than wrapped in `assert()`, which `-DNDEBUG`
+  would delete along with the call.
+- **Rust**: `type_systems/rust.rs` byte-sliced a `String` at a fixed offset —
+  byte 50 lands inside a 🦀 — while `strings/rust.rs:48` warns against exactly
+  that. `concurrency/rust.rs` used `Arc` inside `thread::scope`, against its own
+  concept.toml. The `atomic::fence` label was corrected: measured with
+  `--emit asm`, `fence` emits `lock orl $0, -64(%rsp)` (a hardware barrier)
+  while `compiler_fence` emits only `#MEMBARRIER` — it was mislabelled as the
+  latter.
+- **Go**: `iterators/go.go` advertised `iter.Seq` and never imported `iter`;
+  `bloom_and_glow` shadowed the 1.21 `clear` builtin; `tracing:191` panicked on
+  any caller-supplied context while two sibling sites used comma-ok. Two
+  performance claims were **measured and found wrong**: index-vs-range loops
+  compile to *byte-identical* machine code (both 27 bytes, same instruction
+  sequence), and the "~50 element" slice/map crossover measures ≈14 on a miss
+  and ≈37 on a hit.
+- **Zig**: `allocators/zig.zig`'s bump allocator aligned the *offset*, not the
+  *address* — its `%8==0` assertion passed only because the backing array
+  happened to sit favourably; with a deliberately odd base the old code returns
+  `addr%8==1`. `performance/zig.zig` claimed sentinel slices "avoid bounds
+  checks"; indexing past the sentinel panics with
+  `index out of bounds: index 12, len 11`.
+- **Shell**: unquoted expansions in trap/xargs strings — under a `TMPDIR` with
+  a space, `concurrency/shell.sh` failed outright and two others leaked a temp
+  directory every run while exiting 0. Fixed and verified against a
+  from-source **bash 3.2.57** that the files needing ≥ 4.0 features are now
+  annotated as such.
+- **Assembly**: `filesystems/asm_x86_64.s` wrote 13 bytes of a 14-byte literal
+  and then read 13 back, so the dropped newline was invisible; the AArch64
+  sibling said 14, which showed the intent.
+
+### Fixed — Cyrius `&local` is not a dangling pointer, and that is worse
+
+Four files described a returned `&local` as a "dangling stack pointer". It is
+not: Cyrius gives every local a **fixed address**, so the pointer never faults.
+An initial correction swung too far the other way — "the pointer stays readable
+forever, so nothing crashes" — which is also wrong, and would send a reader
+after the wrong workaround. Measured, there are **two** silent hazards:
+
+1. **Aliasing** — every call returns the same address, so a second call
+   overwrites the first call's object.
+2. **Frame reuse** — the compiler overlays frames, so an *unrelated* function's
+   local can occupy that address. A helper returning `&local` read back `4242`,
+   then `999888` after a single call to an unrelated function.
+
+All five files now say this, consistently: `projectile_physics`,
+`sprite_rendering`, `state_machines`, `game_ai_decisions`, and
+`ownership_and_borrowing` — the last of which was untouched by the tier and had
+drifted out of agreement with the other four. The two heap-allocating
+constructors that were dead code now have tests asserting that two calls return
+**distinct** objects, so the fix is exercised rather than merely present.
+
+Also fixed: `input_output/cyrius.cyr` told `file_read_all` a 16-byte buffer held
+128 (`var buf[N]` reserves N **bytes** — measured `&b - &a` = −16 for `[16]`);
+`strings/cyrius.cyr:57` documented a `str_replace` call shape that compiles,
+exits 0, and silently returns the string unchanged.
+
 Tier 3 of the example review (crypto naming + error propagation).
 
 - **The stubbed "AEAD" was named as if it were real, in all 10 ports.**

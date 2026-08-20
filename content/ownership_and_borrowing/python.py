@@ -202,22 +202,55 @@ def main():
     # Rust prevents mutating a collection while iterating.
     # Python allows it, leading to subtle bugs.
 
+    # BAD: a list iterator is just an advancing index. Removing an
+    # element shifts every later element one slot left, so the next
+    # step of the loop steps clean over its neighbour. No exception —
+    # the loop just silently misses elements.
     items = [1, 2, 3, 4, 5]
-    # BAD: modifying while iterating skips elements
-    result_bad = []
-    for item in items[:]:  # use a copy to avoid the bug
-        result_bad.append(item * 2)
-    assert result_bad == [2, 4, 6, 8, 10]
+    seen_bad = []
+    for item in items:          # iterating the LIVE list
+        seen_bad.append(item)
+        if item % 2 == 1:
+            items.remove(item)  # mutating the thing being iterated
+    assert seen_bad == [1, 3, 5]  # 2 and 4 were never visited
+    assert items == [2, 4]
 
-    # Dict raises RuntimeError if modified during iteration (Python 3.x)
+    # GOOD: iterate a snapshot, mutate the original. items[:] is a copy,
+    # so the iterator's indices stay valid no matter what happens to
+    # `items`. Every element is visited.
+    items = [1, 2, 3, 4, 5]
+    seen_good = []
+    for item in items[:]:       # copy — a stable snapshot
+        seen_good.append(item)
+        if item % 2 == 1:
+            items.remove(item)
+    assert seen_good == [1, 2, 3, 4, 5]
+    assert items == [2, 4]
+
+    # Dicts are stricter than lists: CPython stamps a version on the
+    # dict and the iterator checks it, raising instead of silently
+    # skipping. The trap: the check runs on the NEXT step, so a `break`
+    # immediately after the mutation exits before it ever fires and the
+    # except handler becomes dead code that proves nothing.
     d = {"a": 1, "b": 2}
+    for key in d:
+        if key == "a":
+            d["c"] = 3  # size changed — but no error yet
+            break       # ...and break escapes before the check runs
+    assert d == {"a": 1, "b": 2, "c": 3}  # no exception was raised
+
+    # Let the loop take one more step and it does raise.
+    d = {"a": 1, "b": 2}
+    raised = False
     try:
         for key in d:
             if key == "a":
                 d["c"] = 3  # modify during iteration
-                break
-    except RuntimeError:
-        pass  # some Python implementations catch this
+        assert False, "expected RuntimeError"  # AssertionError, not caught below
+    except RuntimeError as e:
+        raised = True
+        assert "changed size during iteration" in str(e)
+    assert raised
 
     print("All ownership and borrowing examples passed.")
 

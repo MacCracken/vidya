@@ -29,12 +29,23 @@ var FALL_FRAMES = 20;     # 0.33s
 struct Player { state; prev_state; timer; }
 
 fn player_new() {
-    # Construct on stack and return address. Callers must consume the
-    # returned pointer before the caller's frame exits — same convention
-    # as projectile_physics's ball_new. For long-lived Players, construct
-    # `var p = Player { … }` directly in the caller's scope (see tests).
-    var p = Player { PS_IDLE, PS_IDLE, 0 };
-    return &p;
+    # TRAP: the obvious body here is
+    #     var p = Player { PS_IDLE, PS_IDLE, 0 }; return &p;
+    # and it compiles clean. It is still wrong, but NOT for the reason it
+    # looks like — Cyrius gives every local a FIXED address (static
+    # storage, not a stack slot). The pointer never faults, but the data
+    # is not safe: every call returns the same address, so two "different"
+    # Players are one Player and the second `player_new()` silently resets
+    # the first — and an unrelated function's local can land on that same
+    # address and overwrite it outright. Heap the storage so each call owns
+    # its own object. (Tests below still build `var p = Player { … }`
+    # inline in their own scope, which is fine — one object, one owner.)
+    var p = alloc(24);              # 3 fields * 8 bytes
+    if (p == 0) { return 0; }
+    store64(p, PS_IDLE);
+    store64(p + 8, PS_IDLE);
+    store64(p + 16, 0);
+    return p;
 }
 
 fn is_committed(state) {

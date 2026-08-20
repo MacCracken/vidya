@@ -18,7 +18,11 @@ assert_eq() {
 
 # ── Background processes with & ─────────────────────────────────────
 tmpfile=$(mktemp)
-trap "rm -f $tmpfile" EXIT
+# Single-quote the trap body: it expands at EXIT time, so "$tmpfile" stays
+# one word. With double quotes the path is baked in unquoted at trap-set
+# time, and a TMPDIR containing a space silently splits it into two
+# arguments — rm -f exits 0 and the temp file leaks every run.
+trap 'rm -f "$tmpfile"' EXIT
 
 echo "start" > "$tmpfile"
 
@@ -49,10 +53,14 @@ assert_eq "$result" "1,4,9,16,25" "pipe concurrency"
 
 # ── xargs -P: parallel execution ───────────────────────────────────
 tmpdir=$(mktemp -d)
-trap "rm -rf $tmpdir $tmpfile" EXIT
+trap 'rm -rf "$tmpdir" "$tmpfile"' EXIT
 
-# Process 4 items in parallel with 2 workers
-seq 1 4 | xargs -P2 -I{} bash -c "echo {} > $tmpdir/{}.txt"
+# Process 4 items in parallel with 2 workers.
+# Pass tmpdir as a positional argument instead of interpolating it into the
+# -c string: interpolation would splice an unquoted path into the child's
+# source text, so a directory with a space reparses as a redirect to the
+# wrong file and every worker writes nowhere.
+seq 1 4 | xargs -P2 -I{} bash -c 'echo "$2" > "$1/$2.txt"' _ "$tmpdir" {}
 
 file_count=$(ls "$tmpdir" | wc -l | tr -d ' ')
 assert_eq "$file_count" "4" "xargs parallel"

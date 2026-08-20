@@ -94,13 +94,21 @@ fn test_constant_time_comparison() {
 /// the compiler from optimizing away the zeroing.
 fn secure_zero(buf: &mut [u8]) {
     for byte in buf.iter_mut() {
-        // SAFETY: volatile prevents the compiler from eliding this write
+        // SAFETY: volatile prevents the compiler from eliding this write.
+        // This line — and only this line — is what keeps the zeroing alive.
         unsafe {
             std::ptr::write_volatile(byte as *mut u8, 0);
         }
     }
-    // Compiler fence ensures zeroing completes before any reuse
-    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    // A *compiler* fence: it stops the optimizer hoisting later accesses
+    // above the zeroing, and emits no machine instruction. Do not reach for
+    // `atomic::fence` here — despite the similar name that is a hardware
+    // barrier (`lock orl $0, (%rsp)` on x86-64), it orders atomic accesses
+    // rather than volatile ones, and `rustc -O --emit asm` shows the very
+    // same store loop with it, without it, and with this. The fence is not
+    // load-bearing for elision; `write_volatile` is. Same pairing the
+    // `zeroize` crate uses.
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
 fn test_secret_zeroing() {

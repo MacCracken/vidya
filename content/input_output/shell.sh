@@ -16,7 +16,11 @@ assert_eq() {
 }
 
 tmpdir=$(mktemp -d)
-trap "rm -rf $tmpdir" EXIT
+# Single quotes: the body expands at EXIT time with "$tmpdir" still quoted.
+# With double quotes the path is baked in unquoted, so a TMPDIR containing a
+# space splits into multiple rm arguments, rm still exits 0, and the temp
+# directory leaks on every run.
+trap 'rm -rf "$tmpdir"' EXIT
 
 # ── Writing to files ────────────────────────────────────────────────
 echo "line 1" > "$tmpdir/out.txt"      # overwrite

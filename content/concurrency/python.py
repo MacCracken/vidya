@@ -153,10 +153,25 @@ def main():
     # I/O-bound threads DO run concurrently because the GIL is released
     # during I/O operations (file, network, sleep).
     #
-    # For CPU parallelism:
+    # For CPU parallelism, reach for processes. The `if __name__ ==
+    # "__main__":` guard below is MANDATORY, not decoration: as of
+    # Python 3.14 the default start method on Linux is `forkserver`
+    # (it was `fork` through 3.13). forkserver and spawn re-IMPORT the
+    # main module inside every child, so unguarded top-level Pool()
+    # code runs again in the child, which then aborts. The parent sees
+    # `ConnectionResetError: [Errno 104] Connection reset by peer` from
+    # the forkserver handshake — a symptom that names nothing. The
+    # worker must also live at module scope so it can be pickled by
+    # qualified name; a closure or nested def is not picklable.
+    #
     #   from multiprocessing import Pool
-    #   with Pool(4) as p:
-    #       results = p.map(cpu_heavy_fn, data)
+    #
+    #   def cpu_heavy_fn(x):        # module scope — picklable by name
+    #       return x * x
+    #
+    #   if __name__ == "__main__":  # required under forkserver/spawn
+    #       with Pool(4) as p:
+    #           results = p.map(cpu_heavy_fn, data)
 
     print("All concurrency examples passed.")
 

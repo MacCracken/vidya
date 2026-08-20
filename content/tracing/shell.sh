@@ -5,6 +5,9 @@
 # and introspection variables (BASH_SOURCE, LINENO, FUNCNAME).
 # These provide printf-style debugging, structured trace output,
 # and function-level instrumentation without external tools.
+#
+# Requires bash >= 4.1 — BASH_XTRACEFD (4.1), and bash 4's extdebug, which
+# propagates the DEBUG trap into functions. macOS's 3.2.57 has neither.
 
 set -euo pipefail
 

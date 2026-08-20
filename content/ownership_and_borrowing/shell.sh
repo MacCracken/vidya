@@ -9,6 +9,9 @@
 #   - nameref provides "borrowing" (reference to another variable)
 #   - trap provides RAII-like cleanup
 #   - Temp file patterns show resource ownership
+#
+# Requires bash >= 4.3 — namerefs (declare -n / local -n). macOS's stock
+# /bin/bash is 3.2.57 and rejects them: "local: -n: invalid option".
 
 set -euo pipefail
 

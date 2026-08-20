@@ -7,6 +7,9 @@
 # output without relying on readelf itself. Understanding ELF
 # structure is essential for systems programming, debugging, and
 # security analysis.
+#
+# Requires bash >= 4.0 — associative arrays (declare -A). macOS's stock
+# /bin/bash is 3.2.57 and rejects them: "declare: -A: invalid option".
 
 set -euo pipefail
 

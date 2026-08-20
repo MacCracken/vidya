@@ -8,6 +8,9 @@
 # effect functions and parallel arrays (TOK_KIND, TOK_TEXT) for output.
 # Mirrors the cyrius.cyr reference: SELECT/FROM/WHERE keywords plus
 # IDENT, INT, single-char operators, EOF.
+#
+# Requires bash >= 4.0 — case-modifying expansion (${1^^}). macOS's stock
+# /bin/bash is 3.2.57 and answers "bad substitution".
 
 set -euo pipefail
 

@@ -66,7 +66,12 @@ func countLit(fb []byte) int {
 	return n
 }
 
-func clear(b []byte) {
+// clearFb zeroes a framebuffer. Named clearFb, not clear: since Go 1.21
+// `clear` is a builtin (clear(slice) zeroes it, clear(map) empties it).
+// A package-level func named clear compiles, but it shadows the builtin
+// for the whole file — a later reader writing clear(someMap) gets a
+// confusing type error instead of the builtin.
+func clearFb(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
@@ -85,7 +90,7 @@ func main() {
 	applyBloom(src, dst, Threshold)
 	eq(countLit(dst), 0, "empty")
 
-	clear(src)
+	clearFb(src)
 	fbSet(src, 8, 8, 200)
 	applyBloom(src, dst, Threshold)
 	eq(int(fbGet(dst, 8, 8)), 200, "src")
@@ -96,21 +101,21 @@ func main() {
 	eq(int(fbGet(dst, 7, 7)), 0, "diag")
 	eq(countLit(dst), 5, "single count")
 
-	clear(src)
+	clearFb(src)
 	fbSet(src, 8, 8, 200)
 	fbSet(src, 9, 8, 250)
 	applyBloom(src, dst, Threshold)
 	eq(int(fbGet(dst, 9, 8)), 255, "clamp")
 	eq(int(fbGet(dst, 8, 8)), 255, "sum clamp")
 
-	clear(src)
+	clearFb(src)
 	fbSet(src, 8, 8, 100)
 	applyBloom(src, dst, Threshold)
 	eq(int(fbGet(dst, 8, 8)), 100, "dim preserved")
 	eq(int(fbGet(dst, 7, 8)), 0, "dim no glow")
 	eq(countLit(dst), 1, "dim count")
 
-	clear(src)
+	clearFb(src)
 	fbSet(src, 0, 0, 200)
 	applyBloom(src, dst, Threshold)
 	eq(int(fbGet(dst, 0, 0)), 200, "corner src")
@@ -118,7 +123,7 @@ func main() {
 	eq(int(fbGet(dst, 0, 1)), 100, "corner D")
 	eq(countLit(dst), 3, "corner count")
 
-	clear(src)
+	clearFb(src)
 	fbSet(src, 4, 8, 200)
 	fbSet(src, 6, 8, 200)
 	applyBloom(src, dst, Threshold)

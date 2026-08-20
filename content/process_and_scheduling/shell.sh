@@ -6,6 +6,9 @@
 # background jobs, signals, and scheduling. This file uses /proc,
 # bash builtins, and arithmetic to explore how the Linux kernel
 # manages processes and decides which one runs next.
+#
+# Requires bash >= 4.0 — $BASHPID and associative arrays (declare -A).
+# macOS's stock /bin/bash is 3.2.57 and has neither.
 
 set -euo pipefail
 

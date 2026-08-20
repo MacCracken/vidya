@@ -12,6 +12,9 @@
 #   - SIB byte: scale(2) | index(3) | base(3)
 #   - Instruction length calculation
 #   - Little-endian immediate encoding
+#
+# Requires bash >= 4.0 — associative arrays (declare -A). macOS's stock
+# /bin/bash is 3.2.57 and rejects them: "declare: -A: invalid option".
 
 set -euo pipefail
 

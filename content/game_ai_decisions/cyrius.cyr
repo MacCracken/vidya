@@ -15,13 +15,32 @@ enum Action { ACT_SHOOT = 0; ACT_DUNK = 1; ACT_PASS = 2; ACT_DRIVE = 3; ACT_STEA
 struct Stats { speed; shooting; dunking; passing; stealing; blocking; clutch; rebounding; }
 
 fn stats_new(spd, sht, dnk, pas, stl, blk, clt, reb) {
-    # Cyrius parser doesn't accept `return Stats { ... }` directly, and
-    # returning `&local_struct` would be a dangling stack pointer. Tests
-    # construct `Stats { … }` inline at their call site (matches the
-    # convention in content/projectile_physics/cyrius.cyr); this helper
-    # is dead code retained for documentation but unused.
-    var s = Stats { spd, sht, dnk, pas, stl, blk, clt, reb };
-    return &s;   # WARNING: dangling stack ptr — do not use
+    # Cyrius's parser doesn't accept `return Stats { ... }` directly, so
+    # a helper has to build the object and return a pointer.
+    #
+    # TRAP: the tempting body is
+    #     var s = Stats { … }; return &s;
+    # It compiles clean, and it does not dangle in the C sense — Cyrius
+    # gives every local a FIXED address (static storage), so the pointer
+    # never faults. That is WORSE than a dangling pointer, not better:
+    # nothing crashes, and the corruption is silent. Two ways it bites.
+    # (1) Aliasing: `var a = stats_new(...); var b = stats_new(...);`
+    # returns the same address twice, leaving a holding b's numbers.
+    # (2) Reuse: the compiler overlays frames, so an UNRELATED function's
+    # local can occupy that address. Measured — a helper returning &local
+    # read back 4242, then 999888 after one call to an unrelated function.
+    # Heap the storage so each call owns its own object.
+    var s = alloc(64);              # 8 fields * 8 bytes
+    if (s == 0) { return 0; }
+    store64(s, spd);
+    store64(s + 8, sht);
+    store64(s + 16, dnk);
+    store64(s + 24, pas);
+    store64(s + 32, stl);
+    store64(s + 40, blk);
+    store64(s + 48, clt);
+    store64(s + 56, reb);
+    return s;
 }
 
 # --- PRNG (PCG multiply-add) ---
@@ -253,7 +272,8 @@ fn test_difficulty_scaling() {
 
 fn test_ai_decide() {
     # At dunk range with high dunk stat — should prefer dunk.
-    # Construct Stats inline (see stats_new note re: dangling stack ptr).
+    # Construct Stats inline (see the stats_new note: a returned &local
+    # aliases and gets overwritten — it does not fault).
     rng_seed(100);  # fixed seed for determinism
     var s = Stats { 5, 5, 10, 3, 3, 3, 3, 3 };
     var action = ai_decide_offense(&s, 1 << 16, 20);

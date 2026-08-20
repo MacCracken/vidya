@@ -61,7 +61,11 @@ IntVec intvec_new(size_t cap) {
 void intvec_push(IntVec *v, int value) {
     if (v->len == v->cap) {
         v->cap *= 2;
-        v->data = realloc(v->data, v->cap * sizeof(int));
+        // Trap: `v->data = realloc(v->data, ...)` leaks the old buffer when
+        // realloc fails — the only pointer to it is gone. Use a temporary.
+        int *grown = realloc(v->data, v->cap * sizeof(int));
+        assert(grown != NULL);
+        v->data = grown;
     }
     v->data[v->len++] = value;
 }
