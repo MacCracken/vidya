@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-08-20 (v2.8.1 ship — see the 2.8.1 sweep block below).
+> **Last refresh**: 2026-08-20 (v2.8.2 ship — see the 2.8.1 sweep block below).
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -15,6 +15,29 @@ type: state
 > **Convention adopted from cyrius/agnosticos** (2026-05-16): pattern from `cyrius/docs/doc-health.md` (which adopted it from `agnosticos/docs/doc-health.md`). Vidya's doc tree is ~14 markdown files (vs cyrius's ~81 and agnosticos's ~265) so the tier structure here is leaner — no ADRs, audits, FFI, issues/proposals subdirs at this scale.
 
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
+
+---
+
+## 2026-08-20 sweep (v2.8.2)
+
+Release-cut refresh, done in the same step as `docs/development/state.md` —
+the process fix the v2.8.1 block asked for, now actually exercised.
+
+| Doc | Updated for 2.8.2 |
+|---|---|
+| `CHANGELOG.md` | 2.8.2 entry cut from `[Unreleased]`. Three merges had each appended their own section, leaving duplicate `### Changed` / `### Added` blocks and three Fixed items filed under the wrong headings — reorganized into one Fixed / Changed / Added set. Added a lead paragraph with the *verified* totals (139 tests, 12 benchmarks), because each entry quotes a per-change delta from the shared baseline of 41 and those do not sum. |
+| `BENCHMARKS.md` | Re-run at 2.8.2, 3 reps on an idle box; table grew 7 → 12 rows with the new `json_*` / `field_*` benchmarks, plus a section naming the escaping cost (+2.9 µs per field). |
+| `docs/development/state.md` | Version, binary size (2,563,160 B), sakshi 2.4.11, the new `src/` split, and a Gates line (139 / 12 / 847). |
+| `docs/development/roadmap.md` | Header + footer stamps, 2.8.x release-history row. |
+| `.gitignore` | `.claude/` ignored, matching sit / sandhi / hoosh / sakshi. A `git add -A` from the repo root had committed a live agent worktree as a 160000 gitlink pointing at a branch that was deleted with its session. |
+
+**Still outstanding**, carried from the v2.8.1 block and not silently closed:
+`docs/sources.md` cites none of the 16 RFCs the corpus references by number,
+nor Raft/Paxos, nor DEFLATE/LZ77/Huffman. And
+`docs/development/content-format.md` still files description / best practices /
+gotchas / performance notes under **"Optional Fields"**, contradicting
+CLAUDE.md's "Content Standards", which makes all four mandatory — that needs
+resolving before any content backfill.
 
 ---
 

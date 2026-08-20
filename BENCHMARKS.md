@@ -1,8 +1,8 @@
 # Vidya Benchmarks
 
-> **Last run**: 2026-08-19 | **Version**: 2.8.1 (+ unreleased search fixes) | **Platform**: x86_64 Linux | **Cyrius**: 6.5.29
+> **Last run**: 2026-08-20 | **Version**: 2.8.2 | **Platform**: x86_64 Linux | **Cyrius**: 6.5.29
 >
-> Vidya binary: 2,562,008 B static ELF (77 topics × 11 languages = 847 examples in the corpus)
+> Vidya binary: 2,563,160 B static ELF (77 topics × 11 languages = 847 examples in the corpus)
 
 > ⚠ **These numbers are not comparable to anything this file published before 2.8.1.**
 > Four of the six benchmarks — `reg_get_hit`, `reg_get_miss`, `search_text`,
@@ -17,23 +17,50 @@
 
 ## Current results
 
-`cyrius bench tests/vidya.bcyr`, 4 runs at cyrius 6.5.29 against the 77-topic
-corpus. **Mean** is the median of the 4 per-run averages; Min/Max are the
-extremes across all 4 runs. The harness subtracts a measured timer floor
-(~1.2 µs per clock read) from every sample.
+`cyrius bench tests/vidya.bcyr`, 3 runs at cyrius 6.5.29 against the 77-topic
+corpus, on an otherwise-idle box. **Mean** is the median of the 3 per-run
+averages; Min/Max are the extremes across all 3 runs. The harness subtracts a
+measured timer floor (~1.2 µs per clock read) from every sample.
+
+**12 benchmarks** as of 2.8.2 — the five `json_*` / `field_*` rows are new,
+added with the `src/vidya_core.cyr` extraction that first made the HTTP
+builders reachable from a `.bcyr`.
 
 | Benchmark | Mean | Min | Max | Iters | Tier |
 |-----------|------|-----|-----|-------|------|
-| **reg_get_hit** | 134 ns | 127 ns | 225 ns | 10,000 | Micro |
-| **reg_get_miss** | 400 ns | 378 ns | 648 ns | 10,000 | Micro |
-| **toml_sections** | 1.97 μs | 1.83 μs | 2.33 μs | 1,000 | Meso |
-| **search_text** | 6.49 μs | 6.15 μs | 7.95 μs | 1,000 | Meso |
-| **search_text_exact** | 12.04 μs | 11.14 μs | 25.74 μs | 1,000 | Meso |
-| **load_concept** | 42.3 μs | 23.2 μs | 71.5 μs | 100 | Meso |
-| **load_all** (77 topics) | 5.625 ms | 5.615 ms | 5.667 ms | 10 | Macro |
+| **reg_get_hit** | 134 ns | 128 ns | 221 ns | 10,000 | Micro |
+| **reg_get_miss** | 400 ns | 376 ns | 1.14 μs | 10,000 | Micro |
+| **field_raw_splice** | 605 ns | 549 ns | 1.22 μs | 10,000 | Micro |
+| **toml_sections** | 1.89 μs | 1.80 μs | 2.64 μs | 1,000 | Meso |
+| **field_escaped** | 3.52 μs | 3.28 μs | 7.58 μs | 10,000 | Meso |
+| **search_text** | 6.54 μs | 6.15 μs | 7.78 μs | 1,000 | Meso |
+| **json_info_response** | 9.84 μs | 9.01 μs | 21.4 μs | 1,000 | Meso |
+| **search_text_exact** | 12.00 μs | 11.22 μs | 25.7 μs | 1,000 | Meso |
+| **load_concept** | 44.2 μs | 24.0 μs | 113 μs | 100 | Meso |
+| **json_list_response** | 117 μs | 109 μs | 248 μs | 100 | Meso |
+| **json_search_response** | 280 μs | 269 μs | 714 μs | 200 | Meso |
+| **load_all** (77 topics) | 5.794 ms | 5.783 ms | 5.813 ms | 10 | Macro |
 
 `search_text` scans every id/title/description in the corpus, so it moved from
 the Micro tier to Meso once it had a corpus to scan. `toml_sections` likewise.
+
+### What the JSON escaping fix costs
+
+Closing the `/search?q=` injection hole meant routing every user- and
+content-derived string through `sandhi_json_escape` instead of splicing it
+raw. The paired micro-benchmarks isolate that on one real 130-byte corpus
+description:
+
+| Path | Mean |
+|---|---|
+| `field_raw_splice` — unescaped splice (former behavior, the vulnerability) | 605 ns |
+| `field_escaped` — through `sandhi_json_escape` (current) | **3.52 μs** |
+| Delta | **+2.9 μs per escaped field** |
+
+In context that is cheap: a whole `/info` body is 9.84 μs, and
+`json_search_response` at 280 μs is dominated by the 77-concept scan, not by
+escaping. The cost is real and worth naming, but it buys a response that
+cannot be forged.
 
 ### Case-insensitive search: the folding change is a net win
 
@@ -117,8 +144,8 @@ This table **predates** the empty-input harness bug described at the top, and it
 
 - Cyrius benchmarks use `lib/bench.cyr` (nanosecond precision via `clock_gettime(CLOCK_MONOTONIC_RAW)`).
 - Rust v1.5.0 numbers were collected with criterion (statistical, N=100+ iterations with warmup).
-- Cyrius CLI source: ~1,900 lines of `src/main.cyr` (v2.8.1).
-- Binary size (85 KB at v2.0 → ~1.1 MB at v2.7.1 → 14.66 MB at v2.8.0 → **2.56 MB at v2.8.1**) is driven by content parsing, the bundled vyakarana tokenizer, and the sandhi HTTP stdlib. The v2.8.0 spike was ~13 MB of sigil parallel-crypto static data linked through sandhi's TLS transitive; cyrius 6.5.x no longer places it that way. Current size is tracked in [`docs/development/state.md`](docs/development/state.md).
+- Cyrius source: `src/main.cyr` 598 lines (CLI plumbing, routes, `main()`) + `src/vidya_core.cyr` 1,537 lines (domain + JSON layer), split at v2.8.2 so the suite and the benchmarks run the same code the binary serves.
+- Binary size (85 KB at v2.0 → ~1.1 MB at v2.7.1 → 14.66 MB at v2.8.0 → 2.56 MB at v2.8.1 → **2,563,160 B at v2.8.2**) is driven by content parsing, the bundled vyakarana tokenizer, and the sandhi HTTP stdlib. The v2.8.0 spike was ~13 MB of sigil parallel-crypto static data linked through sandhi's TLS transitive; cyrius 6.5.x no longer places it that way. Current size is tracked in [`docs/development/state.md`](docs/development/state.md).
 - Raw history in `target/bench-history/` (per-snapshot via `scripts/bench-history.sh`). Rust baseline frozen in `bench-history-rust.csv`.
 
 ## Running benchmarks

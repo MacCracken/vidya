@@ -2,11 +2,11 @@
 
 > **Status**: Active | **Last Updated**: 2026-08-20
 >
-> **Version**: 2.8.1 (infra-only cut — cyrius 6.5.29; P5 content opens in a later 2.8.x) | **Cyrius**: 6.5.29 (Zig content pin: 0.16.0)
+> **Version**: 2.8.2 (correctness cut on the 2.8.1 infra base; P5 content opens in a later 2.8.x) | **Cyrius**: 6.5.29 (Zig content pin: 0.16.0)
 > **Topics**: 77 (77 fully covered) — **P0 → P4 complete** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 847 source files; concept files: 77
-> **Validator**: 847/847 green
+> **Validator**: 847/847 green (`VIDYA_STRICT=1`, zero skipped) | **Tests**: 139 | **Benchmarks**: 12
 >
 > Vidya is the library's reference shelf — every programming concept with implementations,
 > best practices, gotchas, and performance notes across 11 languages.
@@ -26,7 +26,7 @@ This table is one row per minor for navigation only.
 | 2.5.x | **P2 distributed systems** | +3 → 69 | 759/759 | 2026-05-03 |
 | 2.6.x | **P3 audio + AI/ML** | +5 → 74 | 814/814 | 2026-05-03 |
 | 2.7.x | **P4 build systems** (2.7.0–2.7.2 infra-only; 2.7.3 content) | +3 → 77 | 847/847 | 2026-06-12 |
-| 2.8.x | **Infra** — cyrius 6.1.41 → 6.4.2 (2.8.0), → 6.5.29 + sakshi stdlib fold-in (2.8.1). P5 opens later in the series. | 77 | 847/847 | in progress |
+| 2.8.x | **Infra + correctness** — cyrius 6.1.41 → 6.4.2 (2.8.0), → 6.5.29 + sakshi stdlib fold-in (2.8.1), then five user-visible defect fixes + the `src/vidya_core.cyr` split (2.8.2). P5 opens later in the series. | 77 | 847/847 | in progress |
 
 ---
 
@@ -303,4 +303,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-08-20 (v2.8.1) — **P0–P4 complete; 77/77 at 11/11; 847/847 validator. 2.8.1 infra cut: cyrius 6.4.2 → 6.5.29, sakshi 2.4.4 → 2.4.10 (reshaped from a `[deps.sakshi]` git block, which was shadow-overriding the toolchain-folded module, into a `[deps] stdlib` leaf), vyakarana 2.2.3 → 2.3.2. Binary 14.66 MB → 2.56 MB. Gate repairs in the same cut: the release aarch64 probe (dead since the 6.1.x pin), the content gate's qemu probe (77 AArch64 examples silently skipped every CI run) plus a `VIDYA_STRICT` skip-gate, `continue-on-error` off `cyrius test`, and four benchmarks that had been measuring empty inputs since April. See "2.7.x dep-track follow-ups" for queued cleanup items.***
+*Last Updated: 2026-08-20 (v2.8.2) — **P0–P4 complete; 77/77 at 11/11; 847/847 validator with zero skips. 2.8.2 correctness cut: `search` case-insensitivity + tag search restored, `/info` section counts un-collapsed, `/search?q=` JSON injection closed, and `vidya validate` fixed after reporting 462 false FAILs of 847 (empty envp, under-reserved stack buffers, asm templates masking exit status). All five shared a root cause — nothing tested the code that had them — so the domain + JSON layer split into `src/vidya_core.cyr` and the suite went 41 → 139 assertions, benchmarks 6 → 12. sakshi 2.4.10 → 2.4.11 arrived with no manifest change, vindicating the 2.8.1 stdlib-leaf shape. Preceding 2.8.1 infra cut: cyrius 6.4.2 → 6.5.29, vyakarana 2.2.3 → 2.3.2, binary 14.66 MB → 2.56 MB, plus the release aarch64 probe / content-gate qemu probe / `continue-on-error` / empty-input benchmark repairs. See "2.7.x dep-track follow-ups" for queued cleanup items.***

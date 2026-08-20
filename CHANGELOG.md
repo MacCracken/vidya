@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.2] — 2026-08-20
+
+Correctness cut over the 2.8.1 infra base — no content change (corpus stays
+77 topics / 847 examples, 0 gaps). Five user-visible defects fixed, three of
+them in surfaces the two documented consumers (agnoshi, hoosh) read directly,
+plus the `src/vidya_core.cyr` extraction that made the last three findable at
+all. Binary 2,562,008 B → 2,563,160 B (+1,152 B).
+
+**Tests 41 → 139. Benchmarks 6 → 12.** Each entry below quotes the delta it
+was measured at against the shared 2.8.1 baseline of 41 assertions, so those
+per-entry numbers (41 → 74, 41 → 96, 41 → 51) do not sum — they overlap. 139
+and 12 are the verified totals for this release, from a clean-room
+`rm -rf lib && cyrius lib sync && cyrius deps && cyrius build`.
+
+Every defect here shares one root cause: **nothing tested the code that had
+them.** `tests/vidya.tcyr` exercised zero functions from `src/main.cyr` — it
+re-implemented helpers locally and asserted on stdlib primitives — so the JSON
+builders, the search path, and the validate subprocess layer had no coverage
+between them. The extraction is the structural half of the fix; the 98 new
+assertions are the other half.
+
 ### Fixed
 
 - **`search` is case-insensitive again.** Matching was a byte-exact `memeq`
@@ -19,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was never documented. Both `search()` callers are covered, so the CLI and
   the HTTP `/search?q=` endpoint (and with them both documented consumers,
   agnoshi and hoosh) are fixed together.
+
 - **`search` searches tags again.** The tag branch was commented out —
   `# Tags search disabled pending Str null-termination fix` — directly under
   a section header claiming tags were searched, and
@@ -31,31 +53,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the new scanner reads `str_data`/`str_len` directly rather than
   requiring one.
 
-### Changed
-
-- `tests/vidya.bcyr` no longer inlines its own copies of `to_cstr` and
-  `cstr_contains`; it includes `src/vidya_core.cyr` like the test suite.
-- **Search no longer allocates per field.** `str_has` copied every field into
-  a fresh null-terminated buffer via `to_cstr` before scanning; `str_has_ci`
-  folds the query once per search and scans the field's bytes in place. On the
-  like-for-like benchmark this is **12.04 μs → 6.49 μs (−46.1%)** for one probe
-  across all 77 topic ids, with non-overlapping distributions over 4 runs of
-  1,000 iterations — the removed allocation more than pays for the added
-  per-byte fold. It also stops `serve` leaking: each `/search?q=` request made
-  up to 4 `to_cstr` allocations per concept (~308 corpus-wide) from a bump
-  allocator that never frees. The now-unused `cstr_contains` helper was
-  removed from `src/main.cyr`.
-- **Benchmarks**: added `search_text_exact`, which measures the former
-  copy-then-byte-exact path so the case-folding delta is measured against what
-  `search()` actually cost. `search_text` now walks the production path over
-  `Str` fields; through 2.8.1 it probed the registry's already-null-terminated
-  hashmap keys and so never paid the copy production paid, making its 9.52 μs
-  not comparable to the current 6.49 μs. See [`BENCHMARKS.md`](BENCHMARKS.md).
-- **Tests**: `cyrius test` 41 → 74 assertions, adding `search_case_fold` and
-  `search_tags` groups covering both regressions, the ASCII-only fold boundary
-  (`@`/`[`/digits/UTF-8 lead bytes untouched), and the leading-byte fast path's
-  false-start cases.
-
 - **`/info/{topic}` reported `1` for every section count.** The HTTP
   builder emitted `str_builder_add_int(sb, bps != 0 && vec_len(bps))`
   for `best_practices`, `gotchas` and `performance_notes`. Cyrius `&&`
@@ -67,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as the value. Counts now go through a `vec_count()` helper that branches
   explicitly. **This was consumer-visible**: agnoshi and hoosh read these
   three fields.
+
 - **`/search?q=` allowed JSON structure injection.** The query was spliced
   into the response body with `str_builder_add_cstr` and no escaping, and
   sandhi percent-decodes params before the builder sees them
@@ -80,72 +78,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   everywhere else). Concept ids, titles, descriptions, tags and example
   paths were spliced unescaped too; latent only because no concept in
   `content/` currently contains a quote or a backslash.
-
-- **`vidya validate` mirrors `scripts/validate-content.sh` command for
-  command.** The two had drifted, and every divergence produced a wrong
-  answer rather than a different one:
-  - **A missing toolchain is now a SKIP, not a FAIL.** Each language gets a
-    one-shot `command -v` probe (qiskit gets an import probe), cached per
-    process, and skips print `SKIP: <topic>/<Lang> (toolchain not installed)`
-    instead of vanishing silently. This is the gate's contract; the CLI had no
-    probe at all, so on any host missing one toolchain it would have reported
-    77 false FAILs for that language.
-  - **OpenQASM is validated instead of blanket-skipped.** There was no command
-    template, so all 77 `.qasm` files fell through to the skip sentinel — the
-    whole of the old `77 skipped`. Now runs the gate's
-    `qasm2.load(..., include_path=[<content dir>])`, via a new `{content}`
-    substitution alongside `{file}` and `{out}`.
-  - **Cyrius examples run through `cyrius run`.** The template built the
-    example by piping it through `./build/cc2` inside
-    `${CYRIUS_HOME:-$HOME/Repos/cyrius}` — a compiler-development path that
-    does not exist on a normal install, so all 77 would have failed even with
-    the environment fixed.
-  - **Python runs the file, not `python3 -c "exec(open(f).read())"`.** The
-    wrapper left `__file__` undefined, so any example reaching for it would
-    have failed under the CLI and passed under the gate.
-  - The summary now prints `note: authoritative content gate is
-    scripts/validate-content.sh`, so the diagnostic cannot be mistaken for it.
-- **`process` is declared in `cyrius.cyml` `[deps] stdlib`.** It was already
-  vendored as another module's transitive; an undeclared module of that class
-  fails at **runtime**, not at build time. Vendored file count is unchanged
-  (62); binary 2,562,008 B → 2,563,184 B (**+1,176 B**, the reachable part of
-  `exec_cmd`). The six benchmarks are flat against 2.8.1 (`load_all` 5.82–5.87 ms
-  vs 5.63 ms, `load_concept` 43.8 μs vs 42.4 μs, `reg_get_hit` 133–139 ns vs
-  136 ns — all inside run-to-run spread; no benchmarked path was touched).
-
-### Added
-
-- **`src/vidya_core.cyr`** — the domain + JSON layer split out of
-  `src/main.cyr` (types, registry, TOML loader, hot-reload, search,
-  compare, code, validate, and the `json_*_response` builders). Included
-  by `main.cyr`, `tests/vidya.tcyr` and `tests/vidya.bcyr`, so tests and
-  benchmarks now run the same code the binary serves. This is the trigger
-  named in decision 4 of [`docs/architecture/overview.md`](docs/architecture/overview.md)
-  finally firing: `tcyr` cannot bind a port and could not reach into a
-  file whose only entry point is `main()`.
-- **55 new tests (41 → 96), all against the real builders.** Golden bodies
-  for `/info`, `/stats`, `/list`, `/compare`, `/gaps` and `/search` against
-  a fixture concept whose section counts are 3 / 2 / 4 — distinct from each
-  other and none equal to `1`, so a boolean collapse fails loudly. Plus:
-  escaping unit tests (quote, backslash, newline, tab, `\u0001` control
-  byte, null and length-borrowed `Str`), injection round-trip tests
-  asserting a hostile query comes back verbatim as a *value* with no
-  attacker key at structure level, a content-derived hostile fixture
-  (bare `"` and `\` reaching the builder from TOML), and a corpus sweep
-  that checks all 77 `/info` bodies are structurally sound and report
-  counts equal to the registry's real vector lengths.
-- **Test fixtures under `tests/fixtures/`** (`json_golden`, `json_hostile`).
-  Outside `content/` on purpose — `load_all` and the content gate never
-  see them.
-- **5 new benchmarks (6 → 11)** over the real builders:
-  `json_info_response` 10.0µs, `json_search_response` 300.0µs (dominated by
-  the 77-concept scan, not by escaping), `json_list_response` 120.1µs. The
-  escaping cost is isolated by a paired micro-benchmark on one real
-  130-byte description: `field_escaped` 3.59µs vs `field_raw_splice` 620ns,
-  i.e. **+3.0µs per escaped field** — the price of the injection fix. In
-  context: a whole `/info` body costs 10µs against an ~84µs request. The
-  six pre-existing benchmarks are unchanged and within noise
-  (`load_all` 6.03ms → 5.97ms, `reg_get_hit` 31ns → 32ns).
 
 - **`vidya validate` reported 462 false FAILs out of 847 examples.** On a host
   with every toolchain installed the subcommand printed `308 passed, 462
@@ -188,7 +120,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `scripts/validate-content.sh` on the same topic now both report 10 passed
   / 0 failed / 1 skipped.
 
-- **`tests/vidya.tcyr` — `validate_exec` group (41 → 51 assertions).** Pins the
+### Changed
+
+- `tests/vidya.bcyr` no longer inlines its own copies of `to_cstr` and
+  `cstr_contains`; it includes `src/vidya_core.cyr` like the test suite.
+
+- **Search no longer allocates per field.** `str_has` copied every field into
+  a fresh null-terminated buffer via `to_cstr` before scanning; `str_has_ci`
+  folds the query once per search and scans the field's bytes in place. On the
+  like-for-like benchmark this is **12.04 μs → 6.49 μs (−46.1%)** for one probe
+  across all 77 topic ids, with non-overlapping distributions over 4 runs of
+  1,000 iterations — the removed allocation more than pays for the added
+  per-byte fold. It also stops `serve` leaking: each `/search?q=` request made
+  up to 4 `to_cstr` allocations per concept (~308 corpus-wide) from a bump
+  allocator that never frees. `cstr_contains` is no longer on the search
+  path but is kept in `src/vidya_core.cyr`: the JSON golden tests use it as
+  a general substring helper.
+
+- **Benchmarks**: added `search_text_exact`, which measures the former
+  copy-then-byte-exact path so the case-folding delta is measured against what
+  `search()` actually cost. `search_text` now walks the production path over
+  `Str` fields; through 2.8.1 it probed the registry's already-null-terminated
+  hashmap keys and so never paid the copy production paid, making its 9.52 μs
+  not comparable to the current 6.49 μs. See [`BENCHMARKS.md`](BENCHMARKS.md).
+
+- **Tests**: `cyrius test` 41 → 74 assertions *for this change alone*, adding `search_case_fold` and
+  `search_tags` groups covering both regressions, the ASCII-only fold boundary
+  (`@`/`[`/digits/UTF-8 lead bytes untouched), and the leading-byte fast path's
+  false-start cases.
+
+- **`vidya validate` mirrors `scripts/validate-content.sh` command for
+  command.** The two had drifted, and every divergence produced a wrong
+  answer rather than a different one:
+  - **A missing toolchain is now a SKIP, not a FAIL.** Each language gets a
+    one-shot `command -v` probe (qiskit gets an import probe), cached per
+    process, and skips print `SKIP: <topic>/<Lang> (toolchain not installed)`
+    instead of vanishing silently. This is the gate's contract; the CLI had no
+    probe at all, so on any host missing one toolchain it would have reported
+    77 false FAILs for that language.
+  - **OpenQASM is validated instead of blanket-skipped.** There was no command
+    template, so all 77 `.qasm` files fell through to the skip sentinel — the
+    whole of the old `77 skipped`. Now runs the gate's
+    `qasm2.load(..., include_path=[<content dir>])`, via a new `{content}`
+    substitution alongside `{file}` and `{out}`.
+  - **Cyrius examples run through `cyrius run`.** The template built the
+    example by piping it through `./build/cc2` inside
+    `${CYRIUS_HOME:-$HOME/Repos/cyrius}` — a compiler-development path that
+    does not exist on a normal install, so all 77 would have failed even with
+    the environment fixed.
+  - **Python runs the file, not `python3 -c "exec(open(f).read())"`.** The
+    wrapper left `__file__` undefined, so any example reaching for it would
+    have failed under the CLI and passed under the gate.
+  - The summary now prints `note: authoritative content gate is
+    scripts/validate-content.sh`, so the diagnostic cannot be mistaken for it.
+
+- **sakshi 2.4.10 → 2.4.11, with no manifest change** — the cyrius 6.5.29
+  stdlib snapshot was refreshed in place and `cyrius lib sync` picked it up.
+  This is the 2.8.1 stdlib-leaf decision working as designed: that entry
+  predicted the newer sakshi "arrives here when a later cyrius patch folds
+  it", and it did, without vidya touching a pin. Under the old
+  `[deps.sakshi]` git block the repo would still be holding 2.4.4 and
+  shadow-overriding the snapshot. 2.4.11 adds drop accounting to
+  `sakshi_span_enter` (non-zero return on a saturated 16-deep stack, plus a
+  one-shot warn); vidya's single `load_all` span is balanced with no early
+  return, so it cannot leak a slot.
+- **`process` is declared in `cyrius.cyml` `[deps] stdlib`.** It was already
+  vendored as another module's transitive; an undeclared module of that class
+  fails at **runtime**, not at build time. Vendored file count is unchanged
+  (62); binary 2,562,008 B → 2,563,184 B (**+1,176 B**, the reachable part of
+  `exec_cmd`). The six benchmarks are flat against 2.8.1 (`load_all` 5.82–5.87 ms
+  vs 5.63 ms, `load_concept` 43.8 μs vs 42.4 μs, `reg_get_hit` 133–139 ns vs
+  136 ns — all inside run-to-run spread; no benchmarked path was touched).
+
+### Added
+
+- **`src/vidya_core.cyr`** — the domain + JSON layer split out of
+  `src/main.cyr` (types, registry, TOML loader, hot-reload, search,
+  compare, code, validate, and the `json_*_response` builders). Included
+  by `main.cyr`, `tests/vidya.tcyr` and `tests/vidya.bcyr`, so tests and
+  benchmarks now run the same code the binary serves. This is the trigger
+  named in decision 4 of [`docs/architecture/overview.md`](docs/architecture/overview.md)
+  finally firing: `tcyr` cannot bind a port and could not reach into a
+  file whose only entry point is `main()`.
+
+- **55 new tests (41 → 96 *for this change alone*), all against the real builders.** Golden bodies
+  for `/info`, `/stats`, `/list`, `/compare`, `/gaps` and `/search` against
+  a fixture concept whose section counts are 3 / 2 / 4 — distinct from each
+  other and none equal to `1`, so a boolean collapse fails loudly. Plus:
+  escaping unit tests (quote, backslash, newline, tab, `\u0001` control
+  byte, null and length-borrowed `Str`), injection round-trip tests
+  asserting a hostile query comes back verbatim as a *value* with no
+  attacker key at structure level, a content-derived hostile fixture
+  (bare `"` and `\` reaching the builder from TOML), and a corpus sweep
+  that checks all 77 `/info` bodies are structurally sound and report
+  counts equal to the registry's real vector lengths.
+
+- **Test fixtures under `tests/fixtures/`** (`json_golden`, `json_hostile`).
+  Outside `content/` on purpose — `load_all` and the content gate never
+  see them.
+
+- **5 new benchmarks (6 → 11)** over the real builders:
+  `json_info_response` 10.0µs, `json_search_response` 300.0µs (dominated by
+  the 77-concept scan, not by escaping), `json_list_response` 120.1µs. The
+  escaping cost is isolated by a paired micro-benchmark on one real
+  130-byte description: `field_escaped` 3.59µs vs `field_raw_splice` 620ns,
+  i.e. **+3.0µs per escaped field** — the price of the injection fix. In
+  context: a whole `/info` body costs 10µs against an ~84µs request. The
+  six pre-existing benchmarks are unchanged and within noise
+  (`load_all` 6.03ms → 5.97ms, `reg_get_hit` 31ns → 32ns).
+
+- **`tests/vidya.tcyr` — `validate_exec` group (41 → 51 assertions *for this change alone*).** Pins the
   subprocess contract behind `vidya validate`, since every false-FAIL bug lived
   in that layer and none of it was covered: exit status is the child's exit
   code (0 / 1 / 42), a signal-killed child reports -1 (the case that must not
@@ -198,7 +239,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trailing `rm` swallows a non-zero status while a bare command does not, the
   toolchain-probe shape returns 0 for a present tool and non-zero for an absent
   one, and `{out}` substitution replaces *all* occurrences.
-
 
 ## [2.8.1] — 2026-08-20
 
