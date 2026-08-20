@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Cyrius toolchain 6.5.29 → 6.5.31.** A pure compiler-side bump: diffing
+  the two snapshots' `lib/` sets shows **no module added, none removed, and
+  none of the 25 modules vidya declares changed content** (verified by
+  sha256 over each declared module). So there was no stdlib surface to
+  migrate and no source change was needed. Binary 2,563,160 B →
+  2,563,264 B (+104 B); `cyrius test` 139/0; `cyrius lint` unchanged.
+
 ## [2.8.2] — 2026-08-20
 
 Correctness cut over the 2.8.1 infra base — no content change (corpus stays
