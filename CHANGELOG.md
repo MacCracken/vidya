@@ -30,6 +30,30 @@ position-independent code emitted 12 absolute relocations while claiming
 they were RIP-relative. Compiling and exiting 0 is a much weaker guarantee
 than it appears.
 
+### Fixed — CI
+
+- **The C23 move broke CI for eight commits while passing locally.** I measured
+  "77/77 compile and run under `-std=c23`" on **gcc 16.2.1** and generalised it
+  to the corpus, without ever checking the compiler CI uses. `ubuntu-latest`
+  ships **gcc 13.2**, which rejects `-std=c23` outright:
+  `unrecognized command-line option '-std=c23'; did you mean '-std=c2x'?`
+  Every Content Validation run from the first example-review commit onward
+  failed on the first C file.
+
+  The corpus itself was fine — reproduced in a `gcc:13.2` container, all
+  **77 C examples compile and run under `-std=c2x`**, which selects the same
+  standard (`__STDC_VERSION__` is 202311 for both spellings). Only the flag
+  name was wrong. Both validators now **probe**: `-std=c23` where the compiler
+  accepts it, `-std=c2x` otherwise. Verified selecting `c23` locally and `c2x`
+  in the gcc 13.2 container, compiling a real example in each.
+
+- **The TypeScript gate resolved `tsc` once instead of 77 times.** The first
+  form was `npx -y -p typescript@latest tsc` *per file* — 77 npx resolutions,
+  each able to reach the registry. It now prefers an installed binary
+  (`$(npm root -g)/typescript/bin/tsc`, or `VIDYA_TSC`) and only falls back to
+  npx when none exists: 0.03s vs 0.44s per file, and no network dependency in
+  the common case.
+
 ### Added — four gate checks
 
 Every one of these had already let a real defect through, and each is

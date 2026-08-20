@@ -36,16 +36,40 @@ elif has_cmd qemu-aarch64-static; then QEMU_AA64=qemu-aarch64-static; HAS_QEMU_A
 fi
 HAS_CYRIUS=false;      has_cmd cyrius && HAS_CYRIUS=true
 
+# C standard flag. The corpus targets C23 (ISO/IEC 9899:2024), but the SPELLING
+# of the flag depends on the compiler: gcc >= 14 accepts `-std=c23`, while
+# gcc 13 — which is what ubuntu-latest ships, and therefore what CI uses —
+# only knows the pre-ratification `-std=c2x`. They select the same standard
+# (`__STDC_VERSION__` is 202311 either way). Probing keeps one flag working on
+# both; hardcoding `c23` broke CI for eight commits while passing locally on
+# gcc 16.
+C_STD=c2x
+if echo 'int main(void){return 0;}' | gcc -std=c23 -x c - -o /dev/null 2>/dev/null; then
+    C_STD=c23
+fi
+
 # TypeScript type-checking. `tsx` STRIPS types and runs — it never type-checks,
 # so without this the corpus was shipping TypeScript nobody had checked. Needs
 # both tsc and @types/node; probed separately so a dev without them still gets
 # a useful run (and VIDYA_STRICT catches the omission in CI).
 HAS_TSC=false
 TSC_TYPEROOTS=""
-if npx -y -p typescript@latest tsc --version >/dev/null 2>&1; then
+TSC_CMD=""
+# Resolve an INSTALLED tsc once. The obvious `npx -y -p typescript@latest tsc`
+# works, but it is one npx resolution per file — 77 of them, each able to touch
+# the registry. Prefer a real binary; fall back to npx only if none is found.
+_npm_root="$(npm root -g 2>/dev/null || true)"
+for c in "${VIDYA_TSC:-}" ./node_modules/.bin/tsc \
+         "$_npm_root/typescript/bin/tsc" \
+         "$HOME/.npm-global/lib/node_modules/typescript/bin/tsc"; do
+    [[ -n "$c" && -f "$c" ]] && { TSC_CMD="$c"; break; }
+done
+[[ -z "$TSC_CMD" ]] && npx -y -p typescript@latest tsc --version >/dev/null 2>&1 \
+    && TSC_CMD="npx -y -p typescript@latest tsc"
+if [[ -n "$TSC_CMD" ]]; then
     # VIDYA_TSC_TYPEROOTS lets a caller point at an out-of-tree @types dir.
     for r in "${VIDYA_TSC_TYPEROOTS:-}" ./node_modules/@types \
-             "$(npm root -g 2>/dev/null)/@types" \
+             "$_npm_root/@types" \
              "$HOME/.npm-global/lib/node_modules/@types"; do
         [[ -n "$r" && -d "$r/node" ]] && { TSC_TYPEROOTS="$r"; break; }
     done
@@ -73,7 +97,7 @@ else
 fi
 
 echo "=== Vidya Content Validation ==="
-echo "  Toolchain: zig=$HAS_ZIG aarch64-as=$HAS_AARCH64_AS qemu-aarch64=$HAS_QEMU_AA64${QEMU_AA64:+ ($QEMU_AA64)} qasm=${QASM_VALIDATOR:-none} cyrius=$HAS_CYRIUS tsc=$HAS_TSC"
+echo "  Toolchain: zig=$HAS_ZIG aarch64-as=$HAS_AARCH64_AS qemu-aarch64=$HAS_QEMU_AA64${QEMU_AA64:+ ($QEMU_AA64)} qasm=${QASM_VALIDATOR:-none} cyrius=$HAS_CYRIUS tsc=$HAS_TSC c-std=$C_STD"
 [[ "${VIDYA_STRICT:-0}" == "1" ]] && echo "  VIDYA_STRICT=1 — any skipped example fails the run"
 echo ""
 
@@ -135,7 +159,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
         bin=/tmp/vidya_test_$$
         # -fno-stack-protector? No — keep -Wall -Werror semantics. Pipe through tee
         # gives us the captured output even when assert→abort drops buffered stdout.
-        run_lang "C" "$topic/c.c" bash -c "gcc -std=c23 -Wall -Werror '$topic_dir/c.c' -o $bin -lm -lpthread && $bin"
+        run_lang "C" "$topic/c.c" bash -c "gcc -std=$C_STD -Wall -Werror '$topic_dir/c.c' -o $bin -lm -lpthread && $bin"
         rm -f "$bin"
     fi
 
@@ -149,7 +173,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
     # TypeScript
     if [[ -f "$topic_dir/typescript.ts" ]]; then
         if [[ "$HAS_TSC" == "true" ]]; then
-            run_lang "TypeScript" "$topic/typescript.ts" bash -c "npx -y -p typescript@latest tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2025 --lib es2025 --typeRoots '$TSC_TYPEROOTS' --types node --skipLibCheck '$topic_dir/typescript.ts' && npx tsx '$topic_dir/typescript.ts'"
+            run_lang "TypeScript" "$topic/typescript.ts" bash -c "$TSC_CMD --noEmit --strict --module nodenext --moduleResolution nodenext --target es2025 --lib es2025 --typeRoots '$TSC_TYPEROOTS' --types node --skipLibCheck '$topic_dir/typescript.ts' && npx tsx '$topic_dir/typescript.ts'"
         else
             echo "  ⊘ TypeScript (skipped — tsc or @types/node not installed)"
             SKIP=$((SKIP + 1))
