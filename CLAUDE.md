@@ -63,7 +63,7 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 
 | Action | Command | Notes |
 |---|---|---|
-| Sync stdlib | `cyrius lib sync` | Vendors the `[deps] stdlib` subset from the pinned snapshot into `lib/`. As of 6.5.29 this **does** overwrite a stale `lib/<mod>.cyr` (verified 2.8.1 by staging a 6.4.2 `fmt.cyr` into a 6.5.29 tree — both `lib sync` and `deps` restored it). The older "treats an existing file as satisfied and never refreshes" behavior — which vyakarana's 2.3.0 entry documented at 6.5.4 — no longer applies, so `rm -rf lib` before a pin bump is belt-and-braces, not required |
+| Sync stdlib | `cyrius lib sync` | Vendors the `[deps] stdlib` subset from the pinned snapshot into `lib/`. As of 6.5.29 (still true at 6.5.31) this **does** overwrite a stale `lib/<mod>.cyr` (verified 2.8.1 by staging a 6.4.2 `fmt.cyr` into a 6.5.29 tree — both `lib sync` and `deps` restored it). The older "treats an existing file as satisfied and never refreshes" behavior — which vyakarana's 2.3.0 entry documented at 6.5.4 — no longer applies, so `rm -rf lib` before a pin bump is belt-and-braces, not required |
 | Resolve deps | `cyrius deps` | Reads `cyrius.cyml`, resolves the `[deps.<name>]` git deps (vyakarana) alongside the synced stdlib |
 | Verify lock | `cyrius deps --verify` | Checks `cyrius.lock` SHAs. ⚠ **Cannot catch a shadowed stdlib module** — the lock is written *from disk*, so a git dep overlaying a folded module records the overlay's hash and reports clean (this is how sakshi sat downgraded through 2.8.0) |
 | Build binary | `cyrius build src/main.cyr build/vidya` | Output: static ELF — current size in [`docs/development/state.md`](docs/development/state.md) |
@@ -77,21 +77,25 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 
 ### Surface 2: content corpus (per-language validators)
 
-`scripts/validate-content.sh` is the gate. It detects available toolchains and skips missing ones; CI runs with the full set installed. Per-language commands:
+`scripts/validate-content.sh` is the gate. It detects available toolchains and skips missing ones; CI runs with the full set installed. **Set `VIDYA_STRICT=1` (CI does) to make any skip a failure** — a skip means a probe broke, not that work was optional.
+
+⚠ **Whatever you change here, change in `validate_command` in `src/vidya_core.cyr` too.** The two must stay byte-equivalent; both times they drifted, the shipped `vidya validate` CLI silently skipped work the shell gate ran.
 
 | Language | File ext | Validation command |
 |---|---|---|
-| Rust | `.rs` | `rustc --edition 2024 <file> -o X && X` |
-| Python | `.py` | `python3 <file>` |
+| Rust | `.rs` | `rustc --edition 2024 <file> -o X && X`, **plus an additive `--test` pass** when the file matches `#[test]` / `#[cfg(test)]` — otherwise everything behind `cfg(test)` is never compiled |
+| Python | `.py` | `python3 -X warn_default_encoding -W error::EncodingWarning <file>` |
 | C | `.c` | `gcc -std=c23 -Wall -Werror <file> -lm -lpthread -o X && X` |
-| Go | `.go` | `go run <file>` |
-| TypeScript | `.ts` | `npx tsx <file>` |
+| Go | `.go` | `gofmt -l` (must be empty) → `go vet` → `go run` |
+| TypeScript | `.ts` | `tsc --noEmit --strict …` **then** `npx tsx <file>` — tsx strips types and never checks them, so the run alone proves nothing about the types |
 | Shell | `.sh` | `bash <file>` |
 | Zig | `.zig` | `zig build-exe <file> -femit-bin=X && X` |
 | x86_64 ASM | `.s` | `as --64 <file> -o X.o && ld X.o -o X && X` |
-| AArch64 ASM | `.s` | `aarch64-linux-gnu-as` + `aarch64-linux-gnu-ld` + `qemu-aarch64` |
-| OpenQASM | `.qasm` | `python3 -c "from qiskit import qasm2; qasm2.load(...)"` |
-| Cyrius | `.cyr` | `cyrius run <file>` |
+| AArch64 ASM | `.s` | `aarch64-linux-gnu-as` + `aarch64-linux-gnu-ld` + `qemu-aarch64` (or `qemu-aarch64-static`) |
+| OpenQASM | `.qasm` | `qasm2.load(..., custom_instructions=LEGACY_CUSTOM_INSTRUCTIONS)` — qiskit substitutes its own table for `qelib1.inc`, so the corpus's copy is never read |
+| Cyrius | `.cyr` | `cyrius run <file>`, **failing on any `duplicate fn`** — a shadow of a stdlib name is a latent crash, not a warning |
+
+**What the gate still cannot see**: comment-level falsehoods, semantics it never executes (no OpenQASM circuit is simulated), and anything a language's own tooling does not flag. `847/847 green` is a real guarantee but a narrower one than it looks — the 2.8.2/2.8.3 example review found 80 verified defects behind a green gate.
 
 ### Aggregate scripts
 

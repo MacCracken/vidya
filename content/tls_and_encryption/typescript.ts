@@ -79,8 +79,12 @@ function demoOpen(ct: Uint8Array, key: number, nonce: number, tag: number): Uint
 }
 
 class Handshake {
-  state = ST_INIT;
-  negotiated = 0;
+  // Explicit `: number`. Inferred from the initializers these would narrow to
+  // the literal types `0` and `0`, and every later `!== ST_HELLO_SENT` would
+  // be a TS2367 "no overlap" error — the checker would believe a state machine
+  // can never leave its initial state.
+  state: number = ST_INIT;
+  negotiated: number = 0;
 
   advance(srv: number[], cli: number[], chain: Cert[], trust: Cert[], hostname: number): void {
     switch (this.state) {
@@ -133,17 +137,24 @@ function main(): void {
   if (demoOpen(tampered, 42, 7, tag) !== null) throw new Error("tampered");
   if (demoOpen(ct, 42, 7, tag ^ 1) !== null) throw new Error("wrong tag");
 
+  // Same TS2367 shape as content/explicit_gpu_synchronization: the guard
+  // narrows `hs.state` to the literal `0`, and `hs.advance(...)` does not
+  // widen it back, so the checker believes the state machine can never leave
+  // ST_INIT. Reading through helpers keeps the assertions real.
+  const state = (h: Handshake): number => h.state;
+  const negotiated = (h: Handshake): number => h.negotiated;
+
   const hs = new Handshake();
-  if (hs.state !== ST_INIT) throw new Error("init");
+  if (state(hs) !== ST_INIT) throw new Error("init");
   hs.advance(srv, cli, chain, trust, 100);
-  if (hs.state !== ST_HELLO_SENT) throw new Error("hello sent");
+  if (state(hs) !== ST_HELLO_SENT) throw new Error("hello sent");
   hs.advance(srv, cli, chain, trust, 100);
-  if (hs.state !== ST_SERVER_HELLO) throw new Error("server hello");
-  if (hs.negotiated !== TLS_AES_128_GCM_SHA256) throw new Error("negotiated");
+  if (state(hs) !== ST_SERVER_HELLO) throw new Error("server hello");
+  if (negotiated(hs) !== TLS_AES_128_GCM_SHA256) throw new Error("negotiated");
   hs.advance(srv, cli, chain, trust, 100);
-  if (hs.state !== ST_CERT_VERIFIED) throw new Error("cert verified");
+  if (state(hs) !== ST_CERT_VERIFIED) throw new Error("cert verified");
   hs.advance(srv, cli, chain, trust, 100);
-  if (hs.state !== ST_ESTABLISHED) throw new Error("established");
+  if (state(hs) !== ST_ESTABLISHED) throw new Error("established");
 
   const hs2 = new Handshake();
   hs2.advance(srv, cli, chain, trust, 100);

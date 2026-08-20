@@ -1050,10 +1050,22 @@ fn validate_command(lang) {
     if (lang == RUST) {
         return "rustc --edition 2024 {file} -o {out} && {out} && if grep -qE '#\\[test\\]|#\\[cfg\\(test\\)\\]' {file}; then rustc --edition 2024 --test {file} -o {out}_t && {out}_t --test-threads=1; fi";
     }
-    if (lang == PYTHON) { return "python3 {file}"; }
+    # -X warn_default_encoding + EncodingWarning as an error, matching
+    # scripts/validate-content.sh. An encoding-less open() is a portability
+    # bug the corpus's own concept.toml warns about.
+    if (lang == PYTHON) {
+        return "python3 -X warn_default_encoding -W error::EncodingWarning {file}";
+    }
     if (lang == C_LANG) { return "gcc -std=c23 -Wall -Werror {file} -o {out} -lm -lpthread && {out}"; }
-    if (lang == GO) { return "go run {file}"; }
-    if (lang == TYPESCRIPT) { return "npx tsx {file}"; }
+    # gofmt + vet before run, matching the shell gate.
+    if (lang == GO) {
+        return "gofmt -l {file} | grep -q . && { echo 'gofmt: not formatted'; exit 1; }; go vet {file} && go run {file}";
+    }
+    # Type-check THEN run. tsx strips types and never checks them, so
+    # without the tsc pass the corpus ships unchecked TypeScript.
+    if (lang == TYPESCRIPT) {
+        return "TR=$(npm root -g 2>/dev/null)/@types; [ -d \"$TR/node\" ] || TR=./node_modules/@types; npx -y -p typescript@latest tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2025 --lib es2025 --typeRoots \"$TR\" --types node --skipLibCheck {file} && npx tsx {file}";
+    }
     if (lang == SHELL) { return "bash {file}"; }
     if (lang == ZIG) { return "zig build-exe {file} -femit-bin={out} && {out}"; }
     if (lang == ASM_X86_64) { return "as --64 {file} -o {out}.o && ld {out}.o -o {out} && {out}"; }
@@ -1063,7 +1075,12 @@ fn validate_command(lang) {
     if (lang == OPENQASM) {
         return "PY=python3; [ -x .venv/bin/python3 ] && PY=.venv/bin/python3; $PY -c \"from qiskit import qasm2; qasm2.load('{file}', include_path=['{content}'], custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS)\"";
     }
-    if (lang == CYRIUS) { return "cyrius run {file}"; }
+    # A `duplicate fn` shadow is a latent crash, not a cosmetic warning —
+    # gpu_memory_pooling shadowed the stdlib `alloc` and segfaulted once any
+    # stdlib allocation was added. Fail on it, matching the shell gate.
+    if (lang == CYRIUS) {
+        return "out=$(cyrius run {file} 2>&1); rc=$?; printf '%s\\n' \"$out\"; if [ $rc -ne 0 ]; then exit $rc; fi; if printf '%s' \"$out\" | grep -q 'duplicate fn'; then echo 'FAIL: duplicate fn shadow'; exit 1; fi; exit 0";
+    }
     return 0;
 }
 

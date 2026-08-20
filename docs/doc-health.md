@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-08-20 (v2.8.2 ship — see the 2.8.1 sweep block below).
+> **Last refresh**: 2026-08-20 (v2.8.3 ship — see the 2.8.1 sweep block below).
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -15,6 +15,27 @@ type: state
 > **Convention adopted from cyrius/agnosticos** (2026-05-16): pattern from `cyrius/docs/doc-health.md` (which adopted it from `agnosticos/docs/doc-health.md`). Vidya's doc tree is ~14 markdown files (vs cyrius's ~81 and agnosticos's ~265) so the tier structure here is leaner — no ADRs, audits, FFI, issues/proposals subdirs at this scale.
 
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
+
+---
+
+## 2026-08-20 sweep (v2.8.3)
+
+Release-cut refresh alongside `docs/development/state.md`, as the process fix
+asks.
+
+| Doc | Updated for 2.8.3 |
+|---|---|
+| `CHANGELOG.md` | 2.8.3 entry cut, covering the 6.5.31 bump, C23, the Tier 1–4 example review and the four new gate checks. |
+| `CLAUDE.md` | Surface-2 validator table rewritten — it described a gate that only compiles and runs, which is no longer what the gate does. Now records the `--test` / `gofmt`+`vet` / `tsc` / encoding / `duplicate fn` checks, the ⚠ that every one must be mirrored in `src/vidya_core.cyr`, and an explicit statement of **what the gate still cannot see**. |
+| `docs/development/state.md` | Version, binary size, and a new "Gate depth" entry. |
+| `docs/development/roadmap.md` | Header stamp → 2.8.3 / 6.5.31; validator line notes the new checks; the `bench-history.sh` audit item closed (it drove two A/B cycles this series); the "Current pin" line was still 6.5.29. |
+| `docs/sources.md` | Already corrected earlier this cycle: C → C23, TypeScript → TS 7.0.2 / ES2025 (from `tsc`'s own `TS6046`, not release notes), Cyrius pin → 6.5.31. |
+
+**Still outstanding**, carried forward and not silently closed:
+- `docs/sources.md` cites none of the 16 RFCs the corpus references by number, nor Raft/Paxos, nor DEFLATE/LZ77/Huffman.
+- `docs/development/content-format.md` files description / best practices / gotchas / performance notes under **"Optional Fields"**, contradicting CLAUDE.md's "Content Standards", which makes all four mandatory. This blocks any content backfill and should be resolved first.
+- `content/performance/concept.toml:58` still carries the "~50 element" slice/map threshold, which measured ≈14 on a miss and ≈37 on a hit. It is phrased for Rust, so the Go measurement does not settle it — needs a Rust measurement or removal.
+- `content/maze_generation/concept.toml` is a stub (0 best practices / 0 gotchas / 0 performance notes) that still counts toward "Complete: 77", and `content/compression/concept.toml` has no performance notes.
 
 ---
 

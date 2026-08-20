@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.3] — 2026-08-20
+
+Toolchain bump, a corpus-wide example review, and four new gate checks. No
+content added — the corpus stays 77 topics / 847 examples, 0 gaps — but a
+large share of it changed, because a 96-agent review found **80 verified
+defects sitting behind a green gate**.
+
+- **Cyrius 6.5.29 → 6.5.31**, and the C standard C17 → **C23**.
+- **Example review, Tiers 1–4**: memory-safety bugs, tests that could not
+  fail, and code that taught the opposite of its own subject. Each was
+  reproduced as a failure, fixed, then re-reproduced against the fix.
+- **Four gate checks added**, each closing a class rather than a defect.
+- Binary 2,563,160 → 2,564,304 B. `cyrius test` 139/0, 12 benchmarks,
+  content gate **847/847 with zero skips**.
+
+**The headline is not the count of fixes — it is what the gate could not
+see.** `847/847 green` was true throughout, and simultaneously: a C parser
+had six unbounded `memcpy`s, three security suites could not fail, an
+OpenQASM reset never fired in 2059 of 4000 shots, and the file teaching
+position-independent code emitted 12 absolute relocations while claiming
+they were RIP-relative. Compiling and exiting 0 is a much weaker guarantee
+than it appears.
+
+### Added — four gate checks
+
+Every one of these had already let a real defect through, and each is
+mirrored in **both** validators (`scripts/validate-content.sh` and
+`validate_command` in `src/vidya_core.cyr`), which had themselves drifted
+twice this cycle.
+
+- **Rust: an additive `--test` pass** for files carrying `#[test]` /
+  `#[cfg(test)]`. Without it, 116 of 201 lines in `testing/rust.rs` were
+  never compiled — a deliberate type error *and* a false assertion both
+  printed "All testing examples passed".
+- **Go: `gofmt -l` then `go vet` before `go run`.** Seven files shipped a
+  redundant-newline `Println` past the gate; 47 were unformatted.
+- **TypeScript: `tsc --noEmit --strict` before running.** `tsx` strips types
+  and never checks them, so the corpus had never been type-checked. Two real
+  defects surfaced (`TS2367`, comparisons the checker proves impossible).
+- **Python: `-X warn_default_encoding -W error::EncodingWarning`.** An
+  encoding-less `open()` is a portability bug the corpus's own concept.toml
+  warns about, and a plain run cannot see it.
+- **Cyrius: any `duplicate fn` now fails.** Not cosmetic —
+  `gpu_memory_pooling` shadowed the stdlib `alloc` and segfaulted the moment
+  a stdlib allocation was added. Nine further shadows of `chan_send`,
+  `is_digit`, `sock_bind`, `_scan_ident` and friends were renamed.
+
+⚠ **What the gate still cannot see**: comment-level falsehoods, semantics it
+never executes (no OpenQASM circuit is simulated), and anything a language's
+own tooling does not flag. That boundary is now written into `CLAUDE.md`.
+
+
 ### Fixed
 
 Tier 4 of the example review — the tail, 27 findings across seven language

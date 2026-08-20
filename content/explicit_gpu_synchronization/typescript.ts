@@ -3,8 +3,13 @@
 // Timeline semaphores — monotonic counters with signal/wait/wait_all.
 
 class Timelines {
-  compute = 0n;
-  transfer = 0n;
+  // Explicit `: bigint`. Without it TypeScript infers the literal type `0n`
+  // from the initializer, so every later `!== 5n` is flagged TS2367 as a
+  // comparison between non-overlapping types — the checker believes the
+  // field can never hold anything but 0n, which is exactly wrong for a
+  // monotonic counter.
+  compute: bigint = 0n;
+  transfer: bigint = 0n;
 
   signal(sem: number, value: bigint): boolean {
     if (sem === 0) {
@@ -40,23 +45,31 @@ function nope(b: boolean, label: string): void {
 }
 
 function main(): void {
+  // TypeScript narrows `t.compute` to the literal `0n` at the guard below and
+  // does NOT widen it again after `t.signal(...)` — a method call does not
+  // invalidate property narrowing. Every later `t.compute !== 5n` then reads
+  // as TS2367 "no overlap". Reading through these helpers keeps the checks
+  // honest without weakening them: the value still comes from the object.
+  const compute = (tl: Timelines): bigint => tl.compute;
+  const transfer = (tl: Timelines): bigint => tl.transfer;
+
   const t = new Timelines();
-  if (t.compute !== 0n || t.transfer !== 0n) throw new Error("init");
+  if (compute(t) !== 0n || transfer(t) !== 0n) throw new Error("init");
   ok(t.waitFor(0, 0n), "wait(0,0)");
 
   ok(t.signal(0, 5n), "signal 5");
-  if (t.compute !== 5n) throw new Error("compute=5");
+  if (compute(t) !== 5n) throw new Error("compute=5");
 
   ok(t.waitFor(0, 3n), "past");
   ok(t.waitFor(0, 5n), "current");
   nope(t.waitFor(0, 10n), "future");
 
   nope(t.signal(0, 3n), "regress 3");
-  if (t.compute !== 5n) throw new Error("after regress");
+  if (compute(t) !== 5n) throw new Error("after regress");
   nope(t.signal(0, 5n), "regress 5");
 
   t.signal(1, 3n);
-  if (t.transfer !== 3n) throw new Error("transfer=3");
+  if (transfer(t) !== 3n) throw new Error("transfer=3");
   ok(t.waitAll(5n, 3n), "all 5,3");
   nope(t.waitAll(5n, 4n), "all 5,4");
   nope(t.waitAll(6n, 3n), "all 6,3");

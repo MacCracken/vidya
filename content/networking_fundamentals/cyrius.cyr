@@ -79,7 +79,12 @@ fn sock_state_get(s) {
 }
 
 # bind(sock, port) → 1 on success, 0 on conflict.
-fn sock_bind(s, port) {
+# NB: these are prefixed to avoid shadowing the stdlib. Defining `sock_bind`, `sock_listen`, `sock_connect`, `sock_close`
+# here would collide with lib/net.cyr ("last definition wins"), which
+# silently redirects any stdlib code path that calls them into this file's
+# demo versions. That class of shadow segfaulted gpu_memory_pooling once a
+# single stdlib allocation was added.
+fn demo_sock_bind(s, port) {
     if (s == 0) { return 0; }
     if (s >= SOCK_CAP) { return 0; }
     if (load64(&port_to_sock + port * 8) != 0) { return 0; }
@@ -90,7 +95,7 @@ fn sock_bind(s, port) {
 }
 
 # listen(sock) → 1 on transition CLOSED→LISTEN, 0 otherwise.
-fn sock_listen(s) {
+fn demo_sock_listen(s) {
     if (s == 0) { return 0; }
     if (s >= SOCK_CAP) { return 0; }
     if (load64(&sock_state + s * 8) != ST_CLOSED) { return 0; }
@@ -101,7 +106,7 @@ fn sock_listen(s) {
 
 # connect(client_sock, server_port) — handshake completes immediately
 # in single-thread sim. Returns 1 on success.
-fn sock_connect(client, port) {
+fn demo_sock_connect(client, port) {
     if (client == 0) { return 0; }
     if (client >= SOCK_CAP) { return 0; }
     var server = load64(&port_to_sock + port * 8);
@@ -156,7 +161,7 @@ fn sock_recv_byte(s) {
 
 # close(sock) — ESTABLISHED→FIN_WAIT→CLOSED in one step (single-thread
 # sim collapses the FIN/ACK round-trip).
-fn sock_close(s) {
+fn demo_sock_close(s) {
     if (s == 0) { return 0; }
     if (s >= SOCK_CAP) { return 0; }
     var st = load64(&sock_state + s * 8);
@@ -184,13 +189,13 @@ fn main() {
     assert_eq(sock_state_get(srv), ST_CLOSED, "new socket = CLOSED");
 
     # --- 2. bind + listen → LISTEN ---
-    assert_eq(sock_bind(srv, 8080), 1, "bind 8080 succeeds");
-    assert_eq(sock_listen(srv), 1, "listen → 1");
+    assert_eq(demo_sock_bind(srv, 8080), 1, "bind 8080 succeeds");
+    assert_eq(demo_sock_listen(srv), 1, "listen → 1");
     assert_eq(sock_state_get(srv), ST_LISTEN, "state = LISTEN");
 
     # --- 3. Two-way connect: both reach ESTABLISHED ---
     var cli = sock_create();
-    assert_eq(sock_connect(cli, 8080), 1, "connect → 1");
+    assert_eq(demo_sock_connect(cli, 8080), 1, "connect → 1");
     assert_eq(sock_state_get(cli), ST_ESTABLISHED, "client ESTABLISHED");
     assert_eq(sock_state_get(srv), ST_ESTABLISHED, "server ESTABLISHED");
 
@@ -205,12 +210,12 @@ fn main() {
     assert_eq(sock_recv_byte(cli), 67, "client recv 'C'");
 
     # --- 5. close: state transitions to CLOSED ---
-    assert_eq(sock_close(cli), 1, "close client");
+    assert_eq(demo_sock_close(cli), 1, "close client");
     assert_eq(sock_state_get(cli), ST_CLOSED, "client CLOSED");
 
     # --- 6. Port reuse rejected while previous bind active ---
     var srv2 = sock_create();
-    var bind_dup = sock_bind(srv2, 8080);  # 8080 still bound to srv
+    var bind_dup = demo_sock_bind(srv2, 8080);  # 8080 still bound to srv
     assert_eq(bind_dup, 0, "bind to in-use port rejected");
 
     # --- 7. recv on CLOSED returns -1 ---
@@ -218,8 +223,8 @@ fn main() {
     assert_eq(recv_closed, 0 - 1, "recv on CLOSED → -1");
 
     # --- After closing srv, port becomes available ---
-    sock_close(srv);
-    assert_eq(sock_bind(srv2, 8080), 1, "bind 8080 after server closed");
+    demo_sock_close(srv);
+    assert_eq(demo_sock_bind(srv2, 8080), 1, "bind 8080 after server closed");
 
     return assert_summary();
 }

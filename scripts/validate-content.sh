@@ -36,6 +36,22 @@ elif has_cmd qemu-aarch64-static; then QEMU_AA64=qemu-aarch64-static; HAS_QEMU_A
 fi
 HAS_CYRIUS=false;      has_cmd cyrius && HAS_CYRIUS=true
 
+# TypeScript type-checking. `tsx` STRIPS types and runs — it never type-checks,
+# so without this the corpus was shipping TypeScript nobody had checked. Needs
+# both tsc and @types/node; probed separately so a dev without them still gets
+# a useful run (and VIDYA_STRICT catches the omission in CI).
+HAS_TSC=false
+TSC_TYPEROOTS=""
+if npx -y -p typescript@latest tsc --version >/dev/null 2>&1; then
+    # VIDYA_TSC_TYPEROOTS lets a caller point at an out-of-tree @types dir.
+    for r in "${VIDYA_TSC_TYPEROOTS:-}" ./node_modules/@types \
+             "$(npm root -g 2>/dev/null)/@types" \
+             "$HOME/.npm-global/lib/node_modules/@types"; do
+        [[ -n "$r" && -d "$r/node" ]] && { TSC_TYPEROOTS="$r"; break; }
+    done
+    [[ -n "$TSC_TYPEROOTS" ]] && HAS_TSC=true
+fi
+
 # OpenQASM: qiskit only. The former `cargo run --example test_qasm` probe was
 # Rust-era debt (vidya migrated off Rust at v2.0; the example survives only in
 # rust-old/) AND a latent false-green: its branch printed "✓ OpenQASM (native)"
@@ -57,7 +73,7 @@ else
 fi
 
 echo "=== Vidya Content Validation ==="
-echo "  Toolchain: zig=$HAS_ZIG aarch64-as=$HAS_AARCH64_AS qemu-aarch64=$HAS_QEMU_AA64${QEMU_AA64:+ ($QEMU_AA64)} qasm=${QASM_VALIDATOR:-none} cyrius=$HAS_CYRIUS"
+echo "  Toolchain: zig=$HAS_ZIG aarch64-as=$HAS_AARCH64_AS qemu-aarch64=$HAS_QEMU_AA64${QEMU_AA64:+ ($QEMU_AA64)} qasm=${QASM_VALIDATOR:-none} cyrius=$HAS_CYRIUS tsc=$HAS_TSC"
 [[ "${VIDYA_STRICT:-0}" == "1" ]] && echo "  VIDYA_STRICT=1 — any skipped example fails the run"
 echo ""
 
@@ -108,7 +124,10 @@ for topic_dir in "$CONTENT_DIR"/*/; do
 
     # Python
     if [[ -f "$topic_dir/python.py" ]]; then
-        run_lang "Python" "$topic/python.py" env PYTHONUNBUFFERED=1 python3 "$topic_dir/python.py"
+        # -X warn_default_encoding + EncodingWarning as an error: an open()
+        # with no explicit encoding= is a portability bug the corpus's own
+        # concept.toml warns about, and it is invisible to a plain run.
+        run_lang "Python" "$topic/python.py" env PYTHONUNBUFFERED=1 python3 -X warn_default_encoding -W error::EncodingWarning "$topic_dir/python.py"
     fi
 
     # C
@@ -122,12 +141,19 @@ for topic_dir in "$CONTENT_DIR"/*/; do
 
     # Go
     if [[ -f "$topic_dir/go.go" ]]; then
-        run_lang "Go" "$topic/go.go" go run "$topic_dir/go.go"
+        # `go run` alone accepts code gofmt would reformat and that vet flags.
+        # Seven files shipped a redundant-newline Println straight past the gate.
+        run_lang "Go" "$topic/go.go" bash -c "gofmt -l '$topic_dir/go.go' | grep -q . && { echo 'gofmt: file is not formatted'; exit 1; }; go vet '$topic_dir/go.go' && go run '$topic_dir/go.go'"
     fi
 
     # TypeScript
     if [[ -f "$topic_dir/typescript.ts" ]]; then
-        run_lang "TypeScript" "$topic/typescript.ts" npx tsx "$topic_dir/typescript.ts"
+        if [[ "$HAS_TSC" == "true" ]]; then
+            run_lang "TypeScript" "$topic/typescript.ts" bash -c "npx -y -p typescript@latest tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2025 --lib es2025 --typeRoots '$TSC_TYPEROOTS' --types node --skipLibCheck '$topic_dir/typescript.ts' && npx tsx '$topic_dir/typescript.ts'"
+        else
+            echo "  ⊘ TypeScript (skipped — tsc or @types/node not installed)"
+            SKIP=$((SKIP + 1))
+        fi
     fi
 
     # Shell
@@ -184,7 +210,10 @@ for topic_dir in "$CONTENT_DIR"/*/; do
     # Cyrius
     if [[ -f "$topic_dir/cyrius.cyr" ]]; then
         if [[ "$HAS_CYRIUS" == "true" ]]; then
-            run_lang "Cyrius" "$topic/cyrius.cyr" cyrius run "$topic_dir/cyrius.cyr"
+            # A `duplicate fn` shadow is not cosmetic: gpu_memory_pooling
+            # shadowed the stdlib `alloc` and segfaulted as soon as any stdlib
+            # allocation was added. Fail on it rather than printing it.
+            run_lang "Cyrius" "$topic/cyrius.cyr" bash -c "out=\$(cyrius run '$topic_dir/cyrius.cyr' 2>&1); rc=\$?; printf '%s\\n' \"\$out\"; if [ \$rc -ne 0 ]; then exit \$rc; fi; if printf '%s' \"\$out\" | grep -q 'duplicate fn'; then echo 'FAIL: duplicate fn shadow (see warning above)'; exit 1; fi; exit 0"
         else
             echo "  ⊘ Cyrius (skipped — cyrius not installed)"
             SKIP=$((SKIP + 1))
