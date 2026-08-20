@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`search` is case-insensitive again.** Matching was a byte-exact `memeq`
+  scan with no case folding at any layer, so `vidya search tcp` returned
+  "No results." while `vidya search TCP` returned 2 topics. Queries now
+  ASCII-fold on both sides: `tcp`, `TCP`, and `Tcp` are one query. Folding is
+  ASCII-only by design — bytes ≥ 0x80 pass through untouched, so UTF-8
+  sequences are never mangled and non-ASCII queries keep their previous
+  byte-exact behavior. The narrowing dates to the v2.0 Rust→Cyrius port and
+  was never documented. Both `search()` callers are covered, so the CLI and
+  the HTTP `/search?q=` endpoint (and with them both documented consumers,
+  agnoshi and hoosh) are fixed together.
+- **`search` searches tags again.** The tag branch was commented out —
+  `# Tags search disabled pending Str null-termination fix` — directly under
+  a section header claiming tags were searched, and
+  [`docs/development/content-format.md`](docs/development/content-format.md)
+  specifies `tags` to content authors as "Search tags". That contract was
+  unmet across all 77 topics: `content/strings/concept.toml` declares the tag
+  `interpolation`, which appears in no id, title, or description, so
+  `vidya search interpolation` could never match. The blocking rationale was
+  obsolete — tag `Str`s point into the raw TOML buffer with no terminator,
+  and the new scanner reads `str_data`/`str_len` directly rather than
+  requiring one.
+
+### Changed
+
+- **Search no longer allocates per field.** `str_has` copied every field into
+  a fresh null-terminated buffer via `to_cstr` before scanning; `str_has_ci`
+  folds the query once per search and scans the field's bytes in place. On the
+  like-for-like benchmark this is **12.04 μs → 6.49 μs (−46.1%)** for one probe
+  across all 77 topic ids, with non-overlapping distributions over 4 runs of
+  1,000 iterations — the removed allocation more than pays for the added
+  per-byte fold. It also stops `serve` leaking: each `/search?q=` request made
+  up to 4 `to_cstr` allocations per concept (~308 corpus-wide) from a bump
+  allocator that never frees. The now-unused `cstr_contains` helper was
+  removed from `src/main.cyr`.
+- **Benchmarks**: added `search_text_exact`, which measures the former
+  copy-then-byte-exact path so the case-folding delta is measured against what
+  `search()` actually cost. `search_text` now walks the production path over
+  `Str` fields; through 2.8.1 it probed the registry's already-null-terminated
+  hashmap keys and so never paid the copy production paid, making its 9.52 μs
+  not comparable to the current 6.49 μs. See [`BENCHMARKS.md`](BENCHMARKS.md).
+- **Tests**: `cyrius test` 41 → 74 assertions, adding `search_case_fold` and
+  `search_tags` groups covering both regressions, the ASCII-only fold boundary
+  (`@`/`[`/digits/UTF-8 lead bytes untouched), and the leading-byte fast path's
+  false-start cases.
+
 ## [2.8.1] — 2026-08-20
 
 Infra-only cut — no content change (corpus stays 77 topics / 847 examples,

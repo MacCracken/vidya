@@ -64,6 +64,86 @@ fn lang_parse(s) {
 }
 
 # ================================================================
+# Search helpers (subset from main.cyr — kept byte-identical)
+# ================================================================
+
+fn ascii_fold(b) {
+    if (b >= 65 && b <= 90) { return b + 32; }
+    return b;
+}
+
+fn cstr_lower(c) {
+    if (c == 0) { return ""; }
+    var len = strlen(c);
+    var buf = alloc(len + 1);
+    var i = 0;
+    while (i < len) {
+        store8(buf + i, ascii_fold(load8(c + i)));
+        i = i + 1;
+    }
+    store8(buf + len, 0);
+    return buf;
+}
+
+fn str_has_ci(s, folded) {
+    if (s == 0) { return 0; }
+    var hd = str_data(s);
+    var hlen = str_len(s);
+    var nlen = strlen(folded);
+    if (nlen == 0) { return 1; }
+    if (nlen > hlen) { return 0; }
+    var f0 = load8(folded);
+    var last = hlen - nlen;
+    var i = 0;
+    while (i <= last) {
+        if (ascii_fold(load8(hd + i)) == f0) {
+            var j = 1;
+            while (j < nlen && ascii_fold(load8(hd + i + j)) == load8(folded + j)) {
+                j = j + 1;
+            }
+            if (j == nlen) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Tag-array parser (subset from main.cyr load path) — ["a", "b"] -> vec of Str.
+# NB: each Str points into the raw TOML buffer and is NOT null-terminated;
+# that is what the removed "pending Str null-termination fix" comment feared.
+fn parse_tags(tags_raw) {
+    var tags = vec_new();
+    if (tags_raw == 0) { return tags; }
+    var td = str_data(tags_raw);
+    var tl = str_len(tags_raw);
+    var ti = 0;
+    while (ti < tl) {
+        if (load8(td + ti) == 34) {
+            ti = ti + 1;
+            var ts = ti;
+            while (ti < tl && load8(td + ti) != 34) { ti = ti + 1; }
+            vec_push(tags, str_new(td + ts, ti - ts));
+            if (ti < tl) { ti = ti + 1; }
+        } else {
+            ti = ti + 1;
+        }
+    }
+    return tags;
+}
+
+# Case-insensitive match of `query` against a tag vec
+fn tags_have_ci(tags, query) {
+    var folded = cstr_lower(query);
+    var n = vec_len(tags);
+    var i = 0;
+    while (i < n) {
+        if (str_has_ci(vec_get(tags, i), folded) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
 # Tests
 # ================================================================
 
@@ -170,6 +250,60 @@ fn main() {
     # Use cstr_contains for simple substring search
     assert(memeq("strings", "string", 6) == 1, "substring match");
     assert(memeq("concurrency", "concur", 6) == 1, "concur match");
+    assert(str_has_ci(str_from("strings"), "ring") == 1, "substring hit");
+    assert(str_has_ci(str_from("strings"), "zebra") == 0, "substring miss");
+    assert(str_has_ci(str_from("strings"), "") == 1, "empty query matches");
+    assert(str_has_ci(str_from("ab"), "abc") == 0, "query longer than field");
+    assert(str_has_ci(str_from("strings"), "strings") == 1, "whole-field match");
+    assert(str_has_ci(str_from("strings"), "s") == 1, "single-byte query");
+    assert(str_has_ci(str_from(""), "s") == 0, "empty field, non-empty query");
+    # Leading-byte fast path must not stop at the first candidate start:
+    # "aab" has a false start at index 0 before the real match at 1.
+    assert(str_has_ci(str_from("aab"), "ab") == 1, "match after false start");
+    assert(str_has_ci(str_from("abcabd"), "abd") == 1, "second candidate wins");
+
+    # --- Search: ASCII case folding (regression) ---
+    # Search used to be a byte-exact scan: `vidya search tcp` found
+    # nothing while `vidya search TCP` found 2 topics.
+    test_group("search_case_fold");
+    assert_eq(ascii_fold(65), 97, "fold A -> a");
+    assert_eq(ascii_fold(90), 122, "fold Z -> z");
+    assert_eq(ascii_fold(97), 97, "fold a stays a");
+    assert_eq(ascii_fold(64), 64, "fold @ untouched (below A)");
+    assert_eq(ascii_fold(91), 91, "fold [ untouched (above Z)");
+    assert_eq(ascii_fold(53), 53, "fold digit untouched");
+    assert_eq(ascii_fold(226), 226, "fold UTF-8 lead byte untouched");
+    assert(streq(cstr_lower("TCP"), "tcp") == 1, "cstr_lower TCP");
+    assert(streq(cstr_lower("HashMap"), "hashmap") == 1, "cstr_lower HashMap");
+    assert(streq(cstr_lower("already"), "already") == 1, "cstr_lower idempotent");
+    assert(streq(cstr_lower(""), "") == 1, "cstr_lower empty");
+    # The reported repro, both directions
+    assert(str_has_ci(str_from("TCP and UDP socket lifecycle"), cstr_lower("tcp")) == 1,
+      "lowercase query hits uppercase text");
+    assert(str_has_ci(str_from("tcp and udp"), cstr_lower("TCP")) == 1,
+      "uppercase query hits lowercase text");
+    assert(str_has_ci(str_from("Vec vs HashMap"), cstr_lower("hashmap")) == 1,
+      "hashmap hits HashMap");
+    assert(str_has_ci(str_from("Strings"), cstr_lower("zebra")) == 0,
+      "case fold does not invent matches");
+    assert(str_has_ci(0, cstr_lower("tcp")) == 0, "null Str is a miss");
+
+    # --- Search: tags are searched (regression) ---
+    # content-format.md documents `tags` as "Search tags", but the tag
+    # branch was commented out "pending Str null-termination fix". The
+    # tag Strs point into the raw TOML buffer with no terminator; the
+    # to_cstr_lower copy is what makes them safe to scan.
+    test_group("search_tags");
+    var stags = parse_tags(toml_get(pairs, "tags"));
+    assert(vec_len(stags) >= 5, "strings has at least 5 tags");
+    assert(tags_have_ci(stags, "interpolation") == 1, "tag interpolation found");
+    assert(tags_have_ci(stags, "INTERPOLATION") == 1, "tag match is case-insensitive");
+    assert(tags_have_ci(stags, "unicode") == 1, "tag unicode found");
+    assert(tags_have_ci(stags, "nosuchtag") == 0, "absent tag is a miss");
+    # `interpolation` appears in no id/title/description — tags are the only route
+    assert(str_has_ci(id, cstr_lower("interpolation")) == 0, "not in id");
+    assert(str_has_ci(title, cstr_lower("interpolation")) == 0, "not in title");
+    assert(str_has_ci(desc, cstr_lower("interpolation")) == 0, "not in description");
 
     # --- HTTP path routing shape ---
     # tcyr can't bind a port, so we just sanity-check the path-prefix

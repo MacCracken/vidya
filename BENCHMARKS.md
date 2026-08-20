@@ -1,6 +1,6 @@
 # Vidya Benchmarks
 
-> **Last run**: 2026-08-20 | **Version**: 2.8.1 | **Platform**: x86_64 Linux | **Cyrius**: 6.5.29
+> **Last run**: 2026-08-19 | **Version**: 2.8.1 (+ unreleased search fixes) | **Platform**: x86_64 Linux | **Cyrius**: 6.5.29
 >
 > Vidya binary: 2,562,008 B static ELF (77 topics × 11 languages = 847 examples in the corpus)
 
@@ -24,15 +24,50 @@ extremes across all 4 runs. The harness subtracts a measured timer floor
 
 | Benchmark | Mean | Min | Max | Iters | Tier |
 |-----------|------|-----|-----|-------|------|
-| **reg_get_hit** | 136 ns | 128 ns | 247 ns | 10,000 | Micro |
-| **reg_get_miss** | 398 ns | 377 ns | 649 ns | 10,000 | Micro |
-| **toml_sections** | 1.93 μs | 1.84 μs | 2.61 μs | 1,000 | Meso |
-| **search_text** | 9.52 μs | 8.83 μs | 19.77 μs | 1,000 | Meso |
-| **load_concept** | 42.4 μs | 24.2 μs | 85.6 μs | 100 | Meso |
-| **load_all** (77 topics) | 5.63 ms | 5.53 ms | 6.06 ms | 10 | Macro |
+| **reg_get_hit** | 134 ns | 127 ns | 225 ns | 10,000 | Micro |
+| **reg_get_miss** | 400 ns | 378 ns | 648 ns | 10,000 | Micro |
+| **toml_sections** | 1.97 μs | 1.83 μs | 2.33 μs | 1,000 | Meso |
+| **search_text** | 6.49 μs | 6.15 μs | 7.95 μs | 1,000 | Meso |
+| **search_text_exact** | 12.04 μs | 11.14 μs | 25.74 μs | 1,000 | Meso |
+| **load_concept** | 42.3 μs | 23.2 μs | 71.5 μs | 100 | Meso |
+| **load_all** (77 topics) | 5.625 ms | 5.615 ms | 5.667 ms | 10 | Macro |
 
 `search_text` scans every id/title/description in the corpus, so it moved from
 the Micro tier to Meso once it had a corpus to scan. `toml_sections` likewise.
+
+### Case-insensitive search: the folding change is a net win
+
+Search was byte-exact and skipped tags. Making it ASCII-case-insensitive and
+restoring the tag branch was expected to cost time — folding is per-byte work
+the old `memeq` scan never did. It got **faster** instead, because the fold
+replaced a bigger cost than it added.
+
+The old path (`str_has`) copied each field into a fresh null-terminated buffer
+via `to_cstr` and then ran `memeq`. The new path (`str_has_ci`) folds the query
+once per search and scans `str_data`/`str_len` in place — no copy at all. One
+allocation removed per field beats one fold added per byte:
+
+| Path | Mean | Min | Max |
+|---|---|---|---|
+| `search_text_exact` — copy + byte-exact scan (former behavior) | 12.04 μs | 11.14 μs | 25.74 μs |
+| `search_text` — folded in-place scan (current) | **6.49 μs** | 6.15 μs | 7.95 μs |
+| Delta | **−46.1%** | — | — |
+
+Real, not noise: the distributions do not overlap (fastest old sample 11.14 μs,
+slowest new sample 7.95 μs, across 4 runs of 1,000 iterations each).
+
+The saving compounds on the HTTP surface. `serve` answered every `/search?q=`
+request with up to four `to_cstr` allocations per concept — ~308 across the
+77-topic corpus — from a bump allocator that never frees, so search memory grew
+with request count. That allocation is now gone entirely.
+
+> ⚠ **`search_text` is not comparable to the 9.52 μs published for 2.8.1.**
+> That figure probed the registry's already-null-terminated hashmap keys, so it
+> never paid the `to_cstr` copy `search()` made for every field — it timed a
+> shape production did not have. `search_text_exact` was added to restore that
+> copy, and is the honest before-number. The other five benchmarks touch no code
+> that changed here and land flat against 2.8.1 (within noise), which is what
+> makes the two search rows comparable on the same box.
 
 ### Movement across the 6.4.2 → 6.5.29 bump
 
@@ -74,7 +109,7 @@ This table **predates** the empty-input harness bug described at the top, and it
 **Key takeaways from the port**:
 
 - **Registry lookup**: Rust's `HashMap` with SipHash beats Cyrius's FNV-1a + open addressing by ~30×. World-class stdlib hashmap, expected.
-- **Search**: Cyrius's simple `cstr_contains` scan beats Rust's case-insensitive multi-token scoring with allocation — simpler algorithm wins on small corpora.
+- **Search**: Cyrius's simple `cstr_contains` scan beats Rust's case-insensitive multi-token scoring with allocation — simpler algorithm wins on small corpora. (Note the v2.0 Cyrius column is *case-sensitive* search; the Rust column it beats was case-insensitive. Cyrius search is case-insensitive again as of the unreleased fix above, and at 6.49 μs on a 2× larger corpus it stays ahead — but this row compares unlike behavior and was never re-run.)
 - **Load concept**: Cyrius's ~250-line hand-written TOML parser beats Rust's full `toml` crate + serde by ~4×.
 - **Load all**: Cyrius's bump allocator + smaller parser wins at scale by ~1.6×.
 

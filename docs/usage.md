@@ -36,7 +36,7 @@ Shows all topics with their category and language count:
 vidya search <query>
 ```
 
-Full-text search across topic IDs, titles, and descriptions:
+Full-text search across topic IDs, titles, descriptions, and tags:
 
 ```sh
 vidya search memory
@@ -44,6 +44,22 @@ vidya search memory
 #   memory_management — How programs allocate, use, and free memory...
 #   virtual_memory — The abstraction that gives every process...
 ```
+
+Matching is substring-based and **case-insensitive** (ASCII): `tcp`, `TCP`,
+and `Tcp` are the same query. Bytes outside ASCII are compared exactly, so a
+non-ASCII query matches only an identical byte sequence.
+
+Tags are searched too, which is often the only route to a topic — `interpolation`
+is a tag on `strings` but appears in no id, title, or description:
+
+```sh
+vidya search interpolation
+# 1 result(s) for "interpolation":
+#   strings — Text representation and manipulation...
+```
+
+A concept matches if the query appears in **any** of the four fields; results
+are listed in corpus order, not ranked.
 
 ### Topic info
 
