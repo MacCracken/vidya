@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+Tier 3 of the example review (assembly) — code that taught something false.
+Every claim below was measured with `readelf`, `objdump` or a live probe,
+not argued from the source comments.
+
+- **`content/linking_and_loading/asm_x86_64.s` had position-independent code
+  exactly backwards.** It taught that "`[symbol]` in Intel syntax defaults to
+  RIP-relative" and "emits a R_X86_64_PC32 relocation". `readelf -r` on the
+  shipped file: **12 `R_X86_64_32S`, zero `PC32`**. In GAS Intel syntax a bare
+  `[symbol]` is an *absolute* reference; `[rip + symbol]` is required. This is
+  the PIC topic, so the file was teaching the opposite of its subject. Now 11
+  `PC32` and exactly one `32S` — that one deliberately kept and labelled, so
+  `readelf -r` shows the contrast the prose describes.
+- **`content/instruction_encoding/asm_x86_64.s` documented an encoding it did
+  not emit.** The comment gives `mov rax, [rip+disp32] → 48 8B 05 …` with
+  `ModR/M: 05`, then writes `mov rax, [value]`, which assembles to
+  `48 8B 04 25 …` — ModR/M `04` (SIB follows) plus SIB `25`, two extra bytes
+  and an absolute address. Corrected; `objdump -d` now shows the documented
+  `48 8b 05`, and the difference is explained rather than papered over.
+- **Three files claimed the wrong stack alignment at `_start`.** The System V
+  psABI guarantees **16-byte** alignment at process entry; the files said 8.
+  Measured with `mov rax, rsp; and rax, 15` → 0. Worse, `syscalls_and_abi`
+  then did `push rax  # align stack (now 16-byte aligned)`, which takes rsp to
+  8 mod 16 and **breaks** alignment for the following `call` — a callee
+  spilling with `movaps` would fault. The push/pop pair was wrong in both
+  directions and cancelled out. All three now state the rule correctly and
+  *assert* the alignment; `kernel_topics` and `memory_management` had computed
+  `rsp & 0xF` and then thrown the answer away.
+- **Callee-saved registers clobbered across `bl` (AAPCS64).**
+  `framebuffer_rendering`'s `draw_hline`/`draw_vline` kept a loop counter in
+  x23 across a call while saving only x19-x22 — and shipped the abandoned
+  reasoning as comments: *"wait, fb_set IS called. Need i in callee-saved."*
+  and *"fall through — we already accidentally use x4. Fix: use x23 above +
+  add stp."* `consensus`'s `run_election` used x21/x22 unsaved beneath a
+  comment calling x21 **"caller-saved"** — it is callee-saved.
+  `reproducible_builds`'s `build_digest` kept three arguments in x24-x26
+  across a `bl` (correct technique) without saving them (the bug). All fixed
+  with correct frames; the dead `mov x0, x21` in `draw_hline` is gone.
+- **Documented, not "fixed": `grid_pathfinding`'s shared x22.** `bfs_relax`
+  and `astar_relax` update x22 as a caller-owned queue cursor. That is a
+  deliberate local convention rather than a slip, so it is now stated as one,
+  with a warning that these helpers cannot be lifted into a library unchanged.
+
 Tier 2 of the example review — tests that could not fail. Every item was
 proven by sabotage: break the thing the test exists to check, confirm the
 suite still reported success, fix, then confirm the same sabotage now fails.

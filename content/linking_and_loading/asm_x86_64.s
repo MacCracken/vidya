@@ -9,7 +9,8 @@
 # - .globl makes a symbol visible to the linker (exported)
 # - Local labels (no .globl) are file-scoped — invisible to other objects
 # - RIP-relative addressing: lea rax, [rip + symbol] generates a
-#   relocation (R_X86_64_PC32) the linker patches with the offset
+#   relocation (R_X86_64_PC32) the linker patches with the offset.
+#   The `rip +` is REQUIRED — bare [symbol] is absolute (R_X86_64_32S).
 # - Absolute addresses (movabs rax, symbol) generate R_X86_64_64
 #   relocations — not PIC-compatible
 
@@ -48,30 +49,37 @@ bss_buffer:     .skip 4096      # 4KB zero-initialized buffer
 # ════════════════════════════════════════════════════════════════════
 _start:
     # ── RIP-relative addressing ─────────────────────────────────────
-    # In x86_64, [symbol] in Intel syntax defaults to RIP-relative
-    # for static data. The assembler emits a R_X86_64_PC32 relocation
-    # that the linker resolves: final_offset = symbol - (rip + 4)
+    # ⚠ In GAS Intel syntax, `[symbol]` does NOT default to RIP-relative.
+    # A bare symbol inside brackets is an ABSOLUTE memory reference and
+    # emits R_X86_64_32S — a 32-bit sign-extended absolute address. You
+    # must write `[rip + symbol]` to get RIP-relative addressing and the
+    # R_X86_64_PC32 relocation.
     #
-    # This is how position-independent code (PIC) accesses data:
-    # the offset is relative to the instruction pointer, so the code
-    # works regardless of where it's loaded in memory.
+    # This distinction is the whole topic: R_X86_64_32S requires the
+    # linker to know the final load address, so it cannot appear in a
+    # position-independent executable — `ld -pie` rejects it outright.
+    # R_X86_64_PC32 encodes a distance from the instruction pointer, so
+    # the code works wherever it is mapped. That is what makes PIC
+    # possible.
+    #
+    # Verify for yourself:  as --64 this.s -o t.o && readelf -r t.o
 
-    # RIP-relative load: linker fills in displacement
-    lea     rax, [exported_value]   # R_X86_64_PC32 relocation
+    # RIP-relative load: linker fills in the displacement
+    lea     rax, [rip + exported_value]   # R_X86_64_PC32 relocation
     mov     rax, [rax]
     cmp     rax, 42
     jne     fail
 
-    # Direct RIP-relative mov:
-    mov     rax, [exported_value]   # also RIP-relative
+    # Direct RIP-relative mov — same addressing form, one instruction:
+    mov     rax, [rip + exported_value]
     cmp     rax, 42
     jne     fail
 
     # ── LEA for address computation (no memory access) ──────────────
     # LEA computes the address; MOV would dereference it
     # Both generate relocations the linker must resolve
-    lea     r12, [exported_value]   # r12 = &exported_value
-    lea     r13, [internal_counter] # r13 = &internal_counter
+    lea     r12, [rip + exported_value]   # r12 = &exported_value
+    lea     r13, [rip + internal_counter] # r13 = &internal_counter
 
     # Verify they point to different locations
     cmp     r12, r13
@@ -99,7 +107,7 @@ _start:
     call    increment_counter
     call    increment_counter
     call    increment_counter
-    mov     rax, [internal_counter]
+    mov     rax, [rip + internal_counter]
     cmp     rax, 3
     jne     fail
 
@@ -109,13 +117,13 @@ _start:
     # Typically: .text (rx) | .rodata (r) | .data (rw) | .bss (rw)
 
     # Verify .rodata is readable
-    lea     rsi, [local_str]
+    lea     rsi, [rip + local_str]
     movzx   eax, byte ptr [rsi]
     cmp     al, 'l'             # first byte of "local"
     jne     fail
 
     # Verify .bss is zero-initialized
-    lea     rsi, [bss_buffer]
+    lea     rsi, [rip + bss_buffer]
     mov     rax, [rsi]
     test    rax, rax
     jnz     fail                # must be zero
@@ -129,8 +137,8 @@ _start:
     # ── Demonstrate symbol address relationships ────────────────────
     # Symbols in the same section have fixed relative offsets.
     # The linker preserves these offsets when laying out the section.
-    lea     rax, [exported_value]
-    lea     rcx, [internal_counter]
+    lea     rax, [rip + exported_value]
+    lea     rcx, [rip + internal_counter]
     # The difference is fixed at link time (8 bytes if contiguous)
     sub     rcx, rax
     cmp     rcx, 8              # exported_value is 8 bytes, followed by counter
@@ -141,7 +149,7 @@ _start:
     # .globl symbol — strong symbol, linker errors on duplicates
     # We demonstrate with a weak symbol:
 .weak optional_plugin
-    lea     rax, [optional_plugin]
+    lea     rax, [rip + optional_plugin]
     # If not defined elsewhere, this resolves to 0
     # (Linker may or may not zero it — behavior is defined for .weak)
     # In static linking with no other object, it's typically 0
@@ -149,7 +157,7 @@ _start:
     # ── Print success ───────────────────────────────────────────────
     mov     rax, 1
     mov     rdi, 1
-    lea     rsi, [msg_pass]
+    lea     rsi, [rip + msg_pass]
     mov     rdx, msg_len
     syscall
 
@@ -175,5 +183,11 @@ local_helper:
 # Demonstrates: function modifying private module state
 # ════════════════════════════════════════════════════════════════════
 increment_counter:
+    # Deliberately left as a BARE `[symbol]` — the one absolute reference in
+    # this file. It is the contrast the section above describes: `readelf -r`
+    # shows 11 R_X86_64_PC32 (the `[rip + sym]` forms) and exactly one
+    # R_X86_64_32S, this line. Rewrite it as `[rip + internal_counter]` and
+    # the 32S disappears; that is the whole difference between code a linker
+    # can place anywhere and code that must know its load address up front.
     lock inc qword ptr [internal_counter]
     ret

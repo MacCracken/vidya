@@ -93,12 +93,21 @@ request_vote:
 
 // run_election(x0=candidate) -> x0=votes
 run_election:
-    stp     x29, x30, [sp, #-32]!
+    // Frame is 48 bytes, not 32: this function uses x19-x22 and ALL FOUR are
+    // callee-saved, so all four must be preserved for our caller.
+    stp     x29, x30, [sp, #-48]!
     mov     x29, sp
     str     x19, [sp, #16]                      // save x19 (candidate)
     str     x20, [sp, #24]                      // save x20 (cand_term)
+    str     x21, [sp, #32]                      // save x21 (votes)
+    str     x22, [sp, #40]                      // save x22 (loop index)
     mov     x19, x0
-    mov     x21, #1                             // votes (caller-saved x21 ok within funct, but no calls trash x21? request_vote doesn't, OK)
+    // x21 is CALLEE-saved under AAPCS64, not caller-saved — so relying on
+    // "request_vote doesn't trash it" is the wrong test twice over: it is
+    // request_vote's obligation to preserve x21, and it is OUR obligation to
+    // save x21 before using it, because our own caller expects it intact.
+    // The stp below discharges the second obligation.
+    mov     x21, #1                             // votes
     LDADDR  x1, node_term
     ldr     x20, [x1, x19, lsl #3]
     mov     x22, #0                             // v
@@ -125,9 +134,11 @@ run_election:
     str     x2, [x1, x19, lsl #3]
 .re_no_promote:
     mov     x0, x21
+    ldr     x22, [sp, #40]
+    ldr     x21, [sp, #32]
     ldr     x20, [sp, #24]
     ldr     x19, [sp, #16]
-    ldp     x29, x30, [sp], #32
+    ldp     x29, x30, [sp], #48
     ret
 
 assert_eq:

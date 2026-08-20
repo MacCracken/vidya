@@ -116,19 +116,36 @@ _start:
     je      fail                # rcx MUST have been clobbered
 
     # ── Demonstrate stack alignment for function calls ──────────────
-    # At _start, the stack is 8-byte aligned (no return address).
-    # Before calling a function, we need 16-byte alignment.
-    # The call instruction pushes 8 bytes, so if rsp is 16-aligned
-    # before call, the callee sees rsp % 16 == 8 — which is correct.
+    # The System V psABI says rsp is **16-byte aligned at process entry** —
+    # not 8. Measured: `mov rax, rsp; and rax, 15` at _start yields 0.
+    # (8-byte alignment is what a *function* sees on entry, because `call`
+    # has just pushed an 8-byte return address onto a 16-aligned rsp.)
     #
-    # If we need to call from a state where rsp isn't aligned:
-    push    rax                 # align stack (now 16-byte aligned)
+    # The rule: rsp must be 16-byte aligned IMMEDIATELY BEFORE `call`.
+    # So at _start we can call directly — no adjustment needed. A stray
+    # `push rax` here would take rsp to 8 mod 16 and BREAK alignment, which
+    # matters: a callee that spills with movaps faults (SIGSEGV) on a
+    # misaligned stack. That is why this block calls without adjusting.
+    #
+    # Assert the precondition rather than asserting nothing:
+    mov     rax, rsp
+    and     rax, 15
+    test    rax, rax
+    jnz     fail                # rsp must be 16-aligned before the call
+
     mov     rdi, 5
     mov     rsi, 7
     call    add_two_numbers
-    pop     rcx                 # restore stack
     cmp     rax, 12
     jne     fail
+
+    # Stack is back where it started — `call`/`ret` are balanced, so no
+    # `pop` is needed here. (The old version pushed rax to "align" the
+    # stack and popped it afterwards; both were wrong and cancelled out.)
+    mov     rax, rsp
+    and     rax, 15
+    test    rax, rax
+    jnz     fail                # still 16-aligned after the call returns
 
     # ── Print success ───────────────────────────────────────────────
     mov     rax, 1

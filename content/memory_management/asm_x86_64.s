@@ -100,7 +100,12 @@ _start:
     # so stack must be 16-byte aligned BEFORE the call.
     mov     rax, rsp
     and     rax, 0xF            # check alignment
-    # rsp should be 8-byte aligned here (after _start entry)
+    # rsp is **16-byte aligned** at _start per the System V psABI (measured:
+    # rsp & 0xF == 0). The 8-byte figure describes a function on entry, after
+    # `call` pushed its return address. Computing the value and not asserting
+    # it meant this block passed no matter what the answer was.
+    test    rax, rax
+    jnz     fail
 
     # ── Memory ordering with mfence ─────────────────────────────────
     # Ensure all prior stores are visible before subsequent loads

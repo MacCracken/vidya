@@ -103,14 +103,22 @@ _start:
     # Memory indirect (mod=00, RIP-relative):
     # mov rax, [rip+disp32]     → 48 8B 05 xx xx xx xx
     # ModR/M: 05 = 00 000 101 (mod=00, reg=rax, r/m=101 → RIP+disp32)
-    mov     rax, [value]
+    #
+    # ⚠ The `rip +` is REQUIRED to get that encoding. In GAS Intel syntax a
+    # bare `[value]` is ABSOLUTE, and assembles to a different shape entirely:
+    #   mov rax, [value]        → 48 8B 04 25 xx xx xx xx
+    # ModR/M 04 = 00 000 100 — r/m=100 means "SIB byte follows", and the SIB
+    # 25 encodes no base, no index, disp32. Two extra bytes and an absolute
+    # address, which is exactly what a position-independent executable cannot
+    # contain. Check with: objdump -d
+    mov     rax, [rip + value]
     cmp     rax, 42
     jne     fail
 
     # Memory + disp8 (mod=01):
     # mov rax, [rbx + 8]        → 48 8B 43 08
     # ModR/M: 43 = 01 000 011 (mod=01, reg=rax, r/m=rbx, +disp8)
-    lea     rbx, [array]
+    lea     rbx, [rip + array]
     mov     rax, [rbx + 8]      # array[1] = 20
     cmp     rax, 20
     jne     fail
@@ -133,7 +141,7 @@ _start:
     # mov rax, [rbx + rcx*8]    → 48 8B 04 CB
     # ModR/M: 04 = 00 000 100 (mod=00, reg=rax, r/m=100 → SIB follows)
     # SIB: CB = 11 001 011 (scale=8, index=rcx, base=rbx)
-    lea     rbx, [array]
+    lea     rbx, [rip + array]
     mov     rcx, 2              # index 2
     mov     rax, [rbx + rcx * 8]    # array[2] = 30
     cmp     rax, 30
@@ -200,7 +208,7 @@ _start:
     # ── Print success ───────────────────────────────────────────────
     mov     rax, 1
     mov     rdi, 1
-    lea     rsi, [msg_pass]
+    lea     rsi, [rip + msg_pass]
     mov     rdx, msg_len
     syscall
 

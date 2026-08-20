@@ -128,11 +128,18 @@ files_sort:
 // build_digest(x0 = do_sort, x1 = do_norm, x2 = now, x3 = sde) -> x0 = h
 // Callee-saved: x19=i, x20=n, x21=h. x22/x23 hold array bases.
 build_digest:
-    stp     x29, x30, [sp, #-64]!
+    // Frame is 96 bytes: this function keeps its arguments in x24-x26 across
+    // a `bl` (see the comment below), and x19-x28 are ALL callee-saved under
+    // AAPCS64. Using them to survive a call is the right technique; not
+    // saving them first is the bug — it hands our caller back three
+    // registers it was entitled to keep.
+    stp     x29, x30, [sp, #-96]!
     mov     x29, sp
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     str     x23, [sp, #48]
+    stp     x24, x25, [sp, #56]
+    str     x26, [sp, #72]
 
     // if do_sort: files_sort()
     cbz     x0, .Lbd_nosort
@@ -184,10 +191,12 @@ build_digest:
     b       .Lbd_loop
 .Lbd_ret:
     mov     x0, x21
+    ldr     x26, [sp, #72]
+    ldp     x24, x25, [sp, #56]
     ldr     x23, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #64
+    ldp     x29, x30, [sp], #96
     ret
 
 // setup_order_a(): files = (30,111),(10,222),(20,333); f_n = 3

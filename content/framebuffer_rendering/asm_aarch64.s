@@ -97,18 +97,20 @@ fb_get:
 
 // draw_hline(x0=x, x1=y, x2=len, x3=color) — caches loop state in callee-saveds
 draw_hline:
+    // The loop counter must live in a callee-saved register because fb_set is
+    // called from inside the loop: AAPCS64 lets a callee destroy x0-x18, so a
+    // counter in x4 would not survive the `bl`. x23 is callee-saved and so it
+    // must itself be saved here — that is the pair below, not an optional
+    // extra. x19-x22 alone would leave x23 clobbered for OUR caller.
     stp     x29, x30, [sp, #-16]!
     stp     x19, x20, [sp, #-16]!
     stp     x21, x22, [sp, #-16]!
+    stp     x23, x24, [sp, #-16]!
     mov     x19, x0               // x
     mov     x20, x1               // y
     mov     x21, x2               // len
     mov     x22, x3               // color
-    mov     x23, #0               // i (callee-saved x23 too — but we have stp for x19-x22 only)
-    // Use x4 for i since we don't call between iterations of i — wait, fb_set IS called.
-    // Need i in callee-saved.
-    mov     x0, x21
-    // fall through — we already accidentally use x4. Fix: use x23 above + add stp.
+    mov     x23, #0               // i — callee-saved, survives the bl below
 .dh_loop:
     cmp     x23, x21
     b.ge    .dh_done
@@ -119,6 +121,7 @@ draw_hline:
     add     x23, x23, #1
     b       .dh_loop
 .dh_done:
+    ldp     x23, x24, [sp], #16
     ldp     x21, x22, [sp], #16
     ldp     x19, x20, [sp], #16
     ldp     x29, x30, [sp], #16
@@ -126,9 +129,12 @@ draw_hline:
 
 // draw_vline(x0=x, x1=y, x2=len, x3=color)
 draw_vline:
+    // Same shape as draw_hline: x23 holds the loop counter across a `bl`, so
+    // it must be saved along with x19-x22.
     stp     x29, x30, [sp, #-16]!
     stp     x19, x20, [sp, #-16]!
     stp     x21, x22, [sp, #-16]!
+    stp     x23, x24, [sp, #-16]!
     mov     x19, x0
     mov     x20, x1
     mov     x21, x2
@@ -144,6 +150,7 @@ draw_vline:
     add     x23, x23, #1
     b       .dv_loop
 .dv_done:
+    ldp     x23, x24, [sp], #16
     ldp     x21, x22, [sp], #16
     ldp     x19, x20, [sp], #16
     ldp     x29, x30, [sp], #16

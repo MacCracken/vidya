@@ -226,6 +226,14 @@ bfs:
 // bfs_relax: x10=neighbor, x23=curr, x22=tail.
 // If !visited[n] && grid[n]==0: visited[n]=1; dist[n]=dist[curr]+1;
 // queue[tail++]=n. Uses x9,x11,x12 as scratch only.
+// ⚠ CALLING CONVENTION NOTE — bfs_relax and astar_relax deliberately read
+// and update **x22** as a shared queue-tail cursor owned by their caller,
+// rather than passing it in and returning it. That is a legitimate technique
+// in hand-written assembly, but it is a LOCAL convention, not AAPCS64: x22 is
+// callee-saved, so a general-purpose function may not leave it modified. These
+// two are private helpers, called only from this file's own search loops,
+// which is what makes the shortcut safe here. Do not lift them into a library
+// without converting x22 into an argument and a return value.
 bfs_relax:
     adrp    x9, visited
     add     x9, x9, :lo12:visited

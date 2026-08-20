@@ -109,8 +109,12 @@ _start:
     # ABI requires 16-byte stack alignment before CALL
     mov     rax, rsp
     and     rax, 0xF
-    # At _start, stack is 8-byte aligned (return address not pushed)
-    # This is expected — functions must align before call
+    # The System V psABI guarantees rsp is **16-byte aligned at process
+    # entry** — measured, `rsp & 0xF` is 0 here. (The 8-byte figure applies
+    # to a FUNCTION on entry, where `call` has just pushed a return address
+    # onto a 16-aligned rsp.) Assert it rather than just computing it.
+    test    rax, rax
+    jnz     fail
 
     # ── Test 8: Callee-saved register preservation ─────────────────────
     # rbx, rbp, r12-r15 are callee-saved in System V AMD64
