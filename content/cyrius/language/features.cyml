@@ -456,13 +456,32 @@ SEMANTICS:
     Follows the System V AMD64 ABI convention where functions can
     return two 64-bit values in rax and rdx.
 
-ALTERNATIVE — NATIVE MULTI-RETURN:
-    fn divmod(a, b) { return a / b, a % b; }
-    var q, r = divmod(10, 3);
+ALTERNATIVE — NATIVE MULTI-RETURN (v3.7.2):
+    fn divmod(a, b) { return (a / b, a % b); }   # PARENS REQUIRED
+    var q, r = divmod(10, 3);                    # targets are NOT parenthesised
 
-Two values come back via rax (ret1) + rdx (ret2). No tuple
-wrapper; two `return` expressions, comma-separated. ret2/rethi
-still work as the lower-level primitive.
+⚠ THE PARENS ARE MANDATORY ON THE RETURN AND FORBIDDEN ON THE BIND.
+This entry documented `return a / b, a % b;` — WITHOUT parens — from
+v3.7.2 until v6.5.21. That form is a parse error
+(`expected ';', got ','`), and `var (q, r) = f();` is another
+(`expected identifier, got '('`). The cost was not theoretical: an
+abaco consumer filed a proposal in 2026-08 asking for multi-value
+returns as a NEW feature, its "verified against 6.5.20" table listing
+exactly these two spellings as unsupported — because vidya, the place
+CLAUDE.md tells you to search before reimplementing, had the working
+syntax written down wrong. The feature had shipped four majors earlier.
+
+DECLARED FORM (v6.5.21) — arity and element types in the signature:
+    fn two_product(a, b): (f64, f64) { return (p, err); }
+    var prod, e = two_product(x, y);   # both bindings typed f64
+
+Arity 2 or 3. Declaring the return type is what lets the compiler
+arity-check a FORWARD call and type the bindings; an undeclared
+`return (a, b);` still works and stays untyped.
+
+Two values come back via rax + rdx (x0/x2 on aarch64, r0/r4 on cx);
+a third uses r8 / x3 / r5. ret2/rethi remain the lower-level primitive
+and share the same register pair.
 
 IMPLEMENTATION:
     Tokens: ret2 = 97, rethi = 98. Handled in PARSE_SIMD_EXT.
@@ -1638,6 +1657,57 @@ lib/simd.cyr WRAPPERS:
     class-1 arg type-check relaxed to match (f32v4 code 3 stays
     strict). VALUE-form SIMD args must be BARE LOCAL IDENTs (not
     call-result temporaries) — the same constraint f32v4 carries.
+
+[[entries]]
+name = "f64v256_ymm_packed_double"
+description = "f64v256_add/sub/mul/div — the 256-bit packed-DOUBLE kernel (4× f64 in one YMM), v6.5.24. The f64 sibling of f32v8, ten minors later: SIMD fix-list item 3, which the roadmap had gated behind an IR/regalloc substrate it never needed. Measured 15.9 -> ~7.9 ns."
+category = "cyrius"
+---
+BUILTINS: f64v256_add / f64v256_sub / f64v256_mul / f64v256_div (dst, a, b, n)
+  Tokens 154-157, CONSECUTIVE so `ptyp - 154` is the op index. Lexed in
+  LEXKW_EXT (klen == 11 arm, shared 8-byte prefix "f64v256_" + a 3-byte op
+  tail; all three tail bytes checked). EMIT_F64V4_LOOP, x86/float.cyr.
+
+⚠ WHY NOT NAMED `f64v4_add`. That IS the f32v8 family's convention — the
+  256-bit TYPE names the builtin — but for f64 the name was already taken:
+  lib/simd.cyr defines the VALUE-FORM `fn f64v4_add(a: f64v4, b: f64v4)`.
+  f64v4 shipped years before its widening; f32v8 shipped after, so only
+  f32v8 ever got the plain name. Reserving `f64v4_add` as a keyword would
+  make that lib definition a "reserved word as identifier" parse error and
+  break every consumer of the value form. So the KERNEL is named for its
+  register WIDTH — which also leaves `f64v512_*` free for AVX-512.
+
+ENCODING: the `pd` sibling of EMIT_F32V8_LOOP. 2-byte VEX C5, second byte
+  FD instead of FC (pp=01, the 66-prefix slot) so every op is packed
+  DOUBLE; SIB 0xF2 = [rdx+rsi*8]; rsi += 4; vzeroupper on loop exit.
+    C5 FD 10 04 F2   vmovupd ymm0, [rdx+rsi*8]
+    C5 FD 58/5C/59/5E C1   vaddpd/vsubpd/vmulpd/vdivpd ymm0, ymm0, ymm1
+    C5 FD 11 04 F2   vmovupd [rdx+rsi*8], ymm0
+    C5 F8 77         vzeroupper
+⚠ FD vs FC is ONE BIT. Emit FC and every f64 op silently becomes a
+  packed-SINGLE operation on double bit patterns — wrong numbers, no
+  diagnostic, no crash. tests/gates/codegen/f64v4_ymm_disasm.sh pins the
+  bytes AND the mnemonics for exactly this reason.
+
+⚠ rsi ADVANCES BY 4, so this kernel can NEVER serve an f64v2 caller — a
+  4-lane stride over a 16-byte vector runs off the end. f64v2 keeps tokens
+  89-91 / EMIT_F64V_LOOP. Mutation-proven that a value test cannot see a
+  wrong stride: with the stride set to 2, crossos/f64v4_ymm.tcyr still
+  passed 23/23 while writing 16 bytes PAST the vector, because the second
+  iteration recomputes lanes 2-3 correctly.
+
+GATING: unconditional VEX, so lib/simd.cyr picks it only when
+  simd_has_avx2() == 1 and otherwise keeps the 128-bit f64v_* path. All
+  EIGHT f64v4 wrappers carry the gate (4 ops × value/_ptr form).
+  simd_has_avx2() returns 0 on every non-x86 target (its CPUID probe is
+  #ifdef CYRIUS_ARCH_X86), so aarch64 / Mach-O-arm64 / cx take the
+  128-bit path for free. The aarch64 + cx EMIT_F64V4_LOOP stubs DELEGATE
+  to their 128-bit loop rather than `return 0;` — a return-0 stub makes
+  the verb a silent no-op, the defect class the cx multi-return stubs
+  turned out to be at v6.5.21.
+
+cycc itself never calls these, so its own self-host emits no VEX byte and
+  stays byte-identical everywhere — same as every prior SIMD phase.
 
 [[entries]]
 name = "f32v8_avx2_256bit_simd"

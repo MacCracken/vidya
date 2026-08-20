@@ -1,8 +1,8 @@
 # Vidya — Development Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-06-12
+> **Status**: Active | **Last Updated**: 2026-08-20
 >
-> **Version**: 2.8.0 (infra-only cut — cyrius 6.4.2; P5 content opens in a later 2.8.x) | **Cyrius**: 6.4.2 (Zig content pin: 0.16.0)
+> **Version**: 2.8.1 (infra-only cut — cyrius 6.5.29; P5 content opens in a later 2.8.x) | **Cyrius**: 6.5.29 (Zig content pin: 0.16.0)
 > **Topics**: 77 (77 fully covered) — **P0 → P4 complete** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 847 source files; concept files: 77
@@ -25,6 +25,8 @@ This table is one row per minor for navigation only.
 | 2.4.x | **P1 networking & infrastructure** | +6 → 66 | 726/726 | 2026-05-02 |
 | 2.5.x | **P2 distributed systems** | +3 → 69 | 759/759 | 2026-05-03 |
 | 2.6.x | **P3 audio + AI/ML** | +5 → 74 | 814/814 | 2026-05-03 |
+| 2.7.x | **P4 build systems** (2.7.0–2.7.2 infra-only; 2.7.3 content) | +3 → 77 | 847/847 | 2026-06-12 |
+| 2.8.x | **Infra** — cyrius 6.1.41 → 6.4.2 (2.8.0), → 6.5.29 + sakshi stdlib fold-in (2.8.1). P5 opens later in the series. | 77 | 847/847 | in progress |
 
 ---
 
@@ -73,7 +75,7 @@ churn. Ordered by trigger condition, not by patch slot.
 | **vyakarana 2.0.1+ per-feed drain** | vyakarana ships the scanner refactor (per ADR 0017 "When to revisit") | Convert the two streaming sites (`src/main.cyr:877` and `:1569`) to a feed-drain loop for large sources. Today both are buffer-then-finish; benefit only when source > 1 MB. |
 | **vyakarana pull adapter** (`tokenize_stream_next`) | vyakarana exports the thin iterator wrapper queued in ADR 0017 | Collapse the five-call dance back to a one-liner. Cosmetic but reduces the cognitive cost at each new call site. |
 | **vyakarana OpenQASM grammar** | vyakarana ships a `.qasm` grammar (none through 2.2.1 by design) | Drop the `has_grammar("openqasm") == 0` fallback in `cmd_code`. Update the comment at `src/main.cyr:870`. |
-| **Cyrius aarch64 cross-build** | cc5_aarch64 stops dying on stdlib syscall-table gaps (`SYS_OPEN` etc.) | The best-effort step added to `release.yml` in 2.7.1 will start shipping `vidya-<tag>-aarch64-linux` automatically once the upstream gap closes. No vidya-side action — just monitor the CI warning. |
+| **Cyrius aarch64 cross-build** | ~~cc5_aarch64 stops dying on stdlib syscall-table gaps~~ — **RESOLVED at 2.8.1, and it was never upstream's fault.** | The release.yml probe tested for `cc5_aarch64`, renamed `cycc_aarch64` at cyrius 6.0.0 (back-compat symlink dropped at 6.1.0), so from the 6.1.x pin on the guard was permanently false: the job warned, went green, and shipped x86_64-only. 2.7.1 shipped an aarch64 artifact; 2.7.3 and 2.8.0 silently did not. ⚠ "Just monitor the CI warning" is what let this hide for two releases — the warning being emitted *was* the bug. Probe fixed and the cross-build verified at 6.5.29 (working 3.0 MB static aarch64 ELF, runs under qemu). |
 
 ### Vidya-side opportunities (not blocked)
 
@@ -83,14 +85,14 @@ churn. Ordered by trigger condition, not by patch slot.
 | **Theme externalization** | renderer is past wire-up; per-kind ANSI palette is hard-coded inline at `src/main.cyr:827` | Move palettes to `content/theme/*.toml`; expose `--theme=<name>` on `code`, `theme=<name>` on `GET /code/...`. Decouples vidya's style from CLI-vs-HTTP consumers. |
 | **Renderer wider scope** | streaming API is live, byte-identical to 2.7.0 | Wire `info <topic>` to render inline; add `compare <topic> rust go` side-by-side view. |
 | **sigil (content integrity)** | sit/owl already pull it for SHA hashing | Hash `content/` at startup, expose via `/integrity` HTTP route. Lets hoosh/agnoshi verify the corpus they're querying matches a known-good snapshot. Speculative — only worth doing if a consumer actually asks. |
-| **Field-note promotion** | per CLAUDE.md "field-note recurring pain — when the same gotcha bites in 3+ ports" | The `cyrius update` vs `cyrius deps` rehydration gotcha (saved in `memory/`) hit vidya and is documented in sit's `.gitignore` comment. If sandhi or sigil land the same pattern, promote to `content/cyrius/field_notes/`. |
+| **Field-note promotion** | per CLAUDE.md "field-note recurring pain — when the same gotcha bites in 3+ ports" | Two candidates now. (1) The `cyrius update` vs `cyrius lib sync` rehydration gotcha — hit vidya, documented in sit's `.gitignore` comment. (2) **A `[deps.<name>]` git block silently shadow-overriding a stdlib-folded module** — hit sit (sakshi/sankoch/sigil/patra), patra (4 levels deep), sigil, kavach, and vidya at 2.8.1. That is 5+ instances and `deps --verify` cannot detect it; this one has earned promotion to `content/cyrius/field_notes/`. |
 
 ### CI / release plumbing
 
 | Item | Trigger | Action |
 |---|---|---|
 | **Zugot recipe SHA backfill** | first 2.7.1 release tarball builds on GitHub Actions | Compute `sha256sum vidya-2.7.1-src.tar.gz` from the release artifact; fill the `sha256 = ""` placeholder in `zugot/marketplace/vidya.cyml`. |
-| **Content-validation matrix** | observed CI wallclock for the new `scripts/validate-content.sh` step | If the 814-example sweep exceeds ~15 min, split the content job per-language (matrix strategy) for parallelism. The script's per-language stages are independent. |
+| **Content-validation matrix** | observed CI wallclock for the new `scripts/validate-content.sh` step | If the 847-example sweep exceeds ~15 min, split the content job per-language (matrix strategy) for parallelism. The script's per-language stages are independent. |
 | **Zig pin maintenance** | observed failures on `content/*/zig.zig` examples | Track zig's release cadence; bump the CI install pin (`0.16.0` today, matching `docs/sources.md` / `README.md`) when content needs newer language features. The 0.15→0.16 bump at v2.7.2 migrated all 14 zig examples to `std.Io` (Threaded backend, Writer "Writergate", `DebugAllocator`). |
 | **`scripts/bench-history.sh` audit** | next benchmark cycle (P4 work) | Pre-2.0 era script; haven't verified it works against the 5.11.x toolchain layout. Skim before relying on it for the build_systems benchmarks. |
 
@@ -114,9 +116,9 @@ component needs vidya support next.
 
 Trigger condition (from `docs/development/content-grouping.md`):
 **when topic count exceeds ~50, reorganize `content/` into
-subdirectories.** We're at 74. The reorg is overdue and should
-land before topic count crosses ~80 (likely during 2.7.x or
-2.8.x).
+subdirectories.** We're at 77. The reorg is overdue and should
+land before topic count crosses ~80 (likely during 2.8.x or
+2.9.x).
 
 Planned shape (per content-grouping.md):
 
@@ -155,11 +157,11 @@ language-feature alignment. The cadence:
 5. CHANGELOG patch entry summarises the bump
 6. zugot recipe (in the upstream repo) tracks the same version
 
-Current pin: **5.11.55** (vidya 2.7.1; 5.10.x + 5.11.x cycles
-absorbed in one bump from 5.9.43). The 5.11.x model treats `lib/`
-and `cyrius.lock` as build artifacts (gitignored, rehydrated via
-`cyrius update`), and per-file `cyrius lint` / `cyrius fmt` from
-5.7+. See CHANGELOG 2.7.1 for the full call-out, including the
+Current pin: **6.5.29** (vidya 2.8.1). `lib/` and `cyrius.lock`
+are build artifacts (gitignored, rehydrated via `cyrius lib sync`
+then `cyrius deps` — **not** `cyrius update`, which ignores the
+manifest pin under wrapper drift), and `cyrius lint` / `cyrius fmt`
+are per-file from 5.7+. See CHANGELOG 2.7.1 for the full call-out, including the
 transitive-stdlib gap (sandhi pulls `TLS_EARLY_DATA_*`,
 `fdlopen_*`, `base64_encode` via enum/constant refs that v5.10.x
 SLOT 19 doesn't follow) — vidya's `[deps] stdlib` mirrors sit's
@@ -301,4 +303,4 @@ Every science crate cites papers. Vidya cites implementations.
 
 ---
 
-*Last Updated: 2026-05-16 (v2.7.1) — **🎉 P3 complete; 74/74 at 11/11; 814/814 validator. 2.7.1 dep-bump cycle: cyrius 5.9.43 → 5.11.55 (5.10.x + 5.11.x absorbed), sakshi 2.0.0 → 2.2.4 (cycle-counter timestamps + aarch64 lane), vyakarana 1.11.1 → 2.2.1 with streaming-API migration (ADR 0017; output byte-identical at 2187 tokens / 8829 bytes on the rust lexing_and_parsing track). CI/release modernised for the 5.11.x model: `cyrius update`-style rehydration, gitignored `lib/`+`cyrius.lock`, lint gate, validate-content.sh full gate, best-effort aarch64 cross-build. See "2.7.x dep-track follow-ups" for queued cleanup items.***
+*Last Updated: 2026-08-20 (v2.8.1) — **P0–P4 complete; 77/77 at 11/11; 847/847 validator. 2.8.1 infra cut: cyrius 6.4.2 → 6.5.29, sakshi 2.4.4 → 2.4.10 (reshaped from a `[deps.sakshi]` git block, which was shadow-overriding the toolchain-folded module, into a `[deps] stdlib` leaf), vyakarana 2.2.3 → 2.3.2. Binary 14.66 MB → 2.56 MB. Gate repairs in the same cut: the release aarch64 probe (dead since the 6.1.x pin), the content gate's qemu probe (77 AArch64 examples silently skipped every CI run) plus a `VIDYA_STRICT` skip-gate, `continue-on-error` off `cyrius test`, and four benchmarks that had been measuring empty inputs since April. See "2.7.x dep-track follow-ups" for queued cleanup items.***

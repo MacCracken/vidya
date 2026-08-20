@@ -25,19 +25,26 @@ has_cmd() { command -v "$1" &>/dev/null; }
 
 HAS_ZIG=false;         has_cmd zig && HAS_ZIG=true
 HAS_AARCH64_AS=false;  has_cmd aarch64-linux-gnu-as && HAS_AARCH64_AS=true
-HAS_QEMU_AA64=false;   has_cmd qemu-aarch64 && HAS_QEMU_AA64=true
+# qemu-user ships `qemu-aarch64`; qemu-user-static (what CI installs, and
+# what --no-install-recommends leaves you with on noble) ships ONLY
+# `qemu-aarch64-static`. Probing the unsuffixed name alone silently skipped
+# all 77 AArch64 examples on every CI run — accept either, and remember which.
+QEMU_AA64=""
+HAS_QEMU_AA64=false
+if has_cmd qemu-aarch64; then        QEMU_AA64=qemu-aarch64;        HAS_QEMU_AA64=true
+elif has_cmd qemu-aarch64-static; then QEMU_AA64=qemu-aarch64-static; HAS_QEMU_AA64=true
+fi
 HAS_CYRIUS=false;      has_cmd cyrius && HAS_CYRIUS=true
 
-# OpenQASM: prefer native Rust validator, fall back to qiskit
+# OpenQASM: qiskit only. The former `cargo run --example test_qasm` probe was
+# Rust-era debt (vidya migrated off Rust at v2.0; the example survives only in
+# rust-old/) AND a latent false-green: its branch printed "✓ OpenQASM (native)"
+# and incremented PASS without validating anything.
 QASM_VALIDATOR=""
-if has_cmd cargo && cargo run --example test_qasm --features openqasm -- --help &>/dev/null 2>&1; then
-    QASM_VALIDATOR="native"
-else
-    QASM_PYTHON="python3"
-    [[ -f ".venv/bin/python3" ]] && QASM_PYTHON=".venv/bin/python3"
-    if $QASM_PYTHON -c "import qiskit" 2>/dev/null; then
-        QASM_VALIDATOR="qiskit"
-    fi
+QASM_PYTHON="python3"
+[[ -f ".venv/bin/python3" ]] && QASM_PYTHON=".venv/bin/python3"
+if $QASM_PYTHON -c "import qiskit" 2>/dev/null; then
+    QASM_VALIDATOR="qiskit"
 fi
 
 # Line-buffer wrapper: forces external commands to flush per-line so
@@ -50,7 +57,8 @@ else
 fi
 
 echo "=== Vidya Content Validation ==="
-echo "  Toolchain: zig=$HAS_ZIG aarch64=$HAS_AARCH64_AS qasm=$QASM_VALIDATOR cyrius=$HAS_CYRIUS"
+echo "  Toolchain: zig=$HAS_ZIG aarch64-as=$HAS_AARCH64_AS qemu-aarch64=$HAS_QEMU_AA64${QEMU_AA64:+ ($QEMU_AA64)} qasm=${QASM_VALIDATOR:-none} cyrius=$HAS_CYRIUS"
+[[ "${VIDYA_STRICT:-0}" == "1" ]] && echo "  VIDYA_STRICT=1 — any skipped example fails the run"
 echo ""
 
 # run_lang <label> <topic-rel-file> <command...>
@@ -126,9 +134,6 @@ for topic_dir in "$CONTENT_DIR"/*/; do
         if [[ "$QASM_VALIDATOR" == "qiskit" ]]; then
             run_lang "OpenQASM" "$topic/openqasm.qasm" \
                 $QASM_PYTHON -c "from qiskit import qasm2; qc = qasm2.load('$topic_dir/openqasm.qasm', include_path=['$CONTENT_DIR']); print(f'OpenQASM OK: {qc.num_qubits}q, depth {qc.depth()}')"
-        elif [[ "$QASM_VALIDATOR" == "native" ]]; then
-            echo "  ✓ OpenQASM (native)"
-            PASS=$((PASS + 1))
         else
             echo "  ⊘ OpenQASM (skipped — no qiskit or native validator)"
             SKIP=$((SKIP + 1))
@@ -162,7 +167,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
             bin=/tmp/vidya_test_$$
             obj=/tmp/vidya_test_$$.o
             run_lang "AArch64 Assembly" "$topic/asm_aarch64.s" \
-                bash -c "aarch64-linux-gnu-as '$topic_dir/asm_aarch64.s' -o $obj && aarch64-linux-gnu-ld $obj -o $bin && qemu-aarch64 $bin"
+                bash -c "aarch64-linux-gnu-as '$topic_dir/asm_aarch64.s' -o $obj && aarch64-linux-gnu-ld $obj -o $bin && $QEMU_AA64 $bin"
             rm -f "$bin" "$obj"
         else
             echo "  ⊘ AArch64 Assembly (skipped — cross-tools not installed)"
@@ -194,6 +199,17 @@ if [[ $FAIL -gt 0 ]]; then
     for err in "${ERRORS[@]}"; do
         echo "  - $err"
     done
+    exit 1
+fi
+
+# A skip is a silently-unvalidated example. Locally that is fine (not every
+# dev has zig + an aarch64 cross-toolchain + qiskit); in CI, where the full
+# set IS installed, a skip means a probe broke and the gate is reporting green
+# on work it never did. VIDYA_STRICT=1 turns that into a failure.
+if [[ "${VIDYA_STRICT:-0}" == "1" && $SKIP -gt 0 ]]; then
+    echo ""
+    echo "VIDYA_STRICT=1 and $SKIP example(s) were skipped — a toolchain probe"
+    echo "failed, so the gate did not validate everything it reports on."
     exit 1
 fi
 

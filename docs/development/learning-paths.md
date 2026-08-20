@@ -1,6 +1,6 @@
 # Learning Paths
 
-> **Last Updated**: 2026-05-16 (v2.7.1 — post-P3; covers all 74 topics across P0–P3. P4 build-system paths added when those topics ship.)
+> **Last Updated**: 2026-05-16 (v2.7.1 — post-P3). ⚠ **Coverage is 67 of 77 topics, not "all".** The claim was already wrong when written (7 then-existing topics had no path) and P4 widened the gap to 10. A Build & Release path plus the missing entries are queued for the next content cycle.
 
 Ordered topic sequences for structured learning. Each path builds on the previous topic. Run `vidya list` for the full topic index.
 

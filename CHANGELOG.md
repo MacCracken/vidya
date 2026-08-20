@@ -7,6 +7,269 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.1] — 2026-08-20
+
+Infra-only cut — no content change (corpus stays 77 topics / 847 examples,
+0 gaps). Cyrius pin **6.4.2 → 6.5.29**, sakshi reshaped from a git dep into a
+stdlib leaf, vyakarana **2.2.3 → 2.3.2**. Headline: **the binary shrank
+14.66 MB → 2.56 MB (−82.5%)** — 2.8.0's sigil-crypto static-data regression is
+gone at 6.5.x.
+
+### Changed
+
+- **Cyrius toolchain 6.4.2 → 6.5.29.** No stdlib module was removed across the
+  jump (verified by diffing the `lib/` module sets of both snapshots — three
+  additions only: `async_macos`, `async_win`, `thread_macos`, none of which
+  vidya declares). The build required no source change beyond the sakshi work
+  below.
+  - **Binary 14,661,488 B → 2,562,008 B (−82.5%).** The compiler's report of
+    large static data fell from **13,119,032 B → 862,168 B**. 2.8.0 documented
+    the ~13 MB as the unavoidable cost of a sandhi consumer — sigil's
+    `SIGIL_CRYPTO_BANKS = 64` parallel-crypto banks linked as *reachable static
+    data* via the `tls` → `sha384_init_into` transitive, explicitly "not
+    DCE-eliminable". That is no longer true at 6.5.x: the constant is still 64
+    in both snapshots, so the change is in how the toolchain places and reaches
+    those banks, not in sigil's own configuration. vidya's `serve` is still
+    plaintext localhost and still never executes the crypto at runtime.
+  - **`cyrius bench` rediscovers `tests/*.bcyr`.** The 6.4.x discovery
+    regression that 2.8.0 worked around is fixed — no-arg `cyrius bench` finds
+    the suite again. CI and `scripts/bench-history.sh` keep passing the
+    explicit `tests/vidya.bcyr` path anyway: it is unambiguous and works on
+    both sides of the fix.
+- **sakshi is now a stdlib leaf, not a git dep — and this fixes a silent
+  downgrade.** cyrius folded sakshi into its stdlib snapshot at **6.5.24**, so
+  `lib/sakshi.cyr` ships with the toolchain. vidya nonetheless still carried
+  `[deps.sakshi]` pinned at tag **2.4.4**, and `cyrius deps` overlays a git
+  dep's resolution *on top of* the folded snapshot on every build — so the
+  2.4.4 file was **replacing the toolchain's 2.4.10**. Effects, all now gone:
+  - The build emitted `duplicate fn 'sakshi_span_enter' / 'sakshi_span_exit'
+    (last definition wins)` on every compile.
+  - `cyrius deps --verify` could not catch it: the lock is written **from
+    disk**, so it recorded the hash of the downgraded file and reported clean.
+  - The stale copy was pushed at anything reaching vidya transitively.
+
+  `[deps.sakshi]` is removed and `"sakshi"` added to `[deps] stdlib`, matching
+  the shape sit settled on after hitting the same trap. ⚠ Do not re-add the git
+  block — pinning sakshi means pinning the toolchain, and the `cyrius` pin in
+  `[package]` is that lever. Net version movement: sakshi **2.4.4 → 2.4.10**.
+- **vyakarana 2.2.3 → 2.3.2** (still a real git dep — vyakarana is *not* folded
+  into the snapshot). 2.3.0 moved vyakarana's own pin 6.1.24 → 6.5.4 and re-cut
+  its vendored `lib/`; 2.3.1–2.3.2 are tokenizer-correctness patches (`TK_ERROR`
+  adjudication across 37 grammars). No token-kind, `Token`-layout, or public-API
+  change, so vidya's `code` command gains highlighting accuracy with no call-site
+  change.
+
+### Fixed
+
+- **`load_all` span tracing had been dead code.** `src/main.cyr` defined local
+  no-op stubs `fn sakshi_span_enter(...) { return 0; }` / `fn sakshi_span_exit()
+  { return 0; }` immediately after `include "lib/sakshi.cyr"`, which overrode the
+  real implementations ("last definition wins"). The comment above them cited
+  **sakshi v0.5.0**, whose stderr-only profile genuinely omitted the span stack —
+  four major versions stale. So vidya's one instrumented span recorded nothing.
+  Stubs removed; `load_all` now emits real `[ENTER]` / `[EXIT]` records with
+  elapsed time to stderr, stdout unchanged. The pair is balanced with no early
+  return between enter and exit, so it cannot leak a slot from sakshi's 16-deep
+  span stack — the failure mode sakshi 2.4.11 documents.
+
+### Fixed — CI and release gates
+
+A status audit run against this cut found that several gates had been reporting
+green on work they never did. All are one- to six-line repairs and all are in
+this cut; none change the shipped program.
+
+- **The release aarch64 cross-build has been silently skipped since the 6.1.x
+  pin.** `.github/workflows/release.yml` guarded on
+  `$HOME/.cyrius/bin/cc5_aarch64`. That binary was renamed `cycc_aarch64` at
+  cyrius **6.0.0** and the back-compat symlink was dropped at **6.1.0**, so the
+  `if` was permanently false: the step emitted `::warning::cc5_aarch64 not
+  shipped`, the job went green, and the release shipped x86_64-only. **2.7.1
+  shipped an aarch64 artifact; 2.7.3 and 2.8.0 did not.** The probe now tries
+  `cycc_aarch64`, `cycc-native-aarch64`, then `cc5_aarch64`. Verified before
+  changing it: `cyrius build --aarch64` at 6.5.29 produces a working 3,049,200 B
+  static aarch64 ELF that runs the full corpus under `qemu-aarch64`.
+
+  The roadmap entry for this said "no vidya-side action — just monitor the CI
+  warning". The warning being emitted *was* the bug; that entry is corrected.
+
+- **The content gate has been skipping all 77 AArch64 examples on every CI
+  run.** `scripts/validate-content.sh` probed for `qemu-aarch64`, but CI
+  installs `qemu-user-static --no-install-recommends`, which on noble ships
+  **only** `qemu-aarch64-static`. So `HAS_QEMU_AA64=false` and every AArch64
+  example took the skip branch — while the banner printed
+  `aarch64=$HAS_AARCH64_AS` (the *assembler*, which was present), reporting
+  true. CI has been green on **770/847**. The probe now accepts either binary
+  name and the banner reports what it actually gates on.
+
+- **A skipped example could never fail the content gate.** The exit check
+  considered only `$FAIL`; `$SKIP` was printed and discarded, so Zig, AArch64,
+  OpenQASM and Cyrius — 308 of 847 — could all vanish silently behind a broken
+  probe. `VIDYA_STRICT=1` (now set on the CI step, where the full toolchain is
+  installed by construction) makes any skip exit 1. Local runs are unaffected:
+  not every developer has zig, an aarch64 cross-toolchain and qiskit.
+
+- **`cyrius test` was `continue-on-error: true`, and `release.yml` gates on
+  that workflow** via `needs: [ci]` without re-running tests — so a fully red
+  41-test suite could still tag a release. `cyrius test` does exit non-zero on
+  a failed assertion. Flag removed. It is deliberately kept on the *bench* step,
+  which asserts nothing and flakes on shared runners. Neither sit nor hoosh
+  suppresses a test gate anywhere.
+
+- **The lint gate could pass on a file that does not parse.** It matched only
+  `^\s*warn `, so `error: does not parse, so lint checks were NOT run` scored
+  zero warnings and passed. Now matches `error` too.
+
+- **CI staged `lib/` with `cp -rL "$HOME/.cyrius/lib/"*`** — the flat symlink
+  dir, i.e. whatever the wrapper currently points at, and the whole 101-module
+  snapshot. Replaced with `cyrius lib sync` (pin-aware, declared subset) +
+  `cyrius deps`, so CI now produces the same 62-module `lib/` a developer does.
+
+- **`scripts/validate-content.sh` probed `cargo run --example test_qasm`** —
+  banned tooling (vidya migrated off Rust at v2.0; that example survives only
+  in `rust-old/`) *and* a latent false-green: the branch it guarded printed
+  `✓ OpenQASM (native)` and incremented `PASS` without validating anything.
+  Both the probe and the branch are gone; qiskit is the only OpenQASM path.
+
+- **`tests/test.sh` deleted.** It piped `src/main.cyr` into `./build/cc2` — a
+  binary gone since the 2.0 port — and stdin piping cannot resolve the file's
+  17 relative `include`s regardless. Referenced by nothing; its exit status was
+  always `rm`'s 0.
+
+- **`build/vidya` was a tracked 14.6 MB binary**, and `release.yml`'s
+  `git archive HEAD` packed it into every checksummed `*-src.tar.gz` — the
+  tarball zugot's recipe pins. A 2.8.1 source tarball would have shipped a
+  stale executable 5.7× larger than the one that tag builds. `build/` is now
+  gitignored (with a `.gitkeep`, hoosh's convention). ⚠ The ignore rule does
+  not untrack it — `git rm --cached build/vidya` is still needed.
+
+- **A false-positive lint deferral** in `src/main.cyr`: a comment describing
+  allocation lifetime used the phrase "go out of scope", which cyrlint reads as
+  an untracked deferral marker. Reworded; `cyrius lint src/main.cyr` is now
+  clean apart from the three `exceeds 120 characters` warnings CI tolerates.
+
+### Documentation
+
+- **Swept ten user-facing docs that had frozen at v2.7.1** — `README.md`,
+  `docs/usage.md`, `docs/guides/getting-started.md`, `docs/examples/README.md`,
+  `docs/development/{content-format,learning-paths,roadmap}.md`,
+  `docs/architecture/overview.md`, `BENCHMARKS.md`, `CLAUDE.md`. They variously
+  claimed 74 topics / 814 examples (actual: 77 / 847), a `~1.1 MB` binary, and
+  `cyrius update` as the rehydration command — which ignores the manifest pin
+  under wrapper drift and is the exact 2.7.2 incident. `overview.md` was two
+  generations behind at "60 topics" / "~600KB", still described sakshi as a git
+  dep, and still listed the `json`/`toml` modules 6.1.x folded into `bayan`.
+  Volatile figures now point at `docs/development/state.md` rather than being
+  restated. `roadmap.md` contradicted itself — header pin 6.4.2 vs `5.11.55`
+  further down, 77 topics in one line and 74 in another, release history
+  stopping at 2.6.x. CHANGELOG and ADR figures were left alone: those are
+  correct history.
+- **`docs/doc-health.md` had itself gone stale** — the ledger built to catch
+  exactly this drift last swept 2026-05-16 and marked `README.md`,
+  `BENCHMARKS.md` and `docs/usage.md` "✅ Fresh" while all three were wrong.
+  Updated, with the outstanding items (uncited sources, and a
+  CLAUDE.md-vs-`content-format.md` contradiction over whether best practices /
+  gotchas / performance notes are required) recorded rather than quietly closed.
+- **`CLAUDE.md` toolchain table corrected**: `cyrius deps --verify` now carries
+  the ⚠ that it cannot detect a shadowed stdlib module (the lock is written
+  from disk); the `cyrius bench` note records that 6.5.x fixed the 6.4.x
+  discovery regression; `~600KB` and `sakshi 2.0.0` replaced with a pointer to
+  `state.md`; `cyrius lib sync` documented as its own step.
+
+### Fixed — benchmark harness
+
+- **Four of six benchmarks had been measuring empty inputs since 2026-04-08.**
+  `toml_get` / `toml_get_sections` take **cstr** keys, not `Str`; passing
+  `str_from("id")` silently returns 0 rather than erroring. `tests/vidya.bcyr`
+  did exactly that at four sites, so the bench registry was never populated
+  (`map_set` was unreachable) and `reg_get_hit`, `reg_get_miss`, `search_text`
+  and `toml_sections` all probed a **zero-entry** map. The tell was visible in
+  the published numbers and went unread for four months: `reg_get_hit` was
+  benchmarking *faster* than `reg_get_miss`, which is impossible for a
+  populated open-addressed map. `tests/vidya.tcyr` documents this precise trap
+  in a comment on its `toml_loader` group while the sibling `.bcyr` kept doing
+  it. Keys are now cstr literals and the same NB is recorded in the `.bcyr`.
+  Product code was never affected — all 20 `toml_get*` call sites in
+  `src/main.cyr` already used cstr literals.
+
+  Scale of the correction, at the 6.5.29 pin:
+
+  | benchmark | empty input (as published) | real corpus |
+  |---|---|---|
+  | `reg_get_hit` | 33 ns | **136 ns** |
+  | `reg_get_miss` | 51 ns | **398 ns** |
+  | `search_text` | 72 ns | **9.52 µs** (132×) |
+  | `toml_sections` | 1.29 µs | **1.93 µs** |
+
+### Performance
+
+Measured on this box, same corpus, same day, **4 runs at each pin**, medians
+below — and **with the harness fix above in place at both pins**, so this is
+the first A/B in vidya's history that compares real work. `load_concept` and
+`load_all` were always measuring real input and are unaffected by the fix.
+
+| benchmark | 6.4.2 | 6.5.29 | delta | verdict |
+|---|---|---|---|---|
+| `reg_get_miss` | 504 ns | 398 ns | **−21.0%** | **real** — distributions do not overlap (6.4.2 min 502 ns > 6.5.29 max 411 ns) |
+| `load_all` | 5.933 ms | 5.633 ms | −5.1% | modest — 3 of 4 runs below the whole 6.4.2 range |
+| `load_concept` | 44.44 µs | 42.39 µs | −4.6% | modest — one overlapping outlier |
+| `reg_get_hit` | 138.5 ns | 136.5 ns | −1.4% | noise — full overlap |
+| `search_text` | 9.650 µs | 9.520 µs | −1.3% | noise — full overlap |
+| `toml_sections` | 1.834 µs | **1.927 µs** | **+5.1%** | **real regression** — distributions do not overlap (6.4.2 max 1.891 µs < 6.5.29 min 1.917 µs) |
+
+The hashmap miss path is meaningfully faster; TOML section extraction is
+meaningfully *slower*. The regression is small in absolute terms (~93 ns per
+call) and `toml_sections` runs only during corpus load, which improved overall
+— but it is real and is recorded here rather than averaged away. No claim is
+made for the two noise rows in either direction.
+
+⚠ These numbers are **not comparable to `BENCHMARKS.md`**, which is still
+stamped v2.7.1 / cyrius 5.11.55 and derives from the empty-input harness. That
+file needs a regeneration pass it has not had yet.
+
+### Verified rather than assumed
+
+Every claim below was measured on this box at the 6.5.29 pin, from a clean
+`rm -rf lib && cyrius lib sync && cyrius deps`, not inferred:
+
+- **Zero stdlib module removals** 6.4.2 → 6.5.29 across the whole snapshot
+  (diffed both `lib/` sets: three additions only — `async_macos`, `async_win`,
+  `thread_macos` — none declared here).
+- **Clean-room reproducible**: 62 modules vendored, `build/vidya` 2,562,008 B,
+  `cyrius test` **41 passed / 0 failed**, `cyrius lint src/main.cyr` clean apart
+  from the three `exceeds 120 characters` warnings CI tolerates.
+- **Content gate 847/847, zero skipped** under `VIDYA_STRICT=1` — the first run
+  in which a skip would have been a failure. (The machine used has the
+  unsuffixed `qemu-aarch64`, so its AArch64 coverage was already real; CI's was
+  not, which is what the probe fix above addresses.)
+- **aarch64 cross-build works at 6.5.29**: 3,049,200 B static ELF, runs the
+  full corpus under `qemu-aarch64`. Verified *before* changing release.yml's
+  probe, so the fix restores a working artifact rather than converting a silent
+  skip into a loud failure.
+- **All 10 CLI commands dispatch** on the rebuilt binary.
+- **`cyrius lib sync` and `cyrius deps` do overwrite a stale `lib/<mod>.cyr`**
+  at 6.5.29 — staged a 6.4.2 `fmt.cyr` into a 6.5.29 tree and watched each
+  command restore it. The older "treats an existing file as satisfied and never
+  refreshes" behavior (vyakarana's 2.3.0 entry, observed at 6.5.4) no longer
+  applies, so `rm -rf lib` before a pin bump is belt-and-braces, not required.
+  This is also *why* a git-dep overlay is the dangerous case and plain staleness
+  is not: the overlay is reapplied on every build by design.
+- **`ct`, `keccak`, `sigil` are now redundant declarations.** Dropping all three
+  from `[deps] stdlib` still vendors the same 62 modules and still builds clean
+  (binary 4,080 B smaller) — 6.5.x's transitive arc chases them. `chrono` and
+  `dynlib` remain hard requirements; removing either is a build error. All five
+  are kept anyway: an undeclared module of this class fails at **runtime**, not
+  at build time (sit's missing `random` made `sit key generate` SIGILL exactly
+  this way), and 4 KB does not buy that exposure.
+- The five `undefined function` warnings (`random_bytes`, `async_new_in`,
+  `async_spawn`, `async_run`, `async_await_readable`) are unchanged from 2.8.0
+  and remain dead-path placeholders — traced with `CYRIUS_DCE_VERBOSE=1` to
+  `_sigil_random_fill` and `sandhi_server_run_async`. `random_bytes` is
+  referenced only by `lib/sigil.cyr` and the agnos/windows syscall shims, none
+  reachable from a Linux-hosted plaintext `serve`.
+- **`CYRIUS_HOME` takes the install root** (`~/.cyrius`), not the versioned
+  directory. Pointing it at `~/.cyrius/versions/<pin>` makes the resolver look
+  for `<pin>/versions/<pin>/lib` and fail. Recorded in `state.md`.
+
 ## [2.8.0] — 2026-07-04
 
 ### Changed

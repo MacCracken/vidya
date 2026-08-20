@@ -8,7 +8,7 @@ Vidya is a curated, tested, multi-language programming reference for the AGNOS e
 
 1. **Content** (`content/`) — Source files per topic. No compilation needed. Read directly, train AI on it, or browse as documentation.
 
-2. **Cyrius CLI** (`src/main.cyr`) — Compiled to `build/vidya` (~1.1 MB static ELF). Queryable interface for the corpus: `list`, `search`, `info`, `compare`, `code`, `gaps`, `stats`, `languages`, `validate`, `serve`. (Migrated from a Rust crate at v2.0.)
+2. **Cyrius CLI** (`src/main.cyr`) — Compiled to `build/vidya` (current size in [`docs/development/state.md`](docs/development/state.md)). Queryable interface for the corpus: `list`, `search`, `info`, `compare`, `code`, `gaps`, `stats`, `languages`, `validate`, `serve`. (Migrated from a Rust crate at v2.0.)
 
 ## Features
 
@@ -24,26 +24,27 @@ Vidya is a curated, tested, multi-language programming reference for the AGNOS e
 Build the CLI:
 
 ```bash
-cyrius update                          # rehydrate lib/ from the toolchain pin
+cyrius lib sync                        # vendor the pinned stdlib into lib/
+cyrius deps                            # resolve the [deps.*] git deps
 cyrius build src/main.cyr build/vidya
 ```
 
 Use it:
 
 ```bash
-build/vidya stats                          # 74 topics, 814 examples, 11 langs
+build/vidya stats                          # 77 topics, 847 examples, 11 langs
 build/vidya list                           # browse all topics
 build/vidya search "quantum"               # text search across the corpus
 build/vidya info quantum_computing         # full record: practices, gotchas, perf notes
 build/vidya code quantum_computing rust    # ANSI-colored source via vyakarana
 build/vidya compare strings rust python    # side-by-side cross-language view
-build/vidya gaps                           # coverage gaps (currently none — 814/814)
+build/vidya gaps                           # coverage gaps (currently none — 847/847)
 build/vidya serve 8080                     # HTTP service: GET /stats, /code/{topic}/{lang}, ...
 ```
 
 ## Content Topics
 
-74 topics, complete across all 11 languages (814 examples). Browse `content/` directly or run `vidya list` to see the index. Roadmap and per-priority breakdown live in [`docs/development/roadmap.md`](docs/development/roadmap.md).
+77 topics, complete across all 11 languages (847 examples). Browse `content/` directly or run `vidya list` to see the index. Roadmap and per-priority breakdown live in [`docs/development/roadmap.md`](docs/development/roadmap.md).
 
 ## Languages
 

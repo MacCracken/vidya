@@ -63,12 +63,13 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 
 | Action | Command | Notes |
 |---|---|---|
-| Resolve deps | `cyrius deps` | Reads `cyrius.cyml`, refreshes vendored stdlib + sakshi |
-| Verify lock | `cyrius deps --verify` | Checks `cyrius.lock` SHAs (sakshi 2.0.0) |
-| Build binary | `cyrius build src/main.cyr build/vidya` | Output: ~600KB static ELF |
+| Sync stdlib | `cyrius lib sync` | Vendors the `[deps] stdlib` subset from the pinned snapshot into `lib/`. As of 6.5.29 this **does** overwrite a stale `lib/<mod>.cyr` (verified 2.8.1 by staging a 6.4.2 `fmt.cyr` into a 6.5.29 tree — both `lib sync` and `deps` restored it). The older "treats an existing file as satisfied and never refreshes" behavior — which vyakarana's 2.3.0 entry documented at 6.5.4 — no longer applies, so `rm -rf lib` before a pin bump is belt-and-braces, not required |
+| Resolve deps | `cyrius deps` | Reads `cyrius.cyml`, resolves the `[deps.<name>]` git deps (vyakarana) alongside the synced stdlib |
+| Verify lock | `cyrius deps --verify` | Checks `cyrius.lock` SHAs. ⚠ **Cannot catch a shadowed stdlib module** — the lock is written *from disk*, so a git dep overlaying a folded module records the overlay's hash and reports clean (this is how sakshi sat downgraded through 2.8.0) |
+| Build binary | `cyrius build src/main.cyr build/vidya` | Output: static ELF — current size in [`docs/development/state.md`](docs/development/state.md) |
 | Run program | `cyrius run <file.cyr>` | Compile + run in one step (also used by content validator for `cyrius.cyr` examples) |
 | Run tests | `cyrius test` | Runs `tests/vidya.tcyr` |
-| Run benchmarks | `cyrius bench tests/vidya.bcyr` | **Path required in 6.4.x** — no-arg `cyrius bench` only scans `benches/` + `tests/bcyr/`, not `tests/*.bcyr` |
+| Run benchmarks | `cyrius bench tests/vidya.bcyr` | No-arg discovery of `tests/*.bcyr` broke in 6.4.x and was **fixed in 6.5.x**. Keep passing the explicit path — unambiguous, and works either side of the fix |
 | Format | `cyrius fmt <file>` | **Per-file in 5.7+** (no recursive sweep flag) |
 | Lint | `cyrius lint <file>` | **Per-file in 5.7+** |
 
@@ -103,7 +104,7 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 ## Key Types
 
 - `Concept` — A programming topic with examples, best practices, gotchas, performance notes
-- `Topic` — Programming topic IDs (currently 60; see `docs/development/roadmap.md` for status)
+- `Topic` — Programming topic IDs (count in [`docs/development/state.md`](docs/development/state.md); status in `docs/development/roadmap.md`)
 - `Gotcha` — Common mistake with bad/good example (teaches what NOT to do)
 - `PerformanceNote` — Optimization insight with evidence (benchmark numbers)
 - `BestPractice` — The right way, with explanation of why

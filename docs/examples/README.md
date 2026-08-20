@@ -1,6 +1,6 @@
 # Examples
 
-Working code that exercises vidya's surfaces. Most readers don't need this directory — the **`content/` tree itself is the largest example collection in the project**, with 814 runnable implementations across 11 languages.
+Working code that exercises vidya's surfaces. Most readers don't need this directory — the **`content/` tree itself is the largest example collection in the project**, with 847 runnable implementations across 11 languages.
 
 This directory is for examples of **using vidya as a consumer**, not examples *in* vidya's corpus.
 
@@ -14,4 +14,4 @@ This directory is for examples of **using vidya as a consumer**, not examples *i
 
 None yet — vidya's CLI is small enough that the README quick-start and [`../usage.md`](../usage.md) carry the load. Examples land here as concrete consumer-integration patterns emerge from agnoshi / hoosh / future consumers.
 
-For examples of vidya's *content* (the 814 reference implementations), see [`../../content/`](../../content/) directly or run `vidya list`.
+For examples of vidya's *content* (the 847 reference implementations), see [`../../content/`](../../content/) directly or run `vidya list`.

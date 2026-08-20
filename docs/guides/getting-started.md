@@ -13,11 +13,12 @@ That's it. No Python, no Node, no Rust toolchain required to build or use vidya.
 
 ```bash
 cd vidya
-cyrius update                          # rehydrate lib/ from the pinned toolchain
+cyrius lib sync                        # vendor the pinned stdlib into lib/
+cyrius deps                            # resolve the [deps.*] git deps
 cyrius build src/main.cyr build/vidya
 ```
 
-The build produces a ~1.1 MB static ELF at `build/vidya`. No runtime dependencies.
+The build produces a static ELF at `build/vidya` (current size in [`../development/state.md`](../development/state.md)). No runtime dependencies.
 
 ## First Run
 
@@ -31,14 +32,14 @@ Expected output:
 === Vidya Corpus Stats ===
   Topics:     74
   Complete:   74 (all 11 languages)
-  Examples:   814
+  Examples:   847
   Languages:  11
 ```
 
 ## Common Tasks
 
 ```bash
-./build/vidya list                              # browse all 74 topics
+./build/vidya list                              # browse all 77 topics
 ./build/vidya search "memory"                   # text search across the corpus
 ./build/vidya info strings                      # full record for a topic
 ./build/vidya code quantum_computing rust       # ANSI-colored source via vyakarana

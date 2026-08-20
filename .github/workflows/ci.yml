@@ -19,11 +19,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Cyrius toolchain
-        # 5.11.x consumer pattern (sit / sigil / sandhi): pipe the
+        # Consumer pattern (sit / sigil / sandhi): pipe the
         # upstream install.sh which lays out $HOME/.cyrius/versions/$VER/
         # {bin,lib}, the flat $HOME/.cyrius/{bin,lib} symlinks, and the
-        # $HOME/.cyrius/current pointer. Replaces the pre-5.11 hand-rolled
-        # extract that landed stdlib at the wrong path.
+        # $HOME/.cyrius/current pointer. The version comes from the
+        # `cyrius = "..."` pin in cyrius.cyml, so CI installs exactly the
+        # toolchain the manifest declares.
         run: |
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
@@ -33,17 +34,21 @@ jobs:
           echo "CYRIUS_HOME=$HOME/.cyrius" >> "$GITHUB_ENV"
 
       - name: Resolve dependencies
-        # Two-step under cyrius 5.11.x:
-        #   1. Stdlib — install.sh laid these out at $HOME/.cyrius/lib;
-        #      cc5 reads from ./lib/ specifically, so cp -rL into the
-        #      project. `cyrius update` would also do this but is fragile
-        #      across CI $HOME shapes; direct cp is exactly what's needed.
-        #   2. `cyrius deps` resolves [deps.X] git crates (sakshi /
-        #      vyakarana) alongside the staged stdlib.
-        # cyrius.lock is empty under 5.11.x and gitignored; no verify step.
+        # Two-step, both pin-aware:
+        #   1. `cyrius lib sync` vendors the `[deps] stdlib` subset from the
+        #      snapshot named by `cyrius = "..."` in cyrius.cyml. The former
+        #      `cp -rL "$HOME/.cyrius/lib/"*` copied the FLAT symlink dir
+        #      (whatever the wrapper currently points at) and staged the whole
+        #      101-module snapshot, producing a 109-entry lock where a
+        #      developer's produces 62.
+        #   2. `cyrius deps` resolves the [deps.<name>] git deps (vyakarana).
+        #      sakshi is NOT one — it is folded into the stdlib snapshot as of
+        #      cyrius 6.5.24 and is declared in `[deps] stdlib`. See the ⚠ note
+        #      in cyrius.cyml: a git block there shadow-overrides the folded
+        #      module and silently downgrades it.
+        # cyrius.lock is gitignored (a build artifact); no verify step.
         run: |
-          mkdir -p lib
-          cp -rL "$HOME/.cyrius/lib/"* lib/
+          cyrius lib sync
           cyrius deps
 
       - name: Lint
@@ -54,7 +59,7 @@ jobs:
           for f in src/*.cyr; do
             out=$(cyrius lint "$f" 2>&1 || true)
             echo "$out"
-            bad=$(echo "$out" | grep -E '^\s*warn ' | grep -v 'exceeds 120 characters' || true)
+            bad=$(echo "$out" | grep -E '^\s*(warn|error)|^error:' | grep -v 'exceeds 120 characters' || true)
             if [ -n "$bad" ]; then
               fail=1
             fi
@@ -79,12 +84,17 @@ jobs:
           ./build/vidya gaps
 
       - name: Test (.tcyr)
+        # NOT continue-on-error. It was, through 2.8.0 — and release.yml
+        # `needs: [ci]` without re-running tests, so a fully red suite could
+        # still tag a release. `cyrius test` does exit non-zero on a failed
+        # assertion. Neither sit nor hoosh suppresses this anywhere.
         run: cyrius test
-        continue-on-error: true
 
       - name: Bench (.bcyr)
-        # cyrius 6.4.x dropped tests/*.bcyr from no-arg `cyrius bench`
-        # discovery (benches/ + tests/bcyr/ only) — pass the path.
+        # No-arg discovery of tests/*.bcyr broke in 6.4.x and was fixed in
+        # 6.5.x; the explicit path works either side, so keep it.
+        # continue-on-error is deliberate HERE (unlike the test step above):
+        # vidya.bcyr asserts nothing, and timings flake on shared runners.
         run: cyrius bench tests/vidya.bcyr
         continue-on-error: true
 
@@ -173,14 +183,21 @@ jobs:
         # Without rehydration, every per-topic cyrius.cyr fails with
         # "cannot read ./lib/<module>.cyr". Same two-step as build-and-test.
         run: |
-          mkdir -p lib
-          cp -rL "$HOME/.cyrius/lib/"* lib/
+          cyrius lib sync
           cyrius deps
 
       - name: Validate all examples compile/run
         # The gate per CLAUDE.md "Content Standards" — every concept.toml
         # example must compile and run successfully in its language.
-        # ~10 min wallclock for 814 examples × 11 languages.
+        # ~10 min wallclock for 847 examples across 11 languages.
+        #
+        # VIDYA_STRICT=1: every toolchain IS installed above, so a skip means
+        # a probe broke, not a missing tool. Through 2.8.0 the qemu probe
+        # looked only for `qemu-aarch64` while qemu-user-static ships
+        # `qemu-aarch64-static` — all 77 AArch64 examples were skipped on
+        # every run and the gate still reported green on 770/847.
+        env:
+          VIDYA_STRICT: "1"
         run: bash scripts/validate-content.sh
 
   security:

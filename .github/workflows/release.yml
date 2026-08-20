@@ -34,7 +34,8 @@ jobs:
           echo "Version verified: $TAG (cyrius.cyml pulls from VERSION via \${file:VERSION})"
 
       - name: Install Cyrius toolchain
-        # 5.11.x consumer pattern — see ci.yml for full rationale.
+        # Consumer pattern — see ci.yml for full rationale. Version comes
+        # from the `cyrius = "..."` pin in cyrius.cyml.
         run: |
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
@@ -44,12 +45,11 @@ jobs:
           echo "CYRIUS_HOME=$HOME/.cyrius" >> "$GITHUB_ENV"
 
       - name: Resolve deps
-        # Two-step: cp stdlib from install.sh's $HOME/.cyrius/lib into the
-        # project ./lib/, then add [deps.X] git crates via `cyrius deps`.
-        # See ci.yml for rationale.
+        # Two-step, both pin-aware: `cyrius lib sync` vendors the
+        # `[deps] stdlib` subset from the pinned snapshot, then `cyrius deps`
+        # resolves the [deps.<name>] git deps. See ci.yml for full rationale.
         run: |
-          mkdir -p lib
-          cp -rL "$HOME/.cyrius/lib/"* lib/
+          cyrius lib sync
           cyrius deps
 
       - name: Build x86_64
@@ -60,13 +60,23 @@ jobs:
 
       - name: Cross-build aarch64 (best-effort)
         # Best-effort: ship x86_64 even if aarch64 fails. Mirrors sit's
-        # pattern; aarch64 cross-build occasionally fails on stdlib
-        # syscall-table gaps (e.g. SYS_OPEN under cyrius 5.8.x — aarch64
-        # has openat only). When it fails we drop the artifact and
-        # surface a CI warning; when cc5_aarch64 isn't shipped with the
-        # pinned cyrius release, we skip with a warning.
+        # pattern; the cross-build occasionally trips on stdlib syscall-table
+        # gaps (e.g. SYS_OPEN under cyrius 5.8.x — aarch64 has openat only).
+        #
+        # ⚠ This probe named `cc5_aarch64` through 2.8.0. That binary was
+        # renamed `cycc_aarch64` at cyrius 6.0.0 and the back-compat symlink
+        # was dropped at 6.1.0, so from the 6.1.x pin onward the `if` was
+        # ALWAYS false: the job emitted a warning, went green, and shipped
+        # x86_64-only. 2.7.1 shipped an aarch64 artifact; 2.7.3 and 2.8.0
+        # silently did not. Verified at the 6.5.29 pin before this change —
+        # the cross-build produces a working 3.0 MB static aarch64 ELF.
         run: |
-          if [ -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
+          CC_AA64=""
+          for cand in cycc_aarch64 cycc-native-aarch64 cc5_aarch64; do
+            if [ -x "$HOME/.cyrius/bin/$cand" ]; then CC_AA64="$cand"; break; fi
+          done
+          if [ -n "$CC_AA64" ]; then
+            echo "aarch64 backend: $CC_AA64"
             if cyrius build --aarch64 src/main.cyr build/vidya-aarch64; then
               echo "vidya aarch64: $(wc -c < build/vidya-aarch64) bytes"
             else
@@ -74,11 +84,12 @@ jobs:
               rm -f build/vidya-aarch64
             fi
           else
-            echo "::warning::cc5_aarch64 not shipped with this Cyrius — aarch64 binary skipped"
+            echo "::warning::no aarch64 backend in this Cyrius — aarch64 binary skipped"
           fi
 
       - name: Archive
-        # Binary is statically linked (~1.1 MB) — consumers don't need
+        # Binary is statically linked (size in docs/development/state.md)
+        # — consumers don't need
         # lib/ at runtime, so the tarball ships only the binary and the
         # content corpus. lib/ is a build artifact, rehydrated on demand.
         # aarch64 artifacts shipped only when cross-build succeeded.

@@ -7,7 +7,7 @@ Cyrius language reference, and shared toolchain resources:
 
 ```
 content/
-├── {topic}/                  # 74× topic directories (see below)
+├── {topic}/                  # 77× topic directories (see below)
 ├── cyrius/                   # Cyrius language reference + field notes
 │   ├── language/             #   index, stdlib_modules, syntax notes
 │   └── field_notes/          #   recurring-pain notes (cyim, compiler, …)

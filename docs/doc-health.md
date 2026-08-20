@@ -6,7 +6,9 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
+> **Last refresh**: 2026-08-20 (v2.8.1 ship — see the 2.8.1 sweep block below).
+>
+> **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
 > **Scope**: This repo only (`vidya`) — root-level files (README, BENCHMARKS, CHANGELOG, CLAUDE.md, CONTRIBUTING, SECURITY, VERSION) plus `docs/`. Cross-repo state (cyrius pin, sakshi/vyakarana versions, zugot recipe) is tracked in [`development/roadmap.md`](development/roadmap.md) and the relevant section of [`CHANGELOG.md`](../CHANGELOG.md), not here.
 >
@@ -16,7 +18,45 @@ This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
 
-## At a glance — 2026-05-16 inventory
+## 2026-08-20 sweep (v2.8.1)
+
+⚠ **This ledger had itself gone stale, which is the failure mode it exists to
+prevent.** It last swept 2026-05-16, recorded `VERSION 2.7.1`, and marked
+`README.md`, `BENCHMARKS.md` and `docs/usage.md` **✅ Fresh** while all three
+were wrong about topic count, example count, binary size, and the rehydration
+command. Three releases (2.7.2, 2.7.3, 2.8.0) shipped without touching it.
+
+Fixed in this sweep:
+
+| Doc | What was wrong | Now |
+|---|---|---|
+| `README.md` | 74 topics / 814 examples; `~1.1 MB` binary; `cyrius update` rehydration | 77 / 847; size points at `state.md`; `cyrius lib sync` + `cyrius deps` |
+| `BENCHMARKS.md` | stamped v2.7.1 / cyrius 5.11.55; **numbers derived from the empty-input benchmark harness** | regenerated at 6.5.29 with the harness fixed, plus a ⚠ non-comparability banner and a 6.4.2→6.5.29 delta table |
+| `docs/usage.md` | 74/814; `~1.1 MB`; `cyrius update`; "81 modules"; sakshi listed as a git dep | 77/847; size pointer; `lib sync`+`deps`; 62 modules; sakshi corrected to a stdlib leaf |
+| `docs/guides/getting-started.md` | 814 examples; 74 topics; `~1.1 MB`; `cyrius update` | swept |
+| `docs/examples/README.md` | 814 implementations (×2) | 847 |
+| `docs/architecture/overview.md` | **two generations behind** — 60 topics, `~600KB`, sakshi as git dep, `json`/`toml` modules that 6.1.x folded into `bayan` | swept; latency figures re-labelled as 60-topic measurements rather than current |
+| `docs/development/roadmap.md` | self-contradicting: pin 6.4.2 in the header vs **5.11.55** at :158; 77 topics at :6 vs 74 at :117; release history stopped at 2.6.x | swept; 2.7.x + 2.8.x rows added |
+| `docs/development/content-format.md` | 74× topic directories | 77× |
+| `docs/development/learning-paths.md` | claimed "covers all 74 topics" — actually 67 of 77, and the claim was already false when written | claim corrected, gap recorded |
+| `CLAUDE.md` | "currently 60" topics; `~600KB` binary; `sakshi 2.0.0`; "path required in 6.4.x" | swept; volatile figures now point at `state.md` |
+
+**Still outstanding** (deferred to the queued content review, not silently closed):
+`docs/sources.md` cites none of the 16 RFCs the corpus references by number,
+nor Raft/Paxos, nor DEFLATE/LZ77/Huffman — everything P1–P4 added is uncited,
+while this ledger's Tier-2 row marks the file "Fresh".
+`docs/development/content-format.md` files description / best practices /
+gotchas / performance notes under **"Optional Fields"**, directly contradicting
+CLAUDE.md's "Content Standards", which makes all four mandatory. That
+contradiction needs resolving before any content backfill.
+
+**Process fix**: the release hook that touches `docs/development/state.md`
+should touch this file in the same step. A ledger that is only updated when
+someone remembers is the ledger that marked three wrong docs fresh.
+
+---
+
+## At a glance — 2026-05-16 inventory (superseded by the sweep above)
 
 **~20 markdown files** across the repo (+6 since first scaffold: 4 ADR tier files + state.md + 3 standards-conformance scaffolds, minus 1 retired narrative). Bucket counts:
 

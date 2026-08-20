@@ -11,14 +11,14 @@
 ```
 ┌─────────────────────────────────────────────────┐
 │  Content Layer (content/)                       │
-│  529+ source files across 60 topics × 11 langs  │
+│  847 source files across 77 topics × 11 langs   │
 │  Human-readable, AI-trainable, CI-tested        │
 └─────────────┬───────────────────────────────────┘
               │ load_all() at startup (one-shot)
 ┌─────────────▼───────────────────────────────────┐
 │  Cyrius CLI (src/main.cyr → build/vidya)        │
 │  Registry + search + compare + validate + serve │
-│  ~600KB static ELF, no runtime deps             │
+│  static ELF, no runtime deps (size: state.md)   │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -47,13 +47,19 @@ src/
                        # compare, validate, gaps, serve, all CLI
                        # dispatch. Single-file by intent.
 
-lib/                   # Vendored Cyrius stdlib snapshot. Refreshed
-                       # via `cyrius deps`. Sandhi and sakshi are
-                       # the load-bearing service-layer modules:
+lib/                   # Vendored Cyrius stdlib snapshot (62 modules).
+                       # Rehydrate with `cyrius lib sync` then
+                       # `cyrius deps`. Sandhi and sakshi are the
+                       # load-bearing service-layer modules:
 ├── sandhi.cyr         # HTTP/TLS/discovery service stdlib
-├── sakshi.cyr         # Structured tracing (git-pinned, sakshi 2.0.0)
-└── ...                # alloc, str, fmt, vec, hashmap, json, toml,
-                       # cyml, fnptr, args, regex, net, fs, io, ...
+├── sakshi.cyr         # Structured tracing. NOT git-pinned as of
+                       # vidya 2.8.1 — cyrius folds sakshi into the
+                       # stdlib snapshot at 6.5.24, so it is declared
+                       # in `[deps] stdlib`. A `[deps.sakshi]` git
+                       # block shadow-overrides the folded module.
+└── ...                # alloc, str, fmt, vec, hashmap, bayan (the
+                       # 6.1.x bundle that absorbed json/toml/base64/
+                       # cyml), fnptr, args, regex, net, fs, io, ...
 
 tests/
 ├── vidya.tcyr         # 41 tests — language enum, TOML loading,
@@ -78,7 +84,8 @@ main()
   ├─ load_all()            # iterate content/*/, parse concept.toml + read
   │                        # each language file, build Concept records,
   │                        # push into _reg_entries, key by id in _reg_index.
-  │                        # ~2.4ms for 60 topics × 11 langs.
+  │                        # ~2.4ms for 60 topics × 11 langs
+  │                        # (measured pre-2.5; corpus is now 77).
   └─ command dispatch      # streq() chain on argv(1)
 ```
 
@@ -209,7 +216,7 @@ idempotent (closes the prior fd first).
 Verified end-to-end at v2.3.6 across five scenarios: baseline,
 add a topic dir, remove a topic dir, corrupt a concept.toml
 (reload aborts, live registry survives), restore (reload
-succeeds). Reload latency: 17–22ms for 60 topics.
+succeeds). Reload latency: 17–22ms, measured at 60 topics (pre-2.5; the corpus is 77 today — figure not re-measured).
 
 ### Known limits (serve mode)
 
@@ -229,7 +236,7 @@ succeeds). Reload latency: 17–22ms for 60 topics.
   edit" semantics are needed, drive a periodic curl (e.g. a
   10s `curl -s /stats > /dev/null` in another terminal).
 - **No partial reload.** A single touched file triggers a full
-  re-scan of all 60 topics. ~20ms; not worth optimising until
+  re-scan of the whole corpus. ~20ms at 60 topics; not worth optimising until
   topic count crosses ~500.
 
 ## Key Design Decisions

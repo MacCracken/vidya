@@ -5,11 +5,12 @@
 Vidya is a Cyrius program. Build with the Cyrius toolchain:
 
 ```sh
-cyrius update                          # rehydrate lib/ from the pinned toolchain
+cyrius lib sync                        # vendor the pinned stdlib into lib/
+cyrius deps                            # resolve the [deps.*] git deps
 cyrius build src/main.cyr build/vidya
 ```
 
-The binary is ~1.1 MB, statically linked, no runtime dependencies.
+The binary is statically linked with no runtime dependencies; the current size is recorded in [`development/state.md`](development/state.md).
 
 ## Commands
 
@@ -26,7 +27,7 @@ Shows all topics with their category and language count:
   allocators [Allocators] (11 languages)
   audio_dsp [Audio] (11 languages)
   ...
-74 topics
+77 topics
 ```
 
 ### Search
@@ -114,7 +115,7 @@ For full CI-grade validation across the 11-language toolchain matrix, run `./scr
 vidya gaps
 ```
 
-Reports missing language implementations per topic. Currently zero (all 74 topics complete across all 11 languages — 814/814).
+Reports missing language implementations per topic. Currently zero (all 77 topics complete across all 11 languages — 847/847).
 
 ### Languages
 
@@ -136,7 +137,7 @@ Corpus summary:
 === Vidya Corpus Stats ===
   Topics:     74
   Complete:   74 (all 11 languages)
-  Examples:   814
+  Examples:   847
   Languages:  11
 ```
 
@@ -217,6 +218,6 @@ See [`development/content-format.md`](development/content-format.md) for the ful
 
 - **Build**: `cyrius` (Cyrius toolchain pinned in `cyrius.cyml`)
 - **Runtime**: none (static ELF binary)
-- **Vendored stdlib**: 81 modules in `lib/` (gitignored under the v5.11.x model — rehydrate with `cyrius update`)
-- **Git deps**: sakshi (tracing), vyakarana (tokenizer) — see `[deps.*]` in `cyrius.cyml`
+- **Vendored stdlib**: 62 modules in `lib/` (a gitignored build artifact — rehydrate with `cyrius lib sync` then `cyrius deps`; **not** `cyrius update`, which ignores the pin under wrapper drift)
+- **Git deps**: vyakarana (tokenizer) only — see `[deps.vyakarana]` in `cyrius.cyml`. sakshi is **not** a git dep: cyrius folds it into the stdlib snapshot as of 6.5.24, so it is declared in `[deps] stdlib`
 - **Validate (full)**: requires each language's toolchain (rustc, python3, gcc, go, npx/tsx, bash, zig, aarch64-linux-gnu binutils, qemu-user-static, qiskit, cyrius). Missing toolchains are skipped by `validate-content.sh`.
