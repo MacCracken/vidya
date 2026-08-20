@@ -18,12 +18,33 @@
 # This is the kind of program a stage 0 compiler would emit.
 
 _start:
+    # ── Test 1: the seed program's own encodings ────────────────────
+    # A stage-0 compiler emits BYTES, so the thing worth pinning down is
+    # the encoding it produces, not just the value it computes. These are
+    # the three opcodes this program itself uses.
+    lea seed_program(%rip), %rcx
+    movzbl 0(%rcx), %eax
+    cmp $0xB8, %eax         # mov $imm32, %eax
+    jne fail
+    movzbl 5(%rcx), %eax
+    cmp $0x01, %eax         # add %reg, %reg (opcode byte)
+    jne fail
+    mov $seed_program_len, %eax
+    cmp $10, %eax           # 5 + 3 + 2 bytes — variable length
+    jne fail
+
     # Load operands (stage 0: mov reg, imm)
     mov $10, %rdi           # first operand
     mov $32, %rsi           # second operand
 
     # Compute (stage 0: add reg, reg)
     add %rsi, %rdi          # rdi = 42
+
+    # ── Test 2: the arithmetic actually produced 42 ─────────────────
+    # Without this the program prints whatever `add` computed and exits 0,
+    # so a broken adder would ship green.
+    cmp $42, %rdi
+    jne fail
 
     # Convert to ASCII digit(s) for display
     # 42 = '4' (0x34) followed by '2' (0x32)
@@ -60,6 +81,23 @@ _start:
     mov $60, %rax
     xor %rdi, %rdi
     syscall
+
+fail:
+    # exit(1) — a failed assertion must fail the content gate
+    mov $60, %rax
+    mov $1, %rdi
+    syscall
+
+.section .rodata
+.balign 8
+# The byte sequence a seed compiler emits for `10 + 32`. Three x86_64
+# instructions of three different lengths — 5, 3 and 2 bytes. On a
+# fixed-width ISA this table would be exactly 12 bytes; here it is 10.
+seed_program:
+    .byte 0xB8, 0x0A, 0x00, 0x00, 0x00   # mov  $10, %eax    — 5 bytes
+    .byte 0x01, 0xF0, 0x90               # add  %esi, %eax   — 3 bytes
+    .byte 0x0F, 0x05                     # syscall           — 2 bytes
+seed_program_len = . - seed_program
 
 # Key insight: this entire program could be emitted by a seed compiler
 # that understands just: mov, add, xor, div, push, pop, inc, dec,

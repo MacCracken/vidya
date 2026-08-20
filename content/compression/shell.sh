@@ -172,7 +172,16 @@ main() {
     decode EMPTYTOK 0 512
     [[ $OUT_LEN -eq 0 ]] && PASS=$(( PASS + 1 )) || { echo FAIL emptydec; exit 1; }
 
-    echo "compression: $PASS/11 ok"
+    # The denominator is a CLAIM about how many checks this file runs, and it
+# had drifted to 11 while the file actually runs 9. The gate only
+# reads the exit status, so the wrong number shipped green. Assert the
+# count so it can never drift silently again.
+EXPECTED=9
+if [[ $PASS -ne $EXPECTED ]]; then
+    echo "FAIL: ran $PASS checks, expected $EXPECTED" >&2
+    exit 1
+fi
+echo "compression: $PASS/$EXPECTED ok"
 }
 
 main

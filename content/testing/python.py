@@ -50,43 +50,43 @@ class TestParseKV(unittest.TestCase):
     """Tests for parse_kv function."""
 
     def test_valid_input(self):
-        assert parse_kv("host=localhost") == ("host", "localhost")
+        self.assertEqual(parse_kv("host=localhost"), ("host", "localhost"))
 
     def test_trims_whitespace(self):
-        assert parse_kv("  port = 3000  ") == ("port", "3000")
+        self.assertEqual(parse_kv("  port = 3000  "), ("port", "3000"))
 
     def test_empty_value_is_ok(self):
-        assert parse_kv("key=") == ("key", "")
+        self.assertEqual(parse_kv("key="), ("key", ""))
 
     def test_no_equals_raises(self):
         with self.assertRaises(ValueError) as ctx:
             parse_kv("no_equals_sign")
-        assert "no '='" in str(ctx.exception)
+        self.assertIn("no '='", str(ctx.exception))
 
     def test_empty_key_raises(self):
         with self.assertRaises(ValueError) as ctx:
             parse_kv("=value")
-        assert "empty key" in str(ctx.exception)
+        self.assertIn("empty key", str(ctx.exception))
 
 
 class TestClamp(unittest.TestCase):
     """Tests for clamp function."""
 
     def test_in_range(self):
-        assert clamp(5, 0, 10) == 5
+        self.assertEqual(clamp(5, 0, 10), 5)
 
     def test_below_min(self):
-        assert clamp(-1, 0, 10) == 0
+        self.assertEqual(clamp(-1, 0, 10), 0)
 
     def test_above_max(self):
-        assert clamp(100, 0, 10) == 10
+        self.assertEqual(clamp(100, 0, 10), 10)
 
     def test_at_boundaries(self):
-        assert clamp(0, 0, 10) == 0
-        assert clamp(10, 0, 10) == 10
+        self.assertEqual(clamp(0, 0, 10), 0)
+        self.assertEqual(clamp(10, 0, 10), 10)
 
     def test_min_equals_max(self):
-        assert clamp(5, 5, 5) == 5
+        self.assertEqual(clamp(5, 5, 5), 5)
 
     def test_invalid_range_raises(self):
         with self.assertRaises(ValueError):
@@ -103,7 +103,7 @@ class TestClamp(unittest.TestCase):
         ]
         for value, lo, hi, expected in cases:
             with self.subTest(value=value, lo=lo, hi=hi):
-                assert clamp(value, lo, hi) == expected
+                self.assertEqual(clamp(value, lo, hi), expected)
 
 
 class TestCounter(unittest.TestCase):
@@ -111,24 +111,24 @@ class TestCounter(unittest.TestCase):
 
     def test_initial_value(self):
         c = Counter(5)
-        assert c.value == 0
+        self.assertEqual(c.value, 0)
 
     def test_increments(self):
         c = Counter(3)
-        assert c.increment() is True
-        assert c.value == 1
+        self.assertTrue(c.increment())
+        self.assertEqual(c.value, 1)
 
     def test_stops_at_max(self):
         c = Counter(2)
         c.increment()
         c.increment()
-        assert c.increment() is False
-        assert c.value == 2
+        self.assertFalse(c.increment())
+        self.assertEqual(c.value, 2)
 
     def test_zero_max(self):
         c = Counter(0)
-        assert c.increment() is False
-        assert c.value == 0
+        self.assertFalse(c.increment())
+        self.assertEqual(c.value, 0)
 
 
 # ── Test helpers and fixtures ───────────────────────────────────────
@@ -143,11 +143,11 @@ class TestWithSetup(unittest.TestCase):
             self.counter.increment()
 
     def test_value_after_setup(self):
-        assert self.counter.value == 5
+        self.assertEqual(self.counter.value, 5)
 
     def test_can_still_increment(self):
-        assert self.counter.increment() is True
-        assert self.counter.value == 6
+        self.assertTrue(self.counter.increment())
+        self.assertEqual(self.counter.value, 6)
 
 
 # ── Run examples and tests ──────────────────────────────────────────
@@ -174,7 +174,13 @@ def main():
 
     runner = unittest.TextTestRunner(verbosity=0)
     result = runner.run(suite)
-    assert result.wasSuccessful(), f"Tests failed: {result.failures + result.errors}"
+    # NOT an assert. `python3 -O` deletes assert statements outright, so an
+    # assert-based gate makes this file print "All testing examples passed."
+    # and exit 0 even when the runner just reported FAILED. Verified: with a
+    # deliberately broken clamp, `python3 -O` printed both "FAILED
+    # (failures=1)" and the success line, and exited 0.
+    if not result.wasSuccessful():
+        raise SystemExit(f"Tests failed: {result.failures + result.errors}")
 
     print("All testing examples passed.")
 

@@ -124,8 +124,13 @@ _start:
     //   [2] B.EQ label_end     (needs forward ref to [3])
     //   [3] label_end: NOP
     // Branch at [2] targets [3], offset = 3 - 2 = 1 instruction
-    mov     w0, #1                  // forward reference offset
-    cmp     w0, #1                  // verify pass-2 resolved it
+    // Compute the offset the way pass 2 does — target index minus branch
+    // index — instead of moving 1 and comparing it to 1, which verifies
+    // nothing about resolution at all.
+    mov     w0, #3                  // index of label_end
+    mov     w1, #2                  // index of the branch
+    sub     w0, w0, w1              // pass-2 resolves offset = 3 - 2
+    cmp     w0, #1                  // ...one instruction forward
     b.ne    fail
 
     // ── Test 8: stage progression ───────────────────────────────────

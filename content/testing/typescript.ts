@@ -65,14 +65,27 @@ function assertEqual<T>(got: T, expected: T, msg: string): void {
 }
 
 function assertThrows(fn: () => void, expectedMsg?: string): void {
+    // The "did it throw?" bookkeeping happens OUTSIDE the catch. The obvious
+    // shape — `try { fn(); throw new Error("expected to throw") } catch (e)`
+    // — is self-defeating twice over: the sentinel is thrown inside the try,
+    // so its own catch swallows it, and worse, any expectedMsg that happens
+    // to be a substring of the sentinel ("throw", "to throw") then MATCHES,
+    // so the assertion passes precisely when the function did not throw.
+    let threw = false;
+    let caught: unknown;
     try {
         fn();
-        throw new Error("expected function to throw");
     } catch (e) {
-        if (expectedMsg && e instanceof Error) {
-            if (!e.message.includes(expectedMsg)) {
-                throw new Error(`expected error containing '${expectedMsg}', got '${e.message}'`);
-            }
+        threw = true;
+        caught = e;
+    }
+    if (!threw) {
+        throw new Error("expected function to throw, but it returned normally");
+    }
+    if (expectedMsg !== undefined) {
+        const msg = caught instanceof Error ? caught.message : String(caught);
+        if (!msg.includes(expectedMsg)) {
+            throw new Error(`expected error containing '${expectedMsg}', got '${msg}'`);
         }
     }
 }

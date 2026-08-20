@@ -96,7 +96,13 @@ for topic_dir in "$CONTENT_DIR"/*/; do
     # Rust
     if [[ -f "$topic_dir/rust.rs" ]]; then
         bin=/tmp/vidya_test_$$
-        run_lang "Rust" "$topic/rust.rs" bash -c "rustc --edition 2024 '$topic_dir/rust.rs' -o $bin && $bin"
+        # Two passes. The plain build runs main(); the --test build is ADDITIVE
+        # and only runs for files that actually carry test blocks. Without it,
+        # everything behind #[cfg(test)] is never compiled at all: a deliberate
+        # type error plus a false assertion inside `mod tests` still exits 0 and
+        # prints "All testing examples passed". --test catches it as E0308.
+        # It must be additive, not a replacement — --test discards main().
+        run_lang "Rust" "$topic/rust.rs" bash -c "rustc --edition 2024 '$topic_dir/rust.rs' -o $bin && $bin && if grep -qE '#\[test\]|#\[cfg\(test\)\]' '$topic_dir/rust.rs'; then rustc --edition 2024 --test '$topic_dir/rust.rs' -o ${bin}_t && ${bin}_t --test-threads=1; fi"
         rm -f "$bin"
     fi
 

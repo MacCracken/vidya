@@ -177,4 +177,13 @@ hs_advance "$SRV" "$CLI" "$CHAIN" "$TRUST" 100
 hs_advance "$SRV" "$CLI" "$CHAIN" "$TRUST" 999
 check $HS_STATE $ST_FAILED "hostname mismatch"
 
-echo "tls_and_encryption: $PASS/16 ok"
+# The denominator is a CLAIM about how many checks this file runs, and it
+# had drifted to 16 while the file actually runs 15. The gate only
+# reads the exit status, so the wrong number shipped green. Assert the
+# count so it can never drift silently again.
+EXPECTED=15
+if [[ $PASS -ne $EXPECTED ]]; then
+    echo "FAIL: ran $PASS checks, expected $EXPECTED" >&2
+    exit 1
+fi
+echo "tls_and_encryption: $PASS/$EXPECTED ok"

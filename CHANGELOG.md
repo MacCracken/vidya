@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+Tier 2 of the example review — tests that could not fail. Every item was
+proven by sabotage: break the thing the test exists to check, confirm the
+suite still reported success, fix, then confirm the same sabotage now fails.
+
+- **`content/testing/rust.rs`: 116 of 201 lines were never compiled.**
+  Everything behind `#[cfg(test)]` — 11 `#[test]` functions — is invisible to
+  a plain `rustc` build. A deliberate type error *and* a false assertion
+  inside `mod tests` both compiled clean and printed "All testing examples
+  passed". Both validators now make an **additive** `--test` pass for files
+  matching `#[test]` / `#[cfg(test)]`; the type error surfaces as `E0308` and
+  the false assertion as a failing test. Additive matters: `--test` replaces
+  `main()`, so it cannot simply supersede the normal build.
+- **`content/testing/typescript.ts`: `assertThrows` passed when nothing
+  threw.** It threw its sentinel *inside* the `try`, so its own `catch` ate
+  it — and worse, any `expectedMsg` that was a substring of that sentinel
+  ("throw", "to throw") then matched, making the assertion succeed precisely
+  when the function did not throw. Rewritten to record whether the call threw
+  outside the catch. Sabotage now yields `expected function to throw, but it
+  returned normally`.
+- **`content/testing/python.py`: `python3 -O` deleted the whole suite.** 25
+  bare `assert`s inside `unittest.TestCase` plus an assert-based runner gate.
+  With a deliberately broken `clamp`, `python3 -O` printed *both* `FAILED
+  (failures=1)` and "All testing examples passed", exiting 0. Asserts are now
+  `self.assertEqual` / `assertTrue` / `assertIn`, and the gate raises
+  `SystemExit`. Sabotage now exits 1 under both `python3` and `python3 -O`.
+- **`content/binary_formats/asm_x86_64.s` and
+  `content/compiler_bootstrapping/asm_x86_64.s` asserted nothing.** The first
+  printed "ELF!" and exited; the second computed 10+32 and printed the result
+  without ever checking it was 42. Both now build a structure and assert it,
+  mirroring their AArch64 siblings (which had 16 and 8 checks to the x86_64
+  files' zero — so this was never a constraint of assembly). Corrupting a
+  magic byte, `e_machine`, the ELF class, an instruction length, an operand,
+  or an opcode now exits 1; every one of those was silently green before.
+- **Six tautological AArch64 assertions.** `mov wN, #imm` followed by
+  `cmp wN, #imm` cannot fail. Each now checks what its own comment claims:
+  `optimization_passes` performs the `sub w2, w0, w0` instead of asserting a
+  constant; `kernel_topics` derives the EL encodings from the documented
+  `EL << 2` rule; `compiler_bootstrapping` computes the forward-reference
+  offset as `3 - 2`; and `instruction_encoding` reads back the words the
+  assembler actually emitted and compares them to the documented
+  `0xD2800540` / `0x52800021` — turning the bit-field comments into checked
+  claims. (Two further candidates were **not** defects: `concurrency`
+  round-trips through `stlr`/`ldar`, and `explicit_gpu_synchronization`
+  spans a `ret` into a separate entry point. Both left alone.)
+- **`content/memory_management/asm_aarch64.s` asserted the clobber, not the
+  restore.** The STP/LDP block saved a pair, overwrote it, asserted the
+  *overwrite*, then restored — so deleting the very `ldp` the block exists to
+  demonstrate left it passing. Now seeds known values, clobbers, restores and
+  compares against the originals; deleting the `ldp` exits 1.
+- **Five shell examples shipped false test summaries.** `compression` claimed
+  `9/11`, `serialization` `18/19`, `http_and_web_protocols` `16/24`,
+  `tls_and_encryption` `15/16`, `concurrent_file_access` `14/12` — a
+  hardcoded denominator that had drifted from the number of checks actually
+  run. The gate reads only the exit status, so every one shipped green. Each
+  denominator is corrected and now guarded: the file asserts `PASS ==
+  EXPECTED` and exits 1 on mismatch, so the claim cannot drift silently again.
+
 Tier 1 of a corpus-wide example review — five defects where the corpus was
 teaching something unsafe or wrong. Each was reproduced as a failure first,
 then fixed, then re-reproduced against the fix.

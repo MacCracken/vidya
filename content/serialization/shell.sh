@@ -142,4 +142,13 @@ declare -a OVER; OVER=("${ENC[@]}"); OVER_LEN=$ENC_LEN
 decode_frame OVER $OVER_LEN PAYLOAD_OUT $MAX_MSG_SIZE
 check $FRAME_CONSUMED -1 "oversize"
 
-echo "serialization: $PASS/19 ok"
+# The denominator is a CLAIM about how many checks this file runs, and it
+# had drifted to 19 while the file actually runs 18. The gate only
+# reads the exit status, so the wrong number shipped green. Assert the
+# count so it can never drift silently again.
+EXPECTED=18
+if [[ $PASS -ne $EXPECTED ]]; then
+    echo "FAIL: ran $PASS checks, expected $EXPECTED" >&2
+    exit 1
+fi
+echo "serialization: $PASS/$EXPECTED ok"

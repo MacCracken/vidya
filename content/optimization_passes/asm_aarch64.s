@@ -155,9 +155,12 @@ _start:
     cmp     w1, #42
     b.ne    fail
 
-    // x - x optimizes to MOV Xd, #0
-    mov     w2, #0                  // "x - x" -> MOV #0
-    cmp     w2, #0
+    // x - x optimizes to MOV Xd, #0.
+    // Assert the IDENTITY, not the constant: `mov w2, #0; cmp w2, #0` is a
+    // tautology that holds no matter what the optimizer does. Performing the
+    // subtraction and checking the result is what pins the rewrite down.
+    sub     w2, w0, w0              // "x - x" — the unoptimized form
+    cmp     w2, #0                  // ...must equal what MOV #0 would give
     b.ne    fail
 
     // ── Print success ────────────────────────────────────────────────

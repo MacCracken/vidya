@@ -120,4 +120,13 @@ parse_request "$req1"
 header_lookup "authorization"
 check_n $HDR_FOUND 0 "absent header"
 
-echo "http_and_web_protocols: $PASS/24 ok"
+# The denominator is a CLAIM about how many checks this file runs, and it
+# had drifted to 24 while the file actually runs 16. The gate only
+# reads the exit status, so the wrong number shipped green. Assert the
+# count so it can never drift silently again.
+EXPECTED=16
+if [[ $PASS -ne $EXPECTED ]]; then
+    echo "FAIL: ran $PASS checks, expected $EXPECTED" >&2
+    exit 1
+fi
+echo "http_and_web_protocols: $PASS/$EXPECTED ok"

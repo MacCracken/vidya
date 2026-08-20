@@ -44,6 +44,17 @@ _start:
     //   [22:21] hw=00 (shift=0, bits [15:0])
     //   [20:5]  imm16=42 (0x002A)
     //   [4:0]   Rd=00000 (x0)
+    // Verify the ENCODING, not the value. `mov x0, #42; cmp x0, #42` is a
+    // tautology — it holds whatever bits the assembler emitted, so it cannot
+    // check the bit-field breakdown documented above. Instead read back the
+    // word the assembler actually produced for that exact mnemonic (see
+    // `enc_samples` at the end of .text) and compare it to 0xD2800540.
+    adr     x9, enc_samples
+    ldr     w10, [x9]               // word 0: mov x0, #42
+    mov     w11, #0x0540
+    movk    w11, #0xD280, lsl #16   // expected 0xD2800540
+    cmp     w10, w11
+    b.ne    fail
     mov     x0, #42
     cmp     x0, #42
     b.ne    fail
@@ -52,6 +63,11 @@ _start:
     //   sf=0 (32-bit W register)
     //   opc=10 (MOVZ)
     //   imm16=1, Rd=00001 (w1)
+    ldr     w10, [x9, #4]           // word 1: mov w1, #1
+    mov     w11, #0x0021
+    movk    w11, #0x5280, lsl #16   // expected 0x52800021
+    cmp     w10, w11
+    b.ne    fail
     mov     w1, #1
     cmp     w1, #1
     b.ne    fail
@@ -232,6 +248,14 @@ _start:
     mov     x8, #93
     mov     x0, #0
     svc     #0
+
+// Real instructions, assembled by `as` from the same mnemonics documented
+// above. Reading their words back is what turns the bit-field comments into
+// checked claims rather than prose. AArch64 is fixed-width, so word N is
+// always at offset N*4 — the property that makes this table indexable at all.
+enc_samples:
+    mov     x0, #42                 // -> 0xD2800540
+    mov     w1, #1                  // -> 0x52800021
 
 fail:
     mov     x8, #93

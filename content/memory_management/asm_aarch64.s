@@ -44,15 +44,25 @@ _start:
     add     sp, sp, #32         // deallocate
 
     // ── STP/LDP: store/load pair (efficient) ───────────────────────
-    // Stores two registers in one instruction
-    sub     sp, sp, #16
-    stp     x19, x20, [sp]     // save callee-saved registers
-    mov     x19, #111
+    // Stores two registers in one instruction.
+    //
+    // Assert the ROUND TRIP, not the overwrite. The obvious shape — stp,
+    // then `mov x19, #111`, then `cmp x19, #111` — checks the mov and
+    // nothing else: deleting the very ldp this block exists to demonstrate
+    // leaves it passing. Seed known values, clobber them, restore, and
+    // compare against the originals.
+    mov     x19, #111           // known values to save
     mov     x20, #222
-    cmp     x19, #111
-    b.ne    fail
-    ldp     x19, x20, [sp]     // restore
+    sub     sp, sp, #16
+    stp     x19, x20, [sp]      // save the pair in one instruction
+    mov     x19, #999           // clobber both
+    mov     x20, #888
+    ldp     x19, x20, [sp]      // restore the pair in one instruction
     add     sp, sp, #16
+    cmp     x19, #111           // ...both must be back
+    b.ne    fail
+    cmp     x20, #222
+    b.ne    fail
 
     // ── Static data section ────────────────────────────────────────
     adr     x0, static_val

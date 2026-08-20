@@ -56,4 +56,13 @@ exec 200<&-
 exec 201<&-
 rm -f "$PATH_TMP"
 
-echo "concurrent_file_access: $PASS/12 ok"
+# The denominator is a CLAIM about how many checks this file runs, and it
+# had drifted to 12 while the file actually runs 14. The gate only
+# reads the exit status, so the wrong number shipped green. Assert the
+# count so it can never drift silently again.
+EXPECTED=14
+if [[ $PASS -ne $EXPECTED ]]; then
+    echo "FAIL: ran $PASS checks, expected $EXPECTED" >&2
+    exit 1
+fi
+echo "concurrent_file_access: $PASS/$EXPECTED ok"

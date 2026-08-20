@@ -107,9 +107,16 @@ _start:
     mov     w1, #0x4            // EL1
     mov     w2, #0x8            // EL2
     mov     w3, #0xC            // EL3
-    cmp     w1, #0x4
+    // Derive the encodings from the documented rule (EL number << 2) rather
+    // than comparing each constant to itself. `mov w1, #0x4; cmp w1, #0x4`
+    // passes even if the rule above is wrong.
+    mov     w4, #1
+    lsl     w4, w4, #2          // EL1 = 1 << 2 = 0x4
+    cmp     w1, w4
     b.ne    fail
-    cmp     w3, #0xC
+    mov     w5, #3
+    lsl     w5, w5, #2          // EL3 = 3 << 2 = 0xC
+    cmp     w3, w5
     b.ne    fail
 
     // ── All passed ───────────────────────────────────────────────────
