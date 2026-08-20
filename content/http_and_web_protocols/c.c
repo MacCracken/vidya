@@ -44,12 +44,27 @@ static int parse_request(const uint8_t *buf, int len, Request *req) {
     for (int i = sp1 + 1; i < rl_end; i++) if (buf[i] == ' ') { sp2 = i; break; }
     if (sp2 < 0) return 0;
 
-    req->method_len = sp1;
-    memcpy(req->method, buf, sp1);
-    req->path_len = sp2 - sp1 - 1;
-    memcpy(req->path, buf + sp1 + 1, req->path_len);
-    req->version_len = rl_end - sp2 - 1;
-    memcpy(req->version, buf + sp2 + 1, req->version_len);
+    /* Every length below is attacker-controlled — it comes from where the
+     * spaces landed in the request line, not from anything we chose. A fixed
+     * destination plus an unchecked length is the classic parser overflow, so
+     * each field is bounds-checked against its own capacity BEFORE the copy.
+     * Rejecting is what a real server does (414 for the URI, 431 for headers);
+     * truncating silently would corrupt the request instead of refusing it. */
+    int method_len = sp1;
+    int path_len = sp2 - sp1 - 1;
+    int version_len = rl_end - sp2 - 1;
+    if (method_len > (int)sizeof req->method) return 0;   /* 501 */
+    if (path_len > (int)sizeof req->path) return 0;       /* 414 URI Too Long */
+    if (version_len > (int)sizeof req->version) return 0; /* 505 */
+    /* Validate first, THEN commit — a rejected request leaves `req` as
+     * memset left it, so a caller that ignores our return value still sees a
+     * zeroed struct rather than a length that outruns its own buffer. */
+    req->method_len = method_len;
+    memcpy(req->method, buf, method_len);
+    req->path_len = path_len;
+    memcpy(req->path, buf + sp1 + 1, path_len);
+    req->version_len = version_len;
+    memcpy(req->version, buf + sp2 + 1, version_len);
 
     int pos = rl_end + 2;
     while (1) {
@@ -69,6 +84,7 @@ static int parse_request(const uint8_t *buf, int len, Request *req) {
         if (colon < 0) return 0;
         if (req->header_count >= HEADER_CAP) return 0;
         int name_len = colon - pos;
+        if (name_len > STR_CAP) return 0;            /* 431: header name too long */
         for (int i = 0; i < name_len; i++) {
             req->headers_name[req->header_count][i] = (uint8_t)tolower(buf[pos + i]);
         }
@@ -76,6 +92,7 @@ static int parse_request(const uint8_t *buf, int len, Request *req) {
         int vstart = colon + 1;
         while (vstart < line_end && buf[vstart] == ' ') vstart++;
         int value_len = line_end - vstart;
+        if (value_len > STR_CAP) return 0;           /* 431: header value too long */
         memcpy(req->headers_value[req->header_count], buf + vstart, value_len);
         req->headers_value_len[req->header_count] = value_len;
         req->header_count++;
@@ -85,6 +102,7 @@ static int parse_request(const uint8_t *buf, int len, Request *req) {
 
 static const uint8_t *header_lookup(const Request *req, const char *name, int *out_len) {
     int n = (int)strlen(name);
+    if (n > STR_CAP) { *out_len = 0; return NULL; }  /* no stored name can match */
     uint8_t lower[STR_CAP];
     for (int i = 0; i < n; i++) lower[i] = (uint8_t)tolower((unsigned char)name[i]);
     for (int i = 0; i < req->header_count; i++) {

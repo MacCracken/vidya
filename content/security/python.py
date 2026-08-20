@@ -8,6 +8,7 @@
 import hashlib
 import hmac
 import os
+from pathlib import Path
 import re
 import secrets
 import tempfile
@@ -103,14 +104,24 @@ def test_secret_generation():
 # ── Path traversal prevention ─────────────────────────────────────────
 def safe_resolve(base_dir: str, user_input: str) -> str:
     """Resolve user_input within base_dir, rejecting path traversal."""
-    # Join and resolve to absolute path
-    candidate = os.path.normpath(os.path.join(base_dir, user_input))
-    base_resolved = os.path.normpath(base_dir)
+    # Path.resolve() follows SYMLINKS; os.path.normpath does not. That is the
+    # whole difference. normpath is a pure string operation — it collapses
+    # "a/../b" without ever touching the filesystem — so a symlink INSIDE the
+    # base that points outside it sails straight through a normpath-based
+    # check. The lexical form of this function accepted base/escape/passwd
+    # where "escape" was a symlink to /etc, and the caller read /etc/passwd.
+    #
+    # strict=False so a not-yet-created file still resolves; the parent chain
+    # is what carries the symlinks, and that is resolved either way.
+    base_resolved = Path(base_dir).resolve(strict=False)
+    candidate = (base_resolved / user_input).resolve(strict=False)
 
-    # Verify the resolved path stays within the base
-    if not candidate.startswith(base_resolved + os.sep) and candidate != base_resolved:
+    # is_relative_to is an exact path-component comparison, so it cannot be
+    # fooled by a sibling directory that merely shares a name prefix
+    # (/srv/data-evil vs /srv/data) the way a startswith() check can be.
+    if candidate != base_resolved and not candidate.is_relative_to(base_resolved):
         raise ValueError(f"path traversal detected: {user_input!r}")
-    return candidate
+    return str(candidate)
 
 
 def test_path_traversal_prevention():
@@ -126,6 +137,17 @@ def test_path_traversal_prevention():
                 assert False, f"should have rejected: {attack!r}"
             except ValueError:
                 pass
+
+        # A SYMLINK inside the base pointing outside it. This is the case a
+        # purely lexical check cannot see: the string "escape/passwd" never
+        # contains "..", so normpath has nothing to collapse and happily
+        # returns a path that resolves to /etc/passwd.
+        os.symlink("/etc", os.path.join(base, "escape"))
+        try:
+            safe_resolve(base, "escape/passwd")
+            assert False, "should have rejected symlink escape"
+        except ValueError:
+            pass
 
 
 # ── Parameterized query pattern ────────────────────────────────────────

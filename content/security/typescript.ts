@@ -44,8 +44,8 @@ function testInputValidation(): void {
         try {
             validateUsername(bad);
             assert(false, `should have rejected: ${bad}`);
-        } catch {
-            // expected
+        } catch (e) {
+            if (e instanceof AssertionFailed) throw e;       // the test itself failed
         }
     }
 }
@@ -101,11 +101,31 @@ function testSecureRandomGeneration(): void {
 }
 
 // ── Path traversal prevention ─────────────────────────────────────────
-function safeResolve(baseDir: string, userInput: string): string {
-    const resolved = path.resolve(baseDir, userInput);
-    const baseResolved = path.resolve(baseDir);
+function realpathOrSelf(p: string): string {
+    // realpathSync throws on a path that does not exist yet; walk up to the
+    // nearest existing ancestor and re-append the rest, so a not-yet-created
+    // file still gets its PARENT chain resolved. The parents are where the
+    // symlinks live.
+    try {
+        return fs.realpathSync(p);
+    } catch {
+        const parent = path.dirname(p);
+        if (parent === p) return p;
+        return path.join(realpathOrSelf(parent), path.basename(p));
+    }
+}
 
-    if (!resolved.startsWith(baseResolved + path.sep) && resolved !== baseResolved) {
+function safeResolve(baseDir: string, userInput: string): string {
+    // path.resolve is LEXICAL — it collapses "a/../b" as a string and never
+    // touches the filesystem, so a symlink inside baseDir pointing outside it
+    // passes straight through. Verified: with `escape` a symlink to /etc, the
+    // lexical form returned base/escape/passwd and the caller read /etc/passwd.
+    const baseResolved = realpathOrSelf(path.resolve(baseDir));
+    const resolved = realpathOrSelf(path.resolve(baseResolved, userInput));
+
+    // Compare on the separator so a sibling that merely shares a name prefix
+    // (/srv/data-evil vs /srv/data) cannot slip past a startsWith check.
+    if (resolved !== baseResolved && !resolved.startsWith(baseResolved + path.sep)) {
         throw new Error(`path traversal detected: ${userInput}`);
     }
     return resolved;
@@ -122,8 +142,8 @@ function testPathTraversalPrevention(): void {
             try {
                 safeResolve(base, attack);
                 assert(false, `should reject: ${attack}`);
-            } catch {
-                // expected
+            } catch (e) {
+                if (e instanceof AssertionFailed) throw e;   // the test itself failed
             }
         }
     } finally {
@@ -168,8 +188,8 @@ function testIntegerBounds(): void {
         try {
             safeAllocate(bad);
             assert(false, `should reject size ${bad}`);
-        } catch {
-            // expected
+        } catch (e) {
+            if (e instanceof AssertionFailed) throw e;       // the test itself failed
         }
     }
 }
@@ -199,8 +219,15 @@ function testHtmlEscaping(): void {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
+class AssertionFailed extends Error {}
+
 function assert(cond: boolean, msg: string): void {
-    if (!cond) throw new Error(`FAIL: ${msg}`);
+    // A distinct class, not a bare Error. Every `try { …; assert(false) }
+    // catch {}` block below is asserting that something THROWS — and a bare
+    // `catch` cannot tell the expected rejection from the assert that fires
+    // when the rejection never came. Rethrowing AssertionFailed is what makes
+    // those tests able to fail at all.
+    if (!cond) throw new AssertionFailed(`FAIL: ${msg}`);
 }
 
 main();

@@ -36,9 +36,17 @@ fn fx_to_int_round(v) {
 }
 
 fn fx_mul(a, b) {
-    # Standard multiply: (a * b) >> 16
+    # Standard multiply: (a * b) >>> 16
     # WARNING: overflows if |a| * |b| > 2^63
-    return (a * b) >> FX_SHIFT;
+    #
+    # >>> not >>. In Cyrius `>>` is LOGICAL (zero-fills) and `>>>` is
+    # ARITHMETIC (sign-extends) — the opposite of C/Java, and the reason
+    # `asr()` below exists at all. The product of two Q16.16 values is
+    # signed, so a zero-filling shift turns every negative result into a
+    # huge positive one: fx_mul(-3.0, 2.5) returned 281474976219136
+    # instead of -491520. This is the exact defect the field note in
+    # content/cyrius/ records as the DOOM black-screen bug.
+    return (a * b) >>> FX_SHIFT;
 }
 
 fn fx_mul_safe(a, b) {
@@ -143,6 +151,14 @@ fn test_fx_mul() {
     # 0.5 * 0.5 = 0.25
     var quarter = fx_mul(FX_HALF, FX_HALF);
     assert_eq(quarter, 16384, "0.5 * 0.5 == 0.25 (16384)");
+
+    # NEGATIVE operands. Every case above is positive, and a zero-filling
+    # shift is indistinguishable from an arithmetic one when the product is
+    # positive — so a suite that never multiplies a negative cannot detect
+    # the wrong shift operator at all. These three are the detection gap.
+    assert_eq(fx_mul(0 - a, b), 0 - 491520, "-3.0 * 2.5 == -7.5");
+    assert_eq(fx_mul(a, 0 - b), 0 - 491520, "3.0 * -2.5 == -7.5");
+    assert_eq(fx_mul(0 - a, 0 - b), 491520, "-3.0 * -2.5 == +7.5");
     return 0;
 }
 

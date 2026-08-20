@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+Tier 1 of a corpus-wide example review — five defects where the corpus was
+teaching something unsafe or wrong. Each was reproduced as a failure first,
+then fixed, then re-reproduced against the fix.
+
+- **`content/http_and_web_protocols/c.c`: six unbounded `memcpy`s from
+  attacker-controlled lengths.** The request-line and header fields copied
+  parsed lengths into fixed buffers with no bounds check. Reproduced:
+  `AddressSanitizer: stack-buffer-overflow, WRITE of size 15001` past the
+  9,652-byte `Request` — and at smaller sizes it corrupted the struct silently
+  (`path_len` came back as `0x41414141`). The `body` copy was already clamped,
+  so the omission was an oversight, not a design. **The Rust and Go ports of the
+  same topic have no such bug.** Now validates every length against its
+  destination *before* committing anything, so a rejected request leaves the
+  struct as `memset` left it. All 24 of the file's assertions still pass.
+- **`content/security/python.py` and `content/security/typescript.ts`: the
+  path-traversal guards were lexical-only.** `os.path.normpath` and
+  `path.resolve` are pure string operations that never touch the filesystem, so
+  a symlink *inside* the base pointing outside it never contains `..` and sails
+  through. Reproduced: with `escape` a symlink to `/etc`, the corpus's own
+  `safe_resolve` accepted `escape/passwd` and the process read the real
+  `/etc/passwd`. Both now resolve symlinks (`Path.resolve` / `fs.realpathSync`)
+  before an exact containment check, and the Python suite gained a symlink case
+  — the one a lexical check cannot see.
+- **`content/security/typescript.ts`: all three security suites were
+  unfalsifiable.** Each is `try { …; assert(false) } catch {}`, and a bare
+  `catch` cannot distinguish the expected rejection from the assertion that
+  fires when no rejection came. `assert` now throws a distinct `AssertionFailed`
+  that every catch rethrows. Proven both ways: disabling the containment check
+  in a copy previously printed "All security examples passed" and now fails with
+  `AssertionFailed: should reject: ../../etc/passwd`.
+- **`content/gpu_memory_pooling/cyrius.cyr` redefined the stdlib `alloc`.** The
+  file includes `lib/alloc.cyr` and then defines its own `alloc`, which wins
+  ("last definition wins", warned on every compile). Every stdlib call that
+  allocates internally — `vec_push`, `map_set`, `str_builder` — was routed into
+  a 4 KB bump pool that returns *offsets*, not addresses. Adding one `vec_push`
+  to the old shape exits **139 (SIGSEGV)** before printing a line; renamed to
+  `pool_alloc`, the same probe passes 16/16.
+- **`content/fixed_point_arithmetic/cyrius.cyr`: `fx_mul` used a logical shift
+  on a signed product.** In Cyrius `>>` is logical and `>>>` is arithmetic — the
+  opposite of C/Java, which is why the file already defines an `asr()` helper
+  and already handles sign correctly in `fx_to_int` and `fx_to_int_round`.
+  `fx_mul(-3.0, 2.5)` returned **281474976219136** instead of −491520. This is
+  the exact defect `content/cyrius/`'s own field note records as the DOOM
+  black-screen bug. The roundtrip test multiplied only positives, where the two
+  shifts are indistinguishable — three negative-operand assertions now close
+  that detection gap (121/121).
+
 ### Changed
 
 - **C standard C17 → C23** (`ISO/IEC 9899:2024`). gcc 16.2.1 already defaults
