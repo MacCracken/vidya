@@ -65,8 +65,12 @@ build/vidya serve 8080                     # HTTP service: GET /stats, /code/{to
 ## Validation
 
 ```bash
-# Validate all content examples across every installed toolchain
+# The gate: validate all content examples across every installed toolchain
 ./scripts/validate-content.sh
+
+# The quick diagnostic: same commands, from the CLI, filterable by topic
+./build/vidya validate
+./build/vidya validate compression
 
 # Run the Cyrius test suite for the CLI itself
 cyrius test
@@ -75,7 +79,9 @@ cyrius test
 cyrius bench
 ```
 
-`scripts/validate-content.sh` skips languages whose toolchain isn't installed (counted separately); CI installs the full set. Per-language commands and the diagnostic contract are documented in the script header.
+`scripts/validate-content.sh` is the **authoritative gate** — it is what CI runs and what a release blocks on. Per-language commands and the diagnostic contract are documented in the script header.
+
+`vidya validate` is a **diagnostic surface** over the same commands: it reuses the loaded registry, so it can be filtered to one topic and needs no shell loop. Both skip languages whose toolchain isn't installed (counted separately, and named in the CLI's output); CI installs the full set. If the two ever disagree, the script wins and the CLI has a bug — that has happened, see the `validate` entry in [CHANGELOG.md](CHANGELOG.md).
 
 ## Consumers
 

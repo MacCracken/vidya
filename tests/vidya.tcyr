@@ -31,6 +31,7 @@ include "lib/sandhi.cyr"
 include "lib/vyakarana.cyr"
 include "lib/sakshi.cyr"
 include "lib/assert.cyr"
+include "lib/process.cyr"   # exec_cmd — subprocess contract behind `vidya validate`
 
 include "src/vidya_core.cyr"
 
@@ -563,6 +564,53 @@ fn main() {
     assert(json_wellformed(str_data(json_stats_response())) == 1, "corpus /stats well-formed");
     assert(json_wellformed(str_data(json_list_response())) == 1, "corpus /list well-formed");
     assert(json_wellformed(str_data(json_gaps_response())) == 1, "corpus /gaps well-formed");
+
+    # --- Subprocess contract behind `vidya validate` ---
+    # validate_one shells out through exec_cmd; every false-FAIL bug it
+    # had was in this layer, not in content. Pin the three properties it
+    # got wrong.
+    test_group("validate_exec");
+
+    # 1. Exit status is the CHILD's exit code, not a raw wait status.
+    assert_eq(exec_cmd("exit 0"), 0, "exec_cmd: exit 0");
+    assert_eq(exec_cmd("exit 1"), 1, "exec_cmd: exit 1");
+    assert_eq(exec_cmd("exit 42"), 42, "exec_cmd: exit 42");
+
+    # 2. The child inherits the parent's environment. Before this fix the
+    # exec passed envp=0: sh still resolved its own default PATH, so a
+    # naive `command -v` probe looked fine while every toolchain needing
+    # HOME (go's build cache, zig's cache dir, npx) or a PATH entry
+    # outside /usr/bin (rustup's rustc) failed. HOME is the discriminator
+    # — no shell synthesises it. Asserted only when the parent actually
+    # has one, so a HOME-less CI runner cannot fail this spuriously.
+    if (getenv("HOME") != 0) {
+        assert_eq(exec_cmd("[ -n \"$HOME\" ]"), 0, "exec_cmd: child inherits env");
+    }
+
+    # 3. A trailing cleanup verb swallows the real exit status — this is
+    # why validate_command templates end at the example and validate_one
+    # does the unlinking. The first form is the old asm template
+    # shape: a failing example reported PASS.
+    assert_eq(exec_cmd("false ; rm -f /tmp/vidya_no_such_file"), 0, "trailing rm masks failure");
+    assert_eq(exec_cmd("false"), 1, "no trailing verb keeps the status");
+
+    # 4. A signal-killed child (SIGSEGV/SIGABRT — ordinary outcomes for a
+    # broken C or asm example) is not WIFEXITED, and exec_cmd reports it
+    # as -1. That collides with validate_one's VALIDATE_SKIP sentinel, so
+    # validate_one maps rc < 0 to a FAIL: a crashing example must never
+    # be silently counted as skipped.
+    assert_eq(exec_cmd("kill -SEGV $$"), 0 - 1, "exec_cmd: signal death is -1");
+
+    # Toolchain probes: present → 0, absent → non-zero (a SKIP, not a FAIL).
+    assert_eq(exec_cmd("command -v sh >/dev/null 2>&1"), 0, "probe: sh present");
+    assert(exec_cmd("command -v vidya_no_such_tool >/dev/null 2>&1") != 0, "probe: absent tool");
+
+    # Template substitution: {out} appears more than once in the compile
+    # -> run templates, so the replace must be all-occurrences.
+    var tmpl = str_from("cc {file} -o {out} && {out}");
+    var subbed = str_replace_all(tmpl, str_from("{file}"), str_from("a.c"));
+    subbed = str_replace_all(subbed, str_from("{out}"), str_from("/tmp/b"));
+    assert(str_eq_cstr(subbed, "cc a.c -o /tmp/b && /tmp/b") == 1, "template substitution");
 
     return assert_summary();
 }

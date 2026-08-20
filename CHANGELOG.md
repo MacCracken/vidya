@@ -81,6 +81,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paths were spliced unescaped too; latent only because no concept in
   `content/` currently contains a quote or a backslash.
 
+- **`vidya validate` mirrors `scripts/validate-content.sh` command for
+  command.** The two had drifted, and every divergence produced a wrong
+  answer rather than a different one:
+  - **A missing toolchain is now a SKIP, not a FAIL.** Each language gets a
+    one-shot `command -v` probe (qiskit gets an import probe), cached per
+    process, and skips print `SKIP: <topic>/<Lang> (toolchain not installed)`
+    instead of vanishing silently. This is the gate's contract; the CLI had no
+    probe at all, so on any host missing one toolchain it would have reported
+    77 false FAILs for that language.
+  - **OpenQASM is validated instead of blanket-skipped.** There was no command
+    template, so all 77 `.qasm` files fell through to the skip sentinel — the
+    whole of the old `77 skipped`. Now runs the gate's
+    `qasm2.load(..., include_path=[<content dir>])`, via a new `{content}`
+    substitution alongside `{file}` and `{out}`.
+  - **Cyrius examples run through `cyrius run`.** The template built the
+    example by piping it through `./build/cc2` inside
+    `${CYRIUS_HOME:-$HOME/Repos/cyrius}` — a compiler-development path that
+    does not exist on a normal install, so all 77 would have failed even with
+    the environment fixed.
+  - **Python runs the file, not `python3 -c "exec(open(f).read())"`.** The
+    wrapper left `__file__` undefined, so any example reaching for it would
+    have failed under the CLI and passed under the gate.
+  - The summary now prints `note: authoritative content gate is
+    scripts/validate-content.sh`, so the diagnostic cannot be mistaken for it.
+- **`process` is declared in `cyrius.cyml` `[deps] stdlib`.** It was already
+  vendored as another module's transitive; an undeclared module of that class
+  fails at **runtime**, not at build time. Vendored file count is unchanged
+  (62); binary 2,562,008 B → 2,563,184 B (**+1,176 B**, the reachable part of
+  `exec_cmd`). The six benchmarks are flat against 2.8.1 (`load_all` 5.82–5.87 ms
+  vs 5.63 ms, `load_concept` 43.8 μs vs 42.4 μs, `reg_get_hit` 133–139 ns vs
+  136 ns — all inside run-to-run spread; no benchmarked path was touched).
+
 ### Added
 
 - **`src/vidya_core.cyr`** — the domain + JSON layer split out of
@@ -114,6 +146,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   context: a whole `/info` body costs 10µs against an ~84µs request. The
   six pre-existing benchmarks are unchanged and within noise
   (`load_all` 6.03ms → 5.97ms, `reg_get_hit` 31ns → 32ns).
+
+- **`vidya validate` reported 462 false FAILs out of 847 examples.** On a host
+  with every toolchain installed the subcommand printed `308 passed, 462
+  failed, 77 skipped` while `scripts/validate-content.sh` — the authoritative
+  gate, and what CI runs — was green on the same tree. The corpus was never
+  broken; the diagnostic was. Three independent bugs in `validate_one`'s
+  hand-rolled fork/exec (`src/main.cyr`):
+  - **The child got an empty environment.** `sys_execve(..., 0)` passed a NULL
+    `envp`. `/bin/sh` synthesises a default `PATH` for its *own* command
+    lookups but exports nothing, so every failure message was an unset-env
+    symptom: `rustc: command not found` (rustup lives outside the default
+    PATH), `gcc: fatal error: cannot execute 'cc1'`, `GOCACHE is not defined
+    and neither $XDG_CACHE_HOME nor $HOME are defined`, `zig: unable to
+    resolve zig cache directory`, `sh: tsx: command not found`, and `cd:
+    /Repos/cyrius: No such file or directory` (that template's `$HOME`
+    expanded to `""`). Only Python and Shell — the two commands that need
+    nothing from the environment — passed, which is exactly the 308.
+  - **Two under-reserved stack buffers.** `var sh_argv[4]` and `var
+    status_buf[1]`: `var buf[N]` reserves N **bytes**, so a 4-pointer argv
+    needs 32 and a wait status needs 4. Both wrote past their reservation into
+    neighbouring stack slots on every call — the same class of bug as the
+    cyrius stdlib's own v5.11.60 `_exec3` fix.
+  - **The assembly templates masked their exit status.** Both ended
+    `... ; rm -f {out}.o`, so `sh` exited with `rm`'s status — a *failing*
+    x86_64 or AArch64 example reported PASS. False green, opposite direction,
+    same function.
+
+  Exec now runs through the stdlib's `exec_cmd` (`lib/process.cyr`), which
+  sizes its buffers correctly and forwards `/proc/self/environ` to the child.
+  Temp-file cleanup moved out of the templates into `validate_one`, which
+  unlinks both `{out}` and `{out}.o`, so no template can ever end in a status-
+  clobbering verb again. A signal-killed child (`exec_cmd` returns -1 —
+  SIGSEGV/SIGABRT are ordinary outcomes for a broken C or asm example) is now
+  counted as a FAIL; passed through unmapped it would have aliased the -1 skip
+  sentinel and been silently counted as skipped.
+
+  **After: `770 passed, 0 failed, 77 skipped`** on the same tree, exit 0. The
+  77 skips are OpenQASM (no qiskit on that host) — precisely what the shell
+  gate skips there. Cross-checked topic-for-topic: `vidya validate compression`
+  and `scripts/validate-content.sh` on the same topic now both report 10 passed
+  / 0 failed / 1 skipped.
+
+- **`tests/vidya.tcyr` — `validate_exec` group (41 → 51 assertions).** Pins the
+  subprocess contract behind `vidya validate`, since every false-FAIL bug lived
+  in that layer and none of it was covered: exit status is the child's exit
+  code (0 / 1 / 42), a signal-killed child reports -1 (the case that must not
+  alias the skip sentinel), the child inherits the parent's environment
+  (asserted via `$HOME`, which no shell synthesises — guarded on the parent
+  actually having one so a HOME-less runner cannot fail it spuriously), a
+  trailing `rm` swallows a non-zero status while a bare command does not, the
+  toolchain-probe shape returns 0 for a present tool and non-zero for an absent
+  one, and `{out}` substitution replaces *all* occurrences.
+
 
 ## [2.8.1] — 2026-08-20
 
