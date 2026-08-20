@@ -1,3 +1,19 @@
+// ⚠ QISKIT DOES NOT READ THIS FILE.
+//
+// `qasm2.load` special-cases the filename "qelib1.inc" and substitutes its
+// own built-in table instead of parsing whatever is on disk. Verified: this
+// file can be replaced with invalid QASM, or deleted outright, and every
+// example in the corpus still loads. So the 42 gate definitions below are
+// documentation of the OpenQASM 2.0 standard library — they are NOT what
+// your program is resolved against.
+//
+// The practical consequence: qiskit's default table is smaller than this
+// file. `cz` is accepted by default; `swap` is NOT ("'swap' is not defined
+// in this scope") even though it is defined on line 61 below. Both
+// validators therefore pass `custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS`,
+// which restores the full legacy set and makes this file's contents and the
+// loader's behaviour agree.
+//
 // Quantum Experience (QE) Standard Header
 // file: qelib1.inc
 

@@ -110,7 +110,9 @@ h idx[0];
 h idx[1];
 x idx[0];
 x idx[1];
-// controlled-Z on idx via H-CX-H sandwich (qelib1.inc has no `cz`):
+// controlled-Z on idx via H-CX-H sandwich. (`cz` IS available — it is in
+// qiskit's default table — but the H-CX-H decomposition is shown because it
+// is what a compiler emits for a target lacking a native CZ.)
 h   idx[1];
 cx  idx[0], idx[1];
 h   idx[1];

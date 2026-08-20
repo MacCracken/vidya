@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+Tier 3 of the example review (quantum + validator lockstep). OpenQASM files
+parse cleanly and the gate never **simulates** them, so semantic defects here
+shipped green. Everything below was measured on a simulator.
+
+- **`content/kernel_topics/openqasm.qasm`: the qubit reset never fired.** In
+  OpenQASM 2.0 `if(creg==N)` compares the **whole register** as an integer.
+  With a 2-bit `mem_check` and an entangled `(|00⟩+|11⟩)/√2` state the
+  measurement is only ever `00` or `11`, so `if(mem_check==1)` — binary `01` —
+  was never true. Simulated: **2059 of 4000 shots** came back with both qubits
+  still `|1⟩` while the section claimed they had been reset to `|0⟩`. Split
+  into per-qubit 1-bit registers so each comparison is a real bit test:
+  **4000/4000** now reset correctly.
+- **`content/qelib1.inc` is never read, and said so nowhere.** `qasm2.load`
+  special-cases that filename and substitutes its own built-in table.
+  Verified: replacing the file with invalid QASM, or deleting it, changes
+  nothing — every example still loads. So its 42 gate definitions were
+  documentation being mistaken for the resolution set. The practical
+  consequence is a real trap: `swap` is defined on line 61 and yet
+  `'swap' is not defined in this scope` at load time. Both validators now
+  pass `custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS`, which restores
+  the legacy set so the file and the loader agree (77/77 still load under
+  `strict=True`), and the file carries a banner explaining the substitution.
+- **Two files propagated the wrong reason for it.**
+  `projectile_physics` blamed `qelib1.inc` for omitting `swap` (it defines
+  it); `package_resolution` claimed there is no `cz` — measured, **`cz` is
+  accepted by default**. Both comments corrected.
+
+### Fixed — validator lockstep
+
+`scripts/validate-content.sh` and `src/vidya_core.cyr`'s `validate_command`
+must stay in step; they had diverged for two languages, and in both cases the
+shipped `vidya validate` CLI silently skipped work the shell gate ran.
+
+- **AArch64**: the CLI probed only `qemu-aarch64` while the shell accepts
+  `qemu-aarch64-static` too — so on a `qemu-user-static` host the CLI skipped
+  all 77 AArch64 examples. It now accepts either.
+- **OpenQASM**: the CLI hardcoded bare `python3` while the shell prefers
+  `.venv/bin/python3`. With qiskit installed in the venv, the CLI reported
+  "toolchain not installed" and skipped. It now prefers the venv too.
+  `vidya validate quantum_computing` goes from **10 passed / 1 skipped** to
+  **11 passed / 0 skipped**.
+
+### Verified rather than assumed — no change made
+
+- **Both Grover implementations are correct.** Simulated: `quantum_computing`
+  finds `|101⟩` with probability **0.948** (theory for 2 iterations at N=8 is
+  ≈0.945) and `algorithms` finds `|11⟩` with probability **1.000**. A reported
+  "tops out at 0.625" did not reproduce, so neither file was touched.
+
 Tier 3 of the example review (assembly) — code that taught something false.
 Every claim below was measured with `readelf`, `objdump` or a live probe,
 not argued from the source comments.

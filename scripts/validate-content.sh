@@ -139,7 +139,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
     if [[ -f "$topic_dir/openqasm.qasm" ]]; then
         if [[ "$QASM_VALIDATOR" == "qiskit" ]]; then
             run_lang "OpenQASM" "$topic/openqasm.qasm" \
-                $QASM_PYTHON -c "from qiskit import qasm2; qc = qasm2.load('$topic_dir/openqasm.qasm', include_path=['$CONTENT_DIR']); print(f'OpenQASM OK: {qc.num_qubits}q, depth {qc.depth()}')"
+                $QASM_PYTHON -c "from qiskit import qasm2; qc = qasm2.load('$topic_dir/openqasm.qasm', include_path=['$CONTENT_DIR'], custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS); print(f'OpenQASM OK: {qc.num_qubits}q, depth {qc.depth()}')"
         else
             echo "  ⊘ OpenQASM (skipped — no qiskit or native validator)"
             SKIP=$((SKIP + 1))

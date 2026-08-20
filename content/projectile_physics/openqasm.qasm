@@ -14,7 +14,9 @@
 //   3. Measurement that collapses the trajectory to a sampled outcome,
 //      analogous to reading the ball's position out of the simulation
 //
-// qelib1.inc does not define `swap`; the SWAP in the inverse-QFT-style
+// `swap` is unavailable here — not because qelib1.inc omits it (it does
+// define it), but because qiskit substitutes its own smaller built-in table
+// for that include. The SWAP in the inverse-QFT-style
 // readout below is expanded as 3 CNOTs.
 
 OPENQASM 2.0;

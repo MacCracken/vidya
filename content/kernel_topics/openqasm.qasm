@@ -131,7 +131,15 @@ measure fb[1] -> fb_out[0];
 // reuse — like freeing memory. Reset = measure + conditional X.
 
 qreg mem[2];
-creg mem_check[2];
+// ⚠ ONE-BIT registers, deliberately. In OpenQASM 2.0 `if(creg==N)` compares
+// the ENTIRE register as an integer, not a single bit. With a 2-bit
+// `mem_check`, the entangled state below only ever yields 00 or 11 — so
+// `if(mem_check==1)` (binary 01) can never be true and the reset silently
+// never fires. Measured on the previous version: 2059 of 4000 shots came
+// back with both qubits still |1⟩ while the file claimed they were reset.
+// Splitting into per-qubit registers makes each comparison a real bit test.
+creg mem_check0[1];
+creg mem_check1[1];
 creg mem_reset[2];
 
 // Use qubits: create entangled state
@@ -139,12 +147,15 @@ h mem[0];
 cx mem[0], mem[1];
 
 // "Free" the qubits: measure then reset to |0⟩
-measure mem[0] -> mem_check[0];
-measure mem[1] -> mem_check[1];
+measure mem[0] -> mem_check0[0];
+measure mem[1] -> mem_check1[0];
 
 // Reset: conditionally flip back to |0⟩
-if(mem_check==1) x mem[0];
-if(mem_check==1) x mem[1];
+// (OpenQASM 2.0 also has a native `reset` instruction, which three other
+// files in this corpus use; the measure-then-conditional-X form is spelled
+// out here because that is the mechanism the section is teaching.)
+if(mem_check0==1) x mem[0];
+if(mem_check1==1) x mem[1];
 
 // Verify reset: should both be |0⟩ now
 measure mem[0] -> mem_reset[0];

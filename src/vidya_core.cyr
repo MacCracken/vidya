@@ -1009,9 +1009,18 @@ fn validate_probe(lang) {
     # binutils ships as+ld together, so probing the assembler covers the
     # linker; qemu is the part that is separately packaged.
     if (lang == ASM_AARCH64) {
-        return "command -v aarch64-linux-gnu-as >/dev/null 2>&1 && command -v qemu-aarch64 >/dev/null 2>&1";
+        # Accept either qemu binary. qemu-user ships `qemu-aarch64`;
+        # qemu-user-static ships only `qemu-aarch64-static`. Probing one name
+        # made this validator SKIP all 77 AArch64 examples on a host where
+        # scripts/validate-content.sh ran them — the two must agree.
+        return "command -v aarch64-linux-gnu-as >/dev/null 2>&1 && { command -v qemu-aarch64 >/dev/null 2>&1 || command -v qemu-aarch64-static >/dev/null 2>&1; }";
     }
-    if (lang == OPENQASM) { return "python3 -c \"import qiskit\" >/dev/null 2>&1"; }
+    # Prefer .venv/bin/python3 when present, matching validate-content.sh.
+    # Hardcoding bare `python3` made this validator report OpenQASM as
+    # "toolchain not installed" on a host where the shell gate ran all 77.
+    if (lang == OPENQASM) {
+        return "PY=python3; [ -x .venv/bin/python3 ] && PY=.venv/bin/python3; $PY -c \"import qiskit\" >/dev/null 2>&1";
+    }
     if (lang == CYRIUS) { return "command -v cyrius >/dev/null 2>&1"; }
     return 0;
 }
@@ -1049,10 +1058,10 @@ fn validate_command(lang) {
     if (lang == ZIG) { return "zig build-exe {file} -femit-bin={out} && {out}"; }
     if (lang == ASM_X86_64) { return "as --64 {file} -o {out}.o && ld {out}.o -o {out} && {out}"; }
     if (lang == ASM_AARCH64) {
-        return "aarch64-linux-gnu-as {file} -o {out}.o && aarch64-linux-gnu-ld {out}.o -o {out} && qemu-aarch64 {out}";
+        return "aarch64-linux-gnu-as {file} -o {out}.o && aarch64-linux-gnu-ld {out}.o -o {out} && { command -v qemu-aarch64 >/dev/null 2>&1 && QEMU=qemu-aarch64 || QEMU=qemu-aarch64-static; } && $QEMU {out}";
     }
     if (lang == OPENQASM) {
-        return "python3 -c \"from qiskit import qasm2; qasm2.load('{file}', include_path=['{content}'])\"";
+        return "PY=python3; [ -x .venv/bin/python3 ] && PY=.venv/bin/python3; $PY -c \"from qiskit import qasm2; qasm2.load('{file}', include_path=['{content}'], custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS)\"";
     }
     if (lang == CYRIUS) { return "cyrius run {file}"; }
     return 0;
