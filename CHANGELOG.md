@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+Tier 3 of the example review (crypto naming + error propagation).
+
+- **The stubbed "AEAD" was named as if it were real, in all 10 ports.**
+  `aeadSeal` / `aeadOpen` / `computeTag` sit in `tls_and_encryption` next to
+  `TLS_AES_256_GCM_SHA384` and a `concept.toml` that says *"Use AEAD ciphers
+  exclusively… don't compose your own"*. The tag is a byte **sum**, so it is
+  permutation-invariant: swapping bytes 9 and 12 of `"transfer 10 usd"` gives
+  `"transfer u0 1sd"` with an **identical tag** (sum 1362 → tag 1407 with the
+  file's key=42/nonce=7), and the "authenticated" open accepts the forgery.
+  Only the Cyrius port disclaimed the stub at all, and its disclaimer was
+  itself wrong — it claimed "any byte flip in ciphertext or AAD changes the
+  tag", which holds for a flip but not for a permutation.
+
+  Renamed across all ten to `demoSeal` / `demoOpen` / `weakChecksum` (native
+  casing per language; the two assembly ports also renamed their `.ct_*`
+  local labels, and shell's `AEAD_OK` → `DEMO_OK`). Each port now carries a
+  disclaimer naming the exact weakness and pointing at AES-GCM /
+  ChaCha20-Poly1305. **The algorithm is deliberately unchanged** — the eleven
+  ports mirror one scenario and most have no crypto available under the
+  validator (Rust links no crates, C has no `-lcrypto`, the assembly ports
+  have nothing), so making one port real would break the mirror. Naming and
+  disclaiming was the fix. Verified: zero remaining occurrences of the old
+  identifiers anywhere including comments, printed strings and asm labels;
+  every surviving mention of "AEAD" is contrast prose; and filtering comments
+  out of the diff leaves only rename lines — no arithmetic, signature or
+  assertion changed. 10/10 ports green.
+- **`content/error_handling/c.c` discarded the error it was propagating.**
+  The `goto cleanup` label ended `return ERR_NOT_FOUND` unconditionally, so a
+  config with a host but an unparseable port produced `ERR_PARSE` inside
+  `parse_port` and handed the caller `ERR_NOT_FOUND` — in the topic that
+  exists to teach error propagation, on the one path that lost it. The cause
+  now travels in `rc`; two assertions pin it (`ERR_PARSE` for `port=abc`,
+  `ERR_INVALID` for `port=99999`). The Rust and Go siblings already did this.
+- **`content/error_handling/shell.sh` taught a false `set -e` exemption and
+  shipped an inert trap section.** It listed subshells as a case `set -e`
+  misses "depending on shell version" — measured on bash 5.3,
+  `set -e; ( false ); echo reached` exits 1 **without printing** — and then
+  contradicted itself 55 lines later by relying on `|| parent_ok=caught`.
+  Separately, none of `cleanup_ran` / `error_trapped` / `parent_ok` was ever
+  asserted, and `trap - EXIT ERR` disarmed the EXIT trap before the script
+  ended, so `cleanup` never ran at all. The claim is corrected and the traps
+  are now observable: the ERR trap is triggered and asserted, and the EXIT
+  trap is demonstrated from a spawned shell — the only place it can be seen,
+  since it fires as its own process exits.
+
 Tier 3 of the example review (cross-language).
 
 - **Three C files taught the subtraction `qsort` comparator.**

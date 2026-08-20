@@ -1,7 +1,8 @@
 // Vidya — TLS and Encryption in AArch64 Assembly
 //
-// Asm port focuses on pick_cipher + verify_chain + AEAD primitives.
-// Handshake driver is in higher-level ports.
+// Asm port focuses on pick_cipher + verify_chain + a DEMO seal/checksum stub.
+// The stub is not authenticated encryption — see the warning above
+// weak_checksum. Handshake driver is in higher-level ports.
 
 .global _start
 
@@ -153,18 +154,46 @@ xor_stream:
 .xs_done:
     ret
 
-// compute_tag(x0=buf, x1=len, x2=key, x3=nonce) -> x0
-compute_tag:
+// ---------------------------------------------------------------------------
+// WARNING — THIS IS NOT AUTHENTICATED ENCRYPTION. NEVER USE IT AS SUCH.
+//
+// xor_stream + weak_checksum together are a DEMO stand-in for seal/open. The
+// "tag" weak_checksum returns is nothing but the SUM of the message bytes,
+// folded with key and nonce. Addition does not care what order it adds in, so
+// the tag is permutation-invariant: rearranging the same bytes reproduces the
+// tag exactly.
+//
+// Concretely, "transfer 10 usd" and "transfer u0 1sd" differ only by a swap of
+// the bytes at index 9 and index 12 ('1' <-> 'u'). Both sum to 1362 and both
+// carry tag 1407 under this port's key/nonce (42, 7) — verified on AArch64 —
+// so the verify step below ACCEPTS the second one as if the sender had written
+// it. That is a forgery of a payment instruction.
+//
+// Note what is and is not true here: a single flipped byte does move the sum,
+// and so does change the tag. A SWAP does not. The attacker picks which one to
+// do, so "the tag changes if you touch the message" is false as stated. A real
+// AEAD (AES-GCM or ChaCha20-Poly1305 — the ciphers negotiated above) uses a
+// keyed, position-dependent MAC precisely so that reordering is caught.
+//
+// What this code IS for: the structural SHAPE of a sealed record — seal emits
+// ciphertext plus a tag, open recomputes the tag and refuses the plaintext
+// unless it matches. The shape is the lesson. The checksum is a placeholder
+// standing where a real MAC belongs. Never roll your own; call a vetted
+// library.
+//
+// weak_checksum(x0=buf, x1=len, x2=key, x3=nonce) -> x0
+// ---------------------------------------------------------------------------
+weak_checksum:
     mov     x4, #0                // sum
     mov     x5, #0                // i
-.ct_loop:
+.wc_loop:
     cmp     x5, x1
-    b.ge    .ct_done
+    b.ge    .wc_done
     ldrb    w6, [x0, x5]
-    add     x4, x4, x6
+    add     x4, x4, x6            // permutation-invariant: order is lost here
     add     x5, x5, #1
-    b       .ct_loop
-.ct_done:
+    b       .wc_loop
+.wc_done:
     eor     x4, x4, x2
     eor     x0, x4, x3
     ret
@@ -253,7 +282,7 @@ _start:
     mov     x1, #0
     bl      assert_eq
 
-    // 5. AEAD round-trip
+    // 5. demo seal/open round-trip — NOT an AEAD; see warning above weak_checksum
     adrp    x0, ct_buf
     add     x0, x0, :lo12:ct_buf
     adrp    x1, pt_text
@@ -266,7 +295,7 @@ _start:
     mov     x1, #pt_len
     mov     x2, #42
     mov     x3, #7
-    bl      compute_tag
+    bl      weak_checksum
     mov     x19, x0               // tag (callee-saved)
     adrp    x0, pt_buf
     add     x0, x0, :lo12:pt_buf
@@ -280,7 +309,7 @@ _start:
     mov     x1, #pt_len
     mov     x2, #42
     mov     x3, #7
-    bl      compute_tag
+    bl      weak_checksum
     mov     x1, x19
     bl      assert_eq
 

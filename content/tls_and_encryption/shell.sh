@@ -2,7 +2,7 @@
 # Vidya — TLS and Encryption in Shell (Bash)
 #
 # Simulation of TLS 1.3 handshake state machine + cipher negotiation
-# + cert chain verification + AEAD seal/open.
+# + cert chain verification + a toy (NOT authenticated) seal/open.
 
 set -uo pipefail
 
@@ -70,8 +70,28 @@ cert_matches_hostname() {
     [[ "$(cert_subject "$cert")" == "$hostname" ]]
 }
 
-# AEAD: byte-wise XOR + sum-based tag. Bash works on integer arrays
-# of byte values for the plaintext.
+# ---------------------------------------------------------------------------
+# WARNING — THIS IS NOT AUTHENTICATED ENCRYPTION. DO NOT USE IT AS SUCH.
+#
+# demo_seal / demo_open below are a byte-wise XOR plus a "tag" that is nothing
+# more than the SUM of the bytes, folded with the key and nonce. A sum does not
+# depend on the order of what it adds up, so the tag is permutation-invariant:
+# any rearrangement of the same bytes produces exactly the same tag.
+#
+# Concretely, "transfer 10 usd" and "transfer u0 1sd" differ only by a swap of
+# the bytes at index 9 and index 12. Both sum to 1362, so under this file's
+# key/nonce (42, 7) both carry tag 1407, and demo_open happily accepts the
+# second one as if the sender had written it. That is a forgery. A real AEAD
+# (AES-GCM, ChaCha20-Poly1305 — the ciphers negotiated above) uses a keyed,
+# position-dependent MAC precisely so this cannot happen.
+#
+# What this code IS for: showing the STRUCTURAL SHAPE of an AEAD API — seal
+# produces ciphertext plus a tag, open recomputes the tag and refuses to
+# return plaintext unless it matches. The shape is real; the checksum is not.
+# Never roll your own; use a vetted library.
+# ---------------------------------------------------------------------------
+
+# Bash works on integer arrays of byte values for the plaintext.
 
 # xor_stream OUT_NAME SRC_NAME LEN KEY
 xor_stream() {
@@ -81,8 +101,9 @@ xor_stream() {
     for (( i = 0; i < len; i++ )); do out[i]=$(( src[i] ^ key )); done
 }
 
-# compute_tag SRC_NAME LEN KEY NONCE -> sets TAG
-compute_tag() {
+# weak_checksum SRC_NAME LEN KEY NONCE -> sets TAG
+# Order-blind by construction: swapping two bytes leaves TAG unchanged.
+weak_checksum() {
     local -n src=$1
     local len=$2 key=$3 nonce=$4
     local sum=0 i
@@ -90,19 +111,20 @@ compute_tag() {
     TAG=$(( (sum ^ key) ^ nonce ))
 }
 
-# aead_seal PT_NAME LEN KEY NONCE -> sets CT[] (global) + TAG
+# demo_seal PT_NAME LEN KEY NONCE -> sets CT[] (global) + TAG
 declare -a CT
-aead_seal() {
+demo_seal() {
     xor_stream CT "$1" "$2" "$3"
-    compute_tag "$1" "$2" "$3" "$4"
+    weak_checksum "$1" "$2" "$3" "$4"
 }
 
-# aead_open CT_NAME LEN KEY NONCE CLAIMED_TAG -> sets PT_OUT[] + AEAD_OK (1/0)
+# demo_open CT_NAME LEN KEY NONCE CLAIMED_TAG -> sets PT_OUT[] + DEMO_OK (1/0)
+# DEMO_OK=1 means "the weak checksum matched", NOT "this message is authentic".
 declare -a PT_OUT
-aead_open() {
+demo_open() {
     xor_stream PT_OUT "$1" "$2" "$3"
-    compute_tag PT_OUT "$2" "$3" "$4"
-    if [[ $TAG -eq $5 ]]; then AEAD_OK=1; else AEAD_OK=0; fi
+    weak_checksum PT_OUT "$2" "$3" "$4"
+    if [[ $TAG -eq $5 ]]; then DEMO_OK=1; else DEMO_OK=0; fi
 }
 
 # Handshake driver
@@ -149,17 +171,18 @@ verify_chain "$CHAIN" "$TRUST"; check $CHAIN_OK 1 "chain"
 verify_chain "$CHAIN" "999:999"; check $CHAIN_OK 0 "bad trust"
 verify_chain "100:100" "$TRUST"; check $CHAIN_OK 0 "ss leaf"
 
-# AEAD
+# Demo seal/open (see the warning above — not authenticated encryption)
 declare -a PT=(115 101 99 114 101 116 32 109 101 115 115 97 103 101)  # "secret message"
 PT_LEN=14
-aead_seal PT $PT_LEN 42 7; SAVED_TAG=$TAG
-aead_open CT $PT_LEN 42 7 $SAVED_TAG; check $AEAD_OK 1 "roundtrip"
-# Tampered ciphertext
+demo_seal PT $PT_LEN 42 7; SAVED_TAG=$TAG
+demo_open CT $PT_LEN 42 7 $SAVED_TAG; check $DEMO_OK 1 "roundtrip"
+# Tampered ciphertext: a single flipped bit changes the sum, so this one is
+# caught. A swap of two bytes would NOT be — that is the whole weakness.
 ORIG=${CT[5]}
 CT[5]=$(( ORIG ^ 1 ))
-aead_open CT $PT_LEN 42 7 $SAVED_TAG; check $AEAD_OK 0 "tampered"
+demo_open CT $PT_LEN 42 7 $SAVED_TAG; check $DEMO_OK 0 "tampered"
 CT[5]=$ORIG
-aead_open CT $PT_LEN 42 7 $((SAVED_TAG ^ 1)); check $AEAD_OK 0 "wrong tag"
+demo_open CT $PT_LEN 42 7 $((SAVED_TAG ^ 1)); check $DEMO_OK 0 "wrong tag"
 
 # Handshake happy path
 hs_init

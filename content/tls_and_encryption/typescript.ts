@@ -1,7 +1,7 @@
 // Vidya — TLS and Encryption in TypeScript
 //
 // Simulation of TLS 1.3 handshake state machine + cipher negotiation
-// + cert chain verification + AEAD seal/open.
+// + cert chain verification + a DEMO (non-authenticated) seal/open.
 
 const ST_INIT = 0;
 const ST_HELLO_SENT = 1;
@@ -46,19 +46,35 @@ function xorStream(src: Uint8Array, key: number): Uint8Array {
   return out;
 }
 
-function computeTag(buf: Uint8Array, key: number, nonce: number): number {
+// ---------------------------------------------------------------------------
+// WARNING: the seal/open pair below is NOT authenticated encryption. Never use
+// it as such, and never model real code on it.
+//
+// `weakChecksum` adds the bytes together, so the tag is permutation-invariant:
+// any reordering of the same bytes yields the same tag. Concretely, with the
+// same key and nonce, "transfer 10 usd" and "transfer u0 1sd" (bytes 9 and 12
+// swapped) produce an identical tag, and `demoOpen` happily accepts the
+// forgery. A single flipped byte does change the tag -- which is exactly why a
+// sum feels like a MAC and is not one.
+//
+// What this IS for: the structural shape of the pattern -- seal returns
+// ciphertext plus a tag, open recomputes the tag and refuses to return
+// plaintext unless it matches. Real TLS uses AES-GCM or ChaCha20-Poly1305;
+// use a vetted library, never a hand-rolled tag.
+// ---------------------------------------------------------------------------
+function weakChecksum(buf: Uint8Array, key: number, nonce: number): number {
   let sum = 0;
   for (const b of buf) sum += b;
   return (sum ^ key) ^ nonce;
 }
 
-function aeadSeal(pt: Uint8Array, key: number, nonce: number): { ct: Uint8Array; tag: number } {
-  return { ct: xorStream(pt, key), tag: computeTag(pt, key, nonce) };
+function demoSeal(pt: Uint8Array, key: number, nonce: number): { ct: Uint8Array; tag: number } {
+  return { ct: xorStream(pt, key), tag: weakChecksum(pt, key, nonce) };
 }
 
-function aeadOpen(ct: Uint8Array, key: number, nonce: number, tag: number): Uint8Array | null {
+function demoOpen(ct: Uint8Array, key: number, nonce: number, tag: number): Uint8Array | null {
   const pt = xorStream(ct, key);
-  if (computeTag(pt, key, nonce) !== tag) return null;
+  if (weakChecksum(pt, key, nonce) !== tag) return null;
   return pt;
 }
 
@@ -109,13 +125,13 @@ function main(): void {
   if (verifyChain([{ subject: 100, issuer: 100 }], trust)) throw new Error("ss");
 
   const pt = new Uint8Array(Buffer.from("secret message"));
-  const { ct, tag } = aeadSeal(pt, 42, 7);
-  const dec = aeadOpen(ct, 42, 7, tag);
+  const { ct, tag } = demoSeal(pt, 42, 7);
+  const dec = demoOpen(ct, 42, 7, tag);
   if (!dec || !bytesEq(dec, pt)) throw new Error("roundtrip");
   const tampered = new Uint8Array(ct);
   tampered[5] ^= 1;
-  if (aeadOpen(tampered, 42, 7, tag) !== null) throw new Error("tampered");
-  if (aeadOpen(ct, 42, 7, tag ^ 1) !== null) throw new Error("wrong tag");
+  if (demoOpen(tampered, 42, 7, tag) !== null) throw new Error("tampered");
+  if (demoOpen(ct, 42, 7, tag ^ 1) !== null) throw new Error("wrong tag");
 
   const hs = new Handshake();
   if (hs.state !== ST_INIT) throw new Error("init");

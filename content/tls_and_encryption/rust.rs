@@ -1,7 +1,9 @@
 // Vidya — TLS and Encryption in Rust
 //
 // Simulation of TLS 1.3 handshake state machine + cipher
-// negotiation + cert chain verification + AEAD seal/open.
+// negotiation + cert chain verification + a toy seal/open
+// shape (NOT authenticated encryption — see the disclaimer
+// above `weak_checksum`).
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum HsState { Init, HelloSent, ServerHello, CertVerified, Established, Failed }
@@ -44,19 +46,41 @@ fn xor_stream(out: &mut [u8], src: &[u8], key: u8) {
     for (o, &b) in out.iter_mut().zip(src.iter()) { *o = b ^ key; }
 }
 
-fn compute_tag(buf: &[u8], key: u64, nonce: u64) -> u64 {
+// ---------------------------------------------------------------------------
+// NOT AUTHENTICATED ENCRYPTION. Do not use any of the three functions below to
+// protect real data — they are a teaching prop, not a cipher.
+//
+// `weak_checksum` adds the bytes together and XORs in the key and nonce. Byte
+// addition is commutative, so the checksum is permutation-invariant: reorder
+// the bytes of a message and the value does not move. That is not a hardness
+// assumption you can weaken, it is arithmetic.
+//
+// Concretely, "transfer 10 usd" and "transfer u0 1sd" differ only by a swap of
+// bytes 9 and 12 ('1' <-> 'u'), so they carry the identical tag under every key
+// and nonce (1407 with the key=42, nonce=7 used below), and `demo_open` happily
+// ACCEPTS the forged second message as authentic. A real AEAD (AES-GCM,
+// ChaCha20-Poly1305 — the ciphers negotiated above) rejects it, because its tag
+// depends on byte order and on a key the attacker does not hold.
+//
+// What this IS for: the *shape* of the AEAD contract — seal produces ciphertext
+// plus a tag, open recomputes the tag over what it received and refuses to
+// return plaintext unless the tags match. Study the control flow; never the
+// checksum.
+// ---------------------------------------------------------------------------
+
+fn weak_checksum(buf: &[u8], key: u64, nonce: u64) -> u64 {
     let sum: u64 = buf.iter().map(|&b| b as u64).sum();
     (sum ^ key) ^ nonce
 }
 
-fn aead_seal(pt: &[u8], key: u8, nonce: u64, ct_out: &mut [u8]) -> u64 {
+fn demo_seal(pt: &[u8], key: u8, nonce: u64, ct_out: &mut [u8]) -> u64 {
     xor_stream(ct_out, pt, key);
-    compute_tag(pt, key as u64, nonce)
+    weak_checksum(pt, key as u64, nonce)
 }
 
-fn aead_open(ct: &[u8], key: u8, nonce: u64, claimed_tag: u64, pt_out: &mut [u8]) -> i32 {
+fn demo_open(ct: &[u8], key: u8, nonce: u64, claimed_tag: u64, pt_out: &mut [u8]) -> i32 {
     xor_stream(pt_out, ct, key);
-    let actual = compute_tag(&pt_out[..ct.len()], key as u64, nonce);
+    let actual = weak_checksum(&pt_out[..ct.len()], key as u64, nonce);
     if actual != claimed_tag { return -1; }
     ct.len() as i32
 }
@@ -106,18 +130,20 @@ fn main() {
     let ss_leaf = Cert { subject: 100, issuer: 100 };
     assert!(!verify_chain(&[ss_leaf], &trust));
 
-    // AEAD
+    // Demo seal/open (structural shape only — NOT authenticated encryption)
     let pt = b"secret message";
     let mut ct = vec![0u8; pt.len()];
     let mut dec = vec![0u8; pt.len()];
-    let tag = aead_seal(pt, 42, 7, &mut ct);
-    let dlen = aead_open(&ct, 42, 7, tag, &mut dec);
+    let tag = demo_seal(pt, 42, 7, &mut ct);
+    let dlen = demo_open(&ct, 42, 7, tag, &mut dec);
     assert_eq!(dlen, pt.len() as i32);
     assert_eq!(&dec[..], pt);
+    // A single flipped bit shifts the byte sum, so this one is caught. A byte
+    // *swap* would not be — see the disclaimer above `weak_checksum`.
     let mut tampered_ct = ct.clone();
     tampered_ct[5] ^= 1;
-    assert_eq!(aead_open(&tampered_ct, 42, 7, tag, &mut dec), -1);
-    assert_eq!(aead_open(&ct, 42, 7, tag ^ 1, &mut dec), -1);
+    assert_eq!(demo_open(&tampered_ct, 42, 7, tag, &mut dec), -1);
+    assert_eq!(demo_open(&ct, 42, 7, tag ^ 1, &mut dec), -1);
 
     // Handshake happy path
     let mut hs = Handshake::new();

@@ -1,7 +1,8 @@
 // Vidya — TLS and Encryption in Go
 //
 // Simulation of TLS 1.3 handshake state machine + cipher negotiation
-// + cert chain verification + AEAD seal/open.
+// + cert chain verification + a toy seal/open shape (NOT real AEAD — see
+// the disclaimer above weakChecksum).
 
 package main
 
@@ -74,7 +75,32 @@ func xorStream(src []byte, key byte) []byte {
 	return out
 }
 
-func computeTag(buf []byte, key, nonce uint64) uint64 {
+// ---------------------------------------------------------------------------
+// NOT AUTHENTICATED ENCRYPTION. weakChecksum is not a MAC, and demoSeal /
+// demoOpen must never be used to protect real data. They are a teaching prop.
+//
+// The tag is a byte SUM (then XORed with key and nonce). Addition is
+// commutative, so the tag is permutation-invariant: reorder the bytes of a
+// message and the value does not move. That is arithmetic, not a hardness
+// assumption an attacker has to break.
+//
+// Concretely, "transfer 10 usd" and "transfer u0 1sd" differ only by a swap of
+// bytes 9 and 12 ('1' <-> 'u'), so they carry the identical tag under every key
+// and nonce — 1407 with the key=42, nonce=7 used in main below — and demoOpen
+// ACCEPTS the forged second message as authentic. A real AEAD (AES-GCM,
+// ChaCha20-Poly1305 — the ciphers negotiated above) rejects it, because its tag
+// depends on byte order and on a key the forger does not hold.
+//
+// A single flipped byte usually does move the sum, which is why the tamper
+// assertion in main still fails to open. "Usually catches one flip" is not
+// authentication.
+//
+// What this IS for: the structural shape of the AEAD contract — seal returns
+// ciphertext plus a tag, open recomputes the tag over what it received and
+// refuses to return plaintext unless the tags match. Study the control flow;
+// never the checksum.
+// ---------------------------------------------------------------------------
+func weakChecksum(buf []byte, key, nonce uint64) uint64 {
 	var sum uint64
 	for _, b := range buf {
 		sum += uint64(b)
@@ -82,13 +108,13 @@ func computeTag(buf []byte, key, nonce uint64) uint64 {
 	return (sum ^ key) ^ nonce
 }
 
-func aeadSeal(pt []byte, key byte, nonce uint64) ([]byte, uint64) {
-	return xorStream(pt, key), computeTag(pt, uint64(key), nonce)
+func demoSeal(pt []byte, key byte, nonce uint64) ([]byte, uint64) {
+	return xorStream(pt, key), weakChecksum(pt, uint64(key), nonce)
 }
 
-func aeadOpen(ct []byte, key byte, nonce, tag uint64) []byte {
+func demoOpen(ct []byte, key byte, nonce, tag uint64) []byte {
 	pt := xorStream(ct, key)
-	if computeTag(pt, uint64(key), nonce) != tag {
+	if weakChecksum(pt, uint64(key), nonce) != tag {
 		return nil
 	}
 	return pt
@@ -152,17 +178,17 @@ func main() {
 	}
 
 	pt := []byte("secret message")
-	ct, tag := aeadSeal(pt, 42, 7)
-	dec := aeadOpen(ct, 42, 7, tag)
+	ct, tag := demoSeal(pt, 42, 7)
+	dec := demoOpen(ct, 42, 7, tag)
 	if !bytes.Equal(dec, pt) {
 		panic("roundtrip")
 	}
 	tampered := append([]byte{}, ct...)
 	tampered[5] ^= 1
-	if aeadOpen(tampered, 42, 7, tag) != nil {
+	if demoOpen(tampered, 42, 7, tag) != nil {
 		panic("tampered")
 	}
-	if aeadOpen(ct, 42, 7, tag^1) != nil {
+	if demoOpen(ct, 42, 7, tag^1) != nil {
 		panic("wrong tag")
 	}
 

@@ -1,7 +1,10 @@
 /* Vidya — TLS and Encryption in C
  *
  * Simulation of TLS 1.3 handshake state machine + cipher negotiation
- * + cert chain verification + AEAD seal/open.
+ * + cert chain verification + a demo seal/open pair.
+ *
+ * The seal/open pair below is NOT authenticated encryption. See the
+ * disclaimer above weak_checksum().
  */
 
 #include <assert.h>
@@ -50,20 +53,40 @@ static void xor_stream(uint8_t *out, const uint8_t *src, int len, uint8_t key) {
     for (int i = 0; i < len; i++) out[i] = src[i] ^ key;
 }
 
-static uint64_t compute_tag(const uint8_t *buf, int len, uint64_t key, uint64_t nonce) {
+/* ---------------------------------------------------------------------------
+ * DISCLAIMER — weak_checksum / demo_seal / demo_open are NOT authenticated
+ * encryption, and must never be used as such. Do not copy this into anything
+ * that has to be secure.
+ *
+ * The "tag" is a byte SUM. Addition is commutative, so the sum is
+ * permutation-invariant: reordering the bytes of a message leaves the tag
+ * bit-for-bit identical. Concretely, "transfer 10 usd" and "transfer u0 1sd"
+ * (bytes 9 and 12 swapped) checksum to the same value, so demo_open() happily
+ * accepts the forgery as authentic. A real AEAD (AES-GCM, ChaCha20-Poly1305)
+ * is order-sensitive and rejects it. Note it is NOT true that "any byte change
+ * changes the tag": a single flip does move the sum, but any permutation, and
+ * any edit whose byte values happen to sum the same, slips straight through.
+ *
+ * What this IS for: showing the structural shape of an AEAD API — seal
+ * returning ciphertext plus a tag, open recomputing the tag over the recovered
+ * plaintext and refusing to return data unless it matches. The shape is real;
+ * the strength is zero.
+ * ------------------------------------------------------------------------- */
+
+static uint64_t weak_checksum(const uint8_t *buf, int len, uint64_t key, uint64_t nonce) {
     uint64_t sum = 0;
     for (int i = 0; i < len; i++) sum += buf[i];
     return (sum ^ key) ^ nonce;
 }
 
-static uint64_t aead_seal(const uint8_t *pt, int len, uint8_t key, uint64_t nonce, uint8_t *ct_out) {
+static uint64_t demo_seal(const uint8_t *pt, int len, uint8_t key, uint64_t nonce, uint8_t *ct_out) {
     xor_stream(ct_out, pt, len, key);
-    return compute_tag(pt, len, key, nonce);
+    return weak_checksum(pt, len, key, nonce);
 }
 
-static int aead_open(const uint8_t *ct, int len, uint8_t key, uint64_t nonce, uint64_t tag, uint8_t *pt_out) {
+static int demo_open(const uint8_t *ct, int len, uint8_t key, uint64_t nonce, uint64_t tag, uint8_t *pt_out) {
     xor_stream(pt_out, ct, len, key);
-    if (compute_tag(pt_out, len, key, nonce) != tag) return -1;
+    if (weak_checksum(pt_out, len, key, nonce) != tag) return -1;
     return len;
 }
 
@@ -109,14 +132,14 @@ int main(void) {
     const uint8_t *pt = (const uint8_t *)"secret message";
     int pt_len = 14;
     uint8_t ct[64], dec[64];
-    uint64_t tag = aead_seal(pt, pt_len, 42, 7, ct);
-    int dlen = aead_open(ct, pt_len, 42, 7, tag, dec);
+    uint64_t tag = demo_seal(pt, pt_len, 42, 7, ct);
+    int dlen = demo_open(ct, pt_len, 42, 7, tag, dec);
     assert(dlen == pt_len);
     assert(memcmp(dec, pt, pt_len) == 0);
     ct[5] ^= 1;
-    assert(aead_open(ct, pt_len, 42, 7, tag, dec) == -1);
+    assert(demo_open(ct, pt_len, 42, 7, tag, dec) == -1);
     ct[5] ^= 1;
-    assert(aead_open(ct, pt_len, 42, 7, tag ^ 1, dec) == -1);
+    assert(demo_open(ct, pt_len, 42, 7, tag ^ 1, dec) == -1);
 
     Handshake hs = {ST_INIT, 0};
     assert(hs.state == ST_INIT);

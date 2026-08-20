@@ -62,7 +62,12 @@ assert_eq "$output" "ran" "and-then"
 #   - if conditions: if failing_cmd; then ...
 #   - commands before ||: failing_cmd || handle
 #   - commands before &&: failing_cmd && handle
-#   - subshells: (failing_cmd)  (depends on shell version)
+#
+# NOT on that list: subshells. `set -e; ( false ); echo reached` exits 1
+# WITHOUT printing, on bash 5.3 and on every POSIX shell — a failing
+# subshell is just a failing command to the parent. This file used to say
+# subshells were exempt "depending on shell version", and then contradicted
+# itself 55 lines later by relying on `|| parent_ok=caught` to catch one.
 
 # ── set -o pipefail: catch pipe failures ────────────────────────────
 # Without pipefail, only the last command's exit code matters:
@@ -90,6 +95,23 @@ err_handler() {
     error_trapped="yes"
 }
 trap err_handler ERR
+
+# Prove the ERR trap actually fires. Nothing here used to assert
+# cleanup_ran / error_trapped / parent_ok, so the whole trap section was
+# decorative — and `trap - EXIT ERR` near the end disarms the EXIT trap
+# before the script finishes, so `cleanup` never ran at all.
+set +e
+false                       # triggers ERR
+set -e
+assert_eq "$error_trapped" "yes" "ERR trap fired on a failing command"
+
+# The EXIT trap can only be observed from OUTSIDE the process that has it
+# installed, because it runs as that shell exits. Spawn one and read what
+# it printed.
+exit_trap_out=$(bash -c 'trap "echo CLEANED" EXIT; true')
+assert_eq "$exit_trap_out" "CLEANED" "EXIT trap runs on normal exit"
+exit_trap_err=$(bash -c 'trap "echo CLEANED" EXIT; exit 3' || true)
+assert_eq "$exit_trap_err" "CLEANED" "EXIT trap runs on error exit too"
 
 # ── Functions with return codes ─────────────────────────────────────
 parse_port() {
@@ -122,7 +144,10 @@ parent_ok="yes"
     set +e
     false  # fails in subshell
 ) || parent_ok="caught"
-# Parent continues regardless
+# The `||` is what stops set -e acting on the subshell's non-zero status —
+# not any exemption for subshells. Assert the branch actually ran.
+assert_eq "$parent_ok" "caught" "subshell failure reached the parent"
+
 
 # ── Error messages to stderr ────────────────────────────────────────
 # GOOD: errors to stderr, results to stdout

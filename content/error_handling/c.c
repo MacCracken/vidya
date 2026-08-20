@@ -64,6 +64,14 @@ typedef struct {
 } Config;
 
 ErrorCode load_config(const char *text, Config *cfg) {
+    // `rc` carries the reason all the way to the cleanup label. The label
+    // used to `return ERR_NOT_FOUND` unconditionally, which discarded the
+    // real cause: a text with a host but an unparseable port produced
+    // ERR_PARSE inside parse_port and the caller received ERR_NOT_FOUND.
+    // In the topic that exists to teach error propagation, the cleanup path
+    // was the one place that dropped it. The Rust and Go siblings preserve
+    // the cause; this now does too.
+    ErrorCode rc = ERR_OK;
     cfg->host = NULL;
 
     // Allocate host
@@ -75,6 +83,7 @@ ErrorCode load_config(const char *text, Config *cfg) {
     // Parse host
     const char *h = strstr(text, "host=");
     if (h == NULL) {
+        rc = ERR_NOT_FOUND;          // no host key at all
         goto cleanup;
     }
     h += 5;
@@ -88,6 +97,7 @@ ErrorCode load_config(const char *text, Config *cfg) {
     // Parse port
     ErrorCode err = parse_port(text, &cfg->port);
     if (err != ERR_OK) {
+        rc = err;                    // propagate the ACTUAL cause
         goto cleanup;
     }
 
@@ -96,7 +106,7 @@ ErrorCode load_config(const char *text, Config *cfg) {
 cleanup:
     free(cfg->host);
     cfg->host = NULL;
-    return ERR_NOT_FOUND;
+    return rc;
 }
 
 // ── errno: POSIX error reporting ───────────────────────────────────
@@ -157,6 +167,18 @@ int main(void) {
     err = load_config("nothing=here", &cfg);
     assert(err == ERR_NOT_FOUND);
     assert(cfg.host == NULL); // cleanup ran
+
+    // The cleanup path must PRESERVE the cause, not flatten it. A host with
+    // an unparseable port is ERR_PARSE, not ERR_NOT_FOUND — this assertion
+    // is what distinguishes propagation from "something went wrong".
+    err = load_config("host=localhost port=abc", &cfg);
+    assert(err == ERR_PARSE);
+    assert(cfg.host == NULL); // cleanup still ran
+
+    // ...and a host with a port outside range is ERR_INVALID.
+    err = load_config("host=localhost port=99999", &cfg);
+    assert(err == ERR_INVALID);
+    assert(cfg.host == NULL);
 
     // ── errno ──────────────────────────────────────────────────────
     demonstrate_errno();

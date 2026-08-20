@@ -4,7 +4,8 @@
 #   1. Handshake state machine.
 #   2. Cipher suite negotiation (intersection of client + server allowlists).
 #   3. Certificate chain validation (issuer/subject linkage to a trust root).
-#   4. AEAD seal/open with auth-tag check.
+#   4. Demo seal/open with a checksum check — NOT authenticated
+#      encryption; see the warning above demo_seal before reading it.
 #
 # Crypto is stubbed (XOR + sum) — the structural concept is the
 # state machine and the verification logic, not the math.
@@ -98,10 +99,26 @@ fn cert_matches_hostname(cert, hostname) {
     return cert_subject(cert) == hostname;
 }
 
-# --- AEAD seal/open (stub: XOR with key + sum-based auth tag) ---
-# tag = sum(plaintext) XOR key XOR nonce — not real crypto, but
-# captures the structural property: same key+nonce+plaintext → same
-# tag; any byte flip in ciphertext or AAD changes the tag.
+# --- Demo seal/open (XOR stream + sum-based weak checksum) ---
+#
+# WARNING: this is NOT authenticated encryption and must never be used
+# as one. There is no AEAD here, no MAC, no security property at all —
+# the tag is a plain byte sum: tag = sum(bytes) XOR key XOR nonce.
+#
+# Addition is commutative, so the sum — and therefore the tag — is
+# permutation-invariant: reorder the bytes and the tag does not move.
+# Concretely, "transfer 10 usd" and "transfer u0 1sd" (bytes 9 and 12
+# swapped) share a byte sum of 1362, so under this file's key=42 and
+# nonce=7 both check out to tag 1407 and demo_open accepts the forgery
+# as genuine. A single flipped byte does change the tag — the tests
+# below cover that case — but a swap sails straight through, and that
+# is exactly the attack a real AEAD exists to stop.
+#
+# What this IS for: the structural shape of the real thing — seal
+# writes ciphertext and returns a tag; open recomputes the tag over
+# what it actually received and refuses to hand back plaintext on
+# mismatch. That control flow is the lesson. Real code uses AES-GCM or
+# ChaCha20-Poly1305 from a vetted library and never hand-rolls a tag.
 
 fn xor_stream(out, src, len, key) {
     var i = 0;
@@ -112,7 +129,7 @@ fn xor_stream(out, src, len, key) {
     return 0;
 }
 
-fn compute_tag(buf, len, key, nonce) {
+fn weak_checksum(buf, len, key, nonce) {
     var sum = 0;
     var i = 0;
     while (i < len) {
@@ -122,16 +139,18 @@ fn compute_tag(buf, len, key, nonce) {
     return (sum ^ key) ^ nonce;
 }
 
-# aead_seal: writes ciphertext to ct_out, returns auth tag.
-fn aead_seal(pt, pt_len, key, nonce, ct_out) {
+# demo_seal: writes ciphertext to ct_out, returns the weak checksum.
+fn demo_seal(pt, pt_len, key, nonce, ct_out) {
     xor_stream(ct_out, pt, pt_len, key);
-    return compute_tag(pt, pt_len, key, nonce);
+    return weak_checksum(pt, pt_len, key, nonce);
 }
 
-# aead_open: returns plaintext length on success, -1 on tag mismatch.
-fn aead_open(ct, ct_len, key, nonce, claimed_tag, pt_out) {
+# demo_open: returns plaintext length on success, -1 on tag mismatch.
+# "Success" here means the checksum matched, which — see the warning
+# above — is not evidence that the message is genuine.
+fn demo_open(ct, ct_len, key, nonce, claimed_tag, pt_out) {
     xor_stream(pt_out, ct, ct_len, key);
-    var actual = compute_tag(pt_out, ct_len, key, nonce);
+    var actual = weak_checksum(pt_out, ct_len, key, nonce);
     if (actual != claimed_tag) { return 0 - 1; }
     return ct_len;
 }
@@ -257,32 +276,33 @@ fn main() {
     var ss_ok = verify_chain(&ss_chain, 1, &trust, 1);
     assert_eq(ss_ok, 0, "self-signed leaf rejected (not in trust)");
 
-    # === AEAD seal/open ===
+    # === Demo seal/open (NOT authenticated encryption) ===
 
     var pt = "secret message";
     var pt_len = 14;
     var key = 42;
     var nonce = 7;
-    var tag = aead_seal(pt, pt_len, key, nonce, &ct_buf);
-    var dec_len = aead_open(&ct_buf, pt_len, key, nonce, tag, &pt_buf);
-    assert_eq(dec_len, pt_len, "AEAD roundtrip length");
+    var tag = demo_seal(pt, pt_len, key, nonce, &ct_buf);
+    var dec_len = demo_open(&ct_buf, pt_len, key, nonce, tag, &pt_buf);
+    assert_eq(dec_len, pt_len, "demo seal/open roundtrip length");
     var i = 0;
     var match_count = 0;
     while (i < pt_len) {
         if (load8(&pt_buf + i) == load8(pt + i)) { match_count = match_count + 1; }
         i = i + 1;
     }
-    assert_eq(match_count, pt_len, "AEAD plaintext recovered");
+    assert_eq(match_count, pt_len, "demo seal/open plaintext recovered");
 
-    # Tag mismatch (flipped one byte of ciphertext) → -1
+    # Tag mismatch (flipped one byte of ciphertext) → -1.
+    # NB: a flip is caught, a byte SWAP is not — see the warning above.
     var orig_byte = load8(&ct_buf + 5);
     store8(&ct_buf + 5, orig_byte ^ 1);
-    var tampered = aead_open(&ct_buf, pt_len, key, nonce, tag, &pt_buf);
+    var tampered = demo_open(&ct_buf, pt_len, key, nonce, tag, &pt_buf);
     assert_eq(tampered, 0 - 1, "tampered ciphertext rejected");
     store8(&ct_buf + 5, orig_byte);    # restore
 
     # Wrong tag (flipped one bit) → -1
-    var wrong_tag = aead_open(&ct_buf, pt_len, key, nonce, tag ^ 1, &pt_buf);
+    var wrong_tag = demo_open(&ct_buf, pt_len, key, nonce, tag ^ 1, &pt_buf);
     assert_eq(wrong_tag, 0 - 1, "wrong tag rejected");
 
     # === Handshake driver ===

@@ -1,7 +1,7 @@
 # Vidya — TLS and Encryption in Python
 #
 # Simulation of TLS 1.3 handshake state machine + cipher negotiation
-# + cert chain verification + AEAD seal/open.
+# + cert chain verification + a toy seal/open shape (NOT real AEAD — see below).
 
 ST_INIT = 0
 ST_HELLO_SENT = 1
@@ -45,18 +45,35 @@ def xor_stream(src, key):
     return bytes(b ^ key for b in src)
 
 
-def compute_tag(buf, key, nonce):
+# ---------------------------------------------------------------------------
+# WARNING — this is NOT authenticated encryption. Never use it as such.
+#
+# The tag below is a plain byte SUM folded with the key and nonce. Addition is
+# commutative, so the tag is permutation-invariant: reordering the bytes of a
+# message leaves the tag completely unchanged. Concretely, b"transfer 10 usd"
+# and b"transfer u0 1sd" (bytes 9 and 12 swapped) produce the same tag, and
+# demo_open() happily ACCEPTS the second as authentic. A real MAC (Poly1305,
+# GMAC, HMAC) is position-sensitive and rejects that forgery.
+#
+# What this IS for: the structural shape of a seal/open pair — encrypt, carry a
+# tag alongside, recompute and compare the tag before handing back plaintext.
+# Use a vetted library (the AEAD behind TLS_AES_128_GCM_SHA256 above) for
+# anything real.
+# ---------------------------------------------------------------------------
+
+
+def weak_checksum(buf, key, nonce):
     return (sum(buf) ^ key) ^ nonce
 
 
-def aead_seal(pt, key, nonce):
+def demo_seal(pt, key, nonce):
     ct = xor_stream(pt, key)
-    return ct, compute_tag(pt, key, nonce)
+    return ct, weak_checksum(pt, key, nonce)
 
 
-def aead_open(ct, key, nonce, claimed_tag):
+def demo_open(ct, key, nonce, claimed_tag):
     pt = xor_stream(ct, key)
-    if compute_tag(pt, key, nonce) != claimed_tag:
+    if weak_checksum(pt, key, nonce) != claimed_tag:
         return None
     return pt
 
@@ -104,12 +121,12 @@ def main():
     assert not verify_chain([{"subject": 100, "issuer": 100}], trust)
 
     pt = b"secret message"
-    ct, tag = aead_seal(pt, 42, 7)
-    dec = aead_open(ct, 42, 7, tag)
+    ct, tag = demo_seal(pt, 42, 7)
+    dec = demo_open(ct, 42, 7, tag)
     assert dec == pt
     tampered = bytearray(ct); tampered[5] ^= 1
-    assert aead_open(bytes(tampered), 42, 7, tag) is None
-    assert aead_open(ct, 42, 7, tag ^ 1) is None
+    assert demo_open(bytes(tampered), 42, 7, tag) is None
+    assert demo_open(ct, 42, 7, tag ^ 1) is None
 
     hs = Handshake()
     assert hs.state == ST_INIT

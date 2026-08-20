@@ -1,7 +1,8 @@
 // Vidya — TLS and Encryption in Zig
 //
 // Simulation of TLS 1.3 handshake state machine + cipher negotiation
-// + cert chain verification + AEAD seal/open.
+// + cert chain verification + a *demo* seal/open pair (NOT AEAD — see
+// the disclaimer above weakChecksum below).
 
 const std = @import("std");
 
@@ -43,20 +44,43 @@ fn xorStream(out: []u8, src: []const u8, key: u8) void {
     for (src, 0..) |b, i| out[i] = b ^ key;
 }
 
-fn computeTag(buf: []const u8, key: u64, nonce: u64) u64 {
+// ---------------------------------------------------------------------------
+// NOT AUTHENTICATED ENCRYPTION. Do not use any of the three functions below to
+// protect real data, ever.
+//
+// weakChecksum is a byte SUM. Addition is commutative, so the checksum is
+// permutation-invariant: reorder the bytes of a message and the value does not
+// move. That is exactly the property a real MAC must not have.
+//
+// Concretely, under this file's demo parameters (key 42, nonce 7):
+//     "transfer 10 usd"  -> byte sum 1362 -> tag 1407
+//     "transfer u0 1sd"  -> byte sum 1362 -> tag 1407   (bytes 9 and 12 swapped)
+// Same tag, different message: demoOpen accepts the second one as genuine. A
+// forger who can reorder bytes gets a "verified" message for free. (A single
+// flipped byte usually does move the sum, which is why the tamper assertion in
+// main() still fails to open — but "usually catches one flip" is not
+// authentication.)
+//
+// What this IS for: the *structural shape* of an AEAD — seal produces
+// ciphertext plus a tag, open recomputes the tag over what it decrypted and
+// refuses to return plaintext unless the tag matches. Real code gets that shape
+// from AES-GCM or ChaCha20-Poly1305 in a vetted library; see concept.toml.
+// ---------------------------------------------------------------------------
+
+fn weakChecksum(buf: []const u8, key: u64, nonce: u64) u64 {
     var sum: u64 = 0;
     for (buf) |b| sum += b;
     return (sum ^ key) ^ nonce;
 }
 
-fn aeadSeal(pt: []const u8, key: u8, nonce: u64, ct_out: []u8) u64 {
+fn demoSeal(pt: []const u8, key: u8, nonce: u64, ct_out: []u8) u64 {
     xorStream(ct_out, pt, key);
-    return computeTag(pt, key, nonce);
+    return weakChecksum(pt, key, nonce);
 }
 
-fn aeadOpen(ct: []const u8, key: u8, nonce: u64, tag: u64, pt_out: []u8) i32 {
+fn demoOpen(ct: []const u8, key: u8, nonce: u64, tag: u64, pt_out: []u8) i32 {
     xorStream(pt_out, ct, key);
-    if (computeTag(pt_out[0..ct.len], key, nonce) != tag) return -1;
+    if (weakChecksum(pt_out[0..ct.len], key, nonce) != tag) return -1;
     return @intCast(ct.len);
 }
 
@@ -103,14 +127,14 @@ pub fn main() !void {
     const pt = "secret message";
     var ct: [64]u8 = undefined;
     var dec: [64]u8 = undefined;
-    const tag = aeadSeal(pt, 42, 7, ct[0..pt.len]);
-    const dlen = aeadOpen(ct[0..pt.len], 42, 7, tag, dec[0..pt.len]);
+    const tag = demoSeal(pt, 42, 7, ct[0..pt.len]);
+    const dlen = demoOpen(ct[0..pt.len], 42, 7, tag, dec[0..pt.len]);
     if (dlen != @as(i32, pt.len)) return error.RoundtripLen;
     if (!std.mem.eql(u8, dec[0..pt.len], pt)) return error.RoundtripBytes;
     ct[5] ^= 1;
-    if (aeadOpen(ct[0..pt.len], 42, 7, tag, dec[0..pt.len]) != -1) return error.Tampered;
+    if (demoOpen(ct[0..pt.len], 42, 7, tag, dec[0..pt.len]) != -1) return error.Tampered;
     ct[5] ^= 1;
-    if (aeadOpen(ct[0..pt.len], 42, 7, tag ^ 1, dec[0..pt.len]) != -1) return error.WrongTag;
+    if (demoOpen(ct[0..pt.len], 42, 7, tag ^ 1, dec[0..pt.len]) != -1) return error.WrongTag;
 
     var hs = Handshake{};
     if (hs.state != .Init) return error.Init;

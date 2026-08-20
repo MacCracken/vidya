@@ -3,9 +3,13 @@
 # Asm port focuses on the algorithmic primitives:
 #   - pick_cipher: linear-scan intersection with TLS 1.3 filter
 #   - verify_chain: linear linkage check + trust-store reachability
-#   - AEAD seal/open: XOR stream + sum-based tag with verification
+#   - demo seal/open: XOR stream + weak_checksum tag with verification
 # Handshake driver is in higher-level ports; the asm port verifies
 # the 5 critical assertions.
+#
+# The seal/open pair below is a TEACHING STUB, NOT authenticated
+# encryption. See the disclaimer above weak_checksum before reading it
+# as a miniature of TLS_AES_128_GCM_SHA256.
 
 .intel_syntax noprefix
 .global _start
@@ -168,18 +172,38 @@ xor_stream:
 .xs_done:
     ret
 
-# compute_tag(rdi=buf, rsi=len, rdx=key, rcx=nonce) -> rax
-compute_tag:
+# ---------------------------------------------------------------------------
+# WARNING — this is NOT authenticated encryption. Never use it as such.
+#
+# weak_checksum accumulates a plain byte SUM and folds in the key and nonce.
+# Addition is commutative, so the tag is permutation-invariant: reordering the
+# bytes of a message leaves the tag completely unchanged. Only a single flipped
+# byte is caught; a SWAP is not.
+#
+# Concretely, "transfer 10 usd" and "transfer u0 1sd" differ only by a swap of
+# bytes 9 and 12 ('1' <-> 'u'). Both sum to 1362, so under this file's key and
+# nonce (42, 7) both tag to 1407, and the verification below ACCEPTS the second
+# as authentic. A real MAC (Poly1305, GMAC, HMAC) is position-sensitive and
+# rejects that forgery.
+#
+# What this IS for: the structural shape of a seal/open pair — encrypt, carry a
+# tag alongside, recompute and compare the tag before trusting the plaintext.
+# Use a vetted implementation (the real AEAD behind TLS_AES_128_GCM_SHA256
+# above) for anything that matters.
+# ---------------------------------------------------------------------------
+
+# weak_checksum(rdi=buf, rsi=len, rdx=key, rcx=nonce) -> rax
+weak_checksum:
     xor     rax, rax
     xor     r8, r8
-.ct_loop:
+.wc_loop:
     cmp     r8, rsi
-    jge     .ct_done
+    jge     .wc_done
     movzx   r9, byte ptr [rdi + r8]
     add     rax, r9
     inc     r8
-    jmp     .ct_loop
-.ct_done:
+    jmp     .wc_loop
+.wc_done:
     xor     rax, rdx
     xor     rax, rcx
     ret
@@ -255,7 +279,9 @@ _start:
     mov     rsi, 0
     call    assert_eq
 
-    # 5. AEAD round-trip + tampering rejection
+    # 5. demo seal/open round-trip + tag verification
+    #    (structural shape only — see the weak_checksum warning above)
+    # demo_seal: encrypt, then tag the plaintext
     lea     rdi, [rip + ct_buf]
     lea     rsi, [rip + pt_text]
     mov     rdx, pt_len
@@ -265,9 +291,9 @@ _start:
     mov     rsi, pt_len
     mov     rdx, 42
     mov     rcx, 7
-    call    compute_tag
+    call    weak_checksum
     mov     r12, rax              # tag
-    # Decrypt
+    # demo_open: decrypt, then recompute and compare the tag
     lea     rdi, [rip + pt_buf]
     lea     rsi, [rip + ct_buf]
     mov     rdx, pt_len
@@ -277,7 +303,7 @@ _start:
     mov     rsi, pt_len
     mov     rdx, 42
     mov     rcx, 7
-    call    compute_tag
+    call    weak_checksum
     mov     rdi, rax
     mov     rsi, r12
     call    assert_eq
