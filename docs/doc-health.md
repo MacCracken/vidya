@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-08-20 (v2.8.3 ship — see the 2.8.1 sweep block below).
+> **Last refresh**: 2026-08-22 (v2.8.4 ship — see the 2.8.4 sweep block below).
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -17,6 +17,29 @@ type: state
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
+
+## 2026-08-22 sweep (v2.8.4)
+
+Release-cut refresh alongside `docs/development/state.md`. A dependency-only
+cut, so most docs needed a pin stamp rather than a rewrite — but two carried
+numbers that were **wrong**, which is the part worth recording.
+
+| Doc | Updated for 2.8.4 |
+|---|---|
+| `CHANGELOG.md` | 2.8.4 entry cut: cyrius 6.5.31 → 6.5.35, vyakarana 2.3.2 → 2.4.0, the +208,096 B binary growth attributed to `bayan`, and the interleaved-A/B benchmark finding. |
+| `cyrius.cyml` | `[deps]` comment gained a 6.5.35 block (bayan's PDF subsystem, the DCE-off-by-default consequence, and the new `assert.cyr` transitive) and the vyakarana block explains why a boundary-changing minor is inert for a single-feed consumer. |
+| `CLAUDE.md` | Toolchain table's `lib sync` overwrite note re-stamped 6.5.31 → 6.5.35 (behaviour re-confirmed, not assumed). |
+| `docs/development/state.md` | Version, cyrius pin, dep-pin table, stdlib-module count (62 → 63 files), and a 2.8.4 cycle-posture entry. **Also corrected: the recorded 2.8.3 binary size was wrong by 168 B** (2,564,304 recorded vs 2,564,472 actual, verified against the committed `build/vidya`). |
+| `docs/development/roadmap.md` | Header stamp → 2.8.4 / 6.5.35; 2.8.x row extended; "Current pin" line → 6.5.35. |
+| `docs/sources.md` | Cyrius pin row → 6.5.35. |
+| `.github/workflows/{ci,release}.yml` | Action majors bumped (checkout v4 → v7, upload-artifact v4 → v7, download-artifact v4 → v8, gh-release v2 → v3), with an inline block recording *why each is safe* rather than just that it was bumped. |
+| `docs/development/ecosystem-action-pins.md` | **New.** Cross-repo record of the ecosystem-wide action staleness, the per-repo migration table, and the evidence the two advertised breaking changes do not apply. vidya migrated; the other five are written up, not touched. |
+| `content/cyrius/field_notes/index.cyml` | **Re-derived, not re-stamped.** The `compiler/` block claimed 46 entries with `gotchas.cyml` at 12; actual counts are 180 and 123, and six retro files were absent from the listing. Fixed, with the `grep -c` derivation command recorded inline so the next reader regenerates it. Verification range 6.4.10 → 6.5.35. |
+
+**Process note worth keeping**: both errors this sweep were *restated* numbers
+that had drifted from their derivable source — the same failure mode cyrius's
+own v6.5.35 notes call out ("a number you did not just derive is stale").
+Prefer recording the command over recording the count.
 
 ## 2026-08-20 sweep (v2.8.3)
 

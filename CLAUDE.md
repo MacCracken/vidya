@@ -63,7 +63,7 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 
 | Action | Command | Notes |
 |---|---|---|
-| Sync stdlib | `cyrius lib sync` | Vendors the `[deps] stdlib` subset from the pinned snapshot into `lib/`. As of 6.5.29 (still true at 6.5.31) this **does** overwrite a stale `lib/<mod>.cyr` (verified 2.8.1 by staging a 6.4.2 `fmt.cyr` into a 6.5.29 tree — both `lib sync` and `deps` restored it). The older "treats an existing file as satisfied and never refreshes" behavior — which vyakarana's 2.3.0 entry documented at 6.5.4 — no longer applies, so `rm -rf lib` before a pin bump is belt-and-braces, not required |
+| Sync stdlib | `cyrius lib sync` | Vendors the `[deps] stdlib` subset from the pinned snapshot into `lib/`. As of 6.5.29 (still true at 6.5.35) this **does** overwrite a stale `lib/<mod>.cyr` (verified 2.8.1 by staging a 6.4.2 `fmt.cyr` into a 6.5.29 tree — both `lib sync` and `deps` restored it). The older "treats an existing file as satisfied and never refreshes" behavior — which vyakarana's 2.3.0 entry documented at 6.5.4 — no longer applies, so `rm -rf lib` before a pin bump is belt-and-braces, not required |
 | Resolve deps | `cyrius deps` | Reads `cyrius.cyml`, resolves the `[deps.<name>]` git deps (vyakarana) alongside the synced stdlib |
 | Verify lock | `cyrius deps --verify` | Checks `cyrius.lock` SHAs. ⚠ **Cannot catch a shadowed stdlib module** — the lock is written *from disk*, so a git dep overlaying a folded module records the overlay's hash and reports clean (this is how sakshi sat downgraded through 2.8.0) |
 | Build binary | `cyrius build src/main.cyr build/vidya` | Output: static ELF — current size in [`docs/development/state.md`](docs/development/state.md) |

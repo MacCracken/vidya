@@ -7,6 +7,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.4] — 2026-08-22
+
+Dependency cut. **cyrius 6.5.31 → 6.5.35**, **vyakarana 2.3.2 → 2.4.0**, sakshi
+unchanged at 2.4.11. No content added — the corpus stays 77 topics / 847
+examples, 0 gaps — and no source change was required: `cyrius test`
+**139/0**, 12 benchmarks green, content gate **847/847 with zero skips**
+under `VIDYA_STRICT=1`.
+
+The whole cut is one number: **the binary grew 2,564,472 → 2,772,568 B
+(+208,096, +8.1 %)**, and all of it is a stdlib module vidya barely uses.
+
+### Changed — cyrius 6.5.31 → 6.5.35
+
+The snapshot's module **list** is identical either side (102 modules), and
+exactly **three files tree-wide** changed content: `bayan`, `patra`, `vani`.
+Only `bayan` is one of the 25 modules vidya declares; every other declared
+module is byte-identical, sha256-verified per module.
+
+`bayan` is not a small change. It nearly **tripled** — 215,533 → 641,083 B,
++368 functions — absorbing a PDF subsystem (`_pdfc_*`, `_pdfe_*`, `_pdff_*`,
+`_pdfg_*`). vidya reaches bayan only for TOML and JSON, so every byte of that
+is unreachable from `main()`. **cyrius does not run DCE by default, so it
+ships anyway**: unreachable functions 2,546 → 2,931, unreachable bytes
+721,478 → 869,883.
+
+Attributed by building the 6.5.35 compiler against the **6.5.31** lib tree:
+**2,548,088 B**. So 6.5.35's band F register-allocator work made the binary
+**16,384 B smaller**, and the stdlib growth added 224,480 B on top of that.
+Accepted rather than worked around — `CYRIUS_DCE=1` is a build-wide behaviour
+change, not a per-module opt-out, and the corpus loader is not the place to
+run that experiment for the first time in a release. Still **−81.1 %** against
+2.8.0's 14.66 MB.
+
+`lib/` also went **62 → 63 files**: `assert.cyr` is now vendored. Nothing was
+declared to cause it and neither `sakshi` nor `alloc` changed content — the
+transitive resolver simply started chasing `sakshi`'s `panic()` and `alloc`'s
+`fail_after_n_allocs()` into it. Worth noting what it is: a **test assertion
+library**, now linked into the shipped binary. Harmless — DCE-dead, and
+`panic` is a real fatal path — but it is the arc reaching further on its own.
+
+6.5.35's headline is codegen (the register allocator finally time-shares
+registers, via loop-aware liveness). vidya's evidence that this is safe here
+is the gate, not the upstream release notes: 139 assertions, 12 benchmarks,
+847 examples, all unchanged.
+
+### Changed — vyakarana 2.3.2 → 2.4.0
+
+A **minor**, and the minor is earned: 2.4.0 changes streaming token
+*boundaries*. It fixed five independent root causes that made a chunk-fed
+consumer disagree with a whole-buffer consumer on **13 of 20** corpus files —
+a divergence the pre-existing `fuzz/streaming.fcyr` never caught because its
+inputs were short synthetic strings. 15 of 20 grammars are now chunk-invariant
+at every chunk size tested, up from 7.
+
+**None of it reaches vidya, by construction.** `render_code`
+(`src/vidya_core.cyr:942`) makes exactly one `tokenize_stream_feed` call with
+the entire file and then `_finish` — that is the whole-buffer path 2.4.0
+corrects the chunked path *against*. The public API
+(`tokenize_stream_new` / `_feed` / `_finish` / `_free`, `tokenbuf_*`,
+`kind_name`) is unchanged, so no call site moved. Verified live: `vidya code`
+still colours through the vyakarana path.
+
+### Changed — CI action majors, 3–4 versions behind
+
+`actions/checkout` **v4 → v7**, `actions/upload-artifact` **v4 → v7**,
+`actions/download-artifact` **v4 → v8**, `softprops/action-gh-release`
+**v2 → v3**. Every one of those majors is fundamentally a Node 20 → Node 24
+runtime move requiring Actions Runner ≥ 2.327.1, which GitHub-hosted
+`ubuntu-latest` satisfies.
+
+The two candidate breakages were checked rather than assumed, and neither
+applies:
+
+- **`download-artifact` v5's breaking path change is by-ID only.** It fixed
+  `artifact-ids:` downloads extracting to `path/<name>/` instead of `path/`.
+  `release.yml` downloads by `name:`, which upstream's own migration guide
+  lists explicitly under *"no action needed"*.
+- **`upload-artifact` v7's new `archive:` input is opt-in**, and multi-file
+  globs with an explicit `name:` — what `release.yml` does — are unchanged.
+
+⚠ **This was ecosystem-wide staleness, not a vidya oversight.** sit, hoosh,
+vyakarana, sakshi and sandhi were all still on the identical `v4`/`v2` pins as
+of 2026-08-22, so vidya is now deliberately ahead rather than accidentally
+divergent. What the others need is written up in
+[`docs/development/ecosystem-action-pins.md`](docs/development/ecosystem-action-pins.md).
+cyrius itself pins actions by full commit SHA, which is the stronger pattern
+if this ever needs security hardening rather than currency.
+
+The Zig content pin was checked in the same sweep and is **already current** —
+CI installs 0.16.0 and 0.16.0 is the latest release.
+
+### Fixed — two recorded numbers that were wrong
+
+- **The 2.8.3 binary size in `docs/development/state.md` was wrong by 168 B.**
+  It recorded 2,564,304; HEAD at the 6.5.31 pin actually builds **2,564,472**,
+  verified byte-for-byte against the committed `build/vidya`. The 2.8.4 delta
+  above is measured against the real number.
+
+- **The field-notes index had rotted badly.** `content/cyrius/field_notes/index.cyml`
+  claimed the `compiler/` set held **46 entries** with `gotchas.cyml` at
+  **12**. The real counts are **180** and **123**, and six retro files were
+  missing from the listing entirely. Re-derived, with the derivation command
+  recorded inline so the next reader regenerates rather than restates. The
+  verification range also moved 6.4.10 → **6.5.35**.
+
+### Benchmarks — flat, and a stored-baseline trap worth recording
+
+Against the stored 2026-08-20 baseline, `load_all` appeared to regress
+**+29 %** (5.937 → 7.68 ms) and `reg_get_miss` **+30 %**. Neither is real.
+Swapping only `bayan.cyr` back to its 6.5.31 copy reproduced the same 7.69 ms,
+and an **interleaved A/B of the two compilers on the same box** — two rounds,
+alternating — put them on top of each other:
+
+| | load_all | reg_get_miss |
+|---|---|---|
+| 6.5.31 compiler | 7.684 / 7.713 ms | 524 / 523 ns |
+| 6.5.35 compiler | 7.624 / 7.726 ms | 511 / 514 ns |
+
+The pre-bump configuration is exactly as slow on this box today, so the delta
+belongs to the measurement environment, not the release. This is the failure
+mode cyrius 6.5.35's own CHANGELOG documents against itself — **A/B the two
+binaries interleaved rather than comparing against a stored number.** The
+first run here was additionally taken while the 847-example content gate was
+saturating the box, which is how it got noticed.
+
+
 ## [2.8.3] — 2026-08-20
 
 Toolchain bump, a corpus-wide example review, and four new gate checks. No
