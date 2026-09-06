@@ -1048,10 +1048,19 @@ table (see the exhaustive_match entry's CURRENCY note).
 Four families are grow-on-demand; the heap-map offset is the INITIAL
 base, valid only under the first cap.
 
-  fn table       init 8192, `_fnt_grow` doubles, CEILING 32768.
-                 The ceiling is structural: the fn-name / fn-start hash
-                 slots are 2 bytes and store fi+1, so fi+1 <= 65535.
-                 The capacity warning fires at 85% of 32768 (v6.4.75 —
+  fn table       init 8192, `_fnt_grow` doubles, CEILING 131072
+                 (v6.5.40 raised it from 32768; the old "2-byte hash
+                 slots store fi+1, so fi+1 <= 65535" rationale below is
+                 HISTORY — the slots were widened, which is what let the
+                 ceiling move).
+                 ⚠ v6.5.46: raising that ceiling did NOT sweep its
+                 consumers — the DCE reachability bitmap `live[]` was
+                 widened to 16384 bytes but its clear loop stayed at
+                 4096 and the address-taken root-seed bound at 32768,
+                 so `CYRIUS_DCE=1` NOP-filled any address-taken fn above
+                 index 32768 (measured: SIGSEGV on a 33,001-fn program).
+                 Both bounds are now DERIVED from the ceiling and gated.
+                 The capacity warning fires at 85% of the ceiling (v6.4.75 —
                  it used to divide by the LIVE cap, so it screamed at
                  8191 and went silent the instant the table grew).
                  Six fn-indexed SIDE tables (fn_deprecated_msg,
@@ -1075,15 +1084,40 @@ base, valid only under the first cap.
 
 == FIXED CAPS ==
 
-  identifier pool (tok_names)  512 KB at 0x60000-0xE0000 since v6.4.76
-                               (was 256 KB). LEX refuses past 524016,
-                               leaving 272 B of slack for the inner
-                               write loop. The pool END must stay
-                               <= 0x100000 — above that the compiler
-                               HANGS, so the 0xE0000-0x100000 gap is
-                               the whole remaining headroom.
-  tokens                       1,048,576 slots each for tok_types /
-                               tok_values / tok_lines (8 MB apiece).
+  preprocessed source          24 MB (`_SRC_CAP` = 25165824, `_SRCB` at
+                               0x7400000) since v6.5.40; was a FIXED
+                               8 MB slot whose overflow was a hard build
+                               failure with no flag, no env var and no
+                               manifest key — a project that hit it had
+                               exactly one move, hand-vendoring a subset
+                               of its dependencies. ⭐ Raising it exposed
+                               FOUR more caps in turn (tokens, the
+                               identifier pool, the fn table, and the
+                               identifier-dedup table); fixing only the
+                               filed one would have moved the usable
+                               ceiling 8 MB -> ~10-11 MB and been
+                               reported as 3x.
+
+  identifier pool (tok_names)  8 MB at 0xEC00000 since v6.5.40 (was
+                               512 KB at 0x60000-0xE0000 at v6.4.76, and
+                               256 KB before that). LEX refuses past
+                               8388336, leaving 272 B of slack for the
+                               inner write loop. ⚠ The old note that the
+                               pool END must stay <= 0x100000 or the
+                               compiler HANGS applied to the 0x60000
+                               placement and is HISTORY — v6.5.40 moved
+                               the pool out of that band entirely as one
+                               of the four caps stacked behind the
+                               preprocess ceiling.
+  tokens                       4,194,304 slots (v6.5.39; was 1,048,576)
+                               each for tok_types /
+                               tok_values / tok_lines (32 MB apiece —
+                               4,194,304 x 8 bytes; the heap map said
+                               8 MB for tok_values until v6.5.46, a
+                               one-line omission in the three-line
+                               v6.5.39 resize that made the machine-read
+                               auditor report 24 MB of free band which
+                               is fully occupied).
                                Since v6.4.60 tok_lines packs the token
                                BYTE OFFSET into its high 32 bits — that
                                is where column + caret diagnostics come

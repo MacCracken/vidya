@@ -6,7 +6,7 @@
 # CHUNKS since v6.1.19 (measured — 400 MB in 100 MB bites succeeds), so the
 # old "exhaust the heap segment in 9 allocs" story no longer describes it;
 # three entries added from v6.5.8/.9.
-# 16 entries.
+# 17 entries. (v6.5.61: vector value-return binding forms.)
 
 [[entries]]
 name = "heap_allocation_patterns"
@@ -840,3 +840,45 @@ nobody parked and the joiner then parked on an address that would never
 be woken again. Permanent, silent, log-less, ~1 join in 150k, SIGKILL
 the only recovery. Fixed in v6.5.8. If you are on ≤6.5.7 and a
 long-running server wedges in a join, this is it.
+
+[[entries]]
+name = "vector_value_return_binding_forms"
+description = "A value-form vector return (f32v4/f64v2/f64v4) used to survive only `var r: <exact type> = f(...)`; every other binding form silently read back zero"
+category = "cyrius"
+---
+Until v6.5.61, a function returning a SIMD vector by value was stored correctly by
+exactly ONE spelling. The others compiled clean, exited 0, and produced wrong numbers.
+
+    var r: f64v2 = f64v2_add(a, b);    # worked
+    var r        = f64v2_add(a, b);    # lanes read back 0   (no annotation)
+    var r: f64v2;  r = f64v2_add(a,b); # lanes read back 0   (assignment form)
+    var r: f64v4 = f64v2_add(a, b);    # lanes read back 0   (mismatched type)
+
+Every width was affected — f32v4 returned garbage, f64v2 and f64v4 returned 0 — and
+it was never confined to lib/simd.cyr: a user-defined `fn mk(): f64v2` had the same
+problem. The most visible symptom was `f64v2_scale(a, f64_from(3))` coming back as
+`lo=0, hi=3`, with the SCALE FACTOR sitting in lane 1.
+
+WHY. The 16/32-byte receive paths in PARSE_VAR were gated on the variable's own type
+annotation, so a variable without one fell through to the ordinary scalar
+initialiser. The assignment path had no vector receive at all and used the generic
+8-byte store. Since v6.5.61 the type is inferred from the callee's recorded return
+type when the variable declares none, the assignment form has its own receive, and an
+annotation that DISAGREES with the callee is a hard error rather than a silent
+truncation:
+
+    error: vector return type does not match the declared type
+    error: vector return type does not match the assigned variable
+
+WHAT TO TAKE FROM IT. If you are writing SIMD code on a cyrius older than 6.5.61,
+annotate every vector binding with its exact type and never use the assignment form.
+On 6.5.61+ all forms work, and a wrong annotation is refused instead of silently
+dropping lanes.
+
+The reason this survived for so long is worth more than the bug: every call site in
+the tests, the guide and the stdlib spelled the annotation, so the API's most natural
+spelling was exercised by nothing. The differential corpus was 406/407 byte-identical
+across the fix — which measures the corpus, not the fix. When you add a receive path
+for a type, test the binding forms a CONSUMER writes, not the one the stdlib writes;
+and note that a declaration receive and an assignment receive are two halves of one
+statement, not two features (v6.5.57 fixed the same split for structs).

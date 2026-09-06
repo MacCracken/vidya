@@ -3195,7 +3195,7 @@ edit-compile round trip.
 
 [[entries]]
 name = "visibility_public_private_v650"
-description = "private / public — file-scoped visibility for fns and global vars (v6.5.0)"
+description = "private / public — file-scoped visibility for fns and global vars (v6.5.0; scoped at symbol insertion since v6.5.38)"
 category = "cyrius"
 ---
 SYNTAX:
@@ -3230,6 +3230,42 @@ Reported through the multi-error path (v6.4.62), so ONE compile lists every
 violation. Enforcement covers ordinary calls, TAIL calls, operator-overload
 dispatch, and global-var reads — the var path enforces inside `FINDVAR`, which
 is the single resolver every global read reaches.
+
+PRIVATE SYMBOLS ARE SCOPED AT INSERTION (v6.5.38) — THE HALF THAT WAS MISSING.
+Two files may each define a private `_helper`; each file's calls bind to its
+OWN, and neither can capture the other's. A same-named PUBLIC fn stays
+reachable from everywhere else.
+
+    # a.cyr                            # b.cyr
+    private                            fn _helper(x) { return 7; }
+    fn _helper(x) { return 1; }        fn b_entry() { return _helper(0); }  # 7
+    public fn a_entry() {
+        return _helper(0);             # 1 — always a.cyr's own
+    }
+
+⛔ v6.5.0 THROUGH v6.5.37 DID NOT DO THIS, and the failure was silent. The fn
+table held ONE entry per NAME, so b.cyr's definition overwrote a.cyr's —
+INCLUDING for a.cyr's own internal calls — under a `duplicate fn ... last
+definition wins` warning that reads as benign shadowing. `private` on BOTH
+sides did not help: visibility was enforced only where a name was USED, layered
+on an unchanged global symbol table. Filed from owl 1.4.7, where vyakarana and
+sankoch each define a private `_stream_grow` that disagree about arity, buffer
+offsets AND RETURN POLARITY — a wrong binding there does not fault, it reports
+every successful buffer grow as a FAILURE, inside a tokenizer, on file content.
+v6.5.37 closed only the arity-differing case (as a hard error); v6.5.38 closed
+the same-arity half, which is the dangerous one precisely because no check can
+see its shape.
+
+MECHANISM: definitions SPLIT into separate symbols when a private one is
+involved and the origin files differ. Resolution then prefers (1) a definition
+private to the caller's own file, (2) the first non-private one, (3) the first
+match — arm 3 exists so `_vis_check` still produces the precise "is private to
+its file" error instead of a misleading "undefined function". The split is
+flagged per-fn, so a name with one definition costs nothing extra to resolve.
+
+UNCHANGED ON PURPOSE: duplicates between two NON-private files still only warn,
+and two definitions in ONE file are still a duplicate (a redefinition of one
+symbol, not a collision between two files).
 
 VISIBILITY ALSO CONTROLS LINKAGE: a private fn is omitted from the exported
 symbol table, so it disappears from `.dynstr` / `nm` and from
@@ -3318,3 +3354,196 @@ so the joiner can only park on a tid it positively observed live.
 
 Gates: `tests/thread_join_single_load.sh`, plus the `vr01_` corpus on
 real hardware.
+
+[[entries]]
+name = "darwin_concurrency_syscall_wrappers_v6543"
+description = "sys_bsdthread_* and sys_ulock_* — Darwin's threading and blocking primitives, routed on both Mach-O backends (v6.5.43)"
+category = "cyrius"
+---
+macOS has neither `clone` nor `futex`. Real threading on Darwin is
+`bsdthread_create` / `bsdthread_terminate` / `bsdthread_register`, and blocking
+is `__ulock_wait` / `__ulock_wake`. v6.5.43 routes all five on BOTH Mach-O
+backends and adds the peer wrappers:
+
+    fn sys_bsdthread_register(threadstart, wqthread, flags,
+                              stack_addr_hint, targetconc, dq_offset): i64
+    fn sys_bsdthread_create(func, func_arg, stack_addr, pthread, flags): i64
+    fn sys_bsdthread_terminate(stackaddr, freesize, port, sem): i64
+    fn sys_ulock_wait(operation, addr, value, timeout_us): i64
+    fn sys_ulock_wake(operation, addr, wake_value): i64
+
+Source numbers are the v6.5.7 private-alias band (>= 1000, renumbered by
+ESYSXLAT / EMACHO_SYSXLAT, spelled `1000 + the native number` so the alias
+documents itself): 1360 -> 360, 1361 -> 361, 1366 -> 366, 1515 -> 515,
+1516 -> 516. `UL_COMPARE_AND_WAIT` is operation 1; `ULF_WAKE_ALL` is 0x100;
+`sys_ulock_wait`'s timeout is MICROSECONDS, 0 meaning forever.
+
+⛔ THESE DO NOT MAKE A THREAD ON THEIR OWN. `bsdthread_register` must run once
+before any `bsdthread_create`, and the created thread enters the REGISTERED
+TRAMPOLINE with a Darwin-specific register layout — not the user fn. Phase 1
+(v6.5.43) is routing and reachability only; the trampoline, stack mmap, real
+create/join and the `__ulock` mutex are phase 2.
+
+⚠ WHERE THEY LIVE, which is not where you would guess. `lib/syscalls.cyr`
+selects `lib/syscalls_aarch64_linux.cyr` for aarch64-Linux AND for arm64-macOS;
+`lib/syscalls_macos.cyr` is x86-macOS ONLY. So the arm64-macOS wrappers live in
+the file named for Linux, guarded by `#ifdef CYRIUS_TARGET_MACOS`, and real
+aarch64-Linux — which has futex and clone — is untouched. That surprise is why
+the first `kqueue` pass built on Intel-Mac and failed on ecb with
+`undefined function sys_kqueue`.
+
+⚠ `stack` IS A RESERVED KEYWORD, so `sys_bsdthread_create`'s third parameter is
+`stack_addr`. See TOKNAME_BUILTIN — reserved words are a CLASS, not a list.
+
+⚠ ARITIES COME FROM DARWIN'S `syscalls.master` and phase 2 is what confirms them
+by execution. `bsdthread_register` takes 6 args in older SDKs and 7 in newer
+ones (a trailing `tsd_offset`); the 6-arg form is used because cyrius `syscall()`
+carries at most 6.
+
+[[entries]]
+name = "threads_concurrent_capability_v6544"
+description = "THREADS_CONCURRENT — ask whether thread_create really produces a second thread, instead of assuming per target (v6.5.44)"
+category = "cyrius"
+---
+Every cyrius target exposes the same threading surface (`thread_create` / `thread_join` /
+`thread_create_detached` / `thread_is_done` / `gettid` / the `chan_*` family), but not every
+target runs bodies on a SECOND thread. Three peers run them INLINE at `thread_create` —
+correct results, serially. `THREADS_CONCURRENT` says which you have:
+
+    1  Linux (real clone(2) threads)
+    1  arm64-macOS  (real Darwin threads via __got[5] pthread_create, v6.5.44)
+    0  x86-macOS    (static LC_UNIXTHREAD binary: no libSystem, no __got)
+    0  Windows
+    0  agnos
+
+Use it to guard anything whose CORRECTNESS depends on two things running at once — a
+rendezvous, a producer/consumer handoff, a benchmark that claims parallel speedup:
+
+    if (THREADS_CONCURRENT == 1) {
+        # ... assertions that an inline backend cannot satisfy ...
+    }
+
+⚠ DO NOT GUARD ON THE TARGET NAME INSTEAD. A capability guard starts asserting the day a peer
+becomes real; a `#ifdef CYRIUS_TARGET_MACOS` guard waits for a human to remember to remove it.
+That is not hypothetical — macOS bodies ran inline from v6.5.11 to v6.5.43 and the whole
+cross-host concurrency corpus was green throughout, because every assertion in it ("the worker
+ran", "join returned 0", "the count is exact", "the mutex excluded") is honestly satisfiable by
+an inline call. See the field note `a_corpus_that_cannot_tell_real_threads_from_inline_calls`.
+
+⚠ A `0` PEER IS NOT BROKEN. Bodies run and results are correct; only the parallelism is
+absent. Code that uses threads for THROUGHPUT still works there, just serially — so guard on
+this only where concurrency is a correctness precondition, not everywhere threads appear.
+
+[[entries]]
+name = "stack_enum_unboxed_payload_variants_v6555"
+description = "enum Name: stack — payload variants that return (tag, payload) in registers instead of a 16-byte heap box (v6.5.55)"
+category = "cyrius"
+---
+A payload-carrying enum variant normally **allocates**. `Ok(42)` is a 16-byte box from the
+global bump allocator — tag at `+0`, payload at `+8` — and the only reclaim is `alloc_reset()`,
+which invalidates every pointer the allocator has ever returned, so a long-running server can
+never call it. 100 `sock_send` calls grow the heap 1600 bytes, permanently.
+
+`: stack` on the declaration opts that variant family out:
+
+```
+enum Res: stack { Ok(v); Err(e); }
+
+fn parse(x): i64 {
+    if (x > 0) { return Ok(x * 2); }
+    return Err(0 - x);
+}
+
+fn use(): i64 {
+    var tag, val = parse(21);    # zero allocation
+    if (tag == 0) { return val; }
+    return 0 - val;
+}
+```
+
+The constructor hands back `(tag, payload)` in the multi-return register pair — rax/rdx on
+SysV and Win64, x0/x2 on aarch64 — and you read it with the destructuring bind the language
+already had.
+
+RULES, all enforced or diagnosed:
+- **Zero or one field per payload variant.** The pair holds a tag and one value; `Pair(a, b)`
+  in a `: stack` enum is a compile error (`stack enum variant takes 0 or 1 fields`), not a
+  silently dropped field. A **nullary** variant — `None()` — carries no payload, so it needs no
+  second register: it returns its tag alone and binds to a single variable. (Until v6.5.67 the
+  rule read "exactly 1", which refused `enum Option: stack { None(); Some(v); }` outright.)
+- **Bare variants are unchanged** — still integer constants, still sharing the discriminant
+  numbering with the payload variants.
+- **The destructuring bind is function-only.** `var t, v = f();` at top level is rejected with
+  "multi-var destructure only supported inside functions".
+- **A pair must be bound as a pair (v6.5.67).** `var r = SOk(9);` keeps the tag and drops the
+  payload, so it is refused: *"a `: stack` enum returns two values — bind both: `var tag, val =
+  f();`"*. The check follows the value through `return`, so a forwarding wrapper is caught too.
+- **`?` does not apply, and now says so.** The propagation operator desugars to
+  `load64(rax + 8)` — it dereferences its operand — so on a pair it read the *tag* as a pointer
+  and the program SIGSEGV'd after compiling clean. It is a diagnostic as of v6.5.67:
+  *"'?' does not apply to a `: stack` enum — destructure it: `var tag, val = f();`"*.
+
+⚠ **OPT-IN, AND THE DEFAULT DELIBERATELY DID NOT CHANGE.** The boxed layout is not an internal
+detail; it is the documented representation. `?` reads `+8`, `lib/result.cyr`'s `is_ok` /
+`result_unwrap` read `+0` and `+8`, and roughly 300 sites across the ecosystem do the same by
+hand. A register pair read as a pointer is a plausible-looking address, so flipping the default
+would have broken all of them SILENTLY.
+
+📎 `stack` is not a new keyword — it is token 111, reserved since v5.5.36 for
+`stack var buf[N]` ("lives on the call stack rather than being hoisted"), which is the same
+meaning one level up. Introducing a `value` keyword instead would have broken any program using
+`value` as an identifier.
+
+[[entries]]
+name = "inline_directive_v6563"
+description = "`#inline` marks the next fn for the inline-replay path — opt-in, per function, and it WARNS when it cannot be honoured"
+category = "cyrius"
+---
+`#inline` (v6.5.63) requests that the next `fn` definition be inlined at its call sites:
+
+    #inline
+    fn Pt_x(p) { return load64(p + 0); }
+
+    #inline
+    fn addk(a, b) { return a + b + 7; }
+
+⚠ BEFORE v6.5.63 THIS DIRECTIVE DID NOT EXIST. `#` opens a comment in cyrius, so `#inline`
+lexed as a comment and did nothing — silently. Consumers were already writing it: svara
+carried four markers in `src/formant.cyr`, and its own `src/lod.cyr` recorded measuring one
+at "+0.7% -- noise" — a measurement of an optimisation that was never there. If you are on
+6.5.62 or earlier, your `#inline` markers are inert.
+
+WHEN IT PAYS. Small, flat, hot functions — above all generated accessors. Measured on an
+8-getter loop: 20.84 ms -> 6.04 ms, a 3.45x speedup, for +192 bytes of `.text`.
+
+WHAT QUALIFIES. The request is honoured only for a function that is:
+  - at most 2 parameters,
+  - at most 32 body tokens,
+  - free of control flow (`if` / `while` / `for`) and of `var` declarations,
+  - free of struct/aggregate parameters (SIMD vector params are fine).
+
+WHEN IT CANNOT BE HONOURED, YOU GET A WARNING naming the constraint:
+
+    warning: #inline ignored: fn takes more than 2 parameters
+    warning: #inline ignored: body exceeds 32 tokens
+    warning: #inline ignored: struct/aggregate parameter
+    warning: #inline ignored: body has control flow or a var declaration
+
+That diagnostic is half the feature. A directive that silently does nothing is the exact
+defect `#inline` was added to end, so a request that cannot be met says so rather than
+quietly reverting to a call. A warning never changes behaviour: the function is still called
+and still returns the right answer.
+
+⚠ THE ARITY LIMIT IS STRUCTURAL, not a tunable. The inline record packs two 32-bit parameter
+name offsets into one 64-bit word, so a third parameter has nowhere to go. Restructure to two
+parameters (or a pointer) if you need the inline.
+
+⚠ GENERAL INLINING IS NOT AVAILABLE. `_INLINE_OK` is 0 on every backend. Two source comments
+justified that with "+25.6 % on cycc at v1.11.3" for about fifteen majors; re-measured at
+v6.5.63 that figure is unquotable, because a compiler built with `_INLINE_OK = 1` does not
+compile at all — it dies with "function exceeds 1023 jump targets (x86 LASE cap)". `#inline`
+is the supported route, and being per-function it cannot drive any one function toward that
+cap the way whole-program inlining does.
+
+RELATED: `#naked`, `#regalloc`, `#alloc` follow the same "attribute on the next fn" shape.
+
