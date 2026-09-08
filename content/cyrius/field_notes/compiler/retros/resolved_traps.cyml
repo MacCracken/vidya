@@ -25,7 +25,7 @@
 # trap is reachable again. An entry landing back in gotchas.cyml should be a
 # measured regression, not a hunch.
 #
-# 44 entries.
+# 51 entries. (44 at the first v6.6.1 pass; +7 change-records on the second.)
 [[entries]]
 name = "slice_fn_local_layout_flip"
 description = "Pre-§8 16-byte fn-local slices put the canonical slot at the higher stack address; `&slice + 8` overflowed past the local frame into saved-rbp territory. §8 layout-flip (v5.8.16) allocates the high-half slot FIRST (higher address) and the canonical slot SECOND (lower address)."
@@ -1852,4 +1852,189 @@ name = "compensating_a_prepend_by_setting_a_line_bias_does_nothing_the_reanchor_
 description = "v6.5.24, fixing `<source>` diagnostics that shifted one line per cbt prepend (abaco's 18-module manifest: **+17**, pointing PAST EOF on a 23-line file, which reads as a compiler fault so the reader stops trusting line numbers entirely). `_pp_srcline_bias` already existed and `#@incdir` already set it to 1, so the obvious fix is to make the bias count ALL prepended lines. **That changes nothing measurable, and the reason is worth carrying: the bias is only ever CONSUMED by `PP_REANCHOR_SRC` when an `include` RETURNS.** cbt's prepended `include` lines all sit ABOVE the point where you learn the true offset, so the last re-anchor has already been emitted with the old bias and nothing recomputes it. A bias-only first cut reported the RAW line (8) where the user's line was 3 — WORSE than the +1 it started with. The marker has to RE-ANCHOR outright (`op = PP_REANCHOR(S, out, op, \"<source>\", 1)`), i.e. declare 'what follows is `<source>` line 1'; setting state for a later consumer that has already run is the bug. Costs ONE `#@file` map entry per compile, which the 1024-entry cap absorbs — and that cap is exactly why v6.5.19 PADS `#ifdef` blocks with newlines instead of marking them (agnosai would have needed ~1139 entries, and overflow makes `FM_FILEID` return -1, which `private` visibility is load-bearing on). ⭐ **The marker deliberately carries NO COUNT.** Having cbt declare 'I prepended N lines' makes N a hand-maintained value duplicating a derivable fact — the same shape that had silently drifted in three separate places in this one cycle (heap-map sizes vs regions, gate-script counts vs files, ERR_MSG lengths vs strings) — and it is unworkable the moment `[build].modules` is used, since those splice in whole FILES of unknown length. cycc derives the bias from the marker's own line position, so cbt counts nothing and cannot drift. ⚠ Not the remedy the filing proposed: re-emitting `#@file` stays foreclosed by v6.5.21's neutralisation of user-authored `#@file` (which closed a forged-marker bypass of `private`); `#@srcline` carries no filename and is honoured once, so it cannot re-open that hole. Gate `tests/gates/diagnostics/srcline_no_line_shift.sh` demands the SAME line at 0/6/18 modules and for a subdir entry, so a fix that merely shifts the constant by one cannot pass. See CHANGELOG [6.5.24]."
 category = "cyrius"
 tags = ["diagnostics", "line-numbers", "srcline", "PP_REANCHOR", "_pp_srcline_bias", "cbt-prepend", "deps-stdlib", "build-modules", "file-map-1024-cap", "private-FM_FILEID", "derive-never-restate", "past-EOF", "v6.5.24"]
+[[entries]]
+name = "cx_bytecode_backend_is_cli_exposed_check_backend_dirs_before_declaring_a_feature_absent"
+description = "The cyrius-x (cx) bytecode backend is a REAL, self-hosting, CLI-EXPOSED target: `cyrius build --target=cx` emits a portable `.cyx`, `cyrius run` executes it through the installed cxvm, and programs/checks/cx.cyr gates the whole path end-to-end in the green check.sh. Its last-mile CLI exposure landed in the v6.4.17-.22 arc (Release A CLI wiring .17, f64 arith .18-.19, cross-OS `.cyx` .20) with float/SIMD codegen following (.32); cxvm now installs via the `[bins]` loop in scripts/install.sh (`cbt/cyrius.cyr` accepts `--target=cx`, `cbt/core.cyr` routes it). HISTORICAL (through ~v6.4.16): the backend was fully built + gated but had NO CLI verb — no `--target=cx`, cxvm built only ad-hoc inside the gate, `cyrius run` ran native code — so a grep for `wasm`/`--target=cx` returned nothing and it was easy to wrongly conclude 'we have no bytecode/WASM target' (a user premise-check 2026-07-05 caught exactly that). That gap is now CLOSED — the shape mirrors the TS->JS gap before `--emit-js`/`--target=js` wired it in at v6.1.12. LESSON (evergreen): 'grep for the literal string returns nothing' is NOT 'the work doesn't exist' — a backend can be fully built and gated yet invisible because it has no CLI verb; check git history + src/backend/ dirs + the checks/ gates before declaring a feature absent."
+category = "cyrius"
+
+[[entries]]
+name = "cxvm_guest_syscall_is_compiler_renumbered_at_runtime_fix_pointer_slot_and_pe_arity"
+description = "cx Release C (v6.4.20): making a portable .cyx do I/O on all 4 hosts is a cxvm-ONLY fix — the guest syscall number does NOT need a translation table in cxvm, because the compiler already renumbers it per-host AT RUNTIME. cxvm's 0x70 handler does `syscall(sn, ...)` with a VAR sn (the guest's x86-Linux number). On aarch64 `ESYSXLAT` (src/backend/aarch64/emit.cyr) and on macOS `EMACHO_SYSXLAT` emit a runtime `cmp x8,#N / b.ne / movz x8,#M` chain BEFORE svc — so whatever runtime value is in the number register gets renumbered. Empirically: the PRE-fix cxvm cross-compiled to aarch64/macho already ran a write+exit .cyx unchanged. Adding a `_cx_hostsys` renumber table in cxvm (the scoping workflow's proposed design) would DOUBLE-translate (guest 1→64, then 64→garbage). The two REAL bugs were: (1) POINTER-SLOT — the handler translated the guest virtual-offset→real-address on the wrong register for open: open(path,flags,mode) puts path in arg0=s2, but it fixed s3(=flags), so every open() EFAULTed on ALL hosts; read/write buf=s3 were correct. Fix keys on the GUEST number BEFORE renumber, shifts only the pointer reg (offset 0=NULL untouched). aarch64 open→openat's AT_FDCWD arg-shift is emitted by ESYSXLAT and composes automatically. (2) WINDOWS ARITY — cxvm issued a FIXED `syscall(sn,s2,s3,s4,s5,s6)` = argc 6. `EPE_SYSCALL_DYNAMIC` routes var-numbered PE syscalls BY ARITY (argc4→read/write/open/lseek, argc2→close/exit, argc7→mmap) and has NO argc-6 bucket → every guest write/read/open/close/exit hit _pe_dyn_nomatch → -ENOSYS (cass exit=-38, no output; verified defender-clean, NOT a quarantine). Fix: arity-correct dispatch — `if sn∈{0,1,2,8} syscall(sn,s2,s3,s4)` (argc4), `elif sn∈{3,60} syscall(sn,s2)` (argc2), `else` 5-arg passthrough. PE arity buckets now route to the SHIPPED EWRITE_PE/EREAD_PE/EOPEN_PE/ECLOSE_PE/ELSEEK_PE/EEXIT emitters (ZERO new backend code); Linux/macOS ignore extra args so exact-arity is equally correct → one dispatch, four hosts. cycc byte-identical (cxvm is a program, off the self-host/seed chain). SEPARATE catch: the cx COMPILER cycc_cx (src/main_cx.cyr) cross-compiles to Mach-O/PE CLEAN but FAULTS on macOS (signal 12; 2 syscalls ESYSXLAT doesn't route) — so cxvm ships to the tarballs but cycc_cx does NOT (issues/2026-07-07-cycc_cx-cross-native-macho-pe.md). LESSON: cross-compiling clean ≠ running clean — RUN the newly-shipped binary on the host; and when a scoping premise says 'add a translation table', check whether the compiler already translates at runtime before duplicating it."
+category = "cyrius"
+
+[[entries]]
+name = "heap_layout_relocation_option_a_vs_b"
+description = "When growing a heap region 8x in-place collides with neighboring scratch state, the choice is Option A (in-place grow + shift downstream — monotonic, ~200+ edits) or Option B (relocate to fresh high block — non-monotonic, ~50 edits). v5.8.46 (tok arrays) + v5.8.59 (str_data) both took Option B; v5.8.61 reverted .59 back to monotonic once the gap was free."
+category = "cyrius"
+tags = ["heap", "layout", "two-step-bootstrap", "v5.8.46", "v5.8.59", "v5.8.61"]
+content = """
+**The trap**: cyrius's heap regions have hardcoded offset
+constants scattered across many files. Growing any region 8x
+to absorb new data collides with whatever sits immediately
+above. Two paradigms emerge:
+
+**Option A — in-place grow + shift downstream**:
+- Region stays at its original offset; size grows.
+- Every region above shifts up by the size delta.
+- Layout stays MONOTONIC (small-offset → big-offset reads
+  cleanly).
+- Cost: every offset literal in the affected band updates.
+  v5.8.59 estimated this at ~200+ edits across ~20 files for
+  the str_data 256 KB → 2 MB grow. Byte-identity risk grows
+  linearly with edit count.
+
+**Option B — relocate to fresh high block**:
+- Region moves to a new offset above the highest-used heap.
+- Size grows in the new location; old slot becomes empty.
+- Layout is NON-MONOTONIC (small-offset reads jump past the
+  vacant slot to the high block).
+- Cost: only the offset literal changes (~50 edits).
+- Precedent: v5.8.46 tok-array relocation moved
+  tok_types/values/lines from `0x94A000`/`0xD4A000`/`0xF4A000`
+  (tangled with output_buf) to a clean post-TS-region high
+  block at `0x368C000`/`0x3E8C000`/`0x468C000`.
+
+**The pattern that emerged**: take Option B during the
+expansion slot to get the new capacity shipped fast and
+audited cheaply. Pin a follow-up "monotonic reorg" slot for
+when the layout-non-monotonicity becomes a maintenance
+liability. v5.8.59 took Option B to ship NFKC/NFKD via the
+str_data bump (placed at `0x4E8C000`); v5.8.61 reverted to
+monotonic once the var_enum_id..preprocess_out gap was sized
+right (str_data now at `0x21A000`). Two-step bootstrap
+required at both: cycc (old layout) compiles cc5b (new layout);
+cc5b compiles cc5b'; cc5b == cc5b' byte-identical at the new
+size.
+
+**When to use which**:
+- New region or major cap raise → Option B initially.
+- Cycle wind-down or pre-major-bump → fold back to Option A
+  (monotonic) when the receiving gap is the right size.
+- DO NOT skip the two-step bootstrap audit for either path —
+  heap layout changes are byte-identity-critical.
+
+**Trade-off note**: Option B's non-monotonicity makes future
+heap-map readers do mental math (str_data jumped to where?).
+The follow-up monotonic reorg pays this back, but only if the
+slot pin holds (don't let the "we'll reorg next minor" become
+"we'll reorg next major" — pre-v6.0 hardening pin exists for
+exactly this drift, see `_aw_is_distlib_bundle` mention in
+the heap-map block of src/main.cyr).
+"""
+
+[[entries]]
+name = "wx_separate_pt_load_segments"
+description = "v6.3.12 split every userland ELF from one RWE PT_LOAD into two — text R E (not writable) + data R W (not executable) — for segment-level W^X (agnos 1.50.6 loader is PF_X-aware). DEFAULT ON; CYRIUS_WX=0 opts out. The split is hard because the code's absolute/PC-relative var+string relocations are patched in FIXUP against dbase = entry + acp (the data base), so EMITELF_USER's 2nd PT_LOAD p_vaddr MUST equal that same dbase or the patched code reads the wrong addresses. Both derive it from a shared _wx_data_vaddr(base + text_foff, cp) that rounds the code-area end up to a fresh 2 MB page (agnos huge-page granularity). Adding a 2nd 56-byte program header pushes .text from file offset 120 to 176, so _entry_base + e_entry must shift to base+176 under W^X. Flipping the default to ON needs a TWO-STEP BOOTSTRAP because the old single-segment cycc cannot emit W^X."
+type = "gotcha"
+tags = ["W^X", "ELF", "PT_LOAD", "cyrld", "FIXUP", "dbase", "two-step-bootstrap", "segments", "v6.3.12"]
+body = """
+**The lockstep invariant.** In cyrius, FIXUP patches every global-var and string
+reference in the emitted code against `dbase = entry + acp` (data base = end of the
+aligned code area): a string is at `dbase + totvar + idx`, a gvar at
+`dbase + pfx[idx]`. EMITELF_USER then serializes the data at a matching vaddr. To
+put data on its own permission-separated PT_LOAD, you MUST change `dbase` in BOTH
+places identically — pad `acp` in FIXUP so `dbase` lands on a fresh page, and emit
+the 2nd PT_LOAD's `p_vaddr` at the SAME value. The shared helper
+`_wx_data_vaddr(S, entry, cp)` (called with `entry = _entry_base` in FIXUP and
+`entry = base + text_foff` in EMITELF_USER — they're equal for userland) guarantees
+agreement. Get this wrong and every string/gvar load in the program reads garbage.
+
+**Why 2 MB.** The agnos loader maps 2 MB huge pages, so a text and data segment that
+share a 2 MB page can't get distinct permissions. Round the data vaddr up to a 2 MB
+boundary. The FILE offset only needs the ELF `p_align` (4 KB on x86, 64 KB on
+aarch64): since the 2 MB vaddr is a multiple of `p_align`, `p_vaddr ≡ p_offset
+(mod p_align)` holds with only a ≤`p_align` file pad — the ≤2 MB gap is *virtual*,
+near-zero file bytes (the "p_offset sharing" trick).
+
+**The .text shift.** A 2nd program header (56 bytes) pushes `.text` from file offset
+120 (64-byte ELF header + 1 PH) to 176 (+ a 2nd PH). `_entry_base` and the ELF
+`e_entry` MUST move to `base + 176` under W^X, or every absolute fn / var / string
+fixup (which is `entry + offset`) lands 56 bytes off the real code. Make
+`_entry_base` call `_wx_active` (forward-ref resolves via pass-1 fn registration).
+
+**Two-step bootstrap to flip default-on.** The existing single-segment cycc CANNOT
+emit W^X (its `_wx_active` doesn't exist / defaults off). So `old-cycc compiles
+new-src` → cc1: a single-segment binary whose *code* defaults W^X-on (a transition
+intermediate). `cc1 compiles src` → cc2: W^X (cc1 emits W^X). `cc2 compiles src` →
+cc3: W^X. `cc2 == cc3` is the stable fixpoint — install that as build/cycc. The
+seed chain works the same way: cybs (single-segment) emits gen1 (cycc code,
+single-seg), gen1 emits gen2 == build/cycc (W^X). Once build/cycc is cc2,
+version-bump's single self-host step reproduces W^X with no further two-step.
+
+**Guard.** W^X is userland-ELF only: `_wx_active` requires `_emit_fmt(S) == 0` (ELF,
+not Mach-O 1/2 or PE 3) AND `kmode == 0` (not kernel / shared `.so` / object). So
+Mach-O, PE, kernel, `.so`, and `.o` outputs are untouched. x86 and aarch64 are
+separate backends, so `_wx_active`/`_wx_data_vaddr` are duplicated in each (aarch64
+`p_align` is 0x10000, x86 0x1000). Verified: readelf -lW shows text R E / data RW on
+x86, aarch64, and CYRIUS_TARGET_AGNOS; pi (real aarch64) self-hosts the W^X cycc;
+CYRIUS_WX=0 is differential byte-identical to the pre-split release.
+"""
+
+[[entries]]
+name = "stdlib_mutex_single_owner_sync_cyr"
+description = "As of v6.3.44 the stdlib mutex has a SINGLE OWNER: lib/sync.cyr. mutex_new/lock/unlock + MUTEX_SIZE used to be defined in BOTH lib/thread.cyr AND lib/sync.cyr (and in each platform sibling: thread_win ⇄ sync_windows SRWLOCK, thread_agnos ⇄ sync agnos) — so any consumer linking both thread and sync (sync arrives transitively via alloc/atomic/patra) saw 3 `duplicate fn 'mutex_*'` warnings and a silent link-order winner if the impls ever drifted. Now sync.cyr owns them, thread.cyr includes sync.cyr once at the top, all thread*.cyr drop their inline defs, and cyrius's include-once dedup collapses the both-included case to one definition. sync.cyr's own #ifdef routing picks the backend (Linux futex / Windows SRWLOCK / macOS spinlock / agnos no-op). SECOND gotcha: the api-surface snapshot is MODULE-QUALIFIED (thread::mutex_lock vs sync::mutex_lock), so RELOCATING a fn from one module to another shows up as REMOVALS in the snapshot diff — regenerate it (build/cyrius_api_surface --update) and verify the removals are relocations, not real deletions."
+type = "gotcha"
+tags = ["mutex", "sync.cyr", "thread.cyr", "single-owner", "include-once", "duplicate-fn", "api-surface", "module-qualified", "v6.3.44"]
+body = """
+**Single owner.** `mutex_new` / `mutex_lock` / `mutex_unlock` + `MUTEX_SIZE`
+now live in exactly one file: `lib/sync.cyr`. Before v6.3.44 they were
+ALSO defined in `lib/thread.cyr` (Linux futex) and in each platform sibling
+(`thread_win.cyr` ⇄ `sync_windows.cyr` SRWLOCK; `thread_agnos.cyr` ⇄ the
+sync agnos branch). Because `sync` arrives transitively (alloc → atomic →
+patra all pull it in), any consumer linking `thread` too got THREE
+`duplicate fn 'mutex_*'` warnings on every build — with a silent
+link-order winner if the two impls ever drifted. Fix: `sync.cyr` is the
+single owner; `thread.cyr` includes it once at the top and all three
+`thread*.cyr` drop their inline defs. `sync`'s own `#ifdef` routing selects
+the backend (Linux futex / Windows SRWLOCK / macOS spinlock / agnos no-op),
+and include-once dedup collapses the both-included case. Behavior-preserving
+on Linux/Windows/agnos (the bodies were byte-identical) and a NET FIX on
+macOS (a working spinlock instead of the never-routed futex).
+
+**The api-surface snapshot is MODULE-QUALIFIED.** Symbols are recorded as
+`module::fn` (e.g. `thread::mutex_lock`, `sync::mutex_lock`), so MOVING a
+fn between modules registers as REMOVALS (`thread::mutex_*` gone) even
+though the consumer-visible unqualified `mutex_*` is unchanged (it stays
+via `sync`/`sync_macos`/`sync_windows`). Regenerate the snapshot
+(`build/cyrius_api_surface --update`) and confirm the removals are
+RELOCATIONS, not deletions — the v6.3.44 fold was 9 relocations / 0 real
+additions. (Same regenerate-and-verify discipline as any folded lib that
+adds/moves public fns — the check.sh api-surface gate goes RED on a stale
+snapshot's exact-count line.)
+"""
+
+[[entries]]
+name = "agnos_ao_access_mode_bits_are_1to1_with_linux_o_flags_pass_through_dont_fold_verify_under_mirshi"
+category = "cyrius"
+description = """
+The agnos file ABI reuses Linux's low-2-bit access-mode encoding EXACTLY:
+AO_RDONLY=0x0, AO_WRONLY=0x1, AO_RDWR=0x2 — identical to O_RDONLY/WRONLY/RDWR
+(lib/syscalls_x86_64_agnos.cyr). So in `file_open`'s `#ifdef CYRIUS_TARGET_AGNOS`
+flag-translation, the access mode PASSES THROUGH: `ao = ao | (flags & 3);`. Do NOT
+write `if ((flags & 3) != 0) { ao = ao | 0x1; }` — that folds BOTH WRONLY(1) and
+RDWR(2) to WRONLY(1), so an O_RDWR open becomes write-only on agnos and every later
+read on that fd returns -1 (v6.4.27 P1: `io.cyr:80`; patra "cannot read header"
+reopening its B-tree O_RDWR under sit/mirshi). The higher bits are NOT 1:1 and DO
+need per-bit mapping (O_CREAT 64→AO_CREAT 0x100, O_TRUNC 512→0x200, O_APPEND
+1024→0x400) — only the access-mode nibble is a straight pass-through.
+
+TWO meta-lessons: (1) an agnos flag/ABI-translation bug is INVISIBLE to Linux runs
+and to a bare `--agnos` COMPILE — both pass. The only thing that catches it is
+running the agnos binary under **mirshi** (~/Repos/mirshi/build/mirshi <bin>, the
+agnos→Linux ptrace supervisor) and asserting real I/O behavior (here: create+write,
+close, reopen O_RDWR, read → exit 42; the buggy fold exits 4 on the read). Build a
+minimal exit-code program (NOT the assert framework — it uses raw syscall(1,…) writes
+that aren't agnos-portable) and check $? under mirshi. (2) When the same helper is
+COPIED into a vendored stdlib (here lib/sakshi.cyr:88 had the identical fold), fix the
+cyrius-native site in a cyrius release but fix the fold at its SOURCE repo
+(~/Repos/sakshi) + patch-bump + re-vendor — never patch lib/sakshi.cyr directly (it's
+materialized; the edit evaporates on the next `cyrius deps`).
+"""
+
+[[entries]]
+name = "codebuf_is_growable_soft_warning_grow_not_exercised_by_selfhost_force_it_with_a_low_cap_build"
+description = "The compiler's code buffer (generated machine code) has been GROWABLE since v6.2.0 — do NOT panic at a 'code buffer at N%' warning or treat the initial cap as a hard wall (a consumer, thoth, hit this: '91% of the ~3.14 MB cap' was a SOFT warning against the small initial allocation; the build succeeds and relocates transparently). v6.4.49 tuned it: initial cap 3 MiB → 8 MiB, and the grow went from ×2 doubling to +8 MiB LINEAR steps (8→16→…→64, dividing evenly into the 64 MiB ceiling — no doubling overshoot). THREE traps for anyone touching it: (1) the INITIAL cap can't just be bumped in-heap — the old 3 MiB region at S+0x41A000 is boxed in by file_map at 0x71A000, so the 8 MiB initial is an off-heap alloc(8388608) (the fixed region is now vestigial; alloc is proven at that init point — _vsgn_base already allocs 8 MiB there, so it's cybs/seed-safe). (2) the cx bytecode backend keeps a SEPARATE fixed 512 KiB region at 0x54A000 (cx/emit.cyr checks cp >= 524288, never _codebuf_base/_codebuf_grow) — cx's _codebuf_base/_codebuf_cap are vestigial; leave them. (3) — the big one — the self-host fixpoint AND check.sh do NOT exercise the grow: cycc emits ~1.09 MB, far under the 8 MiB initial, so no grow ever fires during self-compile or the test corpus. A change to _codebuf_grow (util.cyr) will pass all normal gates while being broken. To actually test the grow: build a throwaway cycc with a tiny initial cap (sed _codebuf_cap = 65536 + _codebuf_base = alloc(65536) into main.cyr, build, RESTORE main.cyr), have it compile the full cycc source (forces a grow), and cmp its output to a normal build — byte-identical proves the grow emits correct code. The warning lives only in main.cyr + main_win.cyr (the x86/Win drivers with an end-of-compile summary); aarch64/macho drivers have no summary block, so no codebuf warning there (pre-existing)."
+category = "cyrius"
+tags = ["codebuf", "grow", "growable", "off-heap", "alloc", "self-host-doesnt-cover", "force-grow-test", "cx-separate-region", "warning", "v6.4.49"]
+
 
