@@ -194,10 +194,14 @@ completion, sandhi 1.1.0→1.3.3 fold at v5.10.34.
 Live `[deps.*]`: **NONE — 0 git deps** as of v6.5.4. mabda was the
 last one standing and is now folded like the rest (4.0.8). All twelve
 siblings ship as byte-identical distfiles in lib/ (verified against
-the vendored headers at v6.5.21): sigil 3.12.7,
-patra 1.13.0, sankoch 2.7.7, sakshi 2.4.10, bayan 1.4.1, ganita 1.1.0,
-mabda 4.0.8, niyama 1.0.6, yantra 1.0.2, vani 1.1.3, sandhi 1.9.10,
-yukti 2.3.2 — verify any of them against the header of the vendored
+the vendored headers at v6.6.1, where ALL TWELVE had drifted since the
+v6.5.21 stamp): sigil 3.12.16,
+patra 1.14.1, sankoch 2.7.14, sakshi 2.5.1, bayan 1.5.5, ganita 1.2.4,
+mabda 4.1.1, niyama 1.0.10, yantra 1.0.4, vani 1.2.4, sandhi 1.9.16,
+yukti 2.3.10 — this list is now GATED upstream
+(`tests/gates/toolchain/fold_table_matches_vendored.sh` in cyrius checks
+`docs/ecosystem.md` against the vendored bundle headers), so prefer that
+table over this one; verify any of them against the header of the vendored
 `lib/<name>.cyr`, and note sakshi uses a DIFFERENT header format
 (`# Bundled distribution of sakshi v2.4.10`) that a `# Version:`-only
 grep silently skips. sakshi 2.4.8 + bayan 1.4.1 both landed at
@@ -406,12 +410,17 @@ Rust struct with derives → Cyrius heap-allocated struct with accessors
 
 Rust HashMap → Cyrius vec of key-value pairs (or sorted vec for lookup)
 
-Rust Result<T> → Cyrius packed Result: Ok(val) returns val, Err(ptr) sets bit 63.
-  is_ok(r) = r >= 0. payload(r) = r & 0x7FFFFFFFFFFFFFFF. Zero alloc on success.
-  Error structs (kind+errno+msg) heap-allocated only on error path (cold).
+Rust Result<T> → Cyrius stdlib `Result<T, E>` (lib/result.cyr), the VALUE FORM since
+  v6.6.0: `var t, v = f();` — (tag, payload) in a register pair, ZERO alloc on BOTH
+  paths. `is_ok(t)`, `err_code_of(t, v)`, `result_unwrap(t, v)`.
+  ⟳ This row used to describe a hand-rolled sign-bit packing (`Err` sets bit 63,
+  `payload(r) = r & 0x7FFF...`). Don't hand-roll it any more — the stdlib type now
+  has the property that idiom existed to get, and `payload()` is DELETED.
 
-Rust Option<T> → Cyrius heap-allocated tagged union: Some(val)/None() via tagged_new.
-  Or simpler: pointer (0 = None, nonzero = Some) for lightweight cases.
+Rust Option<T> → Cyrius stdlib `Option` (lib/tagged.cyr), also the value form:
+  `var t, v = Some(42);` / `None()`. ⟳ Was "heap-allocated tagged union via
+  tagged_new" — `tagged_new()` is DELETED. The pointer idiom (0 = None) is still
+  fine for genuinely lightweight cases.
 
 Rust traits → Cyrius concrete functions (no vtable, no dynamic dispatch)
 
@@ -1020,44 +1029,78 @@ due to the preprocessor bug. Pattern must be built at runtime.
 
 [[entries]]
 name = "tagged_unions"
-description = "tagged.cyr: Option, Result, Either types via heap-allocated tag+value pairs"
+description = "tagged.cyr / result.cyr: Option, Result, Either are the VALUE FORM since v6.6.0 — a payload variant returns (tag, payload) in a register pair, construction allocates ZERO bytes; payload() and tagged_new() are DELETED"
 category = "cyrius"
 ---
-TAGGED UNIONS (lib/tagged.cyr):
+TAGGED UNIONS (lib/tagged.cyr, lib/result.cyr):
 
-A tagged union is a heap-allocated pair: { tag: i64, value: i64 } = 16 bytes.
-tag(t) returns the discriminant. payload(t) returns the value.
+⟳ **REWRITTEN at v6.6.1. Everything this entry said before v6.6.0 was a published
+layout contract that is now FALSE** — it described "a heap-allocated pair
+{ tag, value } = 16 bytes", `payload(t)`, and single-argument helpers, and closed
+with "IMPLEMENTATION: No compiler changes. Pure library using alloc(16)". All of
+that is gone.
 
-OPTION TYPE:
-  var x = Some(42);      # tag=1, value=42
-  var y = None();         # tag=0, value=0
-  if (is_some(x) == 1) { var v = unwrap(x); }
-  var v = unwrap_or(y, 99);  # returns 99 (fallback)
-  # unwrap() aborts on None with error message
+`Option`, `Either` (lib/tagged.cyr) and `Result<T, E>` (lib/result.cyr) are declared
+`enum ...: stack`. A payload variant returns its **(tag, payload) in a REGISTER PAIR**
+(rax, rdx) — **construction allocates zero bytes.** The measurement that forced the
+change: 100 × `sock_send` grew the global bump allocator by exactly 1600 B,
+unbounded, and that allocator's only reclaim (`alloc_reset()`) invalidates every
+pointer it ever handed out, so a long-running server could never call it. It is now
+0 B, structurally.
 
-RESULT TYPE:
+BINDING — bind BOTH halves:
+  var t, v = divide(42, 2);
+  if (is_ok(t) == 1) { ... }        # v = 21
+
+OPTION:
+  var t, v = Some(42);       # t=1, v=42
+  var t, v = None();         # t=0, v=0
+  if (is_some(t) == 1) { var x = unwrap(t, v); }
+  var x = unwrap_or(t, v, 99);   # 99 when None
+  # unwrap() aborts on None with an error message
+
+RESULT:
   fn divide(a, b) {
       if (b == 0) { return Err(1); }
       return Ok(a / b);
   }
-  var r = divide(42, 2);
-  if (is_ok(r) == 1) { var v = result_unwrap(r); }  # v = 21
-  # result_unwrap() aborts on Err with "result_unwrap on Err(N)"
+  var t, v = divide(42, 2);
+  if (is_ok(t) == 1) { var x = result_unwrap(t, v); }
+  var code = err_code_of(t, v);
 
-EITHER TYPE:
-  var l = Left(10);
-  var r = Right(20);
-  if (is_left(l) == 1) { ... }
+EITHER:
+  var t, v = Left(10);
+  if (is_left(t) == 1) { ... }
 
-PRINT HELPERS:
-  option_print(x) → "Some(42)" or "None"
-  result_print(r) → "Ok(21)" or "Err(1)"
+PRINT HELPERS:  option_print(t, v)  ·  result_print(t, v)
+
+ARITY — the rule that explains the whole migration:
+  * rdx does NOT reach a parameter, so no helper can receive a pair in one argument.
+    Anything needing the payload GREW a parameter: unwrap(t,v), unwrap_or(t,v,fb),
+    option_print(t,v), result_unwrap(t,v), result_unwrap_or(t,v,fb),
+    err_code_of(t,v), result_print(t,v).
+  * Tag-only predicates are UNCHANGED at arity 1, because argument 1 receives rax
+    which IS the tag: is_ok, is_err_result, is_none, is_some, is_left, is_right,
+    is_tag, tag (now identity).
+  * ⛔ payload() is DELETED with NO 1-argument replacement. Under the value form the
+    payload is already a plain variable: payload(r) becomes r. tagged_new() is
+    deleted with it — it built a box only tag()/payload() could read.
+  * ok_via(a, v) / err_via(a, e) keep their names and signatures; the allocator
+    argument is accepted and IGNORED on purpose — there is nothing left to allocate.
+
+⛔ THE MIGRATION RULE HAS A SILENT FAIL-OPEN — 19 real sites in yukti alone.
+`return res;` on an Err path returns the PAYLOAD ALONE, so `Err(77)` reads
+downstream as tag=77 / is_err=0: **an error that reads as SUCCESS.** Return both
+halves: `return (t, v);`. A mixed-return function warns since v6.6.0, but the
+warning is not fatal — read it.
+
+⚠ A pair in an ARGUMENT slot is deliberately NOT refused. That is what lets
+`is_ok(f())` read the tag straight out of the call and keeps the one-argument
+predicates working at every site; refusing it would break the idiom everywhere to
+buy a diagnostic only for the case the compiler cannot distinguish anyway.
 
 GOTCHA: Do not use "default" as a parameter name — it is a reserved keyword.
-Use "fallback" instead (e.g., unwrap_or(opt, fallback)).
-
-IMPLEMENTATION: No compiler changes. Pure library using alloc(16) + store64.
-Compiler syntax (enum Foo { None; Some(val); }) deferred — library works well.
+Use "fallback" instead (e.g., unwrap_or(t, v, fallback)).
 
 REAL-WORLD PATTERNS:
   # Safe file read
@@ -1577,7 +1620,7 @@ PATTERN MAPPING (Rust → Cyrius):
   struct Point { x: f64 }  →  struct Point { x; y; }
   impl Point { fn sum() }  →  impl Math for Point { fn sum(self) { } }
   point.sum()               →  point.sum() (same!)
-  match result { Ok(v) }   →  if (is_ok(result) == 1) { var v = payload(result); }
+  match result { Ok(v) }   →  var t, v = f(); if (is_ok(t) == 1) { /* v */ }   (v6.6.0 value form; payload() is DELETED)
   for i in 0..10            →  for i in 0..10 (same!)
   for item in vec           →  for item in vec (same!)
   let f = |x| x * 2        →  var f = |x| x * 2;

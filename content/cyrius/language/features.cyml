@@ -906,7 +906,7 @@ IMPLEMENTATION:
 
 [[entries]]
 name = "tagged_unions_v58x"
-description = "enum sum types — `enum Result<T, E> { Ok(T), Err(E) }` with multi-arg constructors + nullary tagged variants"
+description = "enum sum types — `enum Result<T, E> { Ok(T), Err(E) }` with multi-arg constructors + nullary tagged variants. DEFAULT form is a heap box; `enum Name: stack` (v6.5.55) is the VALUE FORM returning (tag, payload) in a register pair with ZERO allocation — what the stdlib uses since v6.6.0"
 category = "cyrius"
 ---
 Tagged unions / sum types — first-class language feature shipped
@@ -952,6 +952,41 @@ Layout: tag at +0, payload[i] at +8 + 8*i. Frame size scales with
 arity: `(arity + 1) * 16` bytes. Arity-1 produces byte-identical
 output to the pre-v5.8.21 single-arg path (preserves the v5.5.2
 single-arg corpus exactly).
+
+== `: stack` — THE VALUE FORM (v6.5.55; the stdlib flipped at v6.6.0) ==
+
+⚠ **Everything above describes the DEFAULT (boxed) form, and it is still correct
+for it.** `: stack` is opt-in, and it is what `lib/result.cyr` and `lib/tagged.cyr`
+now use:
+
+    enum Result<T, E>: stack { Ok(v); Err(e); }
+    enum Option: stack      { None(); Some(v); }
+
+A **single-payload** variant of a `: stack` enum returns `(tag, payload)` in the
+multi-return REGISTER PAIR (rax, rdx) — **no allocation at all**, so the boxed
+codegen above is not emitted. Bind both halves:
+
+    var t, v = Ok(42);      # t = 0 (the tag), v = 42
+
+The measurement that forced the stdlib flip: 100 × `sock_send` grew the global
+bump allocator by exactly 1600 B, unbounded — and that allocator's only reclaim
+invalidates every pointer it ever returned, so a long-running server could never
+call it. Now 0 B.
+
+CONSEQUENCES that are easy to get wrong:
+  * ⛔ rdx does NOT reach a parameter, so **no helper can take a pair in one
+    argument.** This is why `payload()` was DELETED rather than re-implemented,
+    and why `unwrap`/`result_unwrap`/`unwrap_or`/`err_code_of`/`*_print` all grew
+    the tag as an argument. Tag-only predicates (`is_ok`, `is_none`, …) keep
+    arity 1 because argument 1 receives rax, which IS the tag.
+  * A variant with **two or more** payload fields cannot be a register pair, so it
+    stays BOXED even under `: stack` — the layout above still applies to it.
+  * ⛔ `return res;` on an Err path returns the payload ALONE — `Err(77)` then reads
+    as tag=77 / is_err=0, an error that reads as SUCCESS. Return `(t, v)`. Mixed
+    returns warn since v6.6.0.
+  * Single-value consumption of a pair (`var r = f();`), `store64(&s, f())` and
+    assignment of one are **hard errors** since v6.5.67 — they used to compile and
+    silently drop the payload.
 
 == EMPTY-PAREN NULLARY TAGGED VARIANTS (v5.8.23) ==
 
@@ -3352,8 +3387,9 @@ would never be woken again. Permanent, silent, log-less; ~1 join in 150k;
 SIGKILL the only recovery. Fixed v6.5.8 — one load now feeds both uses,
 so the joiner can only park on a tid it positively observed live.
 
-Gates: `tests/thread_join_single_load.sh`, plus the `vr01_` corpus on
-real hardware.
+Gates: `tests/gates/concurrency/thread_join_single_load.sh`, plus the
+`tests/tcyr/crossos/` corpus on real hardware (that corpus was selected by a
+`vr01_` filename prefix until v6.5.11; it is the DIRECTORY now).
 
 [[entries]]
 name = "darwin_concurrency_syscall_wrappers_v6543"

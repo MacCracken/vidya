@@ -12,6 +12,45 @@
 # For design patterns see patterns.cyml.
 # For full backstory + chronological context see retros/.
 #
+# ⚠ `vr01_` IN OLDER ENTRIES IS A HISTORICAL FILENAME, NOT AN INSTRUCTION. That prefix
+#   selected the cross-OS corpus until v6.5.11; the selector is now the
+#   `tests/tcyr/crossos/` DIRECTORY and zero `vr01_*` files remain. Naming a new test
+#   `vr01_*` today opts it OUT of the release gate's cross-OS leg — the opposite of what
+#   the prefix used to mean. Live paths were repaired at the v6.6.1 audit; remaining
+#   mentions are inside narratives about bugs found when the file was called that.
+#
+# 149 entries (v6.6.1 — an AUDIT, not an accretion. Count DERIVED with
+#   `grep -c '^\[\[entries\]\]'`.)
+#
+#   ⛔ THIS FILE WAS TREATED AS APPEND-ONLY FOR TOO LONG AND IT SHOWS. It reached 158
+#   entries / 5,566 lines / 461 KB — a volume nobody searches, which defeats the entire
+#   purpose of a gotchas file. The v6.6.1 pass ADDED 5 for the v6.6.x band and then
+#   REMOVED and MERGED more than it added:
+#     · 13 entries → 4. Four clusters were one lesson each, split across releases:
+#       the v6.5.50/.51 "confidently-named wrong cause" (4), inline-replay + SIMD
+#       residency (4), gate/mutation proof discipline (3), and install.sh copy
+#       semantics (2).
+#     · 4 entries carrying ~500 lines of v5.11.x BACKSTORY were compressed to the trap
+#       plus a pointer — `retros/v511x.cyml` already held the narrative, and the header
+#       below has always said backstory belongs there.
+#     · 1 entry was FACTUALLY WRONG in its own NAME: it asserted the reserved-token
+#       count is "67 not 51" when the live count is 76. Three values for one set, in
+#       three files. The number is now derived and struck from the name.
+#     · 1 pre-existing syntax defect fixed: a stray closing triple-quote left by a
+#       `content=` → `---` conversion had made the file's quoting unbalanced.
+#   Net: 158 → 149 entries, 5,566 → 5221 lines.
+#
+#   ⭐ THE RULE GOING FORWARD: adding an entry is the cheap half. Before adding, check
+#   whether an existing entry is the same lesson wearing a different release number —
+#   and if an entry is over ~40 lines, its narrative belongs in `retros/` and only the
+#   TRAP belongs here.
+#
+#   Live state at 6.6.1: cycc x86_64 **1,247,608 B** (.text 1,090,832) · seed **29,024 B**
+#   · check.sh **240 passed / 0 failed** · **144** shell gates · **301** .tcyr (68 crossos)
+#   · **102** lib/*.cyr · api-surface **5152** · heap map **102** regions (gate-derived;
+#   a raw grep says 145 by also matching FREED markers) · self_compile **731-734 ms** ·
+#   **0** open issues · cross-OS SELFHOST_OK + crossos LIBTEST_OK on ecb/ach/cass/pi.
+#
 # 149 entries (v6.5.56 — +1 on invariants that silently carry other properties; earlier: 148 at v6.5.55 — +1 on value-vs-lifetime for sum types; earlier: 147 at v6.5.54 — +2 on mutation-proof integrity and stale perf numbers; earlier: 140 at v6.5.51 — +3 covering the .51 compile-time root-cause. Count re-derived by
 #   `grep -c '^\[\[entries\]\]'`, not incremented from the line below. The through-line of the
 #   block: **all three are about a cause that was CONFIDENTLY NAMED and wrong.** cycc's
@@ -1288,117 +1327,6 @@ single-file edits — only manifests when consumers compile.
 """
 
 [[entries]]
-name = "install_sh_cp_L_same_file_silent_fail"
-description = "install.sh's --refresh-only path uses `cp -L lib/*.cyr` to copy stdlib into snapshot. When lib/<dep>.cyr is a `cyrius deps`-resolved symlink AND the snapshot dir has a parallel symlink to the SAME real file, cp -L exits with 'same file' error. `set -e` makes this fatal — install.sh exits BEFORE the symlink-update block at line 249-251. ~/.cyrius/bin / ~/.cyrius/current stay pointing at the previous version. Discovered v5.10.37."
-category = "cyrius"
-tags = ["cyrius", "install", "deps", "symlink", "set-e", "v5.10.37", "v5.10.46"]
-content = """
-WHAT BREAKS
-
-After `sh scripts/version-bump.sh 5.10.X`, expected end state:
-- `cat ~/.cyrius/current` → 5.10.X
-- `readlink ~/.cyrius/bin` → ~/.cyrius/versions/5.10.X/bin
-- `~/.cyrius/bin/cycc --version` → cycc 5.10.X
-
-Observed (multi-bump streak in v5.10.x cycle):
-- ~/.cyrius/current → stale (5.10.34 e.g.)
-- readlink ~/.cyrius/bin → stale version's bin
-- cycc --version → stale 5.10.34
-
-User-visible symptom: `cyrius-prompt-info tool` (which reads
-through ~/.cyrius/bin/cycc) shows wrong toolchain version on
-the user's starship prompt. Easy to mis-read as "starship.toml
-corruption" — actual config bytes are intact, but the cyrius
-prompt segments render with stale data.
-
-ROOT CAUSE
-
-scripts/install.sh's --refresh-only fast path includes a
-lib-copy loop (around line 224):
-
-```sh
-while IFS= read -r f; do
-    rel="${f#lib/}"
-    dst="$CYRIUS_HOME/versions/$VERSION/lib/$rel"
-    mkdir -p "$(dirname "$dst")"
-    cp -L "$f" "$dst"   # ← FAILS with "same file" for symlink colliders
-    _lib_count=$((_lib_count + 1))
-done <<EOF_LIB
-$(find -L lib -type f -name '*.cyr')
-EOF_LIB
-```
-
-When `lib/mabda.cyr` is a `cyrius deps`-resolved symlink into
-`~/.cyrius/deps/mabda/3.0.0-rc.2/dist/mabda.cyr`, AND the
-snapshot at `~/.cyrius/versions/$VERSION/lib/mabda.cyr` is
-ALSO a symlink to the same real file (set up by a prior
-refresh that ran when the deps target was the same version),
-`cp -L` dereferences BOTH and sees source and destination
-resolve to the same inode:
-
-```
-cp: 'lib/mabda.cyr' and '/home/macro/.cyrius/versions/$VER/lib/mabda.cyr' are the same file
-```
-
-install.sh's top-level `set -e` makes this exit code fatal.
-The script exits before reaching the symlink-update block:
-
-```sh
-# install.sh:249-251 (NEVER RUNS when cp -L fails)
-rm -rf "$CYRIUS_HOME/bin" "$CYRIUS_HOME/lib"
-ln -sf "$CYRIUS_HOME/versions/$VERSION/bin" "$CYRIUS_HOME/bin"
-ln -sf "$CYRIUS_HOME/versions/$VERSION/lib" "$CYRIUS_HOME/lib"
-```
-
-So ~/.cyrius/bin / ~/.cyrius/lib / ~/.cyrius/current stay
-pointing at whichever version was previously active.
-
-HOW TO DETECT IT MANUALLY
-
-After version-bump.sh, verify:
-
-```sh
-test "$(readlink ~/.cyrius/bin | sed 's|.*/versions/||;s|/bin||')" = "$(cat VERSION)" || echo "SYMLINK STALE"
-```
-
-If the readlink doesn't match VERSION, install.sh exited
-before the symlink dance. Re-run with:
-
-```sh
-rm -rf ~/.cyrius/{bin,lib} && \
-  ln -sf ~/.cyrius/versions/$(cat VERSION)/bin ~/.cyrius/bin && \
-  ln -sf ~/.cyrius/versions/$(cat VERSION)/lib ~/.cyrius/lib && \
-  echo "$(cat VERSION)" > ~/.cyrius/current
-```
-
-FIX (pinned v5.10.46 closeout)
-
-Two-part fix:
-1. **Primary** — change `cyrius deps` to physical-copy
-   lib/<dep>.cyr instead of symlinking. Eliminates the
-   inode-collision root cause at the architectural layer.
-   (Option C from the v5.10.37 user discussion.)
-2. **Belt-and-suspenders** — replace `cp -L` with
-   `rm -f "$dst" && cp -L` (always nuke dst first) AND add
-   a tail-of-refresh-only verification that `readlink
-   ~/.cyrius/bin` matches the new version with hard-fail
-   if not.
-
-The verification step would have caught this bug in seconds
-instead of multiple observations across slots; silent-skip
-is the worst kind of failure mode.
-
-LESSON: Install scripts running with `set -e` that perform
-multi-step state transitions MUST verify their end-state at
-the tail and hard-fail if not consistent. Silent partial-
-success is unrecoverable from the user's perspective. The
-two version-discovery paths (`cyrius --version` reading
-VERSION file directly vs `cyrius-prompt-info tool` reading
-through ~/.cyrius/bin/cycc) diverged for multiple version
-bumps before anyone noticed.
-"""
-
-[[entries]]
 name = "cyrius_deps_global_symlink_wedge_v51117"
 description = "cyrius deps stdlib_dir resolved from ~/.cyrius/lib (mutable global symlink) before v5.11.17 — wedge for the snapshot-ping-pong wipe"
 category = "cyrius"
@@ -1559,233 +1487,38 @@ description = "FIXUP's kmode==1 hard-coded entry=0x100060 (ELF32+mb1 layout) whi
 category = "cyrius"
 tags = ["compiler", "fixup", "elf64", "multiboot2", "agnos", "v5.11.43", "v5.11.46", "cross-emitter-invariant"]
 ---
-v5.11.43 shipped `EMITELF64_KERNEL` (ELF64 + multiboot2
-+ EFI64-entry tag) at `src/backend/x86/fixup.cyr:873`,
-gated by env var `CYRIUS_ELF64_KERNEL=1` flipping
-`_TARGET_ELF64_KERNEL`. The new emitter writes code at
-file offset `120 + 48 = 168` (ELF64 hdr 64 + PH64 56 +
-multiboot2 48), so `e_entry = 0x100000 + 168 = 0x1000A8`.
+**THE TRAP.** FIXUP's `kmode==1` path hard-coded `entry = 0x100060` (the ELF32 +
+multiboot1 layout) while `EMITELF64_KERNEL` writes code at `0x1000A8` (ELF64 +
+multiboot2). Every absolute fixup was therefore shifted by **0x48 bytes** — the
+kernel booted and produced garbled serial output after the GRUB-EFI handoff, which
+reads as a driver bug, not a linker one.
 
-But `FIXUP()` at the same file's line 95 hardcoded
-`entry = 0x100060` for `kmode == 1` (legacy ELF32 +
-multiboot1 layout: `0x100000 + 84 + 12`). Every absolute
-fixup was computed with `dbase = entry + acp`, so every
-baked address was 0x48 = 72 bytes earlier than the
-actual symbol location. The classic shape:
+**FIX**: gate FIXUP's `kmode==1` entry value on `_TARGET_ELF64_KERNEL`.
 
-```cyrius
-mov rcx, 0x1001D8    ; FIXUP baked this address
-                     ; ...but string lives at 0x100220
-```
+**RECOGNIZE AGAIN**: two emitters that must agree on a layout constant, where one
+holds it as a literal. Any second ELF/PE/Mach-O container variant needs its entry
+base DERIVED from the same helper the writer uses (`_entry_base`), never re-typed.
 
-A `mov rcx, 0x1001D8` lands inside the multiboot2
-header bytes instead of the actual `.rodata` string.
-After GRUB-EFI handoff, the kernel reads garbage as
-the string pointer → garbled VGA / serial output.
-
-== EMPIRICAL CONFIRMATION (v5.11.46) ==
-
-Compiled `programs/kernel_hello.cyr` with pre-fix
-`build/cc5` (v5.11.45) + `CYRIUS_KERNEL=1
-CYRIUS_ELF64_KERNEL=1`:
-
-- ELF64 `e_entry` (header, offset 24): **`0x1000A8`** ✓
-  (EMITELF64_KERNEL writes this correctly)
-- `"Hello from Cyrius!"` string at file offset `0x220`
-  → true VA `0x100220`
-- Baked address inside `.text` at file offset `0x1FE`:
-  **`0x1001D8`** = `0x100220 - 0x48` (FIXUP's bug)
-
-The header was self-consistent (EMITELF64_KERNEL did
-its own arithmetic correctly); the FIXUP-baked
-addresses were 72 B off because FIXUP didn't know
-about ELF64-kernel mode.
-
-== FIX SHAPE ==
-
-`src/backend/x86/fixup.cyr:95`:
-
-```cyrius
-if (kmode == 1) {
-    entry = 0x100000 + 84 + 12;
-    if (_TARGET_ELF64_KERNEL == 1) {
-        entry = 0x100000 + 120 + 48;
-    }
-}
-```
-
-The expanded form (vs the prior literal `0x100060`)
-keeps the arithmetic visibly tied to the same layout
-numbers EMITELF_KERNEL + EMITELF64_KERNEL use
-internally — future drift between the three sites is
-grep-detectable.
-
-== CROSS-EMITTER INVARIANT ==
-
-The general lesson: **every code-emitter that depends
-on a header-emitter's layout must consume the same
-layout constants, not reinvent them**. cyrius has 5
-ELF emitters (x86 user, x86 kernel ELF32+mb1, x86
-kernel ELF64+mb2, aarch64 user, aarch64 kernel) and
-each must agree on entry-RVA with FIXUP's absolute-
-address computation. The v5.11.29-34 section-header
-parity sweep was a sibling instance of the same class:
-fix one emitter, miss the other 4 silently.
-
-== REGRESSION GATE ==
-
-`_elf64_kernel_entry_gate()` in `programs/check.cyr`
-locks the invariant: compiles `kernel_hello.cyr` with
-`CYRIUS_KERNEL=1 CYRIUS_ELF64_KERNEL=1`, asserts ELF64
-magic + `e_entry == 0x1000A8`, locates the
-`"Hello from Cyrius!"` string, computes its true VA
-from `p_vaddr + file_offset`, asserts the OLD-entry-
-shifted pattern (`true_va - 0x48`) is **absent**
-anywhere in the binary, asserts the true-VA pattern
-is present at least once (positive sanity). Negative-
-test verified at slot time: pre-fix cc5 produces the
-`FAIL: OLD-entry-shifted address 1049048 at file
-offset 510` diagnostic with exact-match numbers.
-
-== FILING CONTEXT — PROCESS PIN ==
-
-This bug existed because an unauthorized cross-repo
-edit hit `src/backend/x86/fixup.cyr` from an
-agnosticos agent working on AGNOS boot. Patch was
-technically correct; **the process violation is the
-load-bearing reason for the v5.11.45 revert**, not
-the technical content. Cyrius does not accept drive-by
-patches from sibling-repo agents even when 100%
-correct. Project leader pinned (2026-05-13): "EVEN
-IF ITS 100% CORRECT THE VIOLATION IS THE PROBLEM ...
-FIRABLE OFFENCE IN REAL LIFE IS MY ISSUE." The filing
-form is: file as `docs/development/issues/YYYY-MM-DD-<short>.md`
-in cyrius repo, not patch. Cyrius-side investigator
-implements through cyrius's own slot lifecycle. See
-memory pin `feedback_no_unauthorized_cross_repo_edits`.
-
+⟳ Full narrative in `retros/v511x.cyml` — compressed here at the v6.6.1 gotchas
+audit, which found this file carrying ~500 lines of backstory the retro already had.
 [[entries]]
 name = "relocs_stripped_vs_ovmf_v51149"
 description = "OVMF firmware treats COFF Characteristics RELOCS_STRIPPED (0x0001) as 'load at exact ImageBase or fail'. UEFI Application binaries must NEVER set this bit, even with zero actual fixups. Standard UEFI loaders (rEFInd, systemd-boot, GRUB-EFI) all clear it"
 category = "cyrius"
 tags = ["compiler", "pe", "uefi", "ovmf", "efi-application", "relocs-stripped", "coff-characteristics", "v5.11.49", "gnoboot", "silent-rejection"]
 ---
-v5.11.48 shipped EFI Application emit (`_TARGET_EFI_APPLICATION
-== 1` via `CYRIUS_TARGET_EFI=1` env var) that produced
-a structurally-correct PE32+: Subsystem=0xA, NX_COMPAT,
-Data Dirs [1]/[12] zeroed, `.text` with single-byte
-`ret` EEXIT. The structural gate `_efi_emit_gate()`
-asserted all of those green.
+**THE TRAP.** OVMF firmware treats the COFF Characteristics bit
+`RELOCS_STRIPPED (0x0001)` as *"load at exact ImageBase or fail"*. A UEFI
+Application must **NEVER** set it — even when the image genuinely has zero fixups
+and setting it looks accurate. Every standard loader (rEFInd, systemd-boot,
+GRUB-EFI) clears it.
 
-At .49 entry, manual OVMF runtime smoke:
+**RECOGNIZE AGAIN**: a flag that is *descriptively true* about your output but is
+read by the consumer as a *demand*. The structural gate passed — Subsystem 0xA,
+NX_COMPAT, Data Dirs [1]/[12] zeroed, a valid `.text` — because it checked what the
+bits SAY, not what a firmware DOES with them. Boot it.
 
-```
-BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 "
-        from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
-BdsDxe: failed to load Boot0002 "UEFI QEMU HARDDISK QM00001 "
-        ...: Not Found
-BdsDxe: No bootable option or device was found.
-```
-
-Firmware found the GPT disk + ESP partition + the
-file at `\EFI\BOOT\BOOTX64.EFI` (verified via mdir
-into the FAT image: content byte-identical to the
-compile output). But BdsDxe rejected the load and
-reported "Not Found" with no indication of *why*.
-
-== ROOT CAUSE ==
-
-COFF Characteristics field at PE header offset
-`pe_off + 4 + 18`:
-
-```python
-chars = 0x0023 = 0b0000_0000_0010_0011
-                            │      ││
-                            │      │└─ EXECUTABLE_IMAGE (0x0002)
-                            │      └── RELOCS_STRIPPED (0x0001) ← THIS
-                            └──────── LARGE_ADDRESS_AWARE (0x0020)
-```
-
-Per the PE/COFF spec, `RELOCS_STRIPPED` declares
-"this image's relocations are stripped — the loader
-MUST load me at exactly ImageBase or fail." Cyrius
-emits with `ImageBase = 0x140000000`. Under OVMF
-firmware, the runtime services occupy nearby pages in
-firmware's memory map; OVMF's PE loader can't allocate
-0x140000000 → BdsDxe silently rejects the image →
-reports "Not Found" with no further detail.
-
-The trap: structural correctness of the PE headers
-isn't enough. Standard UEFI Application binaries
-(rEFInd, systemd-boot, GRUB-EFI, the EDK2 sample
-apps) **never** set RELOCS_STRIPPED. Cyrius's PE
-backend was setting it by default at
-`src/backend/pe/emit.cyr:714` and only clearing it
-when `.reloc` had content (`_pe_reloc_vsize != 0`).
-A zero-fixup probe-style EFI program (no globals,
-no DIR64 entries, no `.reloc`) kept RELOCS_STRIPPED
-set → silent rejection on every UEFI firmware that
-can't honor ImageBase.
-
-== FIX SHAPE ==
-
-`src/backend/pe/emit.cyr:714` — branch unconditionally
-on `_TARGET_EFI_APPLICATION`:
-
-```cyrius
-var _chars = 0x0023;
-if (_pe_reloc_vsize != 0) { _chars = 0x0022; }
-if (_TARGET_EFI_APPLICATION == 1) { _chars = 0x0022; }
-```
-
-UEFI mode now clears RELOCS_STRIPPED regardless of
-whether `.reloc` is empty. Firmware can place the
-image at any free address; the probe doesn't care
-(all addressing is runtime register-indirect — no
-imm64 references); gnoboot will care correctly once
-it has globals (covered by `.reloc` which fires
-naturally when DIR64 fixups exist).
-
-Post-fix boot trace:
-
-```
-BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " ...
-hello, uefi
-BdsDxe: loading Boot0000 "BootManagerMenuApp" ...
-```
-
-Firmware loaded BOOTX64.EFI, jumped to
-AddressOfEntryPoint, our inline-asm ran
-`SystemTable→ConOut→OutputString(L"hello, uefi\\r\\n")`,
-returned EFI_SUCCESS, firmware unwound back to boot
-manager menu. **End-to-end working.**
-
-== REGRESSION GATE ==
-
-`_efi_ovmf_smoke_gate()` in `programs/check.cyr`
-runtime-floors this: builds GPT disk + ESP + boots
-qemu+OVMF with `-serial stdio` capture + greps for
-`"hello, uefi"`. Graceful SKIP if qemu / parted /
-mtools / OVMF firmware files absent. Negative-test
-verified at slot time: with pre-.49 cc5 (RELOCS_STRIPPED
-still set), gate FAILs `(sh rc=1)`; post-fix → PASS.
-
-== LESSON FOR FUTURE EMITTER WORK ==
-
-**Structural correctness is necessary but not
-sufficient when firmware silently rejects.** OVMF's
-"Not Found" was actively misleading — the firmware
-was telling us the *outcome* (couldn't load) without
-the *cause* (RELOCS_STRIPPED contract violation). The
-only way to catch this class of bug is runtime smoke,
-not structural inspection. The v5.11.49 OVMF smoke
-gate is the runtime-floor that catches RELOCS_STRIPPED
-or any future analogous silent-rejector.
-
-Reference: PE/COFF spec § 5.1 (Characteristics);
-UEFI 2.10 spec § 2.3.4.1 (LoadImage behavior on
-non-relocatable images).
-
+⟳ Full narrative in `retros/v511x.cyml`.
 [[entries]]
 name = "pe_entry_prologue_e9_jmp_zero_preserves_gpr_v51148"
 description = "cyrius PE entry emits e9 00 00 00 00 (5-byte jmp +0) at AddressOfEntryPoint before user code. The jmp touches no GPRs, so RCX/RDX/R8/R9 (MS x64 first 4 args) survive into the first user instruction. Inline-asm-first is the right shape for capturing UEFI firmware-supplied args"
@@ -2154,156 +1887,50 @@ For agents debugging "gvar reads 0 in kernel mode":
    the same var name at module scope.
 """
 
+
+---
+**THE TRAP.** In `kmode==1` the emit order puts gvar-init AFTER `PARSE_PROG`,
+which never returns. Top-level `var X = <int literal>;` declarations got their
+runtime store **code-emitted but never executed** — so agnos's
+`XHCI_CMD_TIMEOUT_SPINS = 10000000` read as **0**. A timeout of zero does not crash;
+it makes a driver look like a hardware fault.
+
+**FIX** (v5.11.64): static-init tables (`gvar_initval` + `gvar_byte_off`) bake the
+literal values into the file image at FIXUP time, so no runtime store is needed.
+
+**RECOGNIZE AGAIN**: emitted-but-unreachable initialisation. Code being present in
+the binary is not evidence it runs — check the ORDER against any path that does not
+return.
+
+⟳ Full narrative in `retros/v511x.cyml`.
 [[entries]]
 name = "cve_05_tok_names_mangle_magic_budget_v51165"
 description = "NPOS_GUARD(S, 256) was a magic-pessimistic budget that source-identifier byte-copy loops could SILENTLY exceed. tok_names region (256 KB @ 0x60000) could overflow into adjacent regions if source identifier + separator + dest identifier > 256 bytes. Worse: 4 of 6 main_*.cyr variants had NO tok_names guard at all on the use-alias mangle path. v5.11.65 replaced magic-256 with compute-source-length-then-NPOS_GUARD across 11 sites."
 category = "cyrius"
 tags = ["compiler", "tok_names", "mangle-path", "cve-05", "security", "cross-arch", "v5.11.65"]
 content = """
-== SYMPTOM ==
+== THE TRAP ==
 
-`docs/audit/2026-04-13-security-audit.md` § CVE-05 flagged
-"Heap region overlap — no guard pages" as a P1: write-side
-checks for str_data / tok_names / codebuf were the fix
-direction. CVE-06 covered str_data at v5.x; codebuf was
-covered by EB() on both arches. The remaining gap was
-tok_names.
+`NPOS_GUARD(S, 256)` was a MAGIC-PESSIMISTIC BUDGET: the source-identifier
+byte-copy loops could silently exceed it, overflowing the `tok_names` region
+(256 KB @ 0x60000) into adjacent heap. Worse, 4 of 6 `main_*.cyr` forks had
+NO guard at all on the use-alias mangle path.
 
-== ROOT CAUSE ==
+FIX (v5.11.65): compute the source length, THEN NPOS_GUARD on the real
+requirement — in every fork.
 
-`NPOS_GUARD(S, need)` in `src/frontend/lex.cyr` checks
-`np + need >= 261872` and exits cleanly on overflow. The
-`need` argument is supposed to be a pessimistic byte count
-for the pending write. 11 mangle-path call sites used
-`NPOS_GUARD(S, 256)` as a MAGIC PESSIMISTIC BUDGET:
+== RECOGNIZE AGAIN — two live classes ==
 
-  fn BUILD_METHOD_NAME(S, si, mnoff): i64 {
-      NPOS_GUARD(S, 256);                       // LIES: budget is 256
-      var scratch = GNPOS(S);
-      var wp = scratch;
-      var snoff = L64(S + 0x18E630 + si * 8);
-      var ri = 0;
-      var rc = load8(S + 0x60000 + snoff + ri);
-      while (rc != 0) {                         // unbounded copy
-          store8(S + 0x60000 + wp, rc);
-          wp = wp + 1; ri = ri + 1;
-          rc = load8(S + 0x60000 + snoff + ri);
-      }
-      // ... separator + method name + null ...
-  }
+1. A guard whose bound is a ROUND NUMBER rather than a computed requirement is
+   a guess, and a copy loop can exceed it silently.
+2. A guard added to ONE per-target fork. `ls src/main*.cyr` is 7; any new check
+   on a shared path must land in all of them, and only a cross-target gate
+   catches the miss. Same shape as
+   `new_pe_reroute_fn_needs_return0_stubs_in_aarch64_and_cx_backends...`.
 
-If `struct_name_len + 1 + method_name_len + 1 > 256`, the
-write loop exceeds the guard's promise. Source identifiers
-can be up to tok_names region cap (262144 bytes), so the
-guard's pessimistic budget didn't actually cover the
-realistic shape.
-
-In practice the bug rarely bit because typical identifiers
-are < 256 bytes. But it's a SILENT overflow — corruption
-would land in adjacent regions (struct_*, fn_*, etc.) and
-cause downstream miscompile / parse error with no
-diagnostic.
-
-== WORSE PRE-EXISTING GAP ==
-
-The 4 non-x86 main_*.cyr variants (aarch64,
-aarch64_macho, aarch64_native, cx) had **no prior
-tok_names guard at all** on the use-alias path:
-
-  // main_aarch64.cyr — pre-v5.11.65
-  S64(S + 0x18FFD0 + uc * 8, ufn);
-  var apos = GNPOS(S);                          // NO NPOS_GUARD CALL
-  var ri = 0;
-  var rc = load8(S + 0x60000 + umod + ri);
-  while (rc != 0) { ... }
-
-The parallel x86 main.cyr had the magic-256 NPOS_GUARD
-that the cross-arch variants never gained — caught at the
-audit-at-slot-entry sweep, not in the original v5.11.18
-NPOS_GUARD introduction.
-
-== FIX (v5.11.65) ==
-
-Pre-walk source identifier strlen(s); pass actual sum to
-NPOS_GUARD:
-
-  fn BUILD_METHOD_NAME(S, si, mnoff): i64 {
-      var snoff = L64(S + 0x18E630 + si * 8);
-      var _snlen = 0;
-      while (load8(S + 0x60000 + snoff + _snlen) != 0) {
-          _snlen = _snlen + 1;
-      }
-      var _mnlen = 0;
-      while (load8(S + 0x60000 + mnoff + _mnlen) != 0) {
-          _mnlen = _mnlen + 1;
-      }
-      NPOS_GUARD(S, _snlen + 1 + _mnlen + 1);   // ACTUAL write size
-      // ... rest unchanged ...
-  }
-
-NPOS_GUARD's existing region cap check (`np + need >=
-261872`) now bounds the ACTUAL write surface, not a lying
-magic budget.
-
-== 11 SITES FIXED ==
-
-- parse_decl.cyr — BUILD_METHOD_NAME (struct + method)
-- parse_expr.cyr — BUILD_OP_NAME (struct + op_str)
-- parse_fn.cyr — PARSE_FN_DEF module-mangle (mmod + noff)
-- parse_types.cyr — variant-ctor mangle × 2 (pass 1 + 2)
-- main.cyr — use-alias mangle (umod + ufn)
-- main_aarch64.cyr — use-alias mangle (added guard from
-  scratch)
-- main_aarch64_macho.cyr — use-alias mangle (added guard
-  from scratch)
-- main_aarch64_native.cyr — use-alias mangle (added guard
-  from scratch)
-- main_cx.cyr — use-alias mangle (added guard from scratch)
-- main_win.cyr — use-alias mangle
-
-== STRUCTURAL GATE ==
-
-`programs/check.cyr::_cve05_guard_gate()` greps the 10
-affected source files for `NPOS_GUARD(S, 256)` and fails
-fast on any reappearance. Negative-tested at slot bring-up
-(manual sed-inject of the magic-256 pattern → gate FAIL;
-restore → gate PASS). check.sh 75 → 76.
-
-== EXISTING PRECEDENT ==
-
-`parse_expr.cyr::EMIT_OVF_CALL` was already doing the
-correct pattern at v5.6.x:
-
-  fn EMIT_OVF_CALL(S, fname_str): i64 {
-      var flen = 0;
-      while (load8(fname_str + flen) != 0) { flen = flen + 1; }
-      NPOS_GUARD(S, flen + 1);                  // compute then guard
-      // ... rest ...
-  }
-
-The .65 fix propagated this pattern to the 11 other call
-sites that hadn't adopted it.
-
-== LESSON ==
-
-Any "pessimistic budget" passed to a bounds-check helper
-where the actual write size depends on input data is a
-LATENT silent overflow. The fix shape — strlen the input
-first, then call the guard with the actual size — adds
-~5 LoC per site but eliminates the silent-overflow class.
-
-For agents writing future tok_names-writing code:
-1. Walk source identifier(s) with `while load8 != 0`.
-2. Sum: `len_a + 1 + len_b + 1 + ...` for each component
-   (separator + null terminator counts).
-3. Call `NPOS_GUARD(S, actual_sum)`.
-
-DO NOT use `NPOS_GUARD(S, MAGIC_CONSTANT)` for any write
-shape where the input length depends on parser state.
-The gate at `_cve05_guard_gate()` catches the magic-256
-specifically; generalize the principle.
+Full narrative: retros/v511x.cyml. Compressed at the v6.6.1 gotchas audit —
+this entry was 150 lines of backstory the retro already carried.
 """
-
 [[entries]]
 name = "macho_syscall_number_dual_definition_61_vs_217"
 description = "SYS_GETDENTS64 is defined as 217 (x86/macos) AND 61 (aarch64-Linux) in different stdlib files; the wrapper binds 61 by include order, and the macho ESYSXLAT translated only 217→344, missing 61→344 — so arm64-macOS dir-walk silently EBADF'd. 'Works in a probe, fails in the wrapper' = a duplicate global bound differently by include order, NOT codegen."
@@ -3298,8 +2925,22 @@ a plausible value is more dangerous than one that crashes.
 **The fix** (v6.2.6): add `sys_uptime_ms`#40 / `sys_sleep_ms`#41
 wrappers (new `SysNrAgnosTimer` enum) to
 `lib/syscalls_x86_64_agnos.cyr`; point chrono's agnos branches at
-them (`clock_now_ns()` = `sys_uptime_ms()*1e6`; `sleep_ms()` agnos
-branch calls `sys_sleep_ms(ms)`, guard `ms<=0`). Wall-clock#46 was
+them (`sleep_ms()` agnos branch calls `sys_sleep_ms(ms)`, guard
+`ms<=0`).
+
+⟳ **SUPERSEDED IN PART at v6.6.1.** This fix bound
+`clock_now_ns()` = `sys_uptime_ms()*1e6` — syscall **#40**, backed by
+`timer_ticks`, which is driven by the timer interrupt and therefore
+**FROZEN whenever interrupts are cleared**. So the .6 fix replaced a
+placebo that returned 0 with one that returned *a plausible constant*:
+any elapsed-time measurement taken across a critical section or in
+early boot read the same value twice and reported **zero elapsed
+time** — a stopped clock, not a slow one, and strictly harder to spot
+than the original stub. `clock_now_ns()` is now `sys_uptime_us()*1000`
+(**#95**, `rdtsc`), which advances with interrupts disabled. Verified
+at the instruction level: the AGNOS build emits `movl $0x5f, %eax`
+(95) and the Linux path still issues `0xe4` (228). Gated by
+`tests/gates/platform/agnos_monotonic_clock_rdtsc.sh`. Wall-clock#46 was
 already correctly bound at v6.2.3 — this was the monotonic+sleep
 counterpart it didn't cover. Extended `agnos-crossbuild-gate.sh`
 with a chrono monotonic/sleep probe so a re-stub is now caught.
@@ -4158,7 +3799,6 @@ you changed a path nothing exercises, or guarded it wrong. So read the
 axes separately: status-diff is the regression guard; codegen-diff is the
 blast-radius measurement. `codegen-diff > 0 && status-diff = 0` on the
 programs you expected is exactly the signature of a landed, contained fix.
-"""
 
 [[entries]]
 name = "aarch64_transcendental_polyfill_dispatch_and_dekker_dd_range_reduction"
@@ -4431,13 +4071,13 @@ tags = ["output_buf", "alloc", "macos", "windows", "overcommit", "mmap-hint", "p
 
 [[entries]]
 name = "signal_ignore_sigpipe_macho_esysxlat_rt_sigaction_to_bsd_sigaction_46_socketpair_test_per_arch_nums"
-description = "v6.4.51 added `signal_ignore(signum)` (lib/syscalls.cyr) so a server on `sock_send` survives a peer disconnect (SIGPIPE) instead of being killed — the sandhi macOS DoS gap. ONE fn, target-gated by #ifdef (exactly one branch survives per compile, so the #ifdef-blind LSP wrongly warns 'duplicate fn' — ignore it; grep confirms one def): Linux rt_sigaction (x86 #13 / aarch64 #134, 4-arg incl. sigsetsize=8), macOS BSD sigaction (3-arg), Win/agnos no-op. The 32-byte {sa_handler=SIG_IGN,0,0,0} struct is valid for BOTH the Linux and BSD sigaction ABIs. MACOS is the whole point (Linux had sandhi's raw-syscall workaround; macOS had none): it needed the Mach-O ESYSXLAT to translate rt_sigaction → BSD sigaction 46 — aarch64 `cmp x8,#134`(0xF102191F)/`movz x16,#46`(0xD28005D0, llvm-mc-verified) + THE PARALLEL `_macho_arm_routes` MIRROR LIST (add 134 there too or parse_expr's macho whitelist warning drifts), and x86 `_msx(S, 13, 0x200002E)`. cycc doesn't include syscalls.cyr so the lib part is self-host-neutral; the ESYSXLAT entries are macho-backend-only (x86-Linux differential 0). VERIFIED ON REAL ecb via tests/tcyr/vr01_signal_ignore.tcyr: socketpair → close one end → write → assert EPIPE (not SIGPIPE-kill). TEST-WRITING TRAP that cost a cross-OS round-trip: a vr01 test that raw-`syscall(53/3/1,...)`s HARDCODES x86 numbers and SIGSEGVs on aarch64/macOS (53 = fchmodat on the aarch64 enum) — use the PER-ARCH `SYS_SOCKETPAIR`/`SYS_CLOSE`/`SYS_WRITE` constants (x86 53/3/1, aarch64 199/57/64, macOS via ESYSXLAT) so the numbers are right on every target; qemu-aarch64 catches the aarch64 case locally before the pi leg. Also: a .tcyr must end `var ec = main(); syscall(60, ec);` (explicit exit; cyrius auto-main otherwise returns a GARBAGE exit code) AND include assert+alloc+string+fmt+syscalls (assert alone → 'undefined main'). See CHANGELOG [6.4.51], issue 2026-07-11-sandhi-signal-ignore-stdlib-gap.md."
+description = "v6.4.51 added `signal_ignore(signum)` (lib/syscalls.cyr) so a server on `sock_send` survives a peer disconnect (SIGPIPE) instead of being killed — the sandhi macOS DoS gap. ONE fn, target-gated by #ifdef (exactly one branch survives per compile, so the #ifdef-blind LSP wrongly warns 'duplicate fn' — ignore it; grep confirms one def): Linux rt_sigaction (x86 #13 / aarch64 #134, 4-arg incl. sigsetsize=8), macOS BSD sigaction (3-arg), Win/agnos no-op. The 32-byte {sa_handler=SIG_IGN,0,0,0} struct is valid for BOTH the Linux and BSD sigaction ABIs. MACOS is the whole point (Linux had sandhi's raw-syscall workaround; macOS had none): it needed the Mach-O ESYSXLAT to translate rt_sigaction → BSD sigaction 46 — aarch64 `cmp x8,#134`(0xF102191F)/`movz x16,#46`(0xD28005D0, llvm-mc-verified) + THE PARALLEL `_macho_arm_routes` MIRROR LIST (add 134 there too or parse_expr's macho whitelist warning drifts), and x86 `_msx(S, 13, 0x200002E)`. cycc doesn't include syscalls.cyr so the lib part is self-host-neutral; the ESYSXLAT entries are macho-backend-only (x86-Linux differential 0). VERIFIED ON REAL ecb via tests/tcyr/crossos/signal_ignore.tcyr: socketpair → close one end → write → assert EPIPE (not SIGPIPE-kill). TEST-WRITING TRAP that cost a cross-OS round-trip: a vr01 test that raw-`syscall(53/3/1,...)`s HARDCODES x86 numbers and SIGSEGVs on aarch64/macOS (53 = fchmodat on the aarch64 enum) — use the PER-ARCH `SYS_SOCKETPAIR`/`SYS_CLOSE`/`SYS_WRITE` constants (x86 53/3/1, aarch64 199/57/64, macOS via ESYSXLAT) so the numbers are right on every target; qemu-aarch64 catches the aarch64 case locally before the pi leg. Also: a .tcyr must end `var ec = main(); syscall(60, ec);` (explicit exit; cyrius auto-main otherwise returns a GARBAGE exit code) AND include assert+alloc+string+fmt+syscalls (assert alone → 'undefined main'). See CHANGELOG [6.4.51], issue 2026-07-11-sandhi-signal-ignore-stdlib-gap.md."
 category = "cyrius"
 tags = ["signal_ignore", "sigpipe", "sigaction", "esysxlat", "macho", "_macho_arm_routes", "rt_sigaction", "per-arch-syscall-nums", "vr01-test", "tcyr-explicit-exit", "duplicate-fn-lsp-false-positive", "v6.4.51"]
 
 [[entries]]
 name = "macos_windows_large_alloc_path_dedicated_unhinted_mmap_and_virtualalloc_output_buf_1gib_all_platforms_v6452"
-description = "v6.4.52 SOLVED the macOS/Windows allocator wall from v6.4.51 (see the sibling note about alloc(1 GiB) failing there): give each allocator a dedicated LARGE-object path, mirroring Linux's fresh-chunk-per-request. macOS (lib/alloc_macos.cyr alloc()): for a request that won't fit the remaining 256 MiB reserve (`if (_heap_ptr + size > _heap_end)`), do a dedicated UNHINTED `syscall(9, 0, size, 3, 0x1002, 0-1, 0)` (mmap(NULL,size,RW,MAP_PRIVATE|MAP_ANON)) and RETURN IT DIRECTLY — bump pointer untouched, no contiguity needed. This REPLACES the old hinted 1 MiB grow loop, which could never succeed on macOS (macOS ignores mmap address hints without MAP_FIXED, so the grow returned a non-hint base and the contiguity guard `result != _heap_end` always failed). macOS overcommits anonymous mmap (proven: alloc_init already unhinted-mmaps the 256 MiB reserve, and main_aarch64_macho.cyr unhinted-mmaps its ~94 MiB heap, both self-host on ecb every release), so a 1 GiB mapping costs only touched pages. NO ESYSXLAT change needed — syscall(9) already translates 9→BSD mmap 197 (aarch64 emit.cyr) / 0x20000C5 (x86 EMACHO_SYSXLAT). Windows (lib/alloc_windows.cyr alloc()): replace the no-grow bail `if (new_ptr > _heap_end) return 0` with a dedicated `syscall(9, 0, size, 3, 0x22, 0-1, 0)` which the PE backend reroutes via EMMAP_PE (parse_expr.cyr literal-syscall(9) path -> src/backend/x86/emit.cyr:1879) to VirtualAlloc(NULL,size,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE). EAGER-COMMIT CAVEAT: EMMAP_PE hardcodes `mov r8d,0x3000` (MEM_COMMIT|MEM_RESERVE) — there is NO MEM_RESERVE-only variant in the backend — so a 1 GiB VirtualAlloc charges the full 1 GiB against the Windows commit limit (RAM+pagefile) UP FRONT (physical RAM still lazy/demand-zero). This SUCCEEDS on a normal dev box (verified on cass; cass's own ~116 MiB heap at main_win.cyr:351 commits up front every release) but a reserve-only + commit-on-touch path would need a NEW codegen path (a fault/commit-on-write seam) — deferred. alloc_reset SAFE on both: dedicated large mappings live outside the bump [_heap_base,_heap_ptr) region, are fresh kernel-zeroed, never recycled (no reuse info-leak). Then the 6 native drivers drop the .51 `if (_output_base == 0) { ...S+0x4D9D000; _output_cap=16777216 }` fallback: `_output_base = alloc(1073741824); if (_output_base == 0) { error+exit }; _output_cap = 1073741824;` — a DEFENSIVE GUARD (hard-error on true OOM, NOT a blind assign that SIGSEGVs writing to page 0). _output_cap stays the single source of truth for all 4 output caps. VERIFY: tests/tcyr/vr01_alloc_1gib.tcyr (alloc 1 GiB + touch both ends, per-arch SYS_* not raw nums) in the cross-OS vr01_ glob — must PASS on real ecb + cass + pi, not just self-host. This is a LIB+driver change so cycc x86-Linux codegen is differential-0, but cycc INCLUDES the driver so its size shifts (+48 B). See CHANGELOG [6.4.52], issue archived/2026-07-11-macos-windows-large-single-allocation-path.md."
+description = "v6.4.52 SOLVED the macOS/Windows allocator wall from v6.4.51 (see the sibling note about alloc(1 GiB) failing there): give each allocator a dedicated LARGE-object path, mirroring Linux's fresh-chunk-per-request. macOS (lib/alloc_macos.cyr alloc()): for a request that won't fit the remaining 256 MiB reserve (`if (_heap_ptr + size > _heap_end)`), do a dedicated UNHINTED `syscall(9, 0, size, 3, 0x1002, 0-1, 0)` (mmap(NULL,size,RW,MAP_PRIVATE|MAP_ANON)) and RETURN IT DIRECTLY — bump pointer untouched, no contiguity needed. This REPLACES the old hinted 1 MiB grow loop, which could never succeed on macOS (macOS ignores mmap address hints without MAP_FIXED, so the grow returned a non-hint base and the contiguity guard `result != _heap_end` always failed). macOS overcommits anonymous mmap (proven: alloc_init already unhinted-mmaps the 256 MiB reserve, and main_aarch64_macho.cyr unhinted-mmaps its ~94 MiB heap, both self-host on ecb every release), so a 1 GiB mapping costs only touched pages. NO ESYSXLAT change needed — syscall(9) already translates 9→BSD mmap 197 (aarch64 emit.cyr) / 0x20000C5 (x86 EMACHO_SYSXLAT). Windows (lib/alloc_windows.cyr alloc()): replace the no-grow bail `if (new_ptr > _heap_end) return 0` with a dedicated `syscall(9, 0, size, 3, 0x22, 0-1, 0)` which the PE backend reroutes via EMMAP_PE (parse_expr.cyr literal-syscall(9) path -> src/backend/x86/emit.cyr:1879) to VirtualAlloc(NULL,size,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE). EAGER-COMMIT CAVEAT: EMMAP_PE hardcodes `mov r8d,0x3000` (MEM_COMMIT|MEM_RESERVE) — there is NO MEM_RESERVE-only variant in the backend — so a 1 GiB VirtualAlloc charges the full 1 GiB against the Windows commit limit (RAM+pagefile) UP FRONT (physical RAM still lazy/demand-zero). This SUCCEEDS on a normal dev box (verified on cass; cass's own ~116 MiB heap at main_win.cyr:351 commits up front every release) but a reserve-only + commit-on-touch path would need a NEW codegen path (a fault/commit-on-write seam) — deferred. alloc_reset SAFE on both: dedicated large mappings live outside the bump [_heap_base,_heap_ptr) region, are fresh kernel-zeroed, never recycled (no reuse info-leak). Then the 6 native drivers drop the .51 `if (_output_base == 0) { ...S+0x4D9D000; _output_cap=16777216 }` fallback: `_output_base = alloc(1073741824); if (_output_base == 0) { error+exit }; _output_cap = 1073741824;` — a DEFENSIVE GUARD (hard-error on true OOM, NOT a blind assign that SIGSEGVs writing to page 0). _output_cap stays the single source of truth for all 4 output caps. VERIFY: tests/tcyr/crossos/alloc_1gib.tcyr (alloc 1 GiB + touch both ends, per-arch SYS_* not raw nums) in the cross-OS vr01_ glob — must PASS on real ecb + cass + pi, not just self-host. This is a LIB+driver change so cycc x86-Linux codegen is differential-0, but cycc INCLUDES the driver so its size shifts (+48 B). See CHANGELOG [6.4.52], issue archived/2026-07-11-macos-windows-large-single-allocation-path.md."
 category = "cyrius"
 tags = ["alloc", "macos", "windows", "large-allocation", "unhinted-mmap", "virtualalloc", "mem-commit", "eager-commit", "emmap-pe", "output_buf", "1gib-all-platforms", "alloc-reset-safe", "vr01_alloc_1gib", "v6.4.52"]
 
@@ -4454,8 +4094,8 @@ category = "cyrius"
 tags = ["cybs", "seed-derive", "bootstrap-chain", "gtgtgt", "arithmetic-shift", "_CF_ASR", "release-gate-item-2", "silent-failure", "global-reference-ceiling", "fixpoint-is-not-enough", "v6.4.74"]
 
 [[entries]]
-name = "reserved_token_count_is_67_not_51_two_keyword_lex_paths_and_names_over_8_chars_use_u64_plus_load8_tails"
-description = "v6.4.77 fixed `IS_KEYWORD_TOK` and `TOKNAME` (`src/common/util.cyr`) both stopping at token 111, which made **67** reserved builtin/intrinsic names report `expected identifier, got unknown` — a diagnostic pointing at a syntactically clean identifier and calling it unknown. It cost the consumer that filed it (hisab) a whole 312-assertion suite, findable only by bisection. The consumer named three intrinsics; the real surface was 67 — a filing enumerates what it hit, not the class. **THE DURABLE PART IS THE COUNTING TRAP: a first pass finds only 51.** Two independent reasons any regex sweep under-counts. (1) The lexer has TWO keyword paths — `LEXKW_EXT`, which `return`s a token, and the inline `ADDTOK` chain — and a sweep over one silently misses the other. (2) A name longer than 8 characters cannot fit one u64 immediate, so it is matched by a u64 compare on the first 8 bytes PLUS per-byte `load8` tails, and never appears as a single decodable literal: `f64_floor`, `f64_round`, `f64v_sqrt`, `f64v_fmadd`, `f64v_scale`, `f64v_axpy`, `f32v_fmadd` and the whole `f32v8_*` family — 16 names invisible to a hex-literal grep. THE ONLY SOUND METHOD is to round-trip through the compiler: for each candidate spelling, compile `var <name> = 1;` and check the diagnostic names THAT EXACT spelling. That validates every hex decode at once and cannot be fooled by either lexer path. SHAPE OF THE FIX worth copying: the names live in a new `TOKNAME_BUILTIN` and **`IS_KEYWORD_TOK` DERIVES from it** (`if (TOKNAME_BUILTIN(typ) != 0) { return 1; }`) rather than repeating the list, so the 'is it reserved?' set and the 'what is it called?' set cannot drift, and a future intrinsic that gets a name is reserved automatically. CONSEQUENCE FOR DOCS: reserved words are a CLASS, not a list to be hand-extended in prose — CLAUDE.md carried THREE names for the 67-name class until v6.4.80 corrected it, structurally the same partial-observation-as-language-rule error as the retired '<=6 args' rule. And when gating a diagnostic, carry a NEGATIVE control: a gate that only greps for the substring `reserved keyword` passes happily on `reserved keyword 'unknown'`. See CHANGELOG [6.4.77]."
+name = "the_reserved_token_count_cannot_be_grepped_and_every_number_written_down_has_gone_stale"
+description = "⛔ COUNT CORRECTED v6.6.1: it is **76**, not the 67 this entry asserted (and not the 51 a `util.cyr` comment asserted) — THREE live values for one set, in three files, which is the entry's own lesson turned on itself. DERIVE it: `sed -n '/^fn TOKNAME_BUILTIN/,/^}/p' src/common/util.cyr | grep -cE 'if \(typ == [0-9]+\)'` → 76, disjoint from the 26 statement keywords in IS_KEYWORD_TOK, so 102 reserved tokens total. v6.4.77 fixed `IS_KEYWORD_TOK` and `TOKNAME` (`src/common/util.cyr`) both stopping at token 111, which made those reserved builtin/intrinsic names report `expected identifier, got unknown` — a diagnostic pointing at a syntactically clean identifier and calling it unknown. It cost the consumer that filed it (hisab) a whole 312-assertion suite, findable only by bisection. The consumer named three intrinsics; the real surface was 67 — a filing enumerates what it hit, not the class. **THE DURABLE PART IS THE COUNTING TRAP: a first pass finds only 51.** Two independent reasons any regex sweep under-counts. (1) The lexer has TWO keyword paths — `LEXKW_EXT`, which `return`s a token, and the inline `ADDTOK` chain — and a sweep over one silently misses the other. (2) A name longer than 8 characters cannot fit one u64 immediate, so it is matched by a u64 compare on the first 8 bytes PLUS per-byte `load8` tails, and never appears as a single decodable literal: `f64_floor`, `f64_round`, `f64v_sqrt`, `f64v_fmadd`, `f64v_scale`, `f64v_axpy`, `f32v_fmadd` and the whole `f32v8_*` family — 16 names invisible to a hex-literal grep. THE ONLY SOUND METHOD is to round-trip through the compiler: for each candidate spelling, compile `var <name> = 1;` and check the diagnostic names THAT EXACT spelling. That validates every hex decode at once and cannot be fooled by either lexer path. SHAPE OF THE FIX worth copying: the names live in a new `TOKNAME_BUILTIN` and **`IS_KEYWORD_TOK` DERIVES from it** (`if (TOKNAME_BUILTIN(typ) != 0) { return 1; }`) rather than repeating the list, so the 'is it reserved?' set and the 'what is it called?' set cannot drift, and a future intrinsic that gets a name is reserved automatically. CONSEQUENCE FOR DOCS: reserved words are a CLASS, not a list to be hand-extended in prose — CLAUDE.md carried THREE names for the 67-name class until v6.4.80 corrected it, structurally the same partial-observation-as-language-rule error as the retired '<=6 args' rule. And when gating a diagnostic, carry a NEGATIVE control: a gate that only greps for the substring `reserved keyword` passes happily on `reserved keyword 'unknown'`. See CHANGELOG [6.4.77]."
 category = "cyrius"
 tags = ["reserved-words", "TOKNAME_BUILTIN", "IS_KEYWORD_TOK", "LEXKW_EXT", "ADDTOK", "u64-compare", "load8-tail", "regex-undercount", "round-trip-through-the-compiler", "negative-control", "derives-cannot-drift", "v6.4.77"]
 
@@ -4491,7 +4131,7 @@ tags = ["gate-vacuity", "mutation-proof", "placebo-gate", "ascii-collision", "km
 
 [[entries]]
 name = "win64_ecallpops_five_register_shuttle_broke_at_ten_args_and_the_bug_was_written_down_as_a_language_rule"
-description = "**The Win64 caller-side stack-arg path corrupted argument 1 AND never wrote the stack args at all for any call with >=10 arguments** — silently, on a Tier-1 target, for about a year. Fixed v6.4.64. Win64 passes 4 args in `rcx/rdx/r8/r9` and the rest at `[rsp+32..]`; because cyrius pushes args left-to-right (aN on top) but Win64 wants a5 at the LOWEST stack slot, the caller must REVERSE the extras. The PE branch of `ECALLPOPS` did that by shuttling them through a FIXED 5-register table (`r10/r11/r14/r15/r12`) with `if (nextra >= 1..5)` pops and `if (nextra == 1..5)` write-backs. With `nextra = n - 4`, `n >= 10` fell off the end of its own table two ways at once: only 5 of the >=6 extras were popped, so the following `pop r9/r8/rdx/rcx` read SHIFTED slots and `rcx` (argument 1) got the wrong value; and no `nextra ==` branch matched, so the stack args were never emitted and the callee read garbage. Both silent — wrong answers, no error, no warning. Measured on real cass: arity 5-9 correct, 10/11/12 corrupt. SysV had been migrated off the identical register shuttle to rsp-relative addressing at v5.6.24/v6.0.57 for exactly this bug class — **the Win64 branch was never brought along**, which is the durable structural warning: when one ABI branch is rewritten to fix a class, open the sibling branch in the same commit. FIX SHAPE if you touch it again: load `rcx/rdx/r8/r9` IN PLACE via `_emov_rsp_disp` (disp8/disp32 auto-select, no pops); carve the frame BELOW the pushed args so the reversed copy's destination is strictly below its source and cannot overlap at ANY arity (an in-place reversal cannot be done by a single ascending or descending shift — every order clobbers a slot a later read still needs); reverse-copy through `r10`, which is CALLER-saved (the v5.6.24 lesson — r12-r15 are callee-saved and regalloc may pin caller locals there); and share one frame formula between `ECALLPOPS` and `ECALLCLEAN` (`_pe_call_frame`: 32 shadow + nextra*8, 16-rounded, +8 parity pad for odd `n` — the old path got alignment free by popping all `n` slots first, so an in-place path must pay for it explicitly). **WHY IT SURVIVED: it had been written into CLAUDE.md as a LANGUAGE RULE** — 'fns take <=6 args cleanly (register ABI); args 7+ go on the stack and have shown corruption — restructure instead.' Wrong in BOTH directions (7-9 were always fine; the cliff was 10, on one target), it read as settled so nobody re-measured, and on 2026-07-14 it was cited to file an issue **against sigil**, asking a stdlib to restructure around a defect in the compiler that compiles it. The release gate also could not see it structurally: sigil sits outside cycc's include closure and cycc's own PE calls happen to stay <=9 args. The live consumer was sigil 3.12.0 — `argon2id_into` takes 10 args, `argon2_hash_into` 17 — i.e. a password KDF returning a wrong-but-plausible hash, and sandhi's HTTP client (11 fns taking >=10 args, 15 call sites passing >=10) was miscompiled on Win64 in both 1.8.2 and 1.9.0. **THIS IS THE LANGUAGE REPO: when the compiler cannot compile valid cyrius, fix the compiler. If a rule here tells you to work around codegen, treat the rule as the bug report.** Gate: `tests/tcyr/vr01_win64_stack_args.tcyr` (arity 5/9/10/17 + nested), mutation-tested on real cass — old codegen 2 passed / 3 failed, fixed 5 / 0. See CHANGELOG [6.4.64]."
+description = "**The Win64 caller-side stack-arg path corrupted argument 1 AND never wrote the stack args at all for any call with >=10 arguments** — silently, on a Tier-1 target, for about a year. Fixed v6.4.64. Win64 passes 4 args in `rcx/rdx/r8/r9` and the rest at `[rsp+32..]`; because cyrius pushes args left-to-right (aN on top) but Win64 wants a5 at the LOWEST stack slot, the caller must REVERSE the extras. The PE branch of `ECALLPOPS` did that by shuttling them through a FIXED 5-register table (`r10/r11/r14/r15/r12`) with `if (nextra >= 1..5)` pops and `if (nextra == 1..5)` write-backs. With `nextra = n - 4`, `n >= 10` fell off the end of its own table two ways at once: only 5 of the >=6 extras were popped, so the following `pop r9/r8/rdx/rcx` read SHIFTED slots and `rcx` (argument 1) got the wrong value; and no `nextra ==` branch matched, so the stack args were never emitted and the callee read garbage. Both silent — wrong answers, no error, no warning. Measured on real cass: arity 5-9 correct, 10/11/12 corrupt. SysV had been migrated off the identical register shuttle to rsp-relative addressing at v5.6.24/v6.0.57 for exactly this bug class — **the Win64 branch was never brought along**, which is the durable structural warning: when one ABI branch is rewritten to fix a class, open the sibling branch in the same commit. FIX SHAPE if you touch it again: load `rcx/rdx/r8/r9` IN PLACE via `_emov_rsp_disp` (disp8/disp32 auto-select, no pops); carve the frame BELOW the pushed args so the reversed copy's destination is strictly below its source and cannot overlap at ANY arity (an in-place reversal cannot be done by a single ascending or descending shift — every order clobbers a slot a later read still needs); reverse-copy through `r10`, which is CALLER-saved (the v5.6.24 lesson — r12-r15 are callee-saved and regalloc may pin caller locals there); and share one frame formula between `ECALLPOPS` and `ECALLCLEAN` (`_pe_call_frame`: 32 shadow + nextra*8, 16-rounded, +8 parity pad for odd `n` — the old path got alignment free by popping all `n` slots first, so an in-place path must pay for it explicitly). **WHY IT SURVIVED: it had been written into CLAUDE.md as a LANGUAGE RULE** — 'fns take <=6 args cleanly (register ABI); args 7+ go on the stack and have shown corruption — restructure instead.' Wrong in BOTH directions (7-9 were always fine; the cliff was 10, on one target), it read as settled so nobody re-measured, and on 2026-07-14 it was cited to file an issue **against sigil**, asking a stdlib to restructure around a defect in the compiler that compiles it. The release gate also could not see it structurally: sigil sits outside cycc's include closure and cycc's own PE calls happen to stay <=9 args. The live consumer was sigil 3.12.0 — `argon2id_into` takes 10 args, `argon2_hash_into` 17 — i.e. a password KDF returning a wrong-but-plausible hash, and sandhi's HTTP client (11 fns taking >=10 args, 15 call sites passing >=10) was miscompiled on Win64 in both 1.8.2 and 1.9.0. **THIS IS THE LANGUAGE REPO: when the compiler cannot compile valid cyrius, fix the compiler. If a rule here tells you to work around codegen, treat the rule as the bug report.** Gate: `tests/tcyr/crossos/win64_stack_args.tcyr` (arity 5/9/10/17 + nested), mutation-tested on real cass — old codegen 2 passed / 3 failed, fixed 5 / 0. See CHANGELOG [6.4.64]."
 category = "cyrius"
 tags = ["win64", "PE", "ECALLPOPS", "ECALLCLEAN", "stack-args", "nextra", "arity", "_pe_call_frame", "r10-caller-saved", "sysv-migrated-pe-was-not", "codegen-bug-as-language-rule", "sigil-argon2", "sandhi-http", "vr01_win64_stack_args", "v5.6.24", "v6.4.64"]
 
@@ -4573,7 +4213,7 @@ tags = ["ESYSXLAT", "aarch64", "syscall-renumber", "private-alias-band", "1054",
 
 [[entries]]
 name = "darwin_at_star_flags_diverge_from_linux_and_a_pure_renumber_xlat_passes_them_straight_through"
-description = "`AT_FDCWD` is **-2** on Darwin, not Linux's -100 — that was found by ports and corrected at v6.2.40. **The FLAGS diverge exactly the same way and were left Linux-valued for three more minors**, fixed at v6.5.7 in `lib/syscalls_linux_common.cyr`: `AT_SYMLINK_NOFOLLOW` **0x20** (Linux 0x100), `AT_SYMLINK_FOLLOW` **0x40** (Linux 0x400), `AT_REMOVEDIR` **0x80** (Linux 0x200) — values read off ecb's own `$(xcrun --show-sdk-path)/usr/include/sys/fcntl.h`. **WHY A RENUMBER DOES NOT SAVE YOU:** the at-family ESYSXLAT entries are PURE renumbers — they rewrite the syscall number and pass every argument, flags included, straight through — so a Linux flag value is simply an invalid flag on Darwin: **EINVAL, forever, silently.** Measured consequences on real ecb/ach: `sys_fchownat` returned **-22** the first time it was ever run there, and **`xrmdir` had never once worked on macOS-arm64 since the day it shipped at v6.5.2**. That second one had a compounding cause worth its own line — the macho branch mapped `unlinkat(35)` to Darwin `unlink(10)` **with an arg-shift that DROPPED the dirfd and the flag**. Right for `unlink`; fatal for `rmdir`, which is the SAME syscall distinguished only by `AT_REMOVEDIR`, so `sys_rmdir` ran `unlink(AT_FDCWD)` with the dirfd `-2` reinterpreted as the path pointer. Now a pure renumber to Darwin `unlinkat(472)`, which fixes `unlink` and `rmdir` together. `AT_EMPTY_PATH` (0x1000) has NO Darwin equivalent and is deliberately left unguarded, because no at-family wrapper here uses it on the macOS path — if you add one, that changes. **THE RECOGNITION RULE: whenever a constant is `#ifdef CYRIUS_TARGET_MACOS`-corrected, the fix is not done until every SIBLING constant in the same header has been re-read off a real SDK.** A dirfd corrected without its flags is the same half-fix shape as `STAT_SIZE` corrected without the rest of its struct (see the sibling note) and `unlink` mapped without `rmdir` — five of the seven defects v6.5.7 found were this shape, each of which looked complete because the thing that prompted it started working. None of it is visible on the host suite; `tests/tcyr/vr01_syscall_wrappers.tcyr` on hardware is the thing that disagrees. See CHANGELOG [6.2.40], [6.5.2], [6.5.7]."
+description = "`AT_FDCWD` is **-2** on Darwin, not Linux's -100 — that was found by ports and corrected at v6.2.40. **The FLAGS diverge exactly the same way and were left Linux-valued for three more minors**, fixed at v6.5.7 in `lib/syscalls_linux_common.cyr`: `AT_SYMLINK_NOFOLLOW` **0x20** (Linux 0x100), `AT_SYMLINK_FOLLOW` **0x40** (Linux 0x400), `AT_REMOVEDIR` **0x80** (Linux 0x200) — values read off ecb's own `$(xcrun --show-sdk-path)/usr/include/sys/fcntl.h`. **WHY A RENUMBER DOES NOT SAVE YOU:** the at-family ESYSXLAT entries are PURE renumbers — they rewrite the syscall number and pass every argument, flags included, straight through — so a Linux flag value is simply an invalid flag on Darwin: **EINVAL, forever, silently.** Measured consequences on real ecb/ach: `sys_fchownat` returned **-22** the first time it was ever run there, and **`xrmdir` had never once worked on macOS-arm64 since the day it shipped at v6.5.2**. That second one had a compounding cause worth its own line — the macho branch mapped `unlinkat(35)` to Darwin `unlink(10)` **with an arg-shift that DROPPED the dirfd and the flag**. Right for `unlink`; fatal for `rmdir`, which is the SAME syscall distinguished only by `AT_REMOVEDIR`, so `sys_rmdir` ran `unlink(AT_FDCWD)` with the dirfd `-2` reinterpreted as the path pointer. Now a pure renumber to Darwin `unlinkat(472)`, which fixes `unlink` and `rmdir` together. `AT_EMPTY_PATH` (0x1000) has NO Darwin equivalent and is deliberately left unguarded, because no at-family wrapper here uses it on the macOS path — if you add one, that changes. **THE RECOGNITION RULE: whenever a constant is `#ifdef CYRIUS_TARGET_MACOS`-corrected, the fix is not done until every SIBLING constant in the same header has been re-read off a real SDK.** A dirfd corrected without its flags is the same half-fix shape as `STAT_SIZE` corrected without the rest of its struct (see the sibling note) and `unlink` mapped without `rmdir` — five of the seven defects v6.5.7 found were this shape, each of which looked complete because the thing that prompted it started working. None of it is visible on the host suite; `tests/tcyr/crossos/syscall_wrappers.tcyr` on hardware is the thing that disagrees. See CHANGELOG [6.2.40], [6.5.2], [6.5.7]."
 category = "cyrius"
 tags = ["darwin", "macos", "AT_FDCWD", "AT_REMOVEDIR", "AT_SYMLINK_NOFOLLOW", "AT_SYMLINK_FOLLOW", "AT_EMPTY_PATH", "pure-renumber-passes-flags", "unlinkat-472", "xrmdir", "half-fix", "EINVAL-silently", "vr01_syscall_wrappers", "v6.5.7"]
 
@@ -4585,7 +4225,7 @@ tags = ["macos-x86", "intel-mac", "ach", "Stat-enum", "struct-offsets", "darwin-
 
 [[entries]]
 name = "qemu_user_reports_a_false_thread_va_leak_because_proc_self_statm_measures_the_host_process"
-description = "`tests/tcyr/vr01_thread_detach.tcyr` (v6.5.8) asserts that 100 detached threads grow virtual address space by **exactly 0** — before the fix they grew it by **210,124,800 B**, i.e. 100 x 2,101,248 (`THREAD_STACK_SIZE + THREAD_GUARD_SIZE`) to the byte, with `vm.max_map_count` (65530) as the ceiling, so a thread-per-request server degraded to `thread_create` returning 0 after ~65K spawns. **DO NOT TRUST `qemu-aarch64` FOR THIS TEST — IT REPORTS A FALSE LEAK.** Under qemu-user the file fails with ~1,665 residual pages per detached thread, which is not even the 513-page stack: qemu maps its OWN per-thread emulator state into the same address space, and `/proc/self/statm` measures the HOST process, not the guest. On real pi the identical binary reports a delta of exactly 0 and the file passes 115/0. Same class as the v6.4.42 aarch64 epoll bug that only real pi could surface — **if a VA/mapping assertion goes red under qemu, run it on pi before believing it.** THREE MORE MEASUREMENT TRAPS baked into that file, each of which cost a false reading while it was being written. (1) **VA, not RSS.** Thread stacks are touch-on-demand, so the leak showed as ~200 resident pages while VA grew 51,300 — an RSS-based test misses it entirely. (2) **Poll until it settles; never sample at a fixed instant.** A spin loop is not a synchronisation primitive: on a slow machine the children simply have not reached their `munmap` yet, which reads as a leak. The property that actually distinguishes fixed from broken is that VA comes BACK DOWN AT ALL — with the leak it never does, so a bounded retry loop (400 x 5 ms) separates 'slow' from 'broken' where a fixed sleep cannot. (3) **Let the warm-up threads finish BEFORE sampling the baseline**, or they unmap during the measurement and you get a NEGATIVE growth of -513 pages — exactly one thread — the measurement racing the thing it measures. **AND ASSERT ZERO, NOT 'LESS'**: the detached child unmaps its stack AND the TLS block carved from the top of that same mapping and allocates no handle at all, so 0 is the correct number and a threshold like '< 20 MiB' would still pass with the TLS or the handle leaking. See CHANGELOG [6.4.42], [6.5.8]."
+description = "`tests/tcyr/crossos/thread_detach.tcyr` (v6.5.8) asserts that 100 detached threads grow virtual address space by **exactly 0** — before the fix they grew it by **210,124,800 B**, i.e. 100 x 2,101,248 (`THREAD_STACK_SIZE + THREAD_GUARD_SIZE`) to the byte, with `vm.max_map_count` (65530) as the ceiling, so a thread-per-request server degraded to `thread_create` returning 0 after ~65K spawns. **DO NOT TRUST `qemu-aarch64` FOR THIS TEST — IT REPORTS A FALSE LEAK.** Under qemu-user the file fails with ~1,665 residual pages per detached thread, which is not even the 513-page stack: qemu maps its OWN per-thread emulator state into the same address space, and `/proc/self/statm` measures the HOST process, not the guest. On real pi the identical binary reports a delta of exactly 0 and the file passes 115/0. Same class as the v6.4.42 aarch64 epoll bug that only real pi could surface — **if a VA/mapping assertion goes red under qemu, run it on pi before believing it.** THREE MORE MEASUREMENT TRAPS baked into that file, each of which cost a false reading while it was being written. (1) **VA, not RSS.** Thread stacks are touch-on-demand, so the leak showed as ~200 resident pages while VA grew 51,300 — an RSS-based test misses it entirely. (2) **Poll until it settles; never sample at a fixed instant.** A spin loop is not a synchronisation primitive: on a slow machine the children simply have not reached their `munmap` yet, which reads as a leak. The property that actually distinguishes fixed from broken is that VA comes BACK DOWN AT ALL — with the leak it never does, so a bounded retry loop (400 x 5 ms) separates 'slow' from 'broken' where a fixed sleep cannot. (3) **Let the warm-up threads finish BEFORE sampling the baseline**, or they unmap during the measurement and you get a NEGATIVE growth of -513 pages — exactly one thread — the measurement racing the thing it measures. **AND ASSERT ZERO, NOT 'LESS'**: the detached child unmaps its stack AND the TLS block carved from the top of that same mapping and allocates no handle at all, so 0 is the correct number and a threshold like '< 20 MiB' would still pass with the TLS or the handle leaking. See CHANGELOG [6.4.42], [6.5.8]."
 category = "cyrius"
 tags = ["qemu-user", "false-positive", "proc-self-statm", "host-vs-guest", "thread_create_detached", "VA-not-RSS", "poll-until-settled", "baseline-race", "assert-zero-not-less", "real-pi-hardware", "vr01_thread_detach", "v6.5.8"]
 
@@ -5052,33 +4692,8 @@ COMPARING TWO LISTS to ASSERTING THE DERIVATION — the drift it existed to catc
 construction, so checking for it would be vacuous.
 
 [[entries]]
-name = "a_hash_keyed_on_LENGTH_ALONE_reintroduces_the_ON2_scan_it_replaced"
-description = "v6.5.50 (20x compile-time win, byte-identical output): cycc's identifier-dedup index (LEXID, src/frontend/lex.cyr) had keyed its chains on `bucket = klen` saturated at 255 since v5.10.40. That is a hash of the LENGTH and nothing else, so EVERY identifier of the same length shared ONE chain and the per-lookup walk over that chain WAS the O(N^2) scan the index had been added to remove — reintroduced for any realistic unit, because real code is full of same-length names. A 60,000-fn unit named f0..f59999 is ~50,000 entries on a single chain: 20,168 ms to compile, 1,005 ms once the key mixes length with the first, middle and last byte over 16,384 buckets. cycc's OWN source is length-clustered too, so self_compile fell 713 -> 663 ms and crossed a cap the project had carried as unmet. THE EQUIVALENCE ARGUMENT IS WHAT MAKES THIS SAFE TO SHIP: dedup is still an exact byte-compare and the canonical offset is still the FIRST OCCURRENCE IN SOURCE ORDER, so changing the bucket function moves only chain ORDER — output must stay byte-identical, and that is verifiable rather than arguable (self-host fixpoint + all 83 programs). LESSON 1: when you see a bucket key, ask what it is a hash OF; `bucket = length` is not a hash, it is a partition, and a partition with 256 cells over a domain that clusters is a linked list. LESSON 2: the widening needed NO heap relocation — `lexid_heads` grew 2,048 -> 131,072 B by absorbing a 128 KB hole that v6.4.21 had FREED immediately after it. Check the map for adjacent freed bands before designing a relocation. LESSON 3 (measurement): `CYRIUS_PROF`'s phase labels mislead — it reports `gvar=2408 parse=0` because `_prof_gvar_end` is stamped after the WHOLE two-pass parse, so `gvar` is the entire front end and `parse` is always ~0."
-category = "cyrius"
-
-[[entries]]
 name = "scratch_sized_for_an_old_cap_fails_SILENTLY_long_before_it_crashes"
 description = "v6.5.50: EMITELF_OBJ (src/backend/x86/fixup.cyr, the `object;` emitter) carved four sub-regions — strtab / fn_strtab_off / symtab / rela — at HARDCODED offsets inside a FIXED 1 MB brk block, sized by its own comment 'for the v4.7.1 4096 fn cap', with no bounds check on any of them. The loud failure is at 31,398 fns: symtab runs off the end of the block, SIGSEGV, zero bytes out, EMPTY STDERR. THE DANGEROUS HALF IS THE SILENT BAND BELOW IT, where each region walks into its NEIGHBOUR and a corrupt `.o` ships with rc=0. ⛔ THE FILED THRESHOLDS WERE BOTH WRONG AND RE-MEASURING THEM WAS THE SUBSTANCE OF THE FIX: the issue recorded the silent band as '~12,000 fns with LONG names' and asserted '6,000 fns is clean'; bisected against a pre-fix compiler, ORDINARY SHORT NAMES corrupt from 5,528 fns (deterministic 3/3) and 6,000 gives 116 corrupt symbols — about twice as reachable as filed and needing no unusual naming at all. The fix derives every offset from the unit (walk the actual names to size strtab) and CHECKS the brk extension. LESSON 1: a region sized for a cap that has since moved 32x is not 'probably fine' — bisect it, and bisect with a VERIFIED-BAD endpoint (a first attempt converged on 4,200 because `hi` was never probed inside the loop, and 4,200 was clean). LESSON 2: the corruption MAGNITUDE is not stable — the overrun reads residual brk content, so one input gave 927 then 1,106 corrupt symbols on repeat runs — so a gate must assert `corrupt = 0` and NEVER an expected count, or the gate is itself flaky. LESSON 3: the issue also estimated '~90-line refactor'; it was four local assignments plus a derived-size prologue. Read the code before believing a filing's cost estimate."
-category = "cyrius"
-
-[[entries]]
-name = "test_the_comfortable_hypothesis_before_fixing_it_the_zombie_that_could_not_match"
-description = "v6.5.50 (methodology, and the filing predicted its own trap): `tests/gates/toolchain/test_runner_bounded.sh` axis 1b went red once under load and never reproduced. The filing's leading hypothesis was that the sampler (`ps -eo pid=,args= | grep '/cyrius-NNN/[t]est_bin'`) counts a SIGKILLed-but-unreaped child, with the recommended fix being a process-state filter to exclude zombies — and the filing itself flagged this as 'a guess and the kind that is comfortable to believe'. MEASURED: a zombie's argv COLLAPSES to `[test_bin] <defunct>`, so it cannot match the sampler's PATH pattern at all. A zombie is structurally invisible to that grep, and the recommended fix would have been a plausible-looking NO-OP that closed the issue while changing nothing. What a single sample CAN catch is the sub-200 ms window between kill(9) and the kernel finishing teardown, during which the dying child still carries its full argv — against a 0.5 s sample interval. The real repair is to assert the PROPERTY the row is about: 'the deadline KILLS rather than ABANDONS' means an escaped child lives for the REST OF THE SUITE, so require two CONSECUTIVE samples at 2+ children rather than one instantaneous count. The abandon-mutation still holds the overlap for 19 consecutive samples, so sensitivity is unchanged. LESSON: a hypothesis that makes the failure benign is the one to test hardest, and testing it costs one experiment — here, spawn a process under a long path, SIGKILL it, and look at what `ps` actually prints before the reap."
-category = "cyrius"
-
-[[entries]]
-name = "some_gates_need_TWO_different_mutations_source_revert_vs_compiler_swap"
-description = "v6.5.50: when mutation-proving a cyrius gate, swapping `build/cycc` for a pre-fix compiler is NOT always the mutation. `tests/gates/diagnostics/sys_shadow_names_consequence.sh` has an axis that BUILDS the aarch64 emitter from the WORKING-TREE source (`cycc < src/main_aarch64.cyr`) and then runs it. Swapping the host compiler leaves that axis GREEN, because an old host still compiles the CURRENT frontend source and picks up the new behaviour — the same vacuous-pass trap CLAUDE.md records for tests/gates/codegen/cx_multi_return.sh. Measured: compiler-swap reddens axis 1 and leaves axis 3 green; reverting src/frontend/parse_types.cyr reddens axis 3 and leaves axis 1 green (axis 1 runs the INSTALLED build/cycc, so it survives a source revert). The two mutations are COMPLEMENTARY and you need both to prove the gate bites. LESSON: before claiming a gate is mutation-proven, ask for each axis 'which artifact does this axis actually execute — the installed binary, or one rebuilt from the tree?' and mutate THAT. Concluding from a single mutation that an axis is broken (or that a gate is proven) is the mistake in both directions."
-category = "cyrius"
-
-[[entries]]
-name = "an_open_addressed_table_grown_only_when_FULL_is_quadratic_by_construction"
-description = "v6.5.51 (the real cause of cycc's compile-time superlinearity, after two earlier investigations blamed the wrong things): cycc's fn-name hash sized itself as `_fnt_hash_mask = nc - 1` for an `nc`-entry fn table — exactly as many open-addressed slots as entries — while REGFN grew the table only once `fc >= _fnt_cap`. Those two facts together mean the hash ran to EXACTLY 100 % load before every doubling, and linear probing at saturation degenerates into a full-table scan. Instrumented on a 120,000-fn unit: max probe 65,263 (essentially the entire 65,536-slot table to place ONE entry) and 31,504,006 probes for the compile. Giving the hash two slots per fn-table entry — and halving the initial `_fnt_cap` so the FIXED 4096-slot regions are also <=50 % before the first grow — takes it to max probe 38 and 131,892 probes, 239x fewer, and per-fn compile cost goes FLAT at ~5.3 us from 34k to 120k fns (it had been 10.3 us at 15k rising to 25.6 at 120k). Byte-identical on 383 files including all six per-target forks, because a hash is a lookup accelerator whose probe ORDER changes but whose answers do not. LESSON 1: whenever you see a hash mask derived from a table's ENTRY capacity, check what load factor the growth policy actually permits — 'grow when full' plus 'slots == entries' is a quadratic algorithm hiding in two innocuous lines in different files. LESSON 2: the fix had to sweep the CLEAR loops too (`while (sh_clr < _fnt_cap)` in both x86 and aarch64 fixup.cyr), which were correct only while mask == cap-1; leaving them is not a slowdown but a WRONG-FN LOOKUP, the same raise-a-bound-without-sweeping-consumers shape as the v6.5.46 DCE bug."
-category = "cyrius"
-
-[[entries]]
-name = "a_cost_jump_at_a_doubling_boundary_is_not_evidence_the_DOUBLING_is_the_cost"
-description = "v6.5.51 (a misattribution that survived a whole release and two investigations): cycc compile time was seen to jump sharply at each fn-table cap boundary — 60,000 fns 737 ms, 70,000 fns 2078 ms — and v6.5.50 concluded that ONE `_fnt_grow` at the 65536->131072 boundary cost ~1145 ms, which is absurd for copying 17 tables x 8.9 MB and should have been the tell. Direct instrumentation (a `_prof_clock_ns()` pair around the copy block and the rehash loop, printed per call) says every grow in a whole 120,000-fn compile costs 4-9 ms COMBINED: copy 2-4 ms, rehash 1-4 ms. `_fnt_grow` is exonerated entirely. The jump was the hash having just been driven to 100 % load on the way to that boundary — the expensive work happens BEFORE the grow, and the grow is merely the visible event that coincides with it. ⚠ EVERY CAUSE PROPOSED BY READING WAS WRONG: the original filing named `_fnt_grow`'s rehash-and-copy (it doubles, so amortized-linear by construction) and the DCE reachability walk (CYRIUS_DCE is OFF by default, so it never ran in any measurement); the hash LOAD FACTOR read on its own was also misleading, because at equal ~52 % load 34k fns cost 16.9 us/fn while 70k cost 29.7. LESSON: when cost correlates with a structural event, instrument the event itself before designing around it — five minutes of `_prof_clock_ns` around the suspect block would have refuted the 1145 ms figure the first time it was written down. Corollary trap in the same investigation: `CYRIUS_PROF`'s phase labels lie — `_prof_gvar_end` is stamped after the WHOLE two-pass parse, so `gvar` is the entire front end and `parse` always reads ~0."
 category = "cyrius"
 
 [[entries]]
@@ -5087,38 +4702,8 @@ description = "v6.5.51: v6.5.49 taught `cyrius build` to fall back to `[build] s
 category = "cyrius"
 
 [[entries]]
-name = "inline_replay_binds_params_to_8_BYTE_slots_so_16B_SIMD_params_collide"
-description = "v6.5.52 investigation (cycc SIGSEGV, root-caused not shipped): cyrius's inline-replay path re-parses a callee's body tokens at the call site and binds the callee's params to TEMPORARY LOCAL SLOTS — `var p0_slot = saved_flc; var p1_slot = saved_flc + 1;` (parse_fn.cyr:1600), i.e. ADJACENT 8-BYTE slots, each written with an 8-byte `EFLSTORE`. An `f32v4`/`f64v2` is 16 bytes and an `f64v4` is 32, so arg 0's store overruns into arg 1's slot. Bisect is exact and worth keeping: ONE SIMD param works, TWO SIGSEGV the compiler (rc 139, no diagnostic), one SIMD + one i64 errors with 'value-form SIMD arg type mismatch', two i64 are fine. `SFLC(S, saved_flc + pc)` also reserves pc slots where two 16-byte params need four. SECOND, INDEPENDENT defect in the same binding: the replay re-registers params BY NAME ONLY and never re-applies `SLTYPE`, so inside the inlined body the param is no longer SIMD-typed — which is what the mixed-param error is reporting. ⛔ THE CLASSIFIER'S OWN CARVE-OUT IS FALSE AND WAS NEVER EXECUTED: the struct-param exclusion a few lines up says the replay 'never re-applies the struct SLTYPE the fn-def set' and then exempts SIMD with 'f64v2(-20)/f64v4(-21) are register-class (not dot-accessed) → stay inlinable'. Both reasons in the exclusion apply to SIMD as well, and nothing ever reached the carve-out because `_INLINE_OK` defaults to 0 and the SIMD wrappers are not generic — so it is reasoning that was written down, never run, and is wrong. LESSON 1: a conditional branch guarded by a default-off flag is UNTESTED CODE no matter how confident its comment sounds; treat carve-outs inside dead gates as unverified claims. LESSON 2: when a slot allocator is written for one width, every later type of a different width is a latent overrun — grep for `slot + 1` style adjacency before adding a wide type. LESSON 3 (arc ordering): this matters because inlining is a PREREQUISITE for SIMD register residency, not a nicety — a value chain compiles to a `call` per link and every xmm is caller-saved under SysV, so intermediates are provably spilled and reloaded (measured: 4 dead `movupd` per link) until the calls go away."
-category = "cyrius"
-
-[[entries]]
-name = "inlining_is_a_PREREQUISITE_for_SIMD_register_residency_not_a_nicety"
-description = "v6.5.52: cyrius's SIMD value-form chains bought almost nothing over scalar code, and the filing plus two roadmap revisions all framed 'inline the wrappers' as an independent, optional item to be decided on its own evidence. DISASSEMBLY SAYS OTHERWISE and inverts the order: a value chain emits a `call` per link, and EVERY xmm is caller-saved under SysV, so each intermediate is provably spilled and reloaded on the very next instruction (measured: 4 dead `movupd` per link). No register allocator can remove that while the chain crosses call boundaries — so widening the allocator's picker to see xmm locals, which is the 'real' work, buys exactly zero until the calls go away. Inlining first: 2M-iteration f32v4 chain 24 ms -> 16 ms, a 2-link chain 5 callq -> 3. ⚠ THE STATIC INSTRUCTION COUNT MOVED THE WRONG WAY WHILE RUNTIME IMPROVED — `movupd` went 9 -> 13 — because inlining removes call LAYERS, not memory traffic; the wrapper body still round-trips through its `&r` scratch. Do not read an instruction count as a regression without timing it. LESSON: when a filing says an optimization needs substrate X, check whether the substrate can even express the win in the code as it stands — an ABI fact (caller-saved registers across a call) can make a whole planned arc a no-op until an 'optional' item lands first."
-category = "cyrius"
-
-[[entries]]
-name = "an_inline_replay_that_binds_params_BY_NAME_hides_four_defects_at_once"
-description = "v6.5.52: admitting SIMD-param fns to cyrius's inline-replay path exposed FOUR independent defects, and the instructive part is that each one alone still looked nearly working, so any single fix 'almost' succeeded. (1) `SFINL` packed the two param NAME offsets from local slots 0 and 1, which silently assumes ONE SLOT PER PARAM. A 16-byte param allocates (n-1) ANON filler slots BEFORE its named slot, so slot 0 held the anon marker `0 - 1`; packed through `& 0xFFFFFFFF` that becomes 0xFFFFFFFF, which is POSITIVE as an i64, so FINDLOCAL's `if (sn >= 0)` guard waved it straight into STREQ as a name offset -> SIGSEGV inside the compiler with no diagnostic. The fault register named it: rsi = 0xffffffff. ⚠ This is latent for ANY caller who enables _INLINE_OK, nothing to do with SIMD. (2) Param slots were a fixed 8 bytes wide, so arg 0 overran arg 1 — ONE SIMD param inlined correctly and TWO corrupted, a bisect boundary worth remembering. (3) The replay re-registered params BY NAME ONLY and never re-applied SLTYPE, so the param stopped being SIMD-typed inside the body and reported a bogus 'value-form SIMD arg type mismatch' on a mixed signature. (4) `PCMPE` does not materialise a value-form SIMD operand AT ALL: the normal call path routes them in TWO PASSES, loading to XMM only after the int args because int-arg eval clobbers XMM, and the replay had no such pass — so every SIMD arg stored whatever XMM0 last held (three consecutive `movupd %xmm0` with NO load between them, and f32v4_dot returning 36.0 for an 8.0 case). Fix for (4) was NOT to port the two-pass scheme but to sidestep it: the inline destination is a frame slot rather than an ABI register, so a memory-to-memory copy with load and store ADJACENT leaves no clobber window. TWO MORE followed from inlining bodies that declare locals: the wrappers are all `var r: <vec>; <kernel>(&r,&a,&b,n); return r;`, so the replay put a `var r` into the CALLER — colliding with a caller's own `r` ('duplicate variable', since that check is `GLDEP == GSDEP`), and leaving the name registered so the NEXT use of the same wrapper collided with the first. Fixed by making the replay a nested SCOPE and clearing its names on teardown. ⚠ AND DO NOT RESTORE GFLC while doing so: the inlined body's EMITTED CODE still addresses those frame slots at runtime, so handing them to a later local is a real aliasing bug — measured as simd_ints SIGSEGVing at run time while compiling perfectly clean."
-category = "cyrius"
-
-[[entries]]
-name = "no_callee_saved_XMM_on_SysV_means_a_vector_cannot_survive_a_call"
-description = "v6.5.53: cyrius's roadmap and state.md both pinned the blocker for SIMD register residency as 'the allocator's picker only recognises REX.W mov to/from [rbp+disp32], so no xmm/ymm local is a candidate'. That is a true statement about the code and the WRONG lever, for a reason that is an ABI fact rather than a missing feature: **the SysV x86-64 ABI has NO callee-saved XMM registers** — xmm0-15 are all volatile. So a vector value cannot be held in a register across a call AT ALL, and before v6.5.52 every link of a value-form SIMD chain WAS a call (the wrappers were ordinary lib fns). Teaching the picker to see xmm locals would therefore have allocated registers that every call immediately invalidated — measurably zero gain for a substantial change. What actually unlocked the optimization was removing the calls (inlining the wrappers, v6.5.52); only then is there a call-free region for a vector value to live in. LESSON: before extending a register allocator to a new register class, check the ABI's callee-saved set for that class and whether the code region in question contains calls. A 'the allocator can't see X' pin can be simultaneously accurate and irrelevant. COROLLARY that paid off immediately: with the calls gone, the cheap peephole became viable — LASE (load-after-store elimination) already deletes an adjacent store/reload pair for the integer forms, and extending it to `66 0F 11 85`/`66 0F 10 85` took a 3-link f32v4 chain from 18 movupd to 15 and 15 ms to 14 ms. ⚠ The ModRM byte is what makes that safe: 0x85 is mod 10 / reg 000 / rm 101, i.e. **xmm0** specifically (xmm1 is 0x8D, xmm2 0x95, xmm3 0x9D), so requiring 0x85 on BOTH the store and the load pins the same register on both sides — the property the integer version gets for free because 48 89 85 / 48 8B 85 both encode rax. Relaxing it to 'any xmm' would pair the HIGH-half store of a 256-bit value with the LOW-half load of a different one, since f64v4 stores as a PAIR (0x85 then 0x8D)."
-category = "cyrius"
-
-[[entries]]
 name = "every_unaligned_byte_scanner_over_a_fn_range_must_know_about_inline_switch_tables"
 description = "v6.5.53, found by adversarial review of a new peephole and it turned out to indict the OLD one too: since v6.5.20 a cyrius function's emitted byte range can contain inline switch JUMP-TABLE DATA as well as instructions (the table is `(range+1)` 4-byte displacements sitting in the code stream). `_ra_frame_trim`'s NOP recorder already guards against this with `_sw_tbl_hits`, and its comment says exactly why — it is 'an UNALIGNED byte-pattern walk of the whole fn range', so a window landing on table bytes must not be treated as instructions. THE LASE PEEPHOLE IS THE SAME SHAPE AND WAS NOT GUARDED. It scans byte-by-byte for a store/load pair and NOP-FILLS the load in place; a 4-byte table displacement is arbitrary bytes, so it can spell the pattern by coincidence, and NOP-filling there corrupts the table — a silent wrong answer, not a crash. The review was aimed at a NEW 128-bit SIMD arm and noticed it was the only unaligned scanner in the file without the check; checking the twin showed the pre-existing integer arm had the same gap. Both are guarded now (hoist the clamped `L64(S + 0x1AC800)` count once, test `_sw_tbl_hits` alongside `IS_JUMP_TARGET`). LESSON: when a codebase adds DATA to a stream that was previously all instructions, the invariant breaks for every pass that walks that stream unaligned — not just the pass that prompted the fix. Grep for the other walkers the same day. COROLLARY on gates: the review also showed one of the new gate's axes was VACUOUS — it claimed to defend a ModRM 'pin' that no emitted code discriminates on, so the pin's removal was undetectable by any constructible fixture. The honest fix was to stop claiming it and say what the axis actually guards; a gate that overstates what it proves is worse than one that admits its limit, because the next implementer trusts it."
-category = "cyrius"
-
-[[entries]]
-name = "a_mutation_that_silently_fails_to_apply_reports_PASS_and_proves_nothing"
-description = "v6.5.54: mutation-proving a new gate, the mutation was applied with `sed -i 's/                        if (IR_ENABLED(S) != 0) {/.../'` — twenty-four spaces of indentation against the file's twenty. The pattern never matched, the tree was unchanged, the gate ran against the ORIGINAL code and printed PASS. Run twice, PASS twice. Read naively that says 'the code under test is dead — the gate does not need it', and the next step would have been DELETING a load-bearing repair pass. The `grep` placed right after the sed to show the mutated line printed nothing, and that silence was skimmed past both times. It was caught only by comparing the two compiler BINARIES: `cmp -s` said byte-identical, which is impossible if the source really differed. Redone with the correct indentation the same gate went RED immediately and for the right reason (`alloc_init: mmap failed`). ⭐ THE RULE: a mutation proof has TWO assertions, not one. First assert the mutant actually differs from the original — the edited line reads as intended AND the rebuilt artifact differs — and only then read the gate's verdict. A PASS from an unapplied mutation is indistinguishable from a PASS from a vacuous gate, and both look like good news. ⚠ Note the failure mode is asymmetric and that is what makes it dangerous: an unapplied mutation NEVER produces a false RED, only a false GREEN, and a false GREEN here argues for deleting real code. Anchor edits on a line number or a `cat -A`-verified pattern rather than on hand-typed leading whitespace."
-category = "cyrius"
-
-[[entries]]
-name = "a_perf_number_carried_forward_across_releases_was_off_by_20x"
-description = "v6.5.54: cyrius's IR arc had been planned for several releases around a recorded cost for `CYRIUS_IR=3` of '+6.2 % size, +3.6 % compile time (670 ms -> 694 ms)'. The size half was accurate. The time half was never re-taken and was wrong by a factor of twenty: measured live, IR=3 took 13,967 ms against the default path's 672 ms. A whole slot had been scoped against the smaller of the two problems while the larger one was invisible — and the roadmap, the issue file and the slot plan all repeated the same stale figure, so cross-checking the DOCS against each other only ever confirmed it. ⭐ The root cause was pure algorithmic shape and worth recognising by sight: `ir_build_edges` resolved every jump's target by scanning from basic block 0 across the WHOLE PROGRAM, with `_ir_find_bb_for_patch` nesting a scan of every IR node inside that outer scan. Fine at a few hundred blocks; this compile has 29,499. The tell that it was NOT an optimizer pass was decisive and cheap: with `CYRIUS_FOLD_OFF`, `CYRIUS_LASE_OFF`, `CYRIUS_DCE_CAP=0` and `CYRIUS_DSE_CAP=0` ALL set it still took 13,910 ms, i.e. disabling every optimization changed nothing, so the cost had to be in the substrate that runs regardless. Fix was to start each scan at the first block of the jump's OWN function — an intra-function jump's target is in that function, so the scan terminates inside it — giving 13,967 ms -> 1,012 ms with byte-identical output. LESSON: re-measure a number before planning around it, especially one that has survived several releases unchallenged; a figure that no longer has a measurement behind it is a rumour with a decimal point. COROLLARY: `_ir_mode == 51` in main.cyr does NOT mean CYRIUS_IR=51 — the mode is the ASCII code of the first character of the env var, so 51 is '3'. Reading it as a number sent one investigation down a dead end concluding the optimizer passes never ran."
 category = "cyrius"
 
 [[entries]]
@@ -5359,3 +4944,294 @@ THE GENERAL SHAPE: when a pass widens from per-unit to whole-program, the existi
 is not a starting point, it is a subset defined by the OLD scope. Re-derive it from the code —
 grep for every writer of a code position — rather than inheriting it from the narrower pass or
 from an issue file. Here the issue file named four tables; seven needed repair.
+
+[[entries]]
+name = "aggregate_copy_by_type_not_by_occupancy_clobbers_neighbours"
+description = "v6.5.57 P0, live SEVENTEEN releases: `X = Y;` between two struct-POINTER locals copied STRUCTSZ/8 slots and wrote over neighbouring locals. The discriminator is the FILLER SENTINEL (name -1), not the type — and the fixpoint was structurally blind because cycc's own source never uses the shape"
+category = "cyrius"
+---
+`X = Y;` where both are locals of a struct type copied **the number of slots the
+TYPE implies** rather than the number the VARIABLES occupy. For two inline
+aggregates that is right. For two **pointers** to a struct it is catastrophic: the
+locals are one slot each, so the copy walked `STRUCTSZ/8` slots off the end and
+overwrote whatever sat beneath them — in yukti, a loop-bound PARAMETER, which then
+walked its buffer off into the process stack.
+
+**The discriminator is not the type.** An inline aggregate OWNS the slots beneath
+its named one, and the frame marks them with a **filler sentinel** — name `-1`. A
+pointer-to-struct local does not. So the guard is: before copying `nslots`, walk
+both source and destination and refuse unless every slot beneath the named one is
+a filler:
+
+    while (ac_k < nslots) {
+        if (L64(names + (dst_li - ac_k) * 8) != 0 - 1) { return 0; }
+        if (L64(names + (src_li - ac_k) * 8) != 0 - 1) { return 0; }
+        ac_k = ac_k + 1;
+    }
+
+⛔ **WHY IT SURVIVED SEVENTEEN RELEASES, and this is the part to carry.** The
+byte-identical self-host fixpoint could not see it: **cycc's own source never uses
+the shape.** Guarded and unguarded compilers emit `src/main.cyr` byte-identically
+(1,247,608 B) — so the fixpoint agreeing proves the compiler does not *exercise*
+the path, never that the path is correct. Treat "the fixpoint is green" as coverage
+ONLY for constructs cycc itself contains.
+
+**How it was actually found**, after instrumentation kept making it vanish: bisect
+the TRACKED compiler binaries. Every tag carries `build/cycc`, so
+
+    git show 6.5.56:build/cycc > /tmp/cc_56    # PASS
+    git show 6.5.57:build/cycc > /tmp/cc_57    # FAIL
+
+is an instant, download-free bisect over the real artifact. One fix then cleared
+failures in TWO downstream repos that had been written off as pre-existing.
+
+
+[[entries]]
+name = "value_form_return_payload_alone_reads_as_success"
+description = "v6.6.0 migration fail-open: `return res;` on an Err path returns the PAYLOAD by itself, so Err(77) reads downstream as tag=77 / is_err=0 — an error that reads as SUCCESS. 19 real sites in yukti alone"
+category = "cyrius"
+---
+When `Result`/`Option`/`Either` became the value form (v6.6.0), a payload variant
+returns `(tag, payload)` in a register pair. The natural-looking propagation
+
+    var t, v = inner();
+    if (is_err_result(t) == 1) { return v; }     # ⛔ WRONG
+
+returns the **payload alone**. The caller then binds `t` from rax — which now holds
+the payload — so `Err(77)` reads as **tag=77, is_err=0**: the error is silently
+reclassified as a success carrying 77. Correct:
+
+    if (is_err_result(t) == 1) { return (t, v); }
+
+**This is the migration rule's own fail-open**, and it is worse than the bug the
+flip fixed: an allocation leak is a resource problem, an error that reads as success
+is a correctness one. Measured: **19** real sites in yukti (→2.3.10) and 3 in vani.
+
+A mixed-return function — some paths returning a pair, some a single value — now
+raises a compiler **warning**. It is deliberately not fatal (the dual-mode shape is
+legitimate and tested both ways in vani), so the warning must actually be read.
+⚠ Do NOT "fix" a warning by wrapping the single-value path in a constructor without
+checking the tests: that was tried on vani and broke 3 of them, because those
+returns were raw-by-design.
+
+
+[[entries]]
+name = "compaction_moves_code_geometry_computed_before_it_does_not"
+description = "v6.6.1: CYRIUS_DCE=1 shrinks the code buffer, but PE geometry is computed at the TOP of FIXUP from the pre-elimination length — so the import payload was written at the new cursor while the section header named the old offset. The loader mapped the IAT from zero padding and the first call *IAT(%rip) faulted 0xC0000005 before main"
+category = "cyrius"
+---
+v6.5.72 made `CYRIUS_DCE=1` physically REMOVE dead bodies (`wp_compact`) and shrink
+`GCP(S)`. But `_pe_layout(S)` runs at the **top** of FIXUP off the **pre-elimination**
+length, so every PE geometry field — section sizes, RVAs, `PointerToRawData`, and the
+IAT RVA the ftype=4 fixups patch against — described a layout the emitted code no
+longer had. `EMITPE_EXEC` then writes `.idata` at the **post-compaction cursor**
+(`o = o + cp`) while the header still names the pre-compaction offset.
+
+Measured on the filed repro: the import payload moved from file offset `0x220F6` to
+`0x2AF6` — **128,512 B earlier**, against the 128,555 B DCE reported — so the loader
+mapped the Import Address Table from what had become zero padding, every import
+resolved to 0, and the first `call *IAT(%rip)` faulted `0xC0000005` **before main**.
+
+⚠ **Two independent breakages, and fixing one is not enough.** The displacement was
+ALSO wrong on its own terms: patched against the old geometry, then the instruction
+moved, so it resolved to RVA `0x39DD` for an IAT the header puts at `0x23000`. A
+compaction pass that repairs geometry but not rip-relative displacements — or the
+reverse — produces a binary that looks fine and faults later.
+
+**Two tells worth recognising.** (1) The flag reported "N bytes eliminated" while the
+FILE SIZE did not change — output written earlier inside a fixed-size buffer looks
+identical from the outside. (2) The crash read a function pointer whose bytes were
+ASCII (`0x7465470000000057` = `W`…`Get`): an IAT slot holding hint/name-table content
+means the loader never resolved it.
+
+**Current state**: PE and x86 Mach-O DECLINE compaction, exactly as `_pie_mode`
+already did and for the same stated reason — a rip-relative reference shape the pass
+does not repair. They keep NOP-fill (correct, size unchanged). ELF still eliminates
+for real (123,048 → 16,552 B, −86.5%).
+
+⛔ **The filing said "PE / `--win` target only" and that was wrong.**
+`main_x86_macho.cyr` includes the same `x86/fixup.cyr`, so Intel-Mac Mach-O took the
+identical path and SIGSEGV'd on real hardware — absent from the report only because
+the reporter does not build that platform. **A filing's target list is a report about
+what the reporter builds, not about the bug.** Reproduce on every host that shares
+the code path before scoping the fix.
+
+
+[[entries]]
+name = "guard_must_precede_a_range_reduction_not_sit_inside_it"
+description = "v6.6.1: f64_exp/f64_exp2 returned NaN for ±inf in BOTH implementations. The reduction computes `inf - inf`, AND the exponent it assembles comes from f64_to(inf) saturating to i64::MIN — two ways to produce garbage, both upstream of the actual exponential"
+category = "cyrius"
+---
+`f64_exp(+inf)` and `f64_exp(-inf)` returned **NaN**. The range reduction subtracts a
+multiple of the argument *from the argument*, so for an infinite input it computes
+`inf - inf` = NaN. A guard placed *inside* the reduction cannot fix this, because
+there is a **second** failure on the same path: the exponent is assembled from
+`f64_to(inf)`, which **saturates to `i64::MIN`**, so `(n + 1023) << 52` is not an
+exponent either. The check has to come **first**, before any arithmetic touches the
+argument.
+
+    if ((x & 0x7FFFFFFFFFFFFFFF) == 0x7FF0000000000000) {
+        if (((x >> 63) & 1) == 1) { return 0; }    # exp(-inf) = +0
+        return 0x7FF0000000000000;                  # exp(+inf) = +inf
+    }
+
+⚠ **There are TWO implementations and a consumer hits whichever its target selects**:
+the `_f64_exp_polyfill` / `_f64_exp2_polyfill` pair in `lib/math.cyr`, and the emitted
+x87 `f2xm1`/`fscale`/`frndint` sequence in `src/backend/x86/emit.cyr`. Fixing only the
+polyfill leaves every x86 build wrong. The backend guard is emitted ahead of the x87
+sequence and its two exits are patched after the x87 pop.
+
+**NaN deliberately gets NO guard.** It already propagates correctly through both
+paths, and adding one would only create a branch that has to stay correct forever.
+Not every special value needs handling — check which ones actually break.
+
+[[entries]]
+name = "the_confidently_named_cause_was_wrong_four_times_measure_the_thing_itself"
+description = "MERGED v6.6.1 from four v6.5.50-.54 entries. cycc's compile-time superlinearity was blamed on _fnt_grow, on an amortized-linear rehash, and on a DCE walk that never ran — while the real causes were a hash keyed on LENGTH ALONE and an open-addressed table grown only when FULL. Separately a planning number was carried across releases and was off by 20x. The habit that catches all of them: instrument or count the thing, never design around a stated mechanism"
+category = "cyrius"
+---
+⟳ **This entry replaces four** (`a_hash_keyed_on_LENGTH_ALONE…`,
+`an_open_addressed_table_grown_only_when_FULL…`,
+`a_cost_jump_at_a_doubling_boundary…`, `a_perf_number_carried_forward…`). They were
+four faces of one lesson and cost four lookups to learn once.
+
+**The two real causes, both trivial once measured:**
+
+1. **A hash keyed on LENGTH ALONE is not a hash.** LEXID (`src/frontend/lex.cyr`) had
+   used `bucket = klen` saturated at 255 since v5.10.40, so EVERY identifier of the
+   same length shared ONE chain and the per-lookup walk WAS the O(n²) scan the index
+   existed to remove. Real code is full of same-length names. 60,000 fns named
+   `f0..f59999`: **20,168 ms → 1,005 ms** once the key includes content, output
+   byte-identical (dedup is still an exact byte-compare, only chain ORDER moves).
+2. **An open-addressed table grown only when FULL is quadratic by construction.**
+   The fn-name hash sized itself `mask = nc - 1` — exactly as many slots as entries —
+   and REGFN grew only at 100% load. Two innocuous lines, different files.
+
+**The misattributions, which are the durable part:**
+
+- A **cost jump at a doubling boundary is not evidence the doubling is the cost.**
+  60,000 fns 737 ms → 70,000 fns 2,078 ms was read as "one `_fnt_grow` costs
+  ~1,145 ms", which is absurd on its face: the grow costs 4–9 ms across an entire
+  120,000-fn compile. The boundary was where LOAD FACTOR crossed, not where the
+  copy happened.
+- A **rehash that doubles is amortized-linear by construction** — it cannot be the
+  superlinear term, and saying so needs no measurement at all.
+- A **DCE walk that is OFF by default never ran in any measurement** that blamed it.
+- A **planning number carried across releases was off by 20×**: `CYRIUS_IR=3` was
+  planned around "+3.6 % compile time (670 → 694 ms)". Measured live: **13,967 ms**
+  vs 672. The size half of the same note was accurate, which is exactly why the time
+  half survived — a half-right number reads as a checked one.
+
+⭐ **The habit:** instrument or COUNT the thing itself before designing around a
+stated mechanism, and re-take any number you are about to plan against. Three of
+these survived multiple releases and two prior investigations.
+
+
+[[entries]]
+name = "inline_replay_is_a_prerequisite_for_simd_residency_and_it_binds_params_by_slot"
+description = "MERGED v6.6.1 from four v6.5.52-.53 entries. A SIMD value chain cannot keep a vector in a register across a call because SysV has NO callee-saved XMM — so inlining is a PREREQUISITE, not an optional optimisation. Admitting SIMD params to the inline-replay path then exposed four defects at once, rooted in the replay binding params to ADJACENT 8-BYTE slots that a 16-byte value overruns"
+category = "cyrius"
+---
+⟳ **This entry replaces four** (`no_callee_saved_XMM_on_SysV…`,
+`inlining_is_a_PREREQUISITE…`, `inline_replay_binds_params_to_8_BYTE_slots…`,
+`an_inline_replay_that_binds_params_BY_NAME…`). One arc, one lookup.
+
+**The ABI fact that sets the order.** SysV has **no callee-saved XMM registers**.
+So a vector CANNOT survive a call, and a value-form SIMD chain that emits a `call`
+per link must spill and reload around every one of them. The roadmap and state.md
+both pinned the blocker as "the allocator's picker only recognises REX.W mov to/from
+`[rbp+disp32]`, so no xmm/ymm local is a candidate" — a TRUE statement about the
+code and the WRONG lever. Removing the calls (inlining) has to come first;
+teaching the picker about xmm is downstream of it. **Inlining is a prerequisite,
+not a nicety.**
+
+**What admitting SIMD params to inline-replay then exposed — four defects, and the
+instructive part is that each one ALONE still looked nearly working**, so every
+single fix "almost" succeeded:
+
+- The replay binds a callee's params to **temporary local slots** —
+  `var p0_slot = saved_flc; var p1_slot = saved_flc + 1;` — i.e. ADJACENT **8-byte**
+  slots. A 16-byte SIMD param written into one **overruns into the next**, so two
+  vector params collide.
+- `SFINL` packed the two param NAME offsets from local slots 0 and 1, which is only
+  correct when the callee's first two locals ARE its params.
+- The replay's param COPY was read back two instructions later — a 16-byte
+  store-to-load FORWARD that the hardware cannot elide; the emitter must read the
+  CALLER's local instead (v6.5.65, 1.27×).
+- Dead inline-param copies left an `xmm0` clobber that stopped SLASE collapsing the
+  inter-link pair; harvesting them is what finally gave register residency across
+  chain links (v6.5.66, 2.50–2.60× cumulative).
+
+⚠ **Measured, not assumed**: deleting the value-form scaffolding alone — 28
+instructions for ONE `addps` — moved 33.99 → 33.96 ms, i.e. **ZERO**. The cost was
+never the instruction count; it was the store-to-load forwards and the calls.
+
+
+[[entries]]
+name = "a_gate_only_proves_something_if_you_prove_the_mutation_reached_it"
+description = "MERGED v6.6.1 from three v6.5.50-.54 entries. A mutation applied with a sed pattern that never matched left the tree UNCHANGED and the gate printed PASS; some gates need a source revert rather than a compiler swap; and a comfortable hypothesis about a flaky gate was wrong. Mutation-prove the gate AND check the mutation was actually applied"
+category = "cyrius"
+---
+⟳ **This entry replaces three** (`a_mutation_that_silently_fails_to_apply…`,
+`some_gates_need_TWO_different_mutations…`, `test_the_comfortable_hypothesis…`).
+
+- ⛔ **A mutation that does not apply reports PASS and proves nothing.** A gate was
+  mutation-proven with `sed -i 's/                        if (IR_ENABLED(S) != 0) {/…/'`
+  — **twenty-four** spaces of indentation against the file's **twenty**. The pattern
+  never matched, the tree was never modified, the gate ran against the ORIGINAL code
+  and printed PASS. Always assert the file CHANGED (`cmp`, or a grep count that moves)
+  before believing a mutation result.
+- **Some gates need a source revert, not a compiler swap.** Swapping `build/cycc` for
+  a pre-fix compiler is not always the mutation: a gate axis that BUILDS from the
+  working-tree source (`cycc < src/main_aarch64.cyr`) and runs the result is testing
+  the SOURCE, so only a source revert perturbs it. Pick the mutation that reaches the
+  axis you are proving.
+- **Test the comfortable hypothesis before fixing it.** A gate went red once under
+  load and never reproduced; the filing's leading explanation (a sampler counting a
+  SIGKILLed-but-unreaped process) was checked and REFUTED. Fixing the comfortable
+  story would have left the real cause live and closed the investigation.
+
+⭐ Companion traps already known and still true: a gate fixture whose decoy sits
+AFTER the real key is never reached (the scan stops at the first match), and a gate
+whose fixture shares the implementation's assumption agrees with it forever — the
+v6.5.49 manifest-key case, where the feature shipped inert to 96 % of consumers and
+its gate stayed green.
+
+
+[[entries]]
+name = "install_sh_copies_are_where_the_toolchain_breaks_use_temp_plus_rename"
+description = "MERGED v6.6.1 from two entries. install.sh has broken the toolchain twice by HOW it copies: `cp -L` over a symlink pair aborts with 'same file' under set -e before the symlink-update block (v5.10.37), and `cp` writes THROUGH the directory entry so installing over the running binary is ETXTBSY (v6.6.1). Both leave a half-written tree; rename() replaces the entry instead"
+category = "cyrius"
+---
+⟳ **This entry replaces two** (`install_sh_cp_L_same_file_silent_fail`,
+`installing_over_a_running_binary_needs_rename_not_cp`). Same file, same class:
+**how install.sh copies is the thing that breaks the toolchain.**
+
+**Failure 1 — `cp -L` on a symlink pair (v5.10.37).** The `--refresh-only` lib-copy
+loop uses `cp -L lib/*.cyr`. When `lib/<dep>.cyr` is a `cyrius deps`-resolved symlink
+AND the snapshot dir holds a parallel symlink to the SAME real file, `cp -L` exits
+with "same file". `set -e` makes that fatal, so install.sh dies BEFORE the
+symlink-update block — `~/.cyrius/bin` and `~/.cyrius/current` stay pointing at the
+PREVIOUS version. The user-visible symptom is a stale `cycc --version` in the shell
+prompt, which reads as prompt/config corruption rather than a failed install.
+⚠ Still live: `grep -c 'cp -L' scripts/install.sh` → 2.
+
+**Failure 2 — `cp` over a running binary (v6.6.1).** `cp` writes THROUGH the existing
+directory entry, so overwriting a currently-executing binary is `ETXTBSY`. `cyriusly`
+re-execs the pinned toolchain, so it is **always running during its own install** —
+structural, not a race. The install then aborted part-way, which is why deleting
+`cyriusly` and re-running the installer did not recover it: the tree was already
+half-written.
+
+**The fix for both shapes**: write a temp file beside the target and `rename` it over.
+`rename` replaces the DIRECTORY ENTRY; a running process keeps its open inode and
+finishes, and the next exec picks up the new file. A per-file failure warns and
+continues rather than aborting mid-tree (`_install_file`, `scripts/install.sh:90`).
+
+⚠ **v6.5.3 had already fixed the ETXTBSY shape in ONE of THREE copy paths.** The
+tarball path — the one `cyriusly install` actually uses — survived and was reported
+from a clean machine three minors later. When a fix is "make this write atomic",
+sweep every writer of that kind in the same pass.
+⚠ The installer is frozen into each release's immutable tag, so a broken one cannot
+be hot-fixed for an already-published version.
+

@@ -540,25 +540,54 @@ they grew.
 
 [[entries]]
 name = "unwrap_is_option_only_result_silently_corrupts"
-description = "unwrap()/unwrap_or() operate on Option (Some/None); on a Result they silently return the raw error code instead of aborting — use result_unwrap/is_ok/payload for Results"
+description = "unwrap()/unwrap_or() operate on Option (Some/None); on a Result they silently return the raw error code instead of aborting — use result_unwrap/is_ok for Results. Still true under the v6.6.0 VALUE FORM; only the spelling changed (payload() is DELETED, unwrap takes (t, v))"
 category = "cyrius"
 ---
-`unwrap(opt)` (lib/tagged.cyr) checks ONLY `is_none()` (tag == None == 0) before
-returning `payload(opt)`. A `Result` (lib/result.cyr) has Ok tag=0, Err tag=1 —
-tag layouts that OVERLAP Option's None=0/Some=1. So calling `unwrap()` on a Result
-is a category error with NO diagnostic:
+⟳ **Updated at v6.6.1 for the value form. The HAZARD IS UNCHANGED — only the
+spelling is.** That is the point worth carrying: the flip re-aritied every helper
+in this entry and did not close the hole, because the hole is the overlapping tag
+values, not the representation.
+
+`unwrap(t, v)` (lib/tagged.cyr) checks ONLY `is_none()` (tag == None == 0) before
+returning `v`. A `Result` (lib/result.cyr) has Ok tag=0, Err tag=1 — tag values that
+OVERLAP Option's None=0/Some=1. So calling `unwrap()` on a Result is a category
+error with NO diagnostic:
 
 - an **Err** (tag=1, != None) sails past the `is_none` check → `unwrap` hands back
-  `payload(res)` = the RAW ERROR CODE as if it were a valid value (e.g. a negative
+  the payload = the RAW ERROR CODE as if it were a valid value (e.g. a negative
   fd fed straight into a syscall);
 - an **Ok** (tag=0 == None) makes `unwrap` ABORT with "unwrap called on None".
 
 Because the tags overlap, the mismatch never faults at the unwrap site — it
 CORRUPTS DOWNSTREAM. This bit the async net client: `lib/net.cyr` fns
 (`tcp_socket`, `sock_accept`, `sock_connect`, `sock_send/recv`) return a **Result**,
-but the reactor glue reached for the familiar `unwrap()`. For Results use
-`is_ok(res)` / `is_err_result(res)` then `payload(res)`, or `result_unwrap()` /
-`result_unwrap_or()`. Rule of thumb: `unwrap` is Option-only; if a fn returns
+but the reactor glue reached for the familiar `unwrap()`.
+
+**Correct spelling since v6.6.0** — `Result`, `Option` and `Either` are
+`enum ...: stack`, so a payload variant returns `(tag, payload)` in a REGISTER PAIR
+and construction allocates zero bytes. Bind both halves:
+
+    var t, v = sock_send(fd, buf, n);
+    if (is_err_result(t) == 1) { return err_code_of(t, v); }
+    # v is the value
+
+- ⛔ **`payload()` is DELETED and has no 1-argument replacement** — rdx never reaches
+  a parameter. Under the value form the payload is already a plain variable, so
+  `payload(r)` becomes `r`. `tagged_new()` is deleted with it.
+- Helpers that need the payload gained the tag: `unwrap(t, v)`,
+  `unwrap_or(t, v, fallback)`, `option_print(t, v)`, `result_unwrap(t, v)`,
+  `result_unwrap_or(t, v, fallback)`, `err_code_of(t, v)`, `result_print(t, v)`.
+- Tag-only predicates keep **arity 1** — argument 1 receives rax, which for a pair
+  IS the tag: `is_ok`, `is_err_result`, `is_none`, `is_some`, `is_left`, `is_right`,
+  `is_tag`, `tag` (now identity).
+
+⛔ **The migration rule has its own silent fail-open, and it cost 19 sites in yukti
+alone.** `return res;` on an Err path returns the PAYLOAD by itself, so `Err(77)`
+reads downstream as `tag=77, is_err=0` — **an error that reads as success.** Both
+halves must be returned: `return (t, v);`. The compiler warns on a mixed-return
+function since v6.6.0, but the warning is not a hard error, so read it.
+
+Rule of thumb, unchanged across the flip: `unwrap` is Option-only; if a fn returns
 `Result<T,E>`, never `unwrap` it.
 
 
