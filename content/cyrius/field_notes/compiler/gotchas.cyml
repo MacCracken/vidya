@@ -5292,3 +5292,70 @@ Staged prize for a vector register class, all measured:
 And spilling the result once per iteration is FREE (4.114 vs 4.111 ms) — a register class only
 has to kill the per-link RELOAD, not all stores.
 
+
+[[entries]]
+name = "wrong_instruction_length_is_worse_than_unknown_one"
+description = "A length decoder that returns 0 fails safe; one that returns a length ONE BYTE SHORT desynchronises the walk and manufactures phantom control flow — and the mutant is the same SIZE as the correct compiler"
+category = "cyrius"
+---
+v6.5.68. `DECODE_LEN` (src/backend/x86/decode.cyr) is not a diagnostic tool. It feeds
+`RA_SCAN_LOOPS`, which finds the backward edges that drive the register allocator's loop-aware
+live-interval extension — on the DEFAULT path, for every compile. Nothing had ever verified it
+against the bytes cyrius actually emits, and two gaps had accumulated with OPPOSITE severities.
+
+THE SAFE GAP: `0x99` (CQO) had no case at all, so the function returned 0. Every caller treats 0
+as "stop": `RA_SCAN_LOOPS` returns -1, which its own call site documents as "no information, NOT
+no loops", and the picker falls back to whole-function intervals. `ECQO` emits `48 99` before
+EVERY integer division, so v6.5.35's register time-sharing had been silently OFF in every
+function containing `/` or `%` since it shipped. Expensive, never wrong.
+
+THE UNSAFE GAP, and the one worth remembering: the two-byte opcodes carrying an imm8 AFTER the
+ModR/M byte — `0F BA` (BT/BTS/BTR/BTC), `0F 70`-`0F 73` (the PSRL/PSRA/PSLL groups), `0F C2`,
+`0F C4`, `0F C5`, `0F C6` — took the generic `0F`+ModR/M path and returned a length ONE BYTE
+SHORT. 559 sites across a 39-binary corpus. `48 0F BA F0 3F` (`btr rax, 63`, the f64 tag strip)
+is five bytes and the decoder said four, so the walk resumes ON THE IMMEDIATE and decodes it as
+an opcode. A desynced walk can manufacture a phantom Jcc, or step over a real backward edge —
+which is exactly the v5.6.22 miscompile the loop extension exists to prevent.
+
+⛔ NO SIZE-BASED GATE CAN SEE THE SECOND CLASS. The compiler built with the imm8 fix reverted is
+byte-for-byte the SAME SIZE as the correct one (1,213,864 B both) and differs only in content.
+The only assertion that catches it is walking real emitted code and requiring the walk to land
+EXACTLY on each function's end — which is what `CYRIUS_DECODE_AUDIT=1` and
+`tests/gates/codegen/decode_len_coverage.sh` now do (1,281 fns, 1,281 clean).
+
+HOW TO RECOGNISE IT AGAIN: any hand-written length decoder acquires this shape as the emitter
+set grows, because adding an opcode to the emitter and adding it to the decoder are edits in
+different files with no compile-time link. The tell is a *fail-safe* story ("unknown returns 0,
+callers fall back") being used to justify not testing coverage — it only covers the gaps that
+return 0, and says nothing about the ones that return a plausible wrong number. Audit by
+walking, and separate "undecodable" from "desynced" in the report: they need different fixes.
+
+[[entries]]
+name = "raw_emitted_disp32_is_in_no_registry"
+description = "The entry trampoline's E9 is hand-emitted rather than through EJMP0, so no compaction registry knows about it — it never mattered until a pass moved bytes program-wide"
+category = "cyrius"
+---
+v6.5.68. Whole-program NOP compaction has to repair every stored code position, and the
+enumeration people reach for is "the tables the per-function compactor repairs". That list is
+incomplete in a way that is invisible until the scope widens.
+
+The per-fn pass only ever deleted bytes INSIDE one function, so it needed exactly the positions
+that could move relative to each other within a function. Three things fall outside that and are
+therefore absent from every existing table:
+
+  * fn START offsets (`_fnt_offsets`) — a function's own start is below all of its own runs, so
+    the per-fn pass never had to shift it.
+  * fn END offsets (`_fnt_codeend`) — `SFNE` is called AFTER the per-fn compaction, so it is
+    recorded already-correct.
+  * THE ENTRY TRAMPOLINE. `main.cyr` and `main_win.cyr` hand-emit `EB(S, 0xE9)` plus four raw
+    placeholder bytes and patch them later with `EPATCH`, bypassing `EJMP0` — so the site is in
+    NO registry, not the per-fn `jump_src_tbl` and not the fixup table. Its source and target
+    both sit outside every function body, which is exactly why it never mattered before.
+    Unregistered under a program-wide pass, deleting one 5-byte run below the target makes cycc
+    SIGSEGV at its own pre-compaction entry address. `main_x86_macho.cyr` uses `EJMP0` for the
+    same jump — a fork divergence, so ELF and PE are affected and Mach-O is not.
+
+THE GENERAL SHAPE: when a pass widens from per-unit to whole-program, the existing repair list
+is not a starting point, it is a subset defined by the OLD scope. Re-derive it from the code —
+grep for every writer of a code position — rather than inheriting it from the narrower pass or
+from an issue file. Here the issue file named four tables; seven needed repair.
