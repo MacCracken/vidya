@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.5] — 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.35` → `6.6.2`.** No source change; the value form needed none.
+  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.
+
+
 ## [2.8.4] — 2026-08-22
 
 Dependency cut. **cyrius 6.5.31 → 6.5.35**, **vyakarana 2.3.2 → 2.4.0**, sakshi
