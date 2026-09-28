@@ -6,7 +6,10 @@
 # CHUNKS since v6.1.19 (measured — 400 MB in 100 MB bites succeeds), so the
 # old "exhaust the heap segment in 9 allocs" story no longer describes it;
 # three entries added from v6.5.8/.9.
-# 17 entries. (v6.5.61: vector value-return binding forms.)
+# 23 entries (DERIVED: grep -c "^\[\[entries\]\]"; this line read 17 while the file held 18).
+# v6.6.5: `private` covers the whole file, and forward references are checked; a struct
+# declared inside a fn is per call and per thread, and an over-budget array local warns that
+# its storage is static.
 
 [[entries]]
 name = "heap_allocation_patterns"
@@ -179,9 +182,42 @@ struct type directly.
 
 [[entries]]
 name = "fn_main_is_not_the_entry_point"
-description = "`fn main() { ... }` is just a function definition — cyrius has no auto-call for it; top-level statements are the program entry"
+description = "⛔ CORRECTED v6.6.5 — SINCE v5.9.37 CYCC DOES AUTO-CALL `main()`, and this entry said the opposite for eighteen minors. The live traps are now the reverse: a source that defines `fn main` AND calls it at top level without exiting runs the body TWICE and exits with the SECOND run's value. Top-level statements are still the entry; `main` is called after them."
 category = "cyrius"
 ---
+⛔ **CORRECTED v6.6.5 — READ THIS FIRST. The claim below ("cyrius has no auto-call for it")
+WAS TRUE AND HAS NOT BEEN SINCE v5.9.37.** `src/main.cyr` walks the fn table for an exact
+`"main\0"` match at the end of the entry code and emits `call main` when it finds one, so a
+source consisting only of `fn main(): i64 { … return 42; }` exits **42**. Measured at 6.6.5.
+The original v5.6.33 diagnosis below is kept because the MECHANISM it explains is still how
+the entry works — top-level statements are the program, `main` is called after them — and
+because it is the record of how the wrong conclusion was reached.
+
+⭐ **THE LIVE TRAP IS NOW THE REVERSE, and it fails SILENTLY GREEN.** The auto-call is
+unconditional: it does not check whether you already called `main` yourself. So
+
+    fn main(): i64 { …asserts… return 0; }
+    var ec = main();
+    var r = assert_summary();
+
+runs the body **twice** and exits with the SECOND run's return value — the trailing
+`assert_summary()` is dead for the exit code. Measured while writing
+`tests/tcyr/crossos/syscall_shm_fd_passing.tcyr` at 6.6.5: the deliberately-broken control
+build printed `19 passed, 30 failed` and still **exited 0**. A .tcyr in that shape reports
+green over any number of failures. The source comment in `src/main.cyr` claimed the
+auto-call was "purely a fallback for the no-wire case" because "any user-side syscall(60)
+already exited" — true only when the top level ENDS in an explicit exit; corrected in place.
+
+THREE SHAPES ARE CORRECT:
+  (a) no `fn main` at all — top level ends on the value to exit with (`var r = assert_summary();`);
+  (b) `fn main` that RETURNS the value and is NOT called at top level — the auto-call runs it once;
+  (c) `fn main` called at top level FOLLOWED BY an explicit `syscall(SYS_EXIT, r);` — which exits
+      before the auto-call is reached. This is what the `tests/tcyr/crossos/` syscall tests use.
+
+---
+
+THE ORIGINAL ENTRY (v5.6.33, pre-5.9.37 — the auto-call did not exist yet):
+
 THE TRAP:
 
     fn main() {
@@ -313,6 +349,18 @@ name = "global_init_order_silent_zero"
 description = "✅ FIXED in v5.7.32 (cyrlint warning) + v5.7.36 (string-literal awareness) — original bug behavior + workaround pattern preserved below for pre-v5.7.32 toolchain users"
 category = "cyrius"
 ---
+⚠ **RE-MEASURED at v6.6.5 — the example below no longer reads 0, and the rule now sees
+wrapped initializers.** Since v6.4.74 a global whose initializer is a CONSTANT is static-
+folded, so `var COMPUTED = FLAG_A | FLAG_B | FLAG_C;` over later `var FLAG_A = 0x1;` …
+evaluates to 7 (measured). The silent zero is real for a later global with a COMPUTED
+initializer: `var C = FLAG_A | 2;` over a later `var FLAG_A = f(1);` exits 2, not 3.
+cyrlint warns on both shapes. Before v6.6.5 it scanned only the declaration's own line, so
+a WRAPPED initializer — `var A = 1 +` / `    B;` over a later `var B = g();` — drew no
+warning while the binary read B as 0 (exit 1, the reordered program exits 3); it now scans
+to the statement's `;` across lines, ignores an `=` inside a trailing comment, and checks a
+second `var` after a `;` on the same line. A `}` inside a multi-line string no longer takes
+a real top-level declaration out of its sight. CHANGELOG [6.6.5].
+
 ✅ FIXED in cyrius v5.7.32. `cyrlint`'s `lint_globals_init_order`
 walks the file twice (pass 1 collects every top-level `var IDENT =
 ...;` with line, pass 2 walks every `var X = expr;` initializer
@@ -911,3 +959,226 @@ across the fix — which measures the corpus, not the fix. When you add a receiv
 for a type, test the binding forms a CONSUMER writes, not the one the stdlib writes;
 and note that a declaration receive and an assignment receive are two halves of one
 statement, not two features (v6.5.57 fixed the same split for structs).
+
+[[entries]]
+name = "public_marker_leaks_onto_next_declaration_v664"
+description = "A `public` on a struct/union/enum/impl/use in a private file re-exposed the NEXT fn or var (v6.5.0–6.6.3); the marker is now armed only for items that can carry it (v6.6.4)"
+category = "cyrius"
+---
+SYMPTOM. A `private` file declares `public enum AdPowLimit { … }` and, right after
+it, `fn _ad_pow()`. From another file `_ad_pow()` compiles and runs; every other
+`_`-named item in the file is refused. hisab's public-surface gate found exactly ONE
+leak among 457 probes (456 refused), and the one was the declaration after the enum.
+
+MECHANISM. `public` set a running marker (`_pub_pending`) that was consumed by the
+next fn or global-var DEFINITION — and by nothing else. An enum records no visibility
+(enum constants are public by design), so it never touched the marker; the marker
+outlived the enum and the next fn or var was stamped public. The same for a bare
+`public struct` / `union` / `impl` / `use`, and for `public var a[N]` (the array path
+never called the stamp helper). The fix is a POSITIVE list: `public` arms the marker
+only when the next token is `var`/`secret`, `fn`/`async`, or a fn-attribute directive;
+otherwise it is consumed on the spot.
+
+THE SECOND LAYER. The compiler makes two passes over top-level tokens. Pass 2 skips
+`var` inline without consuming the marker and stamps only what pass 1 could not — impl
+methods and fns after top-level code — so `public var V = 7;` followed by an impl block
+re-exposed the impl's FIRST method even with pass 1 correct. Now PARSE_IMPL and the
+relaxed-ordering fn path clear a stale marker on entry. Consequence: `public impl`
+marks NO method; write `public fn` per method.
+
+THREE THINGS THE FIX EXPOSED. (1) `public var a, b = f();` stamped `b` private (the
+helper cleared the marker after `a`) — one `public` now covers every name. (2) Derived
+codecs (`T_to_json`, `T_from_json`, `T_from_json_str`, enum codecs) were emitted
+without the type's `public`; only the v6.6.3 accessors carried it, so closing the leak
+would have turned "one codec reachable by accident" into "none" — they inherit it
+now. (3) The once-per-translation-unit `_cy_enum_name_eq` helper was private to
+whichever file derived an enum first; a second private file's enum codec was refused.
+
+THE PATTERN. A "next item" marker that only some declaration kinds consume is an
+armed trap; every kind that does NOT consume it is a leak site. Enumerate the kinds
+(struct, union, enum, impl, use, mod, array var, destructure var, the pass-2 skip)
+and gate each by name — the filing's matrix had tested struct only through
+`#derive(accessors)`, whose generated `public fn` happened to consume the marker,
+so the struct row read green for the wrong reason.
+
+[[entries]]
+name = "private_applies_to_the_whole_file_and_forward_references_are_checked"
+description = "`private` scopes to the FILE it appears in, wherever in that file the marker sits — including definitions written above it, and including globals — and a reference that comes earlier in the concatenated stream than the definition it names is enforced exactly like one that comes after. Before 6.6.5 both halves were false, and the consequences ran in BOTH directions: reachable private methods on one side, refused public ones on the other."
+category = "cyrius"
+tags = ["language", "visibility", "private", "include-order", "v6.6.5"]
+content = """
+Two rules, both true since 6.6.5 and neither true before it:
+
+**1. The marker's POSITION in the file does not matter.** `private`
+alone on a line flips the whole file. A fn declared ABOVE that line is
+file-private like any other, and so is a global. Until 6.6.5 the flip
+was recorded as the compiler's first pass walked past the marker, so
+anything declared earlier was stamped as if the file were public — and
+a global above the line was never private in EITHER include order.
+
+**2. A FORWARD reference is checked.** If the call is parsed before the
+definition — the library included BELOW the code that uses it — the
+boundary still applies: `q.m()` and `Q_m(&q)` on an impl method,
+`a + b` through an operator `impl`, a `mod`-scoped fn, a fn defined
+after the first top-level statement. Until 6.6.5 every one of those
+compiled and RAN (exit 42 on the filed repro).
+
+⚠ **THE MIRROR IMAGE IS THE PART WORTH KNOWING, because it bit code
+that did nothing unusual.** The same root made the compiler keep one
+symbol-table entry per NAME during that first pass, so:
+
+* Two files that each declare `private` and each define a helper of the
+  same name got a FALSE `'_h' is private to its file` — and a false
+  `'_h' expects 2 arguments, got 1` when the arities differed.
+* A public fn could inherit a private stamp from an unrelated file's
+  same-named private one. The language guide's own two-file `_helper`
+  example was REFUSED when the public file was included first.
+* A forward call passing a plain struct larger than 8 bytes SIGSEGV'd —
+  silently, with no diagnostic, on Linux, macOS/aarch64 and Windows.
+
+**If you are on a toolchain before 6.6.5, the workaround for the
+fail-open is the normal include order (library first) — but note that
+the SAME order is what triggers the false-refusal half, so there is no
+ordering that avoids both. Pin 6.6.5 or later.**
+
+There is also no per-item `private`: `private fn h()` is a hard error
+naming the file-level form (v6.5.56). ⚠ Until 6.6.5 that error printed
+TWICE and privatised the file anyway, so a legitimate sibling fn in the
+same file was then reported `is private to its file` at ITS caller —
+the diagnostic pointed at correct code.
+"""
+
+[[entries]]
+name = "a_struct_declared_inside_a_fn_is_per_call_and_per_thread"
+description = "Until v6.6.5 a struct LITERAL written inside a fn (`var p = T { .. }`) was compiled as a GLOBAL: shared across recursion, shared across threads, and visible to every later reference of that name in ANY file of the program. From v6.6.5 it is a per-call frame object like `var p: T;` has always been. The rules a consumer needs: a struct declared inside a fn is per call and per thread; a struct declared at top level is one shared object; and `var p: T = <expr>` where the expression yields an ADDRESS is a POINTER to someone else's struct, not a copy."
+category = "cyrius"
+tags = ["structs", "storage", "locals", "recursion", "threads", "scoping", "v6.6.5"]
+content = """
+**What changed, in consumer terms.** These three now mean what they look like:
+
+```cyrius
+fn f(n) {
+    var a = P { n, n * 2 };   # per call, per thread (was a GLOBAL before v6.6.5)
+    var b: P;                 # per call, per thread (always was)
+    var c: P = mk();          # a POINTER to whatever mk() returned — NOT a copy
+    return a.x + b.y;
+}
+```
+
+**Symptoms you would have seen before v6.6.5**, all silent: a recursive fn building a literal
+returned the innermost call's value; N threads running the same fn scribbled over one another;
+and a `var cfg = P { 1, 2 };` inside any fn of any file captured a top-level `var cfg = 5;`
+elsewhere in the program. The last one needed no `private`, no second file and no collision the
+author could see — just the same identifier twice.
+
+**Two behaviours that follow, and are now consistent.** Operator overloading dispatches for a
+struct VALUE wherever it lives — literal local, typed local, annotated local, global — and does
+NOT dispatch for a pointer-mode local, where `+` is pointer arithmetic. And a closure that
+references an enclosing struct or array captures it BY VALUE, including a stack array through
+`&buf`, which previously failed to compile.
+
+**If you relied on the old behaviour** — a literal that persisted across calls — declare it at
+top level. That is what it actually was.
+"""
+
+[[entries]]
+name = "an_over_budget_array_local_is_static_storage_and_says_so"
+description = "`var buf[N]` inside a fn is per-thread STACK storage, but past the per-fn frame budget (~120 KB of slots) it falls back to ONE shared static buffer. As of v6.6.5 the compiler says so with a `warning:` rather than a `note:`, and the name is scoped to its fn so it can no longer collide with a global elsewhere in the program. `CYRIUS_STACK_ARRAYS=0` puts EVERY array local on that path."
+category = "cyrius"
+tags = ["arrays", "storage", "threads", "secret", "diagnostics", "v6.6.5"]
+content = """
+```
+warning: array local over the per-fn frame budget gets STATIC storage: one buffer shared by
+all calls and all threads; use alloc() for per-call storage
+```
+
+**Read it as a concurrency warning, not a size warning.** The buffer works; it is simply not
+per call and not per thread. If the fn can be re-entered or run on two threads, move the
+buffer to `alloc()`. Two known consumers (a 256 KB crypto scratch and a test server buffer)
+bank theirs deliberately and are correct as they stand.
+
+**Before v6.6.5** the same declaration ALSO took a program-wide global name, so it captured
+every later reference to that identifier in any file (measured: 7 where 3 was right) and, from
+v6.6.4, produced a visibility error naming the CONSUMER's variable. It was invisible to the
+local table too, so an enclosing local of the same name won inside its own fn and `&buf` wrote
+into that scalar. And `secret var buf[N]` over the budget was refused outright — or, worse,
+compiled and never zeroised. All four are closed.
+"""
+
+[[entries]]
+name = "a_top_level_block_scopes_its_vars_since_6_6_6"
+description = "A `var` declared inside a top-level block (an `if`/`while`/`for`/`switch` body outside every fn) belongs to that block and is gone at its `}` — the same rule as a fn body, since 6.6.6. Before that it registered a GLOBAL: the name stayed visible after the block AND an inner declaration of an outer name overwrote the outer global (measured 2 where 1 is correct). Reading one after its block is now an error that names the variable."
+category = "cyrius"
+tags = ["scope", "globals", "top-level", "semantics", "v6.6.6"]
+content = """
+**The rule.** These two are now the same language:
+
+    fn f(): i64 { var c = 1; if (c == 1) { var t = 5; } return t; }   # undefined variable 't'
+    var c = 1; var x = 0; x = 1;
+    if (c == 1) { var t = 5; }
+    syscall(60, t);                                                   # undefined variable 't'
+
+Before 6.6.6 the second one compiled and exited 5. A top-level `var` inside a block went
+through `PARSE_VAR`'s `GINFN == 0` arm and registered a global, and the global var table had
+no scope mechanism at all — `SCOPE_POP` cleared only the frame-local table.
+
+**The part that was worse than visibility.** With 6.6.6's one-global-per-name fold, an inner
+declaration of an OUTER name did not shadow it, it *was* it:
+
+    var limit = 1;
+    var go = 0; go = 1;
+    if (go == 1) { var limit = 2; }
+    syscall(60, limit);       # 2 on x86 before 6.6.6; 1 now
+
+cx and aarch64 already answered 1, so the self-host fixpoint and both cross-target legs were
+green over an x86-only wrong answer. When two targets disagree about a *frontend* rule, the
+frontend is where to look.
+
+**Writing code that needs the value after the block.** Declare above, assign inside —
+assignment to an outer global from inside a block is unchanged, only DECLARATIONS are scoped:
+
+    var t = 0;
+    if (go == 1) { t = 5; }
+    syscall(60, t);           # 5
+
+**Recognising it.** The error names the variable and says where to put it:
+
+    note: 't' was declared inside a top-level block and goes out of scope at its '}'
+          (since 6.6.6 a top-level block scopes its `var`s like a fn body does)
+          declare it at top level, before the block, to use it after the block
+
+A survey of 12,604 `.cyr` sources across the ecosystem when the change landed found no file
+that relied on the leak, so nothing downstream had to change — but code written against
+pre-6.6.6 cyrius that does rely on it fails loudly rather than quietly.
+"""
+
+[[entries]]
+name = "println_dispatches_on_the_declared_return_type"
+description = "A helper declared `: i64` that returns a string pointer gets println() rerouted to the NUMERIC printer — silently"
+category = "cyrius"
+---
+`println` is an overload-dispatch target (lib/string.cyr, v5.10.5): PARSE_FNCALL routes
+`println(x)` to `println_int` whenever the argument is i64-TYPED — an `: i64`-annotated
+local or global, or the result of an `: i64`-annotated fn call. The dispatch reads the
+DECLARATION, not what the value actually points at.
+
+So a perfectly ordinary helper:
+
+    fn _suite_row(idx, run): i64 {        # every helper in this codebase is `: i64`
+        if (idx == 0) { return "selfhost"; }
+        ...
+    }
+    println(_suite_row(i, 0));            # prints 6551721, not "selfhost"
+
+prints nine pool ADDRESSES where you wanted nine names. No diagnostic, exit 0 — the
+program is type-correct as far as the compiler is concerned, because `: i64` is exactly
+what you told it. Measured 6.6.6 (bite 27a) on the check driver's `--list-suites`.
+
+WHAT TO DO. Either annotate the helper honestly (`: cstring`), or print through a
+cstring-only primitive rather than the overloaded name — the check driver already has
+`_p(cstr)` for exactly this and the fix was `_p(name); _p("\n");`.
+
+⚠ THE SHAPE, not the symbol: any overload-dispatched stdlib name behaves this way, and
+`: i64` is this codebase's default annotation for *everything* (ADR-002), so the two
+collide constantly. When a stdlib call prints or formats the wrong KIND of thing, suspect
+the declared return type of whatever produced the argument before you suspect the callee.

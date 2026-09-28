@@ -779,3 +779,49 @@ gap, not a design choice, and per the repo's own standing rule a
 codegen/parser defect must never be written down as a language rule for
 users to code around. It was treated as temporary, and it was — the
 compiler was fixed one release later rather than the rule being kept.
+
+[[entries]]
+name = "a_hash_that_starts_an_attribute_name_is_not_a_comment"
+description = "Ten `#` words are TOKENS, not comments — `#naked`, `#inline`, `#pure`, `#io`, `#alloc`, `#must_use`, `#regalloc`, `#deprecated`, `#assert`, `#pe_import` — and the lexer keeps reading the line after them, so `#naked fn isr() {` is one line of code. Since 6.6.6 the name ENDS at a word boundary (whitespace, end of input, or `(`), so `#ioctl numbers` is an ordinary comment; before that it matched as a byte PREFIX and did not compile."
+category = "cyrius"
+---
+VERIFIED at 6.6.6 with `build/cycc` (each is line 1 of a small program):
+
+    #naked fn isr() {         ✓ the attribute + the fn on one line — valid, and
+                                the `{` is a real brace
+    #deprecated("old")        ✓ `(` also ends the name
+    # ioctl numbers           ✓ an ordinary comment
+    #ioctl numbers            ✓ also an ordinary comment (6.6.6)
+    #allocator notes          ✓   ”
+    #naked-eye check          ✓   ”
+
+THE RULE (v6.6.6): an attribute name ENDS at a word boundary — the next
+byte must be whitespace, end of input, or `(` (the `#deprecated(` /
+`#pe_import(` form). Anything else and the `#` opens a comment. Each of
+the lines above compiles to bytes IDENTICAL to the same program written
+with a space after the `#`.
+
+⚠ WHAT THIS ENTRY USED TO SAY, because the shape recurs. Until 6.6.6 the
+lexer compared a byte PREFIX and kept lexing the same line, so `#ioctl`
+was `#io` + the identifier `ctl` and the rest of the "comment" was parsed
+as code:
+
+    #ioctl numbers            ✗ error: expected '=', got identifier 'numbers'
+    #assertion holds          ✗ error: #assert: expected number or sizeof()
+    #iota                     ✗ error on the NEXT line
+
+The diagnostic pointed at the comment's SECOND WORD, and the set of words
+that broke a comment was invisible. This entry then told you to put a
+space after the `#` — a codegen/lexer defect written down as an authoring
+rule, which is the same shape as the retired "≤6 args" rule and is why
+the defect survived. When the compiler cannot compile valid cyrius, the
+compiler is the bug.
+
+TOOLS: since 6.6.5 `cyrlint`, `cyrfmt` and `cyrdoc` read these tokens the
+way the lexer does. Before that, all three took `#naked fn f() {` for a
+comment: cyrlint drew 15 false `unmatched closing brace` warnings on
+tests/tcyr/codegen/naked_fn_attribute.tcyr, `cyrius fmt` rewrote the
+fn's body flush left, and `cyrius doc --check` never counted an
+`#inline fn` (or a `pub fn`) and took a `#inline` line above a fn for its
+doc comment. The preprocessor directives (`#include`, `#ifdef`,
+`#define`, `#derive`, …) are whole-LINE directives and are unaffected.

@@ -1466,7 +1466,7 @@ self-contained. CI just needs the cc2 binary, not the full repo.
 
 [[entries]]
 name = "bench_library"
-description = "bench.cyr: nanosecond-precision benchmarking with min/max/avg and human-readable output"
+description = "bench.cyr: benchmarking with a MEASURED clock floor, resolution-gated min/max, picosecond accessors and a consumer-parsed row shape"
 category = "cyrius"
 ---
 BENCHMARKING (lib/bench.cyr):
@@ -1484,9 +1484,41 @@ API:
   bench_report_all(benches)   — print vec of benchmarks
 
   bench_avg_ns(b), bench_min_ns(b), bench_max_ns(b), bench_iterations(b)
+  bench_total_ns(b)
 
-TIMING: Uses clock_gettime(CLOCK_MONOTONIC_RAW) via syscall 228.
-Resolution is nanoseconds. Output auto-scales: ns → us → ms → s.
+  6.6.5 additions (every older symbol keeps its name and arity):
+  bench_avg_ps(b), bench_min_ps(b), bench_max_ps(b)   — picoseconds
+  bench_min_resolved(b)        — 0 if min/max are reporting the MEAN
+  bench_sub_floor(b)           — 1 when every window was at or under one
+                                 clock read (the ONE case that reports 0)
+  bench_windows(b)             — timed windows consumed, one clock PAIR each
+  bench_clock_overhead_ns()    — measured cost of ONE clock read
+  bench_clock_tick_ns()        — measured STEP of the clock (a different number)
+  bench_clock_recheck()        — re-measure; adopts a LOWER floor only
+
+⚠ MIN IS ONLY REPORTED WHEN A WINDOW CAN SUPPORT ONE (6.6.5). A window
+contributes to min/max only if its net duration is at least 100 x (floor +
+tick). Otherwise min and max report the MEAN and bench_min_resolved(b) is 0.
+Through 6.6.4 every window fed the min, net of a MEAN floor, so a real
+operation read min=0ns — filed from mabda, and true of cyrius's own
+bench_tagged/bench_float rows. See the field note
+'bench_min_over_windows_net_of_a_mean_floor'.
+
+TIMING, per target (6.6.5):
+  Linux x86_64/aarch64  clock_gettime(CLOCK_MONOTONIC_RAW=4) via syscall 228
+  macOS (arm64)         _clock_gettime_nsec_np(4)  — id 6 is MICROSECOND
+                        resolution in Apple's Libc, which is the 1,000 ns
+                        tick measured on ecb and ach
+  Windows               QueryPerformanceCounter (PE reroutes 0xF038/0xF039)
+                        — GetTickCount64's tick is 15 ms
+  AGNOS                 sys_uptime_us() (#95, rdtsc); #228 does not exist there
+Output auto-scales: ns → us → ms → s.
+
+ROW SHAPE IS A CONSUMER CONTRACT (goonj, hisab, mabda, chitra, vani, libro,
+szal parse it). Integer nanoseconds inside the row; every added line starts
+with '[' and never contains ' avg':
+  name: 250ns avg (min=250ns max=250ns) [100 iters]
+    [per op in ps: mean 250000 min 250000; min UNRESOLVED, shows the mean: ...]
 
 PATTERN: Define work functions, create bench, run, report:
   fn work_loop() { var s = 0; for (var i = 0; i < 1000; i = i + 1) { s = s + i; } return 0; }

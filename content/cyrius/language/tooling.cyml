@@ -161,18 +161,45 @@ added the auto-prepend for fuzz; check folded in by v5.7.50).
 
 == BUILD VERBS ==
 
-  cyrius build [--aarch64] [--target=cx] [--no-deps] [--strict-pin] [-D NAME] <src> <out>
-  cyrius run [--aarch64] <source.cyr | prog.cyx>
-  cyrius test [--aarch64] <test.cyr>          — exit 0 = pass
-  cyrius bench <bench.cyr>
-  cyrius check [--with-deps] <src.cyr>        — syntax-only
+  cyrius build [--aarch64] [--target=cx] [--no-deps] [--strict-pin] [--pie] [-D NAME] [<src> [<out>]]
+  cyrius run [--aarch64] [-D NAME] <source.cyr> [args...]   — args are the PROGRAM's argv (v6.6.5)
+  cyrius run <prog.cyx>                       — via cxvm; arguments REFUSED (cx has no guest argv)
+  cyrius test [--aarch64] [-D NAME] [<test.tcyr>...]   — 0..N files; exit 0 = pass
+  cyrius bench [<path|dir>]
+  cyrius check [--with-deps] <src.cyr>...     — syntax-only, 1..N files
   cyrius self                                 — cycc==cycc byte-identical
-  cyrius clean                                — wipe build/
+  cyrius clean [--dry-run]                    — wipe build/
   cyrius lib sync [--dry-run]                 — copy snapshot lib/*.cyr → ./lib/ (v5.11.58)
 
-`-D NAME` injects `#define NAME` at the top of the bundled
+`-D NAME` (or `-DNAME`) injects `#define NAME` at the top of the bundled
 source (preprocessor-style; useful for feature flags). The
-`-D` family was added during the v5.6.x optimization arc.
+`-D` family was added during the v5.6.x optimization arc; since
+v6.6.5 it reaches `run`/`test`/`tests`/`bench`/`fuzz`/`check` too, in
+either spelling and in any position.
+
+THE ARGUMENT RULE (v6.6.5, every verb and every delegated tool —
+cyrlint, cyrfmt, cyrdoc, cyaudit, cyrius_api_surface, ark, cyrsign,
+cyrsign-efi, cyrld, cyriusly, cyrius-init, ts_test_runner):
+  * flags may appear in ANY position (`lint f --strict` == `lint --strict f`);
+  * a `-`-prefixed token the verb does not declare is an ERROR that
+    names it — never a file name, never ignored;
+  * operand counts are enforced — an extra operand is processed or
+    rejected, never silently dropped (`lint a b c` lints all three);
+  * a global `-q`/`-v` never shifts the operands;
+  * `run` alone is stop-at-first-positional: after the source,
+    everything belongs to the program (`run -- p.cyr a` is the same);
+  * a value flag given TWICE is an error that names it — except `-D`
+    and `--features`, which accumulate (`--features a --features b` ==
+    `--features a,b`); before 6.6.5 the last one silently won;
+  * `cyrlint --exit-with-count` returns max(count, strict verdict 2),
+    so it can no longer switch `--strict`/`--strict-deferrals` off;
+  * `cyrius <verb> --help` prints exactly what the parser accepts —
+    both read the same spec tables in `cbt/cli_args.cyr`.
+Before 6.6.5 each verb hand-rolled its own loop; `clean --dryrun`
+deleted build/, `fmt f --chekc` rewrote the file, `build s --strict`
+wrote the binary to a file named `--strict`, all at exit 0. Code that
+passed an unsupported flag to a verb and relied on it being ignored now
+gets a named error.
 
 INCLUDE RESOLUTION IS ENTRY-FILE-RELATIVE (v6.5.7). `cyrius build`
 used to resolve every `include` against the process CWD, so a source
@@ -242,13 +269,14 @@ cxvm needs no translation table).
   cyrius port [--language=rust|python] <dir>  — port scaffold (v6.5.34)
   cyrius install <pkg>                        — fetch binary release
   cyrius update                               — re-resolve deps to latest tags
-  cyrius deps [--no-lock|--verify]            — manifest-driven dep resolve
+  cyrius deps [--lock|--no-lock|--verify|--relock] — manifest-driven dep resolve
 
 == QUALITY VERBS ==
 
-  cyrius fmt <file.cyr> [--check]
-  cyrius lint <file.cyr>
-  cyrius doc [--check] <file.cyr>             — also: --serve [port]
+  cyrius fmt [--check|--dry|--verbose|--write] <file.cyr>...   (modes EXCLUSIVE, v6.6.5)
+  cyrius lint [--strict] [--strict-deferrals] [--exit-with-count] <file.cyr>...
+                                              — one cyrlint run; --exit-with-count = TOTAL, clamped to 255
+  cyrius doc [--check] <file.cyr>...
   cyrius vet <source.cyr>                     — include-graph audit
   cyrius deny <source.cyr>                    — project-policy enforcement
   cyrius audit [--internal|--internal=platform-check]  — full sweep: self-host + test + fmt + lint (project-scoped since v6.4.78)
@@ -299,7 +327,7 @@ to Authenticode-sign a PE32+ EFI binary for UEFI Secure Boot.
 
 == TESTING VERBS ==
 
-  cyrius test [<file|dir>]                    — auto-discovers tests/tcyr/*.tcyr
+  cyrius test [<file.tcyr>...]                — no args: every tests/tcyr/**.tcyr (recursive); a DIR is `cyrius tests <dir>`
   cyrius bench [<file|dir>]                   — auto-discovers benches/*.bcyr + tests/*.bcyr
   cyrius fuzz [<file|dir>]                    — auto-discovers fuzz/*.fcyr + tests/*.fcyr
   cyrius soak [N]                             — N-iter self-host loop + tests/scyr/*.scyr
@@ -653,7 +681,94 @@ lines in every test/bench file.
 
 `[deps.<name>]` blocks declare git-resolved deps. Materialized
 into `lib/<name>_<basename>.cyr` (namespaced). Lockfile at
-`cyrius.lock` records resolved SHAs.
+`cyrius.lock` records (1) a `commit\t<sha>\t<name>\t<git>\t<tag>`
+line per git dep (CVE-21, v6.2.30 — a repointed tag is refused
+against it), (2) a `<sha256>  lib/<file>` line per vendored file,
+sorted, and (3) since v6.6.4 a `cyrius\t<pin>` TRAILER naming the
+stdlib pin the hashes were taken under. The trailer is what lets
+the resolver tell "the pin changed" (re-lock silently) from "the
+pinned snapshot's bytes changed under the same pin" — the latter is
+REFUSED by name with both hashes (hisab 2026-09-13: a `cyrius build`
+under an unchanged pin rewrote a committed lib file and re-locked
+it, and `deps --verify` passed on the mutation). `cyrius deps
+--relock` is the explicit accept. A lock written before 6.6.4 has
+no trailer: it fails open for ONE resolve and comes back stamped.
+
+Since 6.6.5 (CVE-43) the cached checkout in
+`$CYRIUS_HOME/deps/<name>/<tag>` is VERIFIED on every resolve, not
+just pinned: `.git` must be a real directory, `HEAD` must equal
+`refs/tags/<tag>^{commit}`, `git fsck` must pass, and the working
+tree must hash back to HEAD's tree with no extra files — computed
+in a PRIVATE throwaway index, so the cache's own stat cache,
+`assume-unchanged`/`skip-worktree` bits and config take no part and
+nothing inside the shared cache is written. Untagged git deps get
+the content half too (they float on the pin, not on the bytes).
+What this means in practice:
+
+  * a `touch` / `cp -a` / uid-mapped-namespace `git status` on the
+    cache is FINE (through 6.6.4 each of those was refused as
+    "tampered", for every project on the box);
+  * an edit inside the cache is REFUSED even when its mtime is
+    restored, even under `assume-unchanged`, and even if the cache
+    holds a local commit — as is any file the tag does not carry,
+    including one hidden by `.gitignore`;
+  * a hand-staged cache directory with no `.git` is REFUSED rather
+    than silently trusted, as is a clone of a DIFFERENT repository
+    parked at that name and tag (`remote.origin.url` must be the url
+    the manifest declares — compared with one trailing `/` and one
+    trailing `.git` normalised away, because `…/x` and `…/x.git` are
+    the same repository and comparing them exactly refused 19 live
+    declarations). `path = "../sibling"` remains the sanctioned local
+    route;
+  * the tree is compared as git compares it AND as RAW BYTES
+    (`hash-object --no-filters`), because a `.gitattributes` carried
+    BY THE TAG (`* text=auto`) otherwise launders a line-ending-only
+    edit past `diff-files`. A raw difference is accepted only when
+    re-running the tag's blob through the same conversion
+    (`cat-file --filters`) reproduces the working tree exactly, so a
+    legitimately CRLF checkout (`core.autocrlf=true`) still resolves;
+  * on native Windows NONE of this runs — `sys_fork` does not exist
+    there, so no git command can — and a pre-populated cache resolves
+    with a warning saying it was not verified, rather than a refusal
+    with a reason that would be untrue;
+  * the cache's own git config gets no vote: what a command-line
+    `-c` can override is overridden, and what it cannot is REFUSED —
+    `filter.*` / `diff.*` drivers (a program git RUNS while hashing,
+    which can print whatever bytes it likes), `include.*` /
+    `includeIf.*` (git follows them; `config --local --list` does not
+    print what they pull in), `core.autocrlf` / `core.eol`,
+    `core.worktree`, `extensions.worktreeConfig`, and any
+    `.git/info/attributes`;
+  * the refusal names the cache path and an OFFLINE recovery:
+        rm -f <cache>/.git/index
+        git --no-replace-objects -C <cache> -c core.fsmonitor=false \
+            -c core.hooksPath=/dev/null reset -q --hard refs/tags/<tag>
+        git -C <cache> clean -qffdx
+    Four reasons have no local repair and say so: an unreadable
+    `.git`, a damaged object store, hostile configuration inside
+    `.git`, and a cache of the wrong repository. For those, delete
+    the cache directory and re-resolve. The damaged-object-store
+    refusal quotes git's own first line, so a malformed OLD commit
+    does not read like a forged object.
+
+⚠ What it proves is narrower than "the checkout IS the tag":
+everything it reads lives inside the cache, so a local tamper commit
+with `git tag -f` moved onto it is indistinguishable offline. The
+`cyrius.lock` commit pin is the bound, and it is trust-on-first-use.
+Keep the lock committed.
+
+⚠ A dep whose tag commit trips an fsck POLICY check (an author line
+with no email, a bad date) still resolves — those message ids are
+passed as `warn`, because reading them as integrity failures made a
+valid dep unresolvable for ever. And `core.fileMode` is PROBED, not
+forced: on a filesystem that cannot store the exec bit (vfat, exfat,
+9p, a WSL `/mnt/c`) forcing `true` refused every 755 entry in the tag
+with no possible repair.
+
+Cost: warm `cyrius deps` on one dep goes from ~7 ms to ~41 ms
+(585-file dep) — a full `git fsck` is 11 ms typical, 70 ms on the
+largest dep in the ecosystem. The whole 138-checkout store verifies
+in ~6.3 s.
 
 [[entries]]
 name = "object_directive"
@@ -869,11 +984,24 @@ category = "cyrius"
   --strict-deferrals Exit 2 if any UNTRACKED deferral-language
                      marker is present (v6.0.63). cyrlint flags
                      deferred / broken-work markers — TODO, FIXME,
-                     SCAFFOLD, NOT_IMPLEMENTED, deferred, "for
-                     now", "not yet", "follow-up", "out of scope",
-                     ... — that are NOT cross-referenced by a
-                     CHANGELOG / issue / roadmap / version pointer
-                     on the same line. These use a SEPARATE counter
+                     SCAFFOLD, NOT_IMPLEMENTED, XXX (exact case) and
+                     deferred, "for now", "not yet", "follow-up",
+                     "later bite", "future bite", "out of scope"
+                     (ANY case, any run of spaces, since v6.6.5) —
+                     that are NOT cross-referenced by a CHANGELOG /
+                     roadmap / docs/ / issue / "See " / version
+                     (v6.6, v0.8.0 — any `v<digits>.<digit>` since
+                     v6.6.5) pointer ON A LINE THE TERM TOUCHES.
+                     v6.6.5: the unit is the COMMENT PARAGRAPH —
+                     consecutive comment lines (and a trailing
+                     comment plus the lines continuing it) are
+                     joined, so `# a later` / `# bite` and
+                     `# follow-` / `# up` are caught; a blank `#`,
+                     a code line or a #skip-lint line ends it. A
+                     pointer elsewhere in the paragraph does NOT
+                     track the term (a block-wide pointer hid one of
+                     the three mabda cases that motivated the join).
+                     These use a SEPARATE counter
                      from warnings (so the legacy backlog doesn't
                      break the existing --strict gate); the count +
                      per-line notes go to STDERR (stdout's last line
@@ -886,8 +1014,23 @@ category = "cyrius"
 
 == `cyrius doc` ADDITIONAL ==
 
-  --serve [port]     Serve generated HTML docs locally on
-                     `lib/http_server.cyr` (default port 8080).
+  ⛔ CORRECTED v6.6.5. This block advertised `--serve [port]` —
+  "Serve generated HTML docs locally on lib/http_server.cyr
+  (default port 8080)". THAT MODE HAS NEVER EXISTED.
+  programs/cyrdoc.cyr has no serve path; measured on 6.6.4,
+  `cyrius doc --serve` produced no output and exited 0, and
+  `cyrius doc --serve 8080` said "cannot read: 8080". Since
+  v6.6.5 an undeclared flag is an error that names the token,
+  so the spelling now fails loudly instead of quietly.
+  The same pass removed this file's claim that `cyrius lint`
+  takes `--check` (it never has — cyrlint opened a file called
+  "--check"); lint's real flags are listed above.
+
+  --check            Report undocumented public fns; the exit code is
+                     that count, CLAMPED TO 255 since v6.6.5 (it used
+                     to be returned raw, and an exit status is 8 bits,
+                     so 256 undocumented fns exited 0 — a clean bill
+                     of health for the worst file — while 257 exited 1).
 
 == `cyrius api-surface` FLAGS ==
 
@@ -895,6 +1038,15 @@ category = "cyrius"
                      current source. No flag → diff against
                      committed snapshot, exit 1 on drift.
   --snapshot=PATH    Diff against an alternate snapshot file.
+  --snapshot PATH    Same, space form (accepted since v6.6.5).
+  --scope project    Scan src/ only, excluding the vendored lib/.
+                     `--scope=project` is the equivalent attached form.
+
+  ⚠ Before v6.6.5 EVERY unrecognized token here was silently
+  ignored — `--updat`, `--scope=projct`, the space form of
+  `--snapshot`, and any stray positional — so the tool diffed
+  against the DEFAULT snapshot and reported a clean surface for
+  a question nobody had asked. They are errors now.
 
 == `cyrius capacity` FLAGS ==
 
@@ -904,8 +1056,18 @@ category = "cyrius"
 == `cyrius deps` FLAGS ==
 
   --no-lock          Don't write/check cyrius.lock
-  --verify           Verify lockfile SHAs match resolved tags;
-                     exit non-zero on mismatch
+  --lock             Re-hash lib/ into cyrius.lock, KEEPING the commit
+                     pins (v6.6.4 — it used to drop every `commit\t`
+                     line, after which a repointed tag was accepted)
+  --verify           Re-hash every vendored lib/ file against its
+                     lock line; exit non-zero on mismatch. (Tag pins —
+                     the `commit\t` lines — are checked at RESOLVE time,
+                     not here.) Reads the whole file
+                     since v6.6.4 — a lock past 64 KB used to stop
+                     verifying at the cut)
+  --relock           Accept a stdlib leaf whose pinned snapshot
+                     disagrees with the lock under an UNCHANGED
+                     [package].cyrius (otherwise refused, v6.6.4)
 
 == `cyrius distlib` FLAGS (v6.5.8) ==
 
@@ -1174,7 +1336,7 @@ N/M with each gate as PASS / FAIL / SKIP. The count grows every minor
   - Heap map: 100 regions / 0 overlaps at v6.5.10, structure intact
   - Test suite: every tests/tcyr/*.tcyr (260 files at v6.5.10)
   - Format: cyrfmt --check on stdlib + src
-  - Lint: cyrlint --check on stdlib + src
+  - Lint: cyrlint on stdlib + src (cyrlint has no --check; since 6.6.5 an unknown flag is refused by name)
   - api-surface: snapshot drift detection (5152 public fns at v6.6.1)
   - Capacity: each cap (frame, heap, code, fixup) within budget
   - Topic-grouped TS suite: lex_combined / parse_core /

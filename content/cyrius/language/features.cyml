@@ -13,6 +13,10 @@
 # enforced encapsulation boundary in the language (file-scoped `private`,
 # per-item `public`, covering fns AND global vars; private items are also
 # dropped from the exported symbol table).
+# v6.6.5 (2026-09-18): +1 entry struct_storage_class_v665 — a struct declared inside a
+# fn is a PER-CALL, PER-THREAD frame object (a literal used to compile as a global,
+# shared across recursion, threads and files), and inline-vs-pointer is now RECORDED at
+# the declaration rather than inferred from a neighbouring stack slot.
 # v6.4.4 (2026-07-05): +1 entry f32v4_packed_single_simd — SIMD arc
 # Phase 1 (128-bit packed single, structured-descriptor encoding, x86).
 # v6.4.5 (2026-07-05): SIMD arc Phase 2 — f32v_fmadd/f32v_dot matmul ops
@@ -278,6 +282,50 @@ SEMANTICS:
     if a downstream consumer needs C ABI compatibility.
 
 [[entries]]
+name = "struct_storage_class_v665"
+description = "Where a struct lives: inside a fn it is a PER-CALL, PER-THREAD frame object; at top level it is one shared object; `var p: T = <expr>` yielding an address is a POINTER to someone else's struct (v6.6.5)"
+category = "cyrius"
+---
+SYNTAX AND MEANING:
+    fn f(n) {
+        var a = P { n, n * 2 };   # per call, per thread
+        var b: P;                 # per call, per thread
+        var c: P = mk();          # a POINTER to what mk() returned — not a copy
+        var d: P = a;             # a COPY of a (all STRUCTSZ bytes)
+        return a.x + c.y;
+    }
+    var G = P { 1, 2 };           # ONE shared object in the data section
+
+WHAT CHANGED AT v6.6.5:
+    A struct LITERAL written inside a fn used to be compiled as a GLOBAL —
+    shared across recursion, shared across threads, and visible to every
+    later reference of that name in ANY file. `var cfg = P { 1, 2 };` inside
+    a library fn captured a consumer's top-level `var cfg = 5;`, silently.
+    It is a frame object now, like `var p: T;` has always been.
+
+    The compiler also RECORDS, at the declaration, whether a variable is the
+    struct or a pointer to one. Before v6.6.5 it inferred that from the shape
+    of the neighbouring stack slot and got it wrong for any pointer-mode
+    struct declared after a closed `{ ... }` block or after a `callptr` /
+    `bitset` / SIMD expression.
+
+WHAT FOLLOWS FROM IT:
+  - Operator overloading (`P_add`, `P_mul`, …) dispatches for a struct VALUE
+    wherever it lives — literal local, `var p: P;`, `var p: P = 1`, global —
+    and does NOT dispatch for a pointer-mode local, where `+` is pointer
+    arithmetic. Before v6.6.5 a struct LOCAL silently did an integer add.
+  - A closure capturing an enclosing struct or array copies it BY VALUE,
+    including a stack array referenced as `&buf`.
+  - `fn mk(): P { var p = P { 7, 8 }; return p; }` returns both fields.
+  - A multi-word struct local inside a SUSPENDING `async fn` is refused with
+    a diagnostic: a coroutine's heap frame lays its slots out in the opposite
+    direction to the stack, so `&p + off` would address a different local.
+    Single-word locals are fine.
+
+IF YOU RELIED ON THE OLD BEHAVIOUR (a literal that persisted across calls),
+declare it at top level — that is what it actually was.
+
+[[entries]]
 name = "expression_type_propagation"
 description = "Type annotations propagate through expressions for width-correct codegen"
 category = "cyrius"
@@ -337,7 +385,6 @@ WHERE IT MAY APPEAR (cycc 6.6.7 — each used to compile silently wrong):
     for a closure's `secret var`)
   - in a coroutine async fn it runs once, at completion; an `await`
     inside a defer body is refused
-
 
 USAGE:
   fn process_file(path) {
@@ -3259,7 +3306,7 @@ edit-compile round trip.
 
 [[entries]]
 name = "visibility_public_private_v650"
-description = "private / public — file-scoped visibility for fns and global vars (v6.5.0; scoped at symbol insertion since v6.5.38)"
+description = "private / public — file-scoped visibility for fns and global vars (v6.5.0; scoped at symbol insertion since v6.5.38; enforced on every resolution path incl. &fn, methods, struct receives since v6.6.4; forward references enforced and the whole file covered regardless of where the marker sits since v6.6.5)"
 category = "cyrius"
 ---
 SYNTAX:
@@ -3345,6 +3392,84 @@ private for both reasons.
 RESERVED WORDS: `public`, `pub` and `private` cannot be used as identifiers.
 They are part of the `TOKNAME_BUILTIN` reserved CLASS (see the reserved-word
 entry) — do not treat this as a three-name list.
+
+EVERY RESOLUTION PATH, NOT JUST THE DIRECT CALL (v6.6.4): the boundary is
+enforced per RESOLUTION SITE (fn side) — `_vis_check` is one helper, but each
+path that resolves a user identifier through FINDFN and emits its own
+call/fixup must call it. v6.5.0 wired three (ordinary call, tail call,
+operator overloading). hisab found `&_helper` callable from any file through
+callptr/fncallN; the sweep found EIGHT unchecked paths: `&fn`, `s.method()`,
+the retptr (asv) and pair (asp) struct receives (`var s: T = f()` and the
+inferred `var s = f()`), and four Win64-only SIMD receive/return paths. All
+eleven now check; `grep -n '_vis_check(' src/frontend/` is the list. Two
+same-class stamp gaps closed with it: a monomorphized instance inherits its
+BASE's visibility (a `public fn pgen<T>` in a private file used to refuse
+`pgen<i32>(42)` from another file while accepting `pgen(42)`), and top-level
+ARRAYS are stamped (PARSE_GVAR_ARR returned before the "one point every global
+var reaches", so `var _buf[N]` in a private file was never private). A
+field access on a private global reports ONCE per line (it resolved its base
+twice). Enum constants and type names carry no visibility — always public.
+THE MARKER IS SCOPED TO ITS ITEM (v6.6.4): `_TL_VIS` arms `_pub_pending` only
+when the next token can carry visibility — `var`/`secret`, `fn`/`async`, or a
+fn-attribute directive (`_PUB_CAN_ARM`, a POSITIVE list). Before, it armed
+unconditionally and only fn/var definitions cleared it, so `public enum E {..}`
+(and bare `public struct` / `union` / `impl` / `use`, and `public var a[N]`)
+in a private file silently re-exposed the NEXT fn or var — hisab's `_ad_pow`,
+one leak among 457 probes (456 refused). Pass 2 had the same shape one level deeper: its
+inline `var` skip re-armed at `public var` and the next PASS-2-ONLY definition
+(an impl's first method, the first relaxed-ordering fn after top-level code)
+inherited it — PARSE_IMPL and that path now clear a stale marker on entry.
+`public impl` therefore marks NO method; per-method `public fn` is the form.
+`public var a, b = f();` covers every name (it stamped b private). Derived
+CODECS inherit the type's `public` as the v6.6.3 accessors did — closing the
+leak would otherwise have made a public type's `T_to_json` unreachable — and
+the once-per-unit `_cy_enum_name_eq` helper is emitted public (a second
+private file's enum codec was refused when the first file was private).
+Globals on the PARSE_PROG path (after the first top-level statement) are now
+stamped; they were never private. Gate:
+tests/gates/frontend/public_marker_scoped_to_its_item.sh (56 rows; the 6.6.3
+compiler reds 30). PARSE_PROG itself clears a stale marker on entry too — the
+first declaration after top-level code used to consume one left by a
+`public var` above it.
+
+FORWARD REFERENCES ARE CHECKED, AND THE MARKER'S POSITION NO LONGER MATTERS
+(v6.6.5) — the last residual, and it was four holes rather than one. The
+enforcement above is only as good as what PASS 1 STAMPED, and pass 1 did not
+stamp: impl methods (all seven forks brace-skipped impl bodies), `mod`-scoped
+fns (a `GMOD == 0` guard), every fn after the FIRST TOP-LEVEL STATEMENT (pass 1
+stops there; PARSE_PROG keeps defining fns), and anything above the `private`
+line (the flip was recorded as pass 1 walked past the marker, so an earlier
+definition was prescanned while the file still read public — and a global above
+the line was never private in either order). An unstamped callee has no flag
+and no owner, so `_vis_check` returned at its FIRST test and a call that merely
+came earlier in the concatenated stream reached it from any file.
+
+⭐ THE SAME ROOT RAN THE OTHER WAY, IN ORDINARY INCLUDE ORDER, which is why
+this is not a corner case: pass 1 kept one entry per NAME, so a second file's
+same-named helper overwrote the first file's owner, arity and private bit
+before either body was parsed — FALSE `is private to its file` and FALSE
+`expects N arguments` on legal programs, and the two-file `_helper` example
+above REFUSED when b.cyr was included first (the private bit was only ever set,
+never cleared, so the PUBLIC fn inherited it). And with no pass-1 signature a
+forward call passing a >8-byte struct took the mask-0 ABI: silent SIGSEGV on
+x86, aarch64 and PE.
+
+Pass 1 now stamps every definition kind and is the AUTHORITY: the file-level
+mark happens once before either pass, the v6.5.38 identity rule runs in BOTH
+passes from one place (so a same-named definition splits in pass 1, before any
+forward call can bind), PARSE_FN_DEF finds the entry pass 1 gave THIS definition
+by its own `fn` token and takes its bit, and the bit is CLEARED for a public
+definition. Under it, `_vis_check` defers a reference whose callee has no owner
+and no body and re-judges it at the end of PARSE_PROG — fail-closed-later, so a
+future unstamped definition kind is reported rather than let through.
+Gates: tests/gates/frontend/visibility_private.sh (per-path axes, now in BOTH
+include orders), tests/gates/frontend/private_forward_reference.sh (7-fork
+static parity + a forward-vs-backward refusal differential) and
+tests/tcyr/crossos/forward_ref_abi_binding.tcyr (the ABI half, real hardware).
+
+NO PER-ITEM `private`: `private fn h()` is a hard error naming the file-level
+form (v6.5.56). ⚠ Until v6.6.5 it printed TWICE and privatised the file anyway,
+so a legitimate sibling fn was then reported private at its caller.
 
 [[entries]]
 name = "threads_detached_and_is_done_v658"

@@ -17,7 +17,8 @@
 # stack-arg codegen fix, and PURE cyrius has no arity limit at all
 # (5-20 args verified on real hardware). A rule that tells you to
 # restructure code around codegen is a bug report, not a rule.
-# 8 entries.
+# 12 entries (v6.6.6 — DERIVE with `grep -c "^\[\[entries\]\]"`, do not increment; the
+# line said 10 while the file held 11, which is why it says DERIVE).
 
 [[entries]]
 name = "per_os_target_flags_win_vs_linux"
@@ -530,3 +531,187 @@ DEFINED on a target does not mean it is ROUTED there.** For Mach-O and
 PE, grep the translation table, not the enum. The "syscall not routed"
 warning is gated on `_TARGET_MACHO == 2` — arm64 only — so an
 x86-Mach-O build compiles clean and dies at runtime.
+
+[[entries]]
+name = "the_stdlib_now_names_the_send_side_truncate_memfd_and_the_scheduler_pair"
+description = "v6.6.5. sys_sendmsg / sys_sendto / sys_ftruncate / sys_truncate / sys_memfd_create / sys_nanosleep / sys_sched_yield exist in lib/syscalls.cyr on every target. Before them a consumer had to hardcode the x86_64 number, and on ELF-aarch64 that runs a DIFFERENT, VALID syscall with a clean, silent build — raw 77 ran tee, raw 46 ran ftruncate, raw 44 ran fstatfs."
+category = "cyrius"
+tags = ["syscalls", "aarch64", "esysxlat", "portability", "wayland", "shm", "v6.6.5"]
+content = """
+**WHAT TO WRITE.** The names, always:
+
+    var fd = sys_memfd_create("buf", 1);        # MFD_CLOEXEC; -78 on macOS, < 0 on Windows
+    sys_ftruncate(fd, w * h * 4);
+    sys_sendmsg(sock, &msghdr, 0);              # SCM_RIGHTS fd-passing
+    sys_sendto(sock, buf, n, 0, &addr, alen);
+    sys_truncate(path, len);
+    sys_nanosleep(&timespec, 0);                # PE -> Sleep, macOS -> poll, agnos -> sleep_ms
+    sys_sched_yield();
+
+⛔ **WHY IT MATTERS MORE THAN AN ERGONOMIC WIN.** ELF-aarch64 passes an unrecognised syscall
+number straight to the `svc` — it has to, so native numbers survive. So the x86 number is not
+an error there, it is a different call. Measured under `qemu-aarch64 -strace` before v6.6.5:
+
+| you wrote | you meant | aarch64 ran |
+|---|---|---|
+| 319 | memfd_create | ENOSYS |
+| 77 | ftruncate | **tee** |
+| 46 | sendmsg | **ftruncate** |
+| 44 | sendto | fstatfs |
+| 35 | nanosleep | unlinkat(0, NULL, 0) |
+| 87 / 84 / 83 / 89 / 33 | unlink / rmdir / mkdir / readlink / dup2 | timerfd_gettime / sync_file_range / fdatasync / acct / mknodat |
+
+v6.6.5 routes all of those, so the x86 spelling now WORKS as well — but the name is still the
+answer, because six numbers stay unrouted on purpose: **24** (`sched_yield` on x86 is **dup3**
+on aarch64), 53 (socketpair / fchmodat), 52 (getpeername / fchmod), 21 (access / epoll_ctl),
+90 (chmod / capget) and 17 (pread64 / getcwd). A compat row for any of those would break the
+native call somebody already uses.
+
+⚠ **DO NOT WRITE THE AARCH64-NATIVE NUMBER UNDER AN `#ifdef CYRIUS_ARCH_AARCH64`.** It looks
+like the careful thing and it is the fragile one: a routing row matches a NUMBER and cannot
+tell your native number from the x86 number it is chasing. Three ecosystem repos had exactly
+that shape when v6.6.5 landed and all three break at their pin bump — thoth's `= 46` (meant as
+native ftruncate) becomes sendmsg, kybernet's `= 45` (truncate) becomes recvfrom, and attn11's
+`n = 83` (fdatasync) becomes mkdirat. ⚠ A **variable** number is rewritten too: the chain runs
+on whatever is in `x8` at run time, so `var n = 83; syscall(n, fd);` is not an escape.
+
+**OFF-LINUX, the wrappers do the right thing rather than the same thing.** memfd declines with
+-78 on macOS (Darwin has no memfd_create; shm_open is a different object model) and < 0 on
+Windows. nanosleep and sched_yield compose from `poll` on macOS, route to kernel32 `Sleep` on
+PE, and use `sleep_ms` on agnos. The agnos peer declares **no Linux constants at all** for
+these: #44 is its sched_yield, #46 time_unix, #47 sock_connect, #76 blk_open and #77 blk_read,
+so a minted `SYS_FTRUNCATE = 77` there would issue a raw block-device read.
+"""
+
+[[entries]]
+name = "the_clock_you_get_per_target_is_not_the_clock_you_asked_for"
+description = "6.6.5. Darwin CLOCK_MONOTONIC (id 6) is gettimeofday minus boottime with MICROSECOND resolution; Windows had only GetTickCount64's 15 ms tick until QPC; AGNOS has no syscall 228 at all. Three targets where a 'monotonic nanosecond clock' was not one."
+category = "cyrius"
+tags = ["platform", "clock", "macos", "windows", "agnos", "v6.6.5"]
+content = """
+`now_ns()` and `clock_now_ns()` look portable and were not. Measured per target:
+
+  **macOS.** Passing Darwin clock id **6** (`CLOCK_MONOTONIC`) gets you
+  `gettimeofday - boottime` in Apple's own Libc (`gen/clock_gettime.c`), whose `clock_getres` is
+  `NSEC_PER_USEC` — **microsecond** resolution. That is exactly the 1,000 ns tick recorded on
+  both ecb and ach for a year. Use **4** (`CLOCK_MONOTONIC_RAW` → `mach_continuous_time`), which
+  `lib/sakshi.cyr` and `src/backend/common/runtime.cyr`'s `_prof_clock_ns` already did. The
+  arm64 route RETURNS ns in the return register and does NOT fill the timespec; x86-macOS drops
+  the id entirely and composes µs from `gettimeofday`, a documented platform ceiling.
+
+  **Windows.** `syscall(228)` routed to kernel32!**GetTickCount64**, whose counter advances in
+  **15 ms** steps (measured on real cass, not quoted). Every duration under 15 ms read as 0 or
+  as one whole tick — so no cyrius program could time anything on Windows, and the bench
+  framework's floor calibrated to 0 because 1,024 calls do not move the counter. 6.6.5 adds the
+  PE reroutes **0xF038 / 0xF039** (QueryPerformanceCounter / Frequency) and
+  `sys_qpc_ns()`; GetTickCount64 remains as the fallback and as an INDEPENDENT clock for tests.
+
+  **AGNOS.** There is no syscall 228. A build emitted a raw `movl $0xe4,%eax; syscall` into a
+  kernel that does not define it, so the timespec read back was undefined. Use `#95`
+  `sys_uptime_us` (rdtsc-derived, needs no interrupts — `#40 uptime_ms` is FROZEN in a
+  foreground program because IF is cleared).
+
+⚠ **A COST and a TICK are different numbers, and on three of five targets the tick is larger.**
+Measured: linux 1,332 ns cost / 1,397 ns tick; ecb 11-39 / 1,000 (pre-fix); ach 540-571 / 1,000;
+pi 3,691 / 3,723; cass 0 / 15,000,000. Anything sizing a measurement window from the cost alone
+sizes for nothing on a coarse counter.
+
+⭐ **And the general lesson is about the SECOND caller.** `lib/chrono.cyr` was moved to `#95` at
+6.6.1; `lib/bench.cyr` has the same `now_ns` and was not, for four releases. A correction applied
+to one clock caller is not a correction. Both are now pinned on one gate axis
+(`tests/gates/platform/agnos_monotonic_clock_rdtsc.sh`), with an objdump emission check and the
+Linux build as the anti-vacuous control.
+"""
+
+[[entries]]
+name = "routing_a_syscall_number_is_only_half_of_portability_the_struct_width_is_the_other_half"
+description = "6.6.6. Every syscall-portability note in this repo is about the NUMBER. statfs showed the second half: Darwin's f_bsize is uint32 with f_iosize packed above it while Linux's is a full 8 bytes, so a shared offset table is still wrong — load64 returns f_bsize | (f_iosize << 32)."
+category = "cyrius"
+tags = ["platform", "syscall", "esysxlat", "macos", "aarch64", "statfs", "v6.6.6"]
+content = """
+The `statfs` repair at 6.6.6 had the familiar shape on the way in — aarch64-Linux's native
+`statfs` is **43**, ESYSXLAT's x86-compat row `accept 43→202` was reissuing it, and under
+`qemu-aarch64 -strace` a `syscall(43, "/", &buf)` traced as
+`accept(6293449, 0x7f…, [0]) = -1 errno=14`. That part is the documented shadow class: declare
+the OTHER arch's number and add a row (137→43), below the row that claims your product.
+
+⭐ **The part that was NOT documented anywhere is the struct.** Getting the number right lands
+you in a buffer whose layout differs per OS — and this repo already knew about differing
+OFFSETS (`STAT_MODE` is +24 on x86_64-Linux, +16 on aarch64-Linux, +4 on Darwin arm64). What
+`statfs` adds is a differing **WIDTH**:
+
+  Linux `struct statfs` (both arches, 120 B):  f_type@0(8)  f_bsize@8(8)   f_blocks@16 …
+  Darwin `struct statfs64`      (2168 B):      f_bsize@0(**4**)  f_iosize@4(4)  f_blocks@8 …
+
+So `load64(buf + STATFS_BSIZE)` on macOS returns `f_bsize | (f_iosize << 32)` —
+**4503599627374592** for a 4096-byte block on a 1 MiB-iosize volume, read off ecb. A caller
+multiplies that by a block count and reports a capacity. It never faults, never errors, and
+every offset in the table was *correct*.
+
+The answer is an **accessor, not a constant**: peers publish `statfs_bsize(buf)`, which is
+`load32` on Darwin and `load64` elsewhere. When a field's width differs across peers, an offset
+enum cannot express it and a comment will not stop anyone.
+
+⚠ Two smaller lessons from the same bite, both about notes going stale rather than being wrong:
+
+  * The agnos peer had written an **honest gap** note at v6.5.37 — "`sys_statfs` exists NOWHERE
+    else in this repo … the alternative was to invent statfs numbers for four more targets from
+    memory … an honest gap beats a plausible wrong number" — and recorded the upgrade path to
+    take when a cross-platform consumer appeared. The reasoning was right and the note became
+    FALSE the moment the consumer landed. An honest-gap note needs its trigger written into it,
+    and someone has to notice the trigger fired: yukti had been the consumer all along, silently
+    broken on ARM for four minors.
+  * A syscall with **no NAME in the peers** is invisible to the raw-literal diagnostic, because
+    that table is derived from names declared in BOTH peers. So "nobody has named it yet" is not
+    a neutral state — it is the state in which consumers hardcode numbers and nothing warns.
+    Naming the call is the fix; the ESYSXLAT row is only what makes the name correct.
+
+Numbers, all MEASURED rather than recalled (the rule that note demanded): Linux 137/138 x86_64,
+43/44 aarch64; Darwin **statfs64 345 / fstatfs64 346**, live-probed on ecb and ach against libc
+(the legacy `statfs(157)` fills a different, shifted struct); Windows has none, so the wrapper
+declines with -38. Pinned by `tests/gates/platform/statfs_family_routed.sh` and
+`tests/tcyr/crossos/statfs_family.tcyr`.
+"""
+
+[[entries]]
+name = "pollout_promises_pipe_buf_not_the_whole_write"
+description = "6.6.6. A blocking write larger than the pipe does not come back short — it waits until every byte is delivered — so poll(POLLOUT) then write(n) blocks on byte 65537 exactly as an unpolled write does. POLLOUT on a pipe promises PIPE_BUF (4096) bytes of room and nothing more."
+category = "cyrius"
+tags = ["platform", "pipe", "poll", "syscall", "deadline", "v6.6.6"]
+content = """
+Bounding a pump that feeds a child's stdin looks like this, and it is wrong:
+
+    if (_poll_fd(fd, 4, timeout_ms) <= 0) { return written; }   # POLLOUT
+    var w = sys_write(fd, buf + written, n - written);          # ... the whole remainder
+
+It was measured RED in 6.6.6 with a 1 MB source piped into a child that never reads: the
+poll returns ready (the pipe is empty), the write fills the 64 KB buffer and then **blocks
+for ever**, because a blocking `write(2)` of more than the pipe can hold does not return a
+short count — it waits until the whole request is delivered. A short count comes back only
+when a signal handler interrupts a write that has already transferred something.
+
+What POLLOUT actually promises on a pipe is that a write of up to **PIPE_BUF (4096)** bytes
+will not block. So the chunk is the bound:
+
+    var chunk_cap = n;
+    if (timeout_ms > 0) { chunk_cap = 4096; }   # PIPE_BUF — what POLLOUT promises
+    ... var chunk = n - written; if (chunk > chunk_cap) { chunk = chunk_cap; }
+
+The READ side does not need this: `read(2)` returns as soon as one byte is available, so a
+poll-then-read of any size cannot block.
+
+Two more things the same bite measured, worth having before you write one of these:
+
+  * **The deadline must be on the PUMP as well as the WAIT.** Every fork+exec verb in
+    `lib/regression.cyr`, `lib/process.cyr` and `programs/checks/` pumps the child's pipe
+    BEFORE it waits, so a wait deadline alone never runs — the runner is already blocked in
+    `sys_read`/`sys_write`. `tests/gates/toolchain/check_driver_bounded.sh` axis 2d pins it.
+  * **Writing into a child that already exited kills the WRITER with SIGPIPE**, default
+    disposition, no diagnostic — exit 141 from a runner that looks like it crashed. That is
+    unrelated to the deadline and is still open in this tree (pre-6.6.6 behaviour); a pump
+    with no SIGPIPE handling reports a dead child as its own death.
+
+`syscall(7, &pfd, 1, ms)` is the portable spelling: the backend translates 7 to Darwin poll
+(230) and to aarch64 `ppoll` (73) with the ms->timespec shift, which is why `lib/net.cyr`
+has used that literal since v6.2.10.
+"""
