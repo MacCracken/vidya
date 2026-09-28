@@ -4984,3 +4984,45 @@ ELSE' and the CHANGELOG claiming 'refuse anything the ABI cannot carry'. A compl
 in a comment is a claim about control flow, and it is cheap to check and cheap to get wrong.
 Do not write one until the early-return enumeration above is done.
 """
+
+[[entries]]
+name = "macho_arm64_unrouted_syscall_reran_stale_x16"
+description = "On arm64-macOS an unrouted syscall number did not fail: ESYSXLAT's Mach-O chain writes x16 (Darwin's syscall register) only on a MATCH and nothing defaulted it, so the svc silently re-ran whatever x16 last held — normally the PREVIOUS syscall — with the new arguments, returning a plausible value. The class shipped at least eight times and was fixed row by row until cycc 6.6.8 defaulted x16 to 0xFFFF at the chain head (xnu → nosys: SIGSYS, or -78 with SIGSYS ignored). A translate-by-chain emitter needs a DEFAULT for the no-match case, not more rows."
+category = "cyrius"
+tags = ["codegen", "aarch64", "macho", "darwin", "syscall", "esysxlat", "silent-failure", "cross-target", "v6.6.8"]
+content = """
+**Symptom.** `getpid()` then `syscall(<unrouted>, …)` on ecb returned the PID again. No
+crash, no errno — the wrong call ran. `tests/tcyr/crossos/syscall_ioctl_x86_compat.tcyr`
+passed on ecb for releases because its raw 16 had no row and re-ran ioctl out of x16 = 54,
+so the test that was supposed to prove the 16 row existed proved nothing.
+
+**Why.** `ESYSXLAT`'s `_TARGET_MACHO == 2` arm is a chain of `cmp x8,#linux; b.ne; movz
+x16,#bsd`. Each row writes x16 only when it matches. ESYSCALL preserves x16 across `svc`
+(the pipe/fork fixups rely on it), so after any syscall x16 holds that call's BSD number,
+and an unmatched number simply inherits it. Other x16 writers exist too (large-offset
+scratch, every `__got` reroute's `adrp/ldr/blr x16`), so "stale" means "whatever last wrote
+x16". x86-macOS never had the hole: an unmatched rax reaches Darwin UNCLASSED and SIGSYSes.
+
+**Fix (6.6.8).** One word at the chain head, guarded on query mode like every row:
+`movz x16, #0xFFFF`. xnu maps a number >= nsysent to nosys. The compiler's "syscall N not
+routed … will fault on macOS" warning had promised that all along; it was false on this
+backend until the default existed.
+
+**x86-macOS had a quieter twin.** With SIGSYS IGNORED, an unclassed number came back with rax
+unchanged — `syscall(4000)` returned 4000, a positive "success". EMACHO_SYSXLAT now ends with
+`_msx_tail`, classing a leftover number as Unix 0xFFFF, so both Macs answer -78.
+
+**The general lesson.** A translation table implemented as a chain of conditional writes has
+an implicit DEFAULT — whatever the destination held before. If that default is "the last
+value", every missing row is a silent wrong answer instead of a loud one, and each one gets
+found late, on hardware, and fixed by adding one more row. Give the chain an explicit
+failing default first; THEN the missing rows announce themselves (the ioctl test died rc 140
+on ecb the moment the default landed without the row).
+
+**Related 6.6.8 finding — a compile-time diagnostic keyed on the number alone.** The Mach-O
+reroutes for 228 / 35 / 1700 fire at ONE argument count, but the route query answered by
+number, so `syscall(228, id)` built clean and faulted. `_macho_warn_unrouted` now checks the
+arity. `tests/gates/platform/darwin_syscall_literals_routed.sh` probes every in-tree literal
+site through the compiler at its REAL argc, and compiles every shipped program and crossos
+test for both Macs, failing on any `not routed`.
+"""
