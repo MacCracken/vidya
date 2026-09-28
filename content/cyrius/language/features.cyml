@@ -308,7 +308,36 @@ category = "cyrius"
 ---
 defer { body } executes body when the enclosing function returns.
 Multiple defers execute in LIFO order (last declared = first to run).
-Return value preserved (push/pop rax around defer chain).
+The WHOLE return convention survives the defer bodies (cycc 6.6.7): an
+Ok/Err payload, a tuple / ret2 pair, a two-word struct, an f64, an
+f64v2/f64v4 — on x86 rax/rdx/r8/xmm0/xmm1, on aarch64 x0/x2/x3/q0/q1,
+on cx r0-r5. Before 6.6.7 only rax was kept, so a defer that called
+anything could zero an Ok payload.
+
+EVERY RETURN PATH (cycc 6.6.7):
+  A defer (and every `secret var` zeroise) runs on every return, a
+  tail-shaped `return f(x);` included — and `return Ok(v);` /
+  `return Err(e);` are exactly that shape. So a fn with a defer or a
+  secret var anywhere in its body NEVER tail-calls, and is never
+  inlined (`#inline` warns and is ignored). Deep self-recursion in such
+  a fn keeps a frame per level: loop instead, or move the defer into a
+  wrapper around a defer-free helper. Before 6.6.7 the tail call jumped
+  past every defer (a skipped unlock = a deadlock; a skipped secret
+  zeroise = CVE-47).
+
+WHERE IT MAY APPEAR (cycc 6.6.7 — each used to compile silently wrong):
+  - only inside a fn (closure and async fn included); top-level defer
+    is refused, like `secret var` / `stack var`
+  - a defer body cannot leave its fn: return / `?` / ret2 inside it are
+    refused, as is a break/continue jumping out of it (a loop opened
+    inside the body is fine); a break/continue with nothing to leave in
+    the same fn is refused too (it used to jump into another fn)
+  - a defer inside a closure belongs to the CLOSURE and runs when the
+    closure returns (it used to register on the enclosing fn — CVE-46
+    for a closure's `secret var`)
+  - in a coroutine async fn it runs once, at completion; an `await`
+    inside a defer body is refused
+
 
 USAGE:
   fn process_file(path) {
