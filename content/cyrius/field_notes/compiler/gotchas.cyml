@@ -19,7 +19,7 @@
 #   the prefix used to mean. Live paths were repaired at the v6.6.1 audit; remaining
 #   mentions are inside narratives about bugs found when the file was called that.
 #
-# 119 entries (DERIVED at v6.6.6 bite 21 review with `grep -c '^\[\[entries\]\]'`, which is the only
+# 121 entries (re-DERIVED at 6.6.10 bite 8 — it read 119 against a live 120; first derived at v6.6.6 bite 21 review with `grep -c '^\[\[entries\]\]'`, which is the only
 # way this number should ever be written. v6.6.1 was an AUDIT that took it 158 -> 62; it then
 # drifted to a live 63 while still reading 62, to 96 while 6.6.5 was in flight, and to 100
 # while still reading 98 — the header was not re-derived when an entry was appended.)
@@ -5025,4 +5025,57 @@ number, so `syscall(228, id)` built clean and faulted. `_macho_warn_unrouted` no
 arity. `tests/gates/platform/darwin_syscall_literals_routed.sh` probes every in-tree literal
 site through the compiler at its REAL argc, and compiles every shipped program and crossos
 test for both Macs, failing on any `not routed`.
+"""
+
+[[entries]]
+name = "float_literal_rational_divided_at_runtime"
+description = "Until cycc 6.6.10 a decimal float literal was an i64 numerator/denominator pair (numer = int*10^fd + frac, denom = 10^fd) that the backends divided at RUNTIME (cvtsi2sd/scvtf + divsd/fdiv). Three silent failures fell out: numer overflowed once the digit string reached 2^63; denom overflowed past 18 FRACTION digits whatever the significance (`0.0000000000000000001` was NEGATIVE, `9.999999999999999999` was -8.2); and the runtime divide double-rounded once numer passed 2^53, so ~3%/24%/21% of 16/17/18-digit literals were 1 ulp off, identically on every host. The fix converts at compile time with integer bignums (round-half-even, sticky, subnormals, +inf) and each backend loads the bits as one immediate. Integer literals >= 2^64 wrapped the same way and are now an error."
+category = "cyrius"
+tags = ["lexer", "float", "literal", "rounding", "bignum", "double-rounding", "overflow", "silent-failure", "cross-target", "seed-derive", "v6.5.28", "v6.6.10"]
+content = """
+**Symptom.** No error and no warning, only a different number. `9.999999999999999999` was
+0xc020e4bba3a48757 (-8.2). `12345678901234567890.0` and `0.0000000000000000001` came out
+negative. dhvani's `0.9222578791123097` ended in ...808b instead of ...808c. x86, aarch64
+(qemu), real pi and ecb all produced the same wrong bits, so no cross-host comparison could
+see it.
+
+**Why it hid.** `tests/tcyr/crossos/float_literal_precision.tcyr` scaled each literal by a
+power of ten and truncated with `f64_to`, which cannot see a 1-ulp error. A test that rounds
+away the property it claims to check will pass. It compares the IEEE-754 bit patterns now
+(38 rows, expected values computed independently in Python).
+
+**The trigger was misreported.** It is not "19+ significant digits". `3.141592653589793238`
+(19 digits, below 2^63) was right, while a ONE-digit literal with 19 fraction digits was
+garbage. The overflow was in the denominator.
+
+**The mechanism: two roundings of one value.** numer and denom are each rounded to a double
+(cvtsi2sd), and then the quotient is rounded again. Both are correctly rounded operations,
+but the composition is not. Correct rounding needs the exact rational and one rounding step,
+which is why the conversion now happens in the lexer, where the digits still exist.
+
+**Bignums under cybs.** `_flit_bits` and its helpers in src/frontend/lex.cyr use 32-bit limbs
+in 8-byte slots. That way no product needs 128 bits, and every shift is correct whether `>>`
+is logical or arithmetic. The quotient is 56 bits, computed by restoring shift-subtract, so
+there is no bignum-by-bignum long division. Every helper is small and uses few globals,
+because cybs fails silently past its per-fn limits. seed-derive's gen1 was checked on a
+3,000-literal sweep, since cycc's own source has no float literals and the fixpoint never
+runs this code.
+
+**The size bound is an argument, not a cap.** Only 800 significant digits are kept. A nonzero
+tail becomes one trailing `1`, which cannot change the result, because every double and every
+halfway point between two doubles has at most 767 significant digits. Values below 1e-324 or
+at or above 1e309 are decided before any bignum is built.
+
+**Integer twin.** LEXDEC, LEXHEX and LEXOCT had no overflow check either: `18446744073709551617`
+was 1, and so was `0x10000000000000001`. Only one such literal existed in the ecosystem,
+cyrld.cyr's `r_add - 0x10000000000000000`, and it was a no-op that compiled BECAUSE of the
+wrap. The hard error and that line's deletion had to land in the same change, or cyrld would
+stop building.
+
+**Lesson.** A number the lexer builds into a fixed-width field needs an overflow check at
+the point it is accumulated. v6.5.28 fixed the 32/32 packing of this same literal and did
+not look at the i64 arithmetic one line above it. Gates:
+`tests/tcyr/crossos/float_literal_precision.tcyr` and
+`tests/gates/frontend/integer_literal_overflow_refused.sh`. See CHANGELOG [6.5.28] and
+[6.6.10].
 """
