@@ -1301,3 +1301,30 @@ integer stored into an f64/f32 slot keeps its integer bits"; only compile-time i
 constants are judged, 0 and hex bit patterns >= 2^52 are exempt, a runtime untyped value
 (`var x: f64 = load64(p)`) is the legal boxed idiom and is not.
 Ecosystem at landing: 0 binary or diagnostic changes over 6,226 non-vendored files.
+
+
+[[entries]]
+name = "generic_using_t_as_a_struct_has_no_i64_instance"
+description = "Since cycc 6.6.10 a generic that uses a T-typed value as a struct (`p.y`) has no i64 or other scalar instance: every scalar call, tail call, &g and forwarding generic is a compile error naming it; struct inference binds the struct instance on every call path"
+category = "cyrius"
+---
+cycc < 6.6.10, silent: `fn g<T>(p: T) { .. p.y .. }` has no valid i64 form, so its BASE (the
+i64 instance) is emitted as a `rax = 0` dead stub — and that decision was made only while the
+base was being emitted, recorded nowhere. So `g<i64>(5)`, `g(5)`, `return g(5);`, `&g` (then
+fncall1) and `outer<i64>(5)` with `fn outer<T>(p: T) { return g<T>(p) + 2; }` all compiled
+and returned 0 (outer: 2); an inlinable body said "no struct type in scope for 'p'" instead.
+Worse, the STRUCT calls ran the stub too: struct inference existed only in the inline replay
+(positionally, re-typing the param i64), so `var r = g(p)`, `return g(p)`, `g(mk(2))`,
+`g(2, p)` (T on param 1), `g(q)` with `q: Pt` a parameter and `outer<Pt>(p)` forwarding
+`g(p)` all returned 0 — only the explicit `g<Pt>(p)` worked.
+SINCE 6.6.10: pass 1 records, BY NAME, each generic's T-typed names (params + `var q: T`
+locals), whether one is used as a struct (`x.f`; `n..m` is a range), and which param carries
+each type parameter; a fixpoint marks a generic that forwards a T-typed value or T itself into
+such a generic. Every scalar use of one is refused: "generic 'g' has no i64 (or other scalar)
+instance: it uses its type parameter as a struct ...". A struct argument (local, param,
+global, struct-returning call) instantiates `g$Pt` exactly like `g<Pt>(p)` on every path —
+expression, var init, tail (`return g(p)` leaves the tail path ONLY for such a callee: a
+scalar generic keeps its tail call, a 20M-deep `cnt<T>` must not overflow), argument, struct
+receive. Two inferred struct type args (or a struct beside a scalar) are refused like the
+explicit `g<Pt, Q>`. A signature naming `Box<Pt>` / `Box<T>` is the instance, not the base.
+⚠ The stub scan is lexical, so it errs toward MORE stubs — a loud refusal, never a silent 0.
