@@ -1271,3 +1271,33 @@ Width ladders that fall to "else: 8 bytes" are the recurring shape: an odd size 
 narrow) — `struct { a: u8; b: u8; }` is 16 bytes. For a binary layout use i8/i16/i32 + mask.
 ⚠ `#derive(accessors)` getters are `load64` and stay UNTYPED on purpose (bit-exact getter
 compares in svara/samay): `p.x + p.y` is a float add, `P_x(&p) + P_y(&p)` an integer one.
+
+
+[[entries]]
+name = "float_builtin_results_are_float_operands_since_6_6_10"
+description = "Since cycc 6.6.10 + - * / on a float builtin's result is float arithmetic (option D: a result flag, not a type); compares on builtin results stay integer; unary minus on an untyped float-initialised var and an integer constant into an f64/f32 slot warn"
+category = "cyrius"
+---
+cycc < 6.6.10, silent: a float-returning builtin (f64_sqrt, f64_add, f64_sin, f32_from, ...)
+left the estype of its LAST ARGUMENT, 0 under the i64-boxed idiom, so every + - * / on its
+result was INTEGER arithmetic on the bits: `f64_sqrt(u) * f64_sqrt(u)` = 0,
+`f64_sin(z) - f64_cos(z)` = -4.0, `f64_mul(u, v) / v` = 1, `-(f64_sqrt(v))` the integer
+negation, `-f64_sqrt(u) * 2.0` an integer multiply — and `f64_add(p, u) * 2.0` differed from
+`f64_add(u, p) * 2.0` because the argument ORDER decided the type.
+SINCE 6.6.10: the result is a float operand of + - * / on either side, directly, in parens
+and after unary minus, whatever the arguments were typed. It is a transient flag (code pointer
++ token index at the end of the call), NOT a type: ⚠ `==` / `<` on builtin results are still
+INTEGER compares of the bits (41 ecosystem sites rely on that — hex constants, hisab's -0
+check, ganita's `f64_floor(v) == v`); `f64_neg(a) < f64_neg(b)` is wrong for negatives — use
+f64_lt/f64_gt/f64_eq. `var x = f64_sqrt(u);` is still UNTYPED (declare `: f64`). Code that
+wants the integer ulp distance of two results must go through an untyped temp first:
+`var a = f64_atan(x); d = a - b;` (cyrius's own exp2_atan_bigtrig.tcyr had to).
+New warnings (CYRIUS_TYPE_CHECK=0 silences them): `var c = 1.5; -c` is integer negation
+(-3.0; `-z` of 0.0 is +0, `-n` of -2.5 is 1.75) → "unary minus on an untyped variable holding
+a float is integer negation (declare it f64)" — judged at the DECLARATION (float literal, f64
+value, float builtin, or a copy of such a var), not after later assignments. And
+`var t: f64 = 1;` / `t = 1;` / `p.x = 1;` / `P { 1, 2 }` store 0x1 (a subnormal) → "an
+integer stored into an f64/f32 slot keeps its integer bits"; only compile-time integer
+constants are judged, 0 and hex bit patterns >= 2^52 are exempt, a runtime untyped value
+(`var x: f64 = load64(p)`) is the legal boxed idiom and is not.
+Ecosystem at landing: 0 binary or diagnostic changes over 6,226 non-vendored files.
