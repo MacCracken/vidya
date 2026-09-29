@@ -3173,12 +3173,13 @@ CROSS-REF: field_notes/compiler/gotchas.cyml
 
 [[entries]]
 name = "async_await_futures_v6311"
-description = "async/await as first-class FUTURES over the cooperative epoll runtime: an `async fn` call builds a deferred Future (does NOT run the body); `await fut` forces it to its value. OPT-IN behind CYRIUS_ASYNC=1 (default-off). Needs lib/async.cyr + lib/alloc.cyr. Shipped v6.3.11. NOT stackless CPS coroutines (run-to-completion runtime)."
+description = "async/await: an `async fn` call builds a Future (does NOT run the body); `await` forces it. A plain Future runs its body ONCE (force-once memo, 6.6.10); an async fn that awaits in its body is a stackless COROUTINE (x86 family only). OPT-IN behind CYRIUS_ASYNC=1. Needs lib/alloc.cyr + lib/fnptr.cyr + lib/async.cyr. Shipped v6.3.11; coroutines v6.5.69; memo, arity, fall-off and await-value fixes 6.6.10."
 category = "cyrius"
 ---
-STATUS — GATED, default-OFF: behind `CYRIUS_ASYNC=1` (default off → cycc
-self-host byte-identical; the tokens are lexed unconditionally but the
-FEATURE is gated in pass 2). Set the env var to use it.
+STATUS — GATED, default-OFF: behind `CYRIUS_ASYNC=1` in the COMPILER'S
+environment (`CYRIUS_ASYNC=1 cyrius build …` passes it on; there is no
+command-line flag). Default off → cycc self-host byte-identical; the tokens
+are lexed unconditionally but the FEATURE is gated in pass 2.
 
 SYNTAX:
     async fn work(n): i64 { return n * 2; }   # `async` before `fn`
@@ -3187,29 +3188,48 @@ SYNTAX:
     var v   = await fut;                      # forces it -> 42
     var v2  = await work(21);                 # await a call directly
 
-MODEL — Futures, NOT coroutines:
-    Calling an `async fn f(p0..pn): T` compiles to a CONSTRUCTOR that
-    allocates a heap Future `[ &f$impl, argc, args… ]` and returns its
-    pointer; the body becomes a hidden `f$impl` reached only by pointer,
-    so the CALL DOES NOT RUN THE BODY. `await fut` lowers to
-    `future_force(fut)`, which calls the bundled impl with the bundled
-    args via fncallN and returns its value. The Future reuses the
-    closure-env heap construction. Futures are spawnable
-    (`async_spawn_future`) and forced cooperatively by `async_run`
-    (a blocking-epoll, run-to-completion driver). 0–6 params.
+PLAIN FUTURES (an async fn with no `await` in its body), every backend:
+    The call compiles to a CONSTRUCTOR that allocates
+    `[ &f$impl, argc|256, args…, done, value ]` and returns its pointer;
+    the body is a hidden `f$impl`. `await fut` = `future_force(fut)`: the
+    FIRST force runs the impl (fncallN) and keeps the value, every later
+    force answers from it (6.6.10 — before, each await re-ran the body).
+    A hand-built `[ fp, argc, args… ]` (no marker) re-runs per force.
+    0–8 parameters; 9+ is refused at the declaration, naming the fn
+    (6.6.10 — it used to compile and exit 70 at the first force).
+    Spawnable with `async_spawn_future`, driven by `async_run`.
 
-REQUIRES: `include "lib/alloc.cyr"` + `include "lib/async.cyr"` (the
-runtime — future_force / async_spawn_future / async_run — is shared across
-all targets, pure fncallN dispatch, no new syscalls).
+COROUTINES (an async fn that awaits in its own body, v6.5.69) — x86_64
+Linux, x86_64 macOS, PE only; aarch64 and cx refuse them by name:
+    Locals live in a heap frame; the argc word is `1|512` (SELF is the one
+    argument, whatever the declared arity — a 0-param coroutine SIGSEGV'd and
+    a 9-param one exited 70 before 6.6.10). Each force resumes at the last
+    `await` and runs to the next (answering 0) or to the end; a completed
+    coroutine answers with its value and runs nothing (6.6.8). Falling off
+    the end completes it with 0 and runs its defers (6.6.10 — it hung).
+    `await e` INSIDE a coroutine (6.6.10 — it used to yield the suspend
+    INDEX): e is evaluated and the coroutine suspends; at the next force
+      - e a call to an `async fn`, or a bare variable → forced; `await`
+        yields its value, re-suspending while a coroutine Future is still
+        pending (pass 1 marks async fns, so a callee defined later counts);
+      - anything else (a plain call, e.g. `await async_wait_fd(rt, fd)`,
+        the park idiom) → e's own value.
+    Under `async_run`, a coroutine must PARK before it suspends: a task that
+    returns without parking is finished as far as the reactor is concerned,
+    so an unparked `await` ends it with 0 there. Force such a coroutine
+    yourself with future_force.
 
-DEFERRED (documented): true stackless coroutines that suspend/resume
-MID-BODY across an `await` (a poll-driven state machine) need a poll-based
-runtime rework; also force-once Future memoization, async generic fns, and
-struct-returning async fns.
+REQUIRES: `include "lib/alloc.cyr"` + `lib/fnptr.cyr` + `lib/async.cyr`
+(future_force / future_pending / async_spawn_future / async_run). The
+constructor and lib/async.cyr ship in LOCKSTEP (the argc markers).
+
+DEFERRED: async generic fns, value-form vector params, by-value struct
+returns over 8 bytes (all refused by name).
 
 CROSS-REF: field_notes/compiler/gotchas.cyml
 `async_await_futures_dce_nameread` (the DCE name-read landmine when a
-modifier keyword precedes `fn`).
+modifier keyword precedes `fn`). Gate: cyrius
+tests/gates/frontend/coroutine_fnptr_and_completion.sh.
 
 [[entries]]
 name = "reserved_word_class_toknames"
