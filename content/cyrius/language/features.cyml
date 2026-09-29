@@ -17,6 +17,8 @@
 # fn is a PER-CALL, PER-THREAD frame object (a literal used to compile as a global,
 # shared across recursion, threads and files), and inline-vs-pointer is now RECORDED at
 # the declaration rather than inferred from a neighbouring stack slot.
+# v6.6.10 (2026-09-28): +1 entry compile_time_assert_v6610 — #assert (and array sizes)
+# take enum constants, bare or `Enum.NAME`; sizeof is a whole word; no cascade error.
 # v6.4.4 (2026-07-05): +1 entry f32v4_packed_single_simd — SIMD arc
 # Phase 1 (128-bit packed single, structured-descriptor encoding, x86).
 # v6.4.5 (2026-07-05): SIMD arc Phase 2 — f32v_fmadd/f32v_dot matmul ops
@@ -3737,3 +3739,49 @@ cap the way whole-program inlining does.
 
 RELATED: `#naked`, `#regalloc`, `#alloc` follow the same "attribute on the next fn" shape.
 
+
+[[entries]]
+name = "compile_time_assert_v6610"
+description = "`#assert A OP B, \"msg\";` — a compile-time check over literals, sizeof(T) and enum constants (bare or qualified since v6.6.10)"
+category = "cyrius"
+---
+`#assert` checks a compile-time fact and stops the build when it does not hold:
+
+    enum Wire { HDR = 16; }
+    struct Hdr { magic; len; }
+    #assert sizeof(Hdr) == Wire.HDR, "Hdr must match the wire header";
+
+Add a third field to `Hdr` and the build stops (exit 1, no output):
+
+    error:<source>:3:34: #assert failed: Hdr must match the wire header
+
+GRAMMAR — `#assert ATOM [OP ATOM] [, "message"];`
+  - ATOM is ONE of: an integer literal, `sizeof(T)` (a scalar name or a struct), or an
+    enum constant spelled `NAME` or `Enum.NAME`.
+  - OP is `== != < > <= >=`; a lone atom asserts non-zero.
+  - There is NO arithmetic inside an `#assert`. `#assert sizeof(P) == E.N * 8` compares
+    against `E.N` and then stops; precompute the constant as its own enum variant.
+  - It works at top level (a declaration-phase directive — structs, enums and fns may follow
+    it, wrapped or on one line) and inside a fn body. It emits no code.
+
+⚠ BEFORE v6.6.10 ENUM CONSTANTS WERE REFUSED. `#assert EB == 4` and `#assert E.EB == 4`
+failed with "expected number or sizeof()" on every backend, because #assert's evaluator
+predates the enum-constant fold. The same release taught BOTH array-size parsers the qualified
+form: `var buf[E.EB]`, `var a: i64[E.EB]` and the fn-local `var b[E.EB]` were refused while
+`var buf[EB]` and `syscall(60, E.EB)` compiled. All three now go through one recogniser
+(`_enum_atom_idx`, parse.cyr), so they cannot drift again.
+
+⚠ `sizeof` MUST BE THE WHOLE WORD. The recogniser compared a 6-byte prefix, so
+`#assert sizeofzz(P) == 16` compiled as if it said `sizeof` (v6.6.10 compares 7 bytes,
+including the terminator).
+
+⚠ ONE MISTAKE, ONE ERROR. A bad operand is reported by name — "expected a number, sizeof(T)
+or an enum constant" — and no longer followed by a message-less "#assert failed" for the same
+mistake.
+
+⚠ A VARIABLE IS NOT A CONSTANT. `var n = 4; #assert n == 4;` is refused, and a base that is a
+variable (`#assert p.x == 0`) is a field access, not an enum variant — the same rule the
+expression parser applies to `Enum.VARIANT`.
+
+RELATED: `enum` constants as array sizes (`var buf[Sz.BUF]`), `sizeof`, and
+`tests/gates/frontend/assert_enum_constants.sh`.
