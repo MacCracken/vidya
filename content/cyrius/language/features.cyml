@@ -30,6 +30,10 @@
 # <= 8 B typed `self` is by value, `var y: Q = x` from a by-value param copies. Updated:
 # unions (the field caps fire after a union), derive_str_fields (a re-derived struct with a
 # different layout is refused).
+# Updated: f64_named_type_and_operators — `+= -= *= /=` on an f64/f32 GLOBAL and in a `for`
+# step are float ops (a step takes all ten compound operators), f32 `+ - * /` warns on a
+# non-f32 right operand (kind 5), `var t = p.y` copies the float type; its stale "an intrinsic
+# cannot flank `*`" gotcha (fixed v6.4.83) is corrected.
 # v6.4.4 (2026-07-05): +1 entry f32v4_packed_single_simd — SIMD arc
 # Phase 1 (128-bit packed single, structured-descriptor encoding, x86).
 # v6.4.5 (2026-07-05): SIMD arc Phase 2 — f32v_fmadd/f32v_dot matmul ops
@@ -3068,7 +3072,7 @@ no-dependency, no-crates posture the one you get for free.
 
 [[entries]]
 name = "f64_named_type_and_operators"
-description = "`var x: f64` / `var x: f32` tags a variable IEEE-754 double / single, so bare `+ - * /` route to EMIT_F{64,32}_BINOP and `< > <= >= == !=` to EF{64,32}_CMP (a REAL float compare, not integer-bit ordering) on x86/PE/Mach-O (SSE2/SSE) + aarch64 (NEON) + cx. Scalar `f64` is also a legal fn RETURN type (xmm0, sentinel -9). Shipped v6.2.18 (f32 conv) + v6.2.19 (named f64) + v6.4.55 (f64 return) + v6.4.56 (f32 ARITHMETIC + comparison + WARN-only typecheck) + v6.4.57 (float params + compound assign)."
+description = "`var x: f64` / `var x: f32` tags a variable IEEE-754 double / single, so bare `+ - * /` route to EMIT_F{64,32}_BINOP and `< > <= >= == !=` to EF{64,32}_CMP (a REAL float compare, not integer-bit ordering) on x86/PE/Mach-O (SSE2/SSE) + aarch64 (NEON) + cx. Scalar `f64` is also a legal fn RETURN type (xmm0, sentinel -9). Shipped v6.2.18 (f32 conv) + v6.2.19 (named f64) + v6.4.55 (f64 return) + v6.4.56 (f32 ARITHMETIC + comparison + WARN-only typecheck) + v6.4.57 (float params + compound assign) + 6.6.11 (compound assign on a float GLOBAL and in a `for` step, the f32 right-operand warning, typed copies `var t = p.y`)."
 category = "cyrius"
 ---
 NAMED FLOAT TYPE (v6.2.19 for f64, v6.4.56 for f32):
@@ -3124,6 +3128,24 @@ local slot is tagged too, so `fn inc(x: f64): f64 { ... x + one ... }`
 computes instead of integer-adding the bit pattern; and `x += y`,
 `-=`, `*=`, `/=` on a float local route through EMIT_F{64,32}_BINOP.
 
+⚠ COMPOUND ASSIGNMENT ON A FLOAT GLOBAL AND IN A `for` STEP (6.6.11).
+Until 6.6.11 only a float LOCAL got float arithmetic from `+= -= *= /=`:
+    var G: f64 = 1.5;
+    G += 1.0;          # 6.6.10: 9216616637413720064 (the two bit patterns
+                       # added as integers); `G -= 0.5` and `G *= 2.0` gave 0
+    for (var x: f64 = 0.0; x < 1.0; x += 0.25) { ... }   # 6.6.10: 2 passes, not 4
+— silently, at top level and inside a fn, on x86 and aarch64 alike; an
+f32 global was garbage the same way. The classic-`for` step was its own
+integer-only copy of the compound arm and knew five of the ten compound
+operators (`i <<= 1` as a step was "expected '='"). Since 6.6.11 the
+statement and the step share one implementation (`_asg_compound_tok` /
+`_asg_compound_load` / `_asg_compound_op`, parse.cyr): `+= -= *= /=`
+on an f64 / f32 local OR global, in a statement, a top-level statement
+or a `for` step, are float operations, and the RIGHT operand is checked
+as `x = x op y` would be (`t += 1` on an f64 warns — 1's bits are a
+subnormal; write `t += 1.0`). `%= &= |= ^= <<= >>=` are integer
+operations on any variable, and a `for` step accepts all ten.
+
 TYPECHECK — A WARNING, NOT AN ERROR (v6.4.56/.57): a plain `+ - * /` on
 an f64/f32 value with a NON-float right operand warns on stderr:
 
@@ -3138,12 +3160,44 @@ an f64/f32 value with a NON-float right operand warns on stderr:
   (v6.4.57) suppresses literal 0, so `if (x > 0)` does not fire but
   `if (x > 5)` does.
 
-PARSER GOTCHA — a float/bit INTRINSIC CALL cannot flank a TERM-tier
-operator. `a * f64_from(2)` and `f64_from(2) * a` are both parse
-ERRORS (`* / % << >> >>>`); `+ - & | ^` and the comparisons are fine.
-Parenthesize (`a * (f64_from(2))`) or bind to a var. See
-field_notes/language/parser_syntax.cyml
-`float_bit_intrinsics_cannot_flank_term_operators`.
+  f32 GOT ITS OWN WARNING AT 6.6.11 (kind 5). An f32 `+ - * /` takes
+  the LOW 32 BITS of its right operand, so an f64 literal or an integer
+  there is reinterpreted, not converted — with `x: f32`, `x * 2.0` is 0,
+  `x + 1.0` is `x`, and `f32_from(u) + 1.0` drops the 1.0 — and the f32
+  arms never checked the right operand while the f64 arm beside them did:
+
+    var x: f32 = f32_from(3.0);
+    var y: f32 = x * 2.0;
+    warning:<source>:3:25: f32 arithmetic with a non-f32 right operand
+
+  Write `x * f32_from(2.0)`. An f64 literal is NOT narrowed for you.
+  Warn-only, like kind 1; `CYRIUS_TYPE_CHECK=0` silences it. The one
+  ecosystem site it found at landing (ranga, `one - ganita_f32_min(..)`)
+  is a callee declared `: i64` that returns f32 bits — bind the call to
+  a `var m: f32` first.
+
+TYPED COPIES (6.6.11). A `var` with no annotation that is a pure COPY of
+a declared float takes its type: `var t = p.y;` (an `f64` field, or a
+chain `o.i.x`), `var u = y;` (an f64 / f32 local or parameter) and
+`var g = G;` (a typed global) make `t`, `u`, `g` floats, so `t + t` is a
+float add. Before 6.6.11 the copy stayed i64 and `t + t` added the bit
+patterns (only `-t` noticed, as a warning). The rule is deliberately
+NARROW — the initialiser must be exactly a name or a field chain, the
+v6.5.21 rule `var x = f();` already applied to a declared `: f64`
+return. A literal (`var z = 0.0;`), a float builtin (`var s =
+f64_sqrt(u);`) and any arithmetic (`var t = p.y * 2.0;`) stay UNTYPED,
+so existing `==` / `<` code does not silently become float compares.
+Globals in the leading declaration block are judged by the same shape
+(`= G;` or `= G.f;`). Across 1,652 ecosystem compiles no output binary
+changed.
+
+PARSER NOTE — an intrinsic call on EITHER side of a TERM-tier operator
+(`a * f64_from(2)`, `f64_from(2) * a`, `x * f32_from(2.0)`) parses and
+computes correctly; it was a parse ERROR until v6.4.83 (re-verified on
+cycc 6.6.11). This entry said "cannot flank" until the 6.6.11 refresh —
+see field_notes/language/parser_syntax.cyml
+`float_bit_intrinsics_cannot_flank_term_operators` (a misnomer kept for
+link stability).
 
 Scalar f64 was usable before the named type (literals, f64_add/sub/mul/div,
 f64_lt/gt/eq, f64_sqrt/abs/floor, int<->f64 f64_from / f64_to) — v6.2.19 is
