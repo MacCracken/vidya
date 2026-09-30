@@ -5,6 +5,15 @@
 # failed; self_compile 731-734 ms; crosses cycc_aarch64 783,784 B /
 # cycc_win 1,154,048 B / cycc_cx 698,992 B; cyrld 919,600 B;
 # cyrius-lsp 119,600 B; core toolchain 6,893,216 B).
+# 6.6.11 (2026-09-29) — CONTENT additions, not a size refresh (cycc 6.6.11 is
+# 1,437,168 B; the other sizes above are still the 6.6.1 measurement): `cyrius
+# test`/`tests` grade the assert summary (tcyr_test_format; `test <dir>` is refused —
+# that entry had said otherwise); the gate SKIP protocol, exit 77 +
+# CYRIUS_CHECK_NO_SKIP=1 (audit_test_check_pipeline); in cyrius_cli the distlib
+# sidecar union over every target (x86_64-Linux CLI only; non-convergence refused),
+# `lint` failing on compiler refusals, `coverage` excluding `main`, CLI children
+# getting the whole environment, the Windows pinned re-exec; in cyrius_cyml_manifest
+# `deps` keeping the stdlib fold over a dep's thin `<leaf>-<profile>.cyr`.
 # ⚠ Sizes are re-measured at each refresh, never carried. This pass added the
 # v6.5.7-.10 tooling surface — `distlib --all` / `--check` and the
 # v6.5.10 `.deps` sidecar union, `cyrius coverage`'s four defects
@@ -229,6 +238,26 @@ directory (open-then-close), so `cyrius capacity benches` printed a
 full, plausible stats block measuring the auto-prepended stdlib and
 exited 0.
 
+CHILD PROCESSES GET THE WHOLE ENVIRONMENT (6.6.11). Every POSIX child
+the CLI starts (cycc, test binaries, git, the hasher, `/bin/sh`, ssh)
+gets `_envp`, built by `load_environ`. On Linux it read
+/proc/self/environ into a fixed 8,192-byte buffer, so every variable
+past 8 KB was silently absent in the child; on macOS there is no /proc,
+so children ran with an EMPTY environment — no PATH, HOME, TMPDIR,
+SSH_AUTH_SOCK or `CYRIUS_*`. Linux now reads to EOF and macOS hands on
+the kernel's own entry-stack envp (`_macho_envp()`), uncapped.
+Scripts that set `CYRIUS_*` knobs around `cyrius build/test/run` on a
+Mac now actually reach the compiler and the test.
+
+PINNED-VERSION RE-EXEC ON WINDOWS (6.6.11). A project whose `cyrius.cyml`
+pins another installed version is run by that version's CLI; on Windows
+that redirect could not work at all (it looked for `bin/cyrius`, not
+`cyrius.exe`, then called a `sys_execve` that is a -1 stub on PE), and
+`CYRIUS_RESOLVED=1`, the documented escape from a pin, was ignored.
+`cyrius.exe` now honours the flag and runs the pinned `cyrius.exe` as a
+child (with `CYRIUS_RESOLVED=1` set, so it does not redirect again),
+exiting with its code.
+
 `--strict-pin` (v5.11.58) augments the cycc child's envp with
 `CYRIUS_STRICT_PIN=1`, which v5.11.57's `_check_cyml_pin_drift`
 in lex.cyr reads to upgrade the pin-drift warning to a hard
@@ -321,9 +350,45 @@ declaration into a `sha` profile would OVER-report and could fail a
 legitimately-narrow consumer against the very check this re-enables.
 Profiles keep the pruned inference, and the gate asserts it.
 
+⭐ THE SIDECAR IS THE UNION OVER EVERY TARGET, SO ONLY AN x86_64-LINUX
+CLI CAN WRITE OR `--check` IT (6.6.11). The verify rounds used to compile
+the unit for the HOST only, so the recorded leaf set was whatever that
+host's `#ifdef` arms left undefined, and `distlib --check` drifted
+between a Mac or an ARM box and Linux CI (15 of 60 ecosystem bundles
+have different undefined sets per target). Each round now compiles for
+x86_64 Linux, Windows (`CYRIUS_TARGET_WIN=1`), x86_64 macOS
+(`CYRIUS_MACHO=1`) and aarch64 Linux and macOS (`cycc_aarch64`,
+`CYRIUS_MACHO_ARM=1`) and classifies the UNION. Only an x86_64-Linux
+CLI has a compiler per target, so on macOS, Windows and aarch64
+`distlib` REFUSES by name ("only an x86_64 Linux CLI has a compiler for
+each") rather than publishing a host-shaped sidecar; a missing
+`cycc_aarch64` is named. A symbol undefined on only SOME targets is
+credited to a declarer already in the unit, else the one dispatcher
+whose peer declares it, else the one non-peer declarer, else a named
+refusal. A verify that does not converge in 6 rounds is a REFUSAL
+("did not converge in 6 rounds — sidecar NOT written"); it used to
+publish the partial set as compile-verified at rc 0. `-v` prints each
+leaf a round adds. Measured over 74 ecosystem repos: sidecars
+byte-identical to 6.6.10's, `--all` 488 s vs 437 s.
+
 `cyrius sign-efi <pe> <key.der> <cert.der> <out>` (v6.4.47) dispatches
 to the standalone `cyrsign-efi` helper (sigil's RSA bignum + PKCS#7)
 to Authenticode-sign a PE32+ EFI binary for UEFI Secure Boot.
+
+`cyrius lint` FAILS WHEN THE COMPILER REFUSES THE FILE (6.6.11). Its
+compile pre-pass used to lint anyway unless the error message began
+with an entry on a SYNTAX allow-list, so `#derive(accessors)` on an
+enum, `#derive` on neither a struct nor an enum, and a duplicate
+variable all reported `0 warnings`, rc 0. The logic is inverted: every
+compiler error must be in a named CONTEXT set (`_lint_msg_is_context` —
+an error that only means "this file is not a whole program": `…
+requires include "…"`, an array sized by another file's enum, a struct
+from a sibling module as a `.field` target, a field type or a `sizeof`)
+or lint FAILS and forwards the diagnostic. A compiler that died after
+writing only a warning, or in its own words, is also a refusal naming
+what it did (killed / `exited N`) — it used to say "could not tell,
+linting anyway". Measured on 2,837 sibling-repo source files: verdicts
+identical to 6.6.10.
 
 == TESTING VERBS ==
 
@@ -379,6 +444,17 @@ PRINTED A NUMBER AND EXITED 0:
     not act on is worse than one it rejects, because the output looks
     like an answer to the question that was asked.
 
+`coverage` DOES NOT COUNT THE ENTRY POINT `main` (6.6.11). A public fn
+counts as covered only when a test NAMES it, and a program's depth-0
+`main` is run by its own file's `syscall(60, main())` (or the epilogue's
+auto-call), never by a test — so no project with an entry point could
+reach 100 % (ganita sat at 139/141 and bayan at 501/503 with `main` the
+only misses; now 139/139 and 501/501). It is excluded by the same rule
+`cyrius header` uses (`_src_is_entry_fn`, cbt/srcscan.cyr), by exact
+name only — `mainx` and `domain` still count. A `src/` whose only public
+fn is `main` has nothing to measure and gets the "no public functions
+found … not a pass" error.
+
 ⛔ THE FAIL-OPEN VERB FAMILY (v6.5.8). `doc`, `vet`, `deny`, `audit` and
 `coverage` all absorbed a bogus argument and exited 0. `doc <missing>`
 printed NOTHING — the worst shape, because empty output from a doc
@@ -424,9 +500,35 @@ category = "cyrius"
 `.tcyr` files are runnable Cyrius programs that follow the
 test-runner contract. `cyrius test` (no args) auto-discovers
 `tests/*.tcyr` RECURSIVELY — so both `tests/tcyr/*.tcyr` (this
-repo's layout, 260 files at v6.5.10) and a flat
-`tests/<name>.tcyr` (what `cyrius init` scaffolds) are found. A
-positional argument may be a FILE or a DIRECTORY (v6.5.7).
+repo's layout, 403 files at 6.6.11) and a flat
+`tests/<name>.tcyr` (what `cyrius init` scaffolds) are found.
+`cyrius test <file>...` takes FILES only — a directory is refused
+with `not a file`; run a subtree with the plural
+`cyrius tests <dir>`. (This entry said "a FILE or a DIRECTORY" until
+the 6.6.11 refresh; the singular verb never walked a directory.)
+
+⚠ HOW `cyrius test` / `cyrius tests` GRADE A TEST (cycc 6.6.11). Exit 0
+is no longer enough. The runner captures the test's stdout (and echoes
+it back) and applies the rule every other `.tcyr` reader in cyrius
+already used (the check driver, CI, the cross-OS runner): when the
+test's SOURCE contains `assert_summary(`, the LAST stdout line that
+starts `N passed, M failed` must exist with N >= 1 and M == 0. So each
+of these, which scored PASS before, now FAILS by name:
+  - a test that died before its summary with exit 0
+    ("no assert summary on stdout: the test stopped before
+    assert_summary() or ran nothing");
+  - a test that asserted nothing (`0 passed, 0 failed`);
+  - a body run TWICE — a defined `main` plus a top-level `main();`,
+    which the epilogue's auto-call of `main` runs again (measured:
+    `1 passed, 1 failed`, exit 0).
+A test that never calls `assert_summary(` is graded on its exit code
+alone, and a summary line reporting failures fails whatever the exit
+code. So end a `.tcyr` with EXACTLY ONE summary:
+  - no `main`:   `var r = assert_summary();` (+ an explicit exit), as
+                 below;
+  - with `main`: `return assert_summary();` inside it, and the file
+                 ends `syscall(60, main());` — never a second bare
+                 `main();`.
 
 Standard shape:
 
@@ -678,6 +780,15 @@ exactly one edit (here).
 `include "lib/<name>.cyr"` to bundled source for
 build/test/bench/fuzz/check/soak/smoke. Avoids repeating include
 lines in every test/bench file.
+
+⚠ A stdlib leaf and a named dep's THIN PROFILE of the same package
+(6.6.11). When a stdlib leaf `<leaf>` (say `sigil`) is in the
+resolution AND a `[deps.<leaf>]` git dep — yours or a dependency's —
+names that package's thin profile (`dist/sigil-mldsa.cyr`, or a
+`<leaf>_<x>.cyr`), the profile is neither vendored nor auto-included:
+the stdlib fold already carries it, and both copies used to land in one
+unit (bote over libro: 232 duplicate fns, five arity errors, a failed
+build). A stale vendored copy is removed, with one `note:` each.
 
 `[deps.<name>]` blocks declare git-resolved deps. Materialized
 into `lib/<name>_<basename>.cyr` (namespaced). Lockfile at
@@ -1354,6 +1465,35 @@ N/M with each gate as PASS / FAIL / SKIP. The count grows every minor
 
 ⚠ check.sh's grep summary can mask a `.tcyr` segfault / exit-code
 failure. Run a per-file exit-code loop before claiming green.
+
+== THE GATE SKIP PROTOCOL — EXIT 77 (cycc 6.6.11) ==
+
+A shell gate that COULD NOT RUN its check (missing tool, host, fixture,
+/proc, wine, …) prints its SKIP line and exits **77** (automake's SKIP).
+Exit 0 means it ran and passed; anything else is a FAIL; 124 is the
+supervisor's deadline alone. Both runners score 77 the same way — the
+check driver (`_gate_score`, programs/checks/main.cyr) and
+`scripts/check.sh` (`_chk_gate`): a SKIP row with its own count, never a
+pass. A run with skips ends `GREEN, with N gate(s) SKIPPED — no failure,
+but not everything was checked` and lists them (exit stays 0), instead
+of ALL GREEN.
+
+`CYRIUS_CHECK_NO_SKIP=1` turns every SKIP into a FAIL (`SKIP REFUSED`).
+CI runs the driver's delegated rows under it, so a CI runner missing a
+tool goes red instead of green. The variable is read by BOTH runners
+with one contract: `1` = strict, unset / empty / `0` = report skips,
+anything else (`=yes`, `=true`) is REFUSED with exit 2 before anything
+runs — a strict mode that silently read "off" would be a no-op.
+
+⛔ WHY: until 6.6.11 the shell-gate protocol was binary. A gate that
+could not run had only `echo "SKIP: …"; exit 0`, and both runners
+scored that as a PASS — the SKIP line was prose nobody graded, and
+`CYRIUS_CHECK_NO_SKIP` (added for the driver's own rows at 6.6.9) never
+reached a shell gate. The census in
+tests/gates/toolchain/check_driver_skip_is_not_pass.sh (axis 11) now
+holds every script under tests/gates to it: none may print SKIP and
+then exit 0 (a planted `{ echo "SKIP: …"; exit 0; }` is reported by
+file:line). When you write a gate, a whole-gate skip is `exit 77`.
 
 == LAYER 2 — `cyrius audit` (dev-loop driver) ==
 
