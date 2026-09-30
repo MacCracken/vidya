@@ -19,6 +19,9 @@
 # the declaration rather than inferred from a neighbouring stack slot.
 # v6.6.10 (2026-09-28): +1 entry compile_time_assert_v6610 — #assert (and array sizes)
 # take enum constants, bare or `Enum.NAME`; sizeof is a whole word; no cascade error.
+# v6.6.11 (2026-09-29): +1 entry string_literal_escapes_and_line_accounting_v6611 —
+# an unknown escape is a lex error, `\`+newline keeps its bytes, a newline inside a
+# string counts as a line (diagnostics were one line high per newline; CVE-55).
 # v6.4.4 (2026-07-05): +1 entry f32v4_packed_single_simd — SIMD arc
 # Phase 1 (128-bit packed single, structured-descriptor encoding, x86).
 # v6.4.5 (2026-07-05): SIMD arc Phase 2 — f32v_fmadd/f32v_dot matmul ops
@@ -3844,3 +3847,71 @@ expression parser applies to `Enum.VARIANT`.
 
 RELATED: `enum` constants as array sizes (`var buf[Sz.BUF]`), `sizeof`, and
 `tests/gates/frontend/assert_enum_constants.sh`.
+
+
+[[entries]]
+name = "string_literal_escapes_and_line_accounting_v6611"
+description = "String-literal escapes are a CLOSED list: since cycc 6.6.11 any other byte after `\\` is `unknown string escape`; `\\` + newline KEEPS the newline (it is not a C line-splice); and a newline inside a string counts as a source line, so diagnostics after a multi-line string name the right line and file"
+category = "cyrius"
+---
+THE WHOLE ESCAPE LIST for string literals (char literals have their own, shorter ladder):
+
+    \n  \r  \t  \0          LF, CR, TAB, NUL
+    \\  \"  \'              backslash, double quote, single quote
+    \a  \b  \f  \v          BEL, BS, FF, VT (v5.7.13)
+    \x##                    one byte, exactly 2 hex digits (`\x1b`)
+    \u####                  one BMP codepoint as 1-3 UTF-8 bytes, exactly 4 hex digits
+    \u{1..6 hex}            1-4 UTF-8 bytes, up to U+10FFFF (D800-DFFF refused)
+    \ + LF                  KEEPS the LF (0x0A)
+    \ + CR LF               keeps BOTH bytes (0x0D 0x0A)
+
+⚠ SINCE 6.6.11 ANY OTHER BYTE AFTER `\` IS A LEX ERROR, reported at the backslash:
+
+    var s = "ab\q";
+    error:<source>:1:12: unknown string escape
+
+cycc 6.6.10 and earlier dropped the backslash and stored the byte, so `"ab\q"` compiled to
+`abq` with no diagnostic (char literals already refused an unknown escape). A comment-,
+char- and string-aware scan of every cyrius source under ~/Repos and ~/.cyrius found no
+other escape in use when this landed, so nothing downstream broke. Write a literal
+backslash as `\\`.
+
+⚠ `\` AT THE END OF A LINE IS NOT A C LINE-SPLICE. It is an escape whose value is the
+newline, so the string still contains it:
+
+    var s = "a\
+b";
+    # s is 3 bytes: 'a', 0x0A, 'b'
+
+That is the v6.5.18 contract `cyrius fmt` relies on when it wraps a long literal
+(tests/gates/toolchain/cyrfmt_string_continuation.sh). If you want the two halves JOINED,
+end the first half with `"` and start a second literal; do not reach for `\`.
+
+⚠ A NEWLINE INSIDE A STRING IS A SOURCE LINE (6.6.11). LEX's string loop stored a raw LF
+(and a `\` + LF) without bumping its line counter, so after any multi-line string every
+later token was reported ONE LINE HIGH PER NEWLINE:
+
+    var s = "a
+    b
+    c";
+    var t = 1;
+    var x = ;      # line 5 — 6.6.10 reported `error:<source>:3:9: unexpected ';'`
+
+A wrong line number was the mild symptom. Line 1 of the NEXT `include` landed on that
+include's own `#@file` marker line and printed a bare `error:4:12:` with no file name; and
+`private`, which decides a token's FILE from its line, attributed code to the wrong file,
+so a call to another file's private fn COMPILED and the privacy error (if any) landed on an
+innocent name (CVE-55). The "diagnostics in backend/x86/fixup.cyr are one line high" report
+was this defect, triggered by the single raw-newline literal in parse_expr.cyr. Since 6.6.11
+both paths count the line; the string token itself keeps its OPENING line, matching the
+column its diagnostic head prints.
+
+WHAT YOU CAN DO WITH A NEWLINE IN SOURCE: raw newlines inside a literal are legal and stay
+in the string (as does `\` + newline). Neither changes line numbering any more, so there is
+no reason to avoid multi-line literals for diagnostic accuracy.
+
+GATES: tests/gates/frontend/lexer_errors_name_file_line.sh (axis 6: the line after a
+multi-line string, the include's file name, and the `private` refusal of a cross-file call
+that compiled on 6.6.10; axis 4: the escape rules). CROSS-REF:
+field_notes/compiler/gotchas.cyml
+`file_attribution_is_a_line_lookup_so_the_lexer_line_counter_is_a_security_boundary`.
