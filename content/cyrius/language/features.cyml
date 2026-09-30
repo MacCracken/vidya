@@ -34,6 +34,8 @@
 # step are float ops (a step takes all ten compound operators), f32 `+ - * /` warns on a
 # non-f32 right operand (kind 5), `var t = p.y` copies the float type; its stale "an intrinsic
 # cannot flank `*`" gotcha (fixed v6.4.83) is corrected.
+# Updated: async_await_futures_v6311 — the reactor resumes a coroutine whose `await` did not
+# park (it used to finish it with 0; the "force it yourself" advice is withdrawn).
 # v6.4.4 (2026-07-05): +1 entry f32v4_packed_single_simd — SIMD arc
 # Phase 1 (128-bit packed single, structured-descriptor encoding, x86).
 # v6.4.5 (2026-07-05): SIMD arc Phase 2 — f32v_fmadd/f32v_dot matmul ops
@@ -3387,14 +3389,26 @@ Linux, x86_64 macOS, PE only; aarch64 and cx refuse them by name:
     the words the expression had pushed before the await are kept in the
     coroutine frame across the suspend (6.6.10 — they were lost, so
     `b + await five()` gave 5 and the store64 form SIGSEGV'd).
-    Under `async_run`, a coroutine must PARK before it suspends: a task that
-    returns without parking is finished as far as the reactor is concerned,
-    so an unparked `await` ends it with 0 there. Force such a coroutine
-    yourself with future_force.
+    Under the reactor (`async_spawn_future(rt, co(..))` + `async_run(rt)`, or
+    `task_join(rt, h)`) a coroutine is driven to its value. One that PARKS
+    (`await async_wait_fd(rt, fd)` / `async_wait_writable`) sleeps until its fd
+    is ready; one whose `await` did not park (an `await` of a Future, or of a
+    call that does not park) stays runnable and resumes on the next step, and
+    while one does the Linux / macOS / Windows reactors still poll — without
+    blocking — for the fds, timers and deadline sentinels other tasks are
+    parked on, so neither side starves (6.6.11). ⚠ Until 6.6.11 every backend's
+    `_async_step` marked a task that returned still-READY as DONE, so such a
+    coroutine was finished with the 0 its suspend returned (measured: 0 where
+    `future_force` gave 41), and this entry told you to force it yourself
+    with future_force. That workaround is no longer needed.
 
 REQUIRES: `include "lib/alloc.cyr"` + `lib/fnptr.cyr` + `lib/async.cyr`
 (future_force / future_pending / async_spawn_future / async_run). The
 constructor and lib/async.cyr ship in LOCKSTEP (the argc markers).
+(6.6.11: the constructor lost a redundant leading skip-`jmp` that sat in
+no fn's range — DCE's seed pass took it as a root for the NEXT fn, so the
+fn defined right after an `async fn` was never reported dead. 5 B less per
+async fn on x86.)
 
 DEFERRED: async generic fns, value-form vector params, by-value struct
 returns over 8 bytes (all refused by name).
