@@ -1,7 +1,9 @@
 # Cyrius — Stdlib Modules (per-module usage)
 # How to use specific stdlib modules — APIs, conventions, gotchas.
-# 20 entries — a CURATED subset of the 102 lib/*.cyr modules (not the
-# full surface). Header refreshed 2026-08-07 at v6.5.10: `file_locking`
+# 21 entries (re-derived 6.6.12) — a CURATED subset of the 104 lib/*.cyr modules
+# (6.6.12; not the full surface). 6.6.12 (2026-09-30): +1 entry
+# file_read_whole_errno_contract_v6612 — the unbounded `file_read_whole` now passes the
+# negative errno through `*len_out` (it overwrote it with 0). Header refreshed 2026-08-07 at v6.5.10: `file_locking`
 # gained the v6.5.7 additions to the portable x* wrapper set
 # (xmkdir / xmkdir_p / xsymlink / xreadlink / xlink, joining the v6.5.2
 # xrmdir) plus the found-by-ports Darwin routing traps that came with
@@ -992,3 +994,46 @@ Gate: `tests/tcyr/crossos/tls_alloc.tcyr` — unique monotonic slots >= 16,
 a high slot (100) round-trips through the grown backing, and allocated
 slots stay disjoint from the frozen 0-15 range. Runs on real hardware
 via the `vr01_` glob.
+
+
+[[entries]]
+name = "file_read_whole_errno_contract_v6612"
+description = "`file_read_whole(path, &n)` (lib/io.cyr) returns a NUL-terminated buffer with the byte count in `n`, or 0 with `n` = a NEGATIVE errno. Since cycc 6.6.12 the unbounded form keeps the errno (it overwrote it with 0, so a missing file, a directory and a refused allocation all read as `n == 0`); `file_read_whole_max` always did. Test the BUFFER for 0 — an empty file is a non-zero buffer with n = 0"
+category = "cyrius"
+tags = ["stdlib", "io", "file_read_whole", "errno", "error-handling", "v6.6.12"]
+---
+THE CONTRACT (lib/io.cyr), one for all three forms:
+
+    var n = 0;
+    var buf = file_read_whole(path, &n);          # unbounded (a ceiling of ALLOC_MAX - 1)
+    var buf = file_read_whole_max(path, max, &n); # never more than `max` bytes
+    var buf = file_read_whole_a(a, path, max, &n);# buffers drawn from Allocator `a`
+    if (buf == 0) {
+        # n is a NEGATIVE errno: the open's or read's own (-ENOENT -2, -EISDIR -21, ...),
+        # -EFBIG (-27) past `max`, -ENOMEM (-12) when a buffer could not be allocated,
+        # -EINVAL (-22) for a negative `max`
+    } else {
+        # n bytes, NUL-terminated; an EMPTY file is a real buffer with n == 0
+    }
+
+⚠ WHAT CHANGED AT 6.6.12. The unbounded wrapper was `file_read_whole_max(path,
+ALLOC_MAX - 1, len_out)` followed by `if (buf == 0) { store64(len_out, 0); }` — it overwrote
+the errno `_max` had just stored. A read error was never mistakable for an empty file (the
+returned buffer tells them apart: 0 vs a buffer), but the one form with no bound to pick
+could not say WHICH failure it was. Measured: a missing path gives `n == -2` on 6.6.12 and
+`n == 0` with the 6.6.11 stdlib; a directory gives `n == -21`.
+
+HOW TO READ IT: test the buffer, then the length. All 24 in-tree callers and every ecosystem
+caller surveyed at 6.6.12 already test the buffer for 0 before reading the length; code that
+loops `while (i < n)` without testing the buffer runs zero times on a negative `n`, exactly
+as it did on 0. Do not treat `n == 0` as "missing": that is an empty file.
+
+History worth keeping, because each was a silent wrong answer: 6.6.6 made a failed READ an
+error rather than end-of-file (a directory — open succeeds, read is -EISDIR — came back as
+a non-zero buffer with length 0, "could not read" reported as "empty"); 6.6.7 checked every
+allocation and clamped growth to `max` (a file of 1 GiB or more SIGSEGV'd the reader: the
+doubling asked alloc for 2^31 + 1, got 0 and copied through NULL).
+
+GATES: tests/tcyr/crossos/file_read_whole_bounded.tcyr (a missing file: 0 and `n < 0`) and
+tests/gates/toolchain/manifest_read_whole_file.sh axes 5 and 6 (a directory, and /dev/zero
+under `ulimit -v`); restoring the overwrite reddens all three.
