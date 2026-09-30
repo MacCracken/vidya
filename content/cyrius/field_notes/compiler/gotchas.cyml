@@ -19,7 +19,7 @@
 #   the prefix used to mean. Live paths were repaired at the v6.6.1 audit; remaining
 #   mentions are inside narratives about bugs found when the file was called that.
 #
-# 122 entries (re-DERIVED at 6.6.11 after the CVE-55 line-counter entry; at 6.6.10 bite 8 it read 119 against a live 120; first derived at v6.6.6 bite 21 review with `grep -c '^\[\[entries\]\]'`, which is the only
+# 123 entries (re-DERIVED at 6.6.12 after the flags_reflect_rax entry — the other four 6.6.12 notes went INTO existing entries per the admission rule: cybs's six-argument CALL limit, the fifth `_cfo` occurrence, the sixth emitted-bytes instance, the eighth cap instance; 122 at 6.6.11 after the CVE-55 line-counter entry; at 6.6.10 bite 8 it read 119 against a live 120; first derived at v6.6.6 bite 21 review with `grep -c '^\[\[entries\]\]'`, which is the only
 # way this number should ever be written. v6.6.1 was an AUDIT that took it 158 -> 62; it then
 # drifted to a live 63 while still reading 62, to 96 while 6.6.5 was in flight, and to 100
 # while still reading 98 — the header was not re-derived when an entry was appended.)
@@ -33,14 +33,14 @@
 #   the 158 entries were instances of 14 classes.** Quantified, because the count IS
 #   the data — seven cap-sweep failures says the caps need DERIVING, not documenting:
 #
-#     7  a cap is declared in one place and believed in five
+#     8  a cap is declared in one place and believed in five
 #     7  there are seven forks; the change landed in one of them
 #     7  a stated cause or a carried number is not evidence
 #     6  a syscall number on Darwin/aarch64 is not the number you wrote
 #     5  identifier identity is fragile in this lexer
 #     7  a green gate measuring nothing
 #     4  inline replay is a prerequisite for SIMD residency
-#     5  any pass over emitted bytes must know every site in the stream
+#     6  any pass over emitted bytes must know every site in the stream
 #     3  prove the mutation actually reached the gate
 #     3  agnos is an x86 host that is not Linux
 #     3  a guard in the loop implies a second pass somebody has to write
@@ -1029,15 +1029,15 @@ tags = ["shift", "logical-shift", "arithmetic-shift", "operator", "crypto", "rot
 
 [[entries]]
 name = "cfo_const_fold_rewind_class_four_occurrences_grep_the_shape_not_the_operator_and_every_tier_that_reenters_the_fold"
-description = "THE most-repeated codegen defect of the v6.x line — four occurrences, each fix scoped to the tier its repro landed in and each declared complete. MECHANISM: the constant folder keeps `_cfo` (fold armed), `_cfv` (folded value) and `_cfp` (the code pointer captured at the START of the foldable region). A parse path clears `_cfo = 0` BEFORE calling a lower tier that RE-ARMS it — `PARSE_FACTOR` sets `_cfp = GCP(S)` then `_cfv = val; _cfo = 1` for a bare NUM — so the flag comes back on with `_cfp` pointing PAST code that was already emitted. The next operator then takes the const-fold branch with a live-but-stale fold and `SCP(S, _cfp)` rewinds the code pointer over that already-emitted code, replacing it with a constant. The symptom is always a silently wrong constant: no error, no warning, valid binary. OCCURRENCES: (1) 2026-06-11, cyrius-doom, `A * B * 4` -> 800 (the EIMUL path). (2) v6.4.74 — 17 sites in the `PARSE_TERM` tier (`/ % << >> >>>`): `100 >>> 1 + 1` == 2 (want 51), `100 >> 0 + 1` == 1 (want 101). `>>` and `<<` mostly escaped because their own fold path handles a literal RHS, so it bit exactly where that fold could not apply (shift count 0, or a value outside the 0x10000 window); a parenthesised RHS also masked it, since the paren path never re-arms. (3) v6.4.80 — 16 sites one tier UP in `PEXPR` (`+ - & | ^`): `1 - 2 + 3` == **5**, `2 - 5 + 10` == 15, `3 + 1 - 5 + 2` == 7. The emitted code is the expression with the leading `a -` deleted. Trigger is the `cfr >= 0` test in the subtract fold — a NEGATIVE intermediate fails it and takes the runtime fallback, and the fallback was the buggy one, which is exactly why non-negative intermediates were always right (`5 - 3 + 1` == 3) and it hid. Measured blast radius: 40 of 400 (10 %) systematic 3-term constant expressions wrong. (4) v6.4.81 — one tier DOWN in `EMIT_OP_DISPATCH`, struct operator overloading: it parses its RHS with `PARSE_TERM` (re-arms) and ends with `SESTYPE(S, 0)`, so the following `+`/`-` rewound over the emitted operator CALL — the overload silently deleted and replaced by a constant. `p * 3 + 1` == 4 (want 1004). The tell was a 2-of-4 asymmetry in four structurally identical lines: `add` (parse_expr.cyr:2809) and `sub` (:2837) already cleared `_cfo`; `mul` (:2550) and `div` (:2610) never did. THE LESSON: **grep the SHAPE, not the operator — and grep EVERY TIER that calls back into the fold, not just the tier the repro landed in.** A single `grep -c \"_cfo = 0; E.*PARSE_TERM\"` at .74 would have found the .80 sites eight releases earlier; at .80 the sweep recorded 'zero occurrences of the shape remain in parse_expr.cyr' and that was true only of PEXPR — the dispatch helper one level down was untouched. THE OTHER LESSON: **251/251 tcyr were byte-identical across the .80 fix, and that is the finding, not reassurance** — the corpus contained zero expressions of the failing shape, so 10 % of constant arithmetic was wrong with every gate green (self-host fixpoint, seed-derive, check.sh, cross-OS on four hosts). A byte-identical corpus proves a change did not perturb what the corpus covers; it says nothing about what it does not. COVERAGE TRAPS recorded while building the regression (`tests/tcyr/const_chained_multiply_fold.tcyr`, now 39 assertions and the single home of this one mechanism): an operator-overload helper whose body ALIASES the folded answer (`OpV_mul` returning `a * b`) passes while broken — make helpers return values plain integer arithmetic cannot produce; and getting a mutation to fail took three rounds, because `1 - 2 & 3` fires the SUB fallback not the AND one, AND needs a left operand folding to 0 (`0 & 1 & 1`), OR/XOR need a ZERO right-hand operand (`1 | 0 ^ 1`), and ADD is reachable only via i64 overflow (`9223372036854775807 + 1 + 1`) since a literal `crv` is never negative. Before that work 8 of the 16 .80 sites had no coverage at all. When a mutation PASSES, fuzz good-vs-mutant to find a discriminator rather than concluding the site is dead. Found at .80 by an adversarial doc-sweep verifier RUNNING the compiler to re-check an unrelated vidya claim about precedence — not by reading code. See CHANGELOG [6.4.74], [6.4.80], [6.4.81]."
+description = "THE most-repeated codegen defect of the v6.x line — four occurrences (a fifth, 6.6.12: a factor arm that parses its own call and cleared the flag BEFORE it), each fix scoped to the tier its repro landed in and each declared complete. MECHANISM: the constant folder keeps `_cfo` (fold armed), `_cfv` (folded value) and `_cfp` (the code pointer captured at the START of the foldable region). A parse path clears `_cfo = 0` BEFORE calling a lower tier that RE-ARMS it — `PARSE_FACTOR` sets `_cfp = GCP(S)` then `_cfv = val; _cfo = 1` for a bare NUM — so the flag comes back on with `_cfp` pointing PAST code that was already emitted. The next operator then takes the const-fold branch with a live-but-stale fold and `SCP(S, _cfp)` rewinds the code pointer over that already-emitted code, replacing it with a constant. The symptom is always a silently wrong constant: no error, no warning, valid binary. OCCURRENCES: (1) 2026-06-11, cyrius-doom, `A * B * 4` -> 800 (the EIMUL path). (2) v6.4.74 — 17 sites in the `PARSE_TERM` tier (`/ % << >> >>>`): `100 >>> 1 + 1` == 2 (want 51), `100 >> 0 + 1` == 1 (want 101). `>>` and `<<` mostly escaped because their own fold path handles a literal RHS, so it bit exactly where that fold could not apply (shift count 0, or a value outside the 0x10000 window); a parenthesised RHS also masked it, since the paren path never re-arms. (3) v6.4.80 — 16 sites one tier UP in `PEXPR` (`+ - & | ^`): `1 - 2 + 3` == **5**, `2 - 5 + 10` == 15, `3 + 1 - 5 + 2` == 7. The emitted code is the expression with the leading `a -` deleted. Trigger is the `cfr >= 0` test in the subtract fold — a NEGATIVE intermediate fails it and takes the runtime fallback, and the fallback was the buggy one, which is exactly why non-negative intermediates were always right (`5 - 3 + 1` == 3) and it hid. Measured blast radius: 40 of 400 (10 %) systematic 3-term constant expressions wrong. (4) v6.4.81 — one tier DOWN in `EMIT_OP_DISPATCH`, struct operator overloading: it parses its RHS with `PARSE_TERM` (re-arms) and ends with `SESTYPE(S, 0)`, so the following `+`/`-` rewound over the emitted operator CALL — the overload silently deleted and replaced by a constant. `p * 3 + 1` == 4 (want 1004). The tell was a 2-of-4 asymmetry in four structurally identical lines: `add` (parse_expr.cyr:2809) and `sub` (:2837) already cleared `_cfo`; `mul` (:2550) and `div` (:2610) never did. THE LESSON: **grep the SHAPE, not the operator — and grep EVERY TIER that calls back into the fold, not just the tier the repro landed in.** A single `grep -c \"_cfo = 0; E.*PARSE_TERM\"` at .74 would have found the .80 sites eight releases earlier; at .80 the sweep recorded 'zero occurrences of the shape remain in parse_expr.cyr' and that was true only of PEXPR — the dispatch helper one level down was untouched. THE OTHER LESSON: **251/251 tcyr were byte-identical across the .80 fix, and that is the finding, not reassurance** — the corpus contained zero expressions of the failing shape, so 10 % of constant arithmetic was wrong with every gate green (self-host fixpoint, seed-derive, check.sh, cross-OS on four hosts). A byte-identical corpus proves a change did not perturb what the corpus covers; it says nothing about what it does not. COVERAGE TRAPS recorded while building the regression (`tests/tcyr/const_chained_multiply_fold.tcyr`, now 39 assertions and the single home of this one mechanism): an operator-overload helper whose body ALIASES the folded answer (`OpV_mul` returning `a * b`) passes while broken — make helpers return values plain integer arithmetic cannot produce; and getting a mutation to fail took three rounds, because `1 - 2 & 3` fires the SUB fallback not the AND one, AND needs a left operand folding to 0 (`0 & 1 & 1`), OR/XOR need a ZERO right-hand operand (`1 | 0 ^ 1`), and ADD is reachable only via i64 overflow (`9223372036854775807 + 1 + 1`) since a literal `crv` is never negative. Before that work 8 of the 16 .80 sites had no coverage at all. When a mutation PASSES, fuzz good-vs-mutant to find a discriminator rather than concluding the site is dead. Found at .80 by an adversarial doc-sweep verifier RUNNING the compiler to re-check an unrelated vidya claim about precedence — not by reading code. (5) 6.6.12 — a NEW factor arm that parses its OWN call, `_call_field` (a `.field` on a call result, src/frontend/parse_expr.cyr), is the same mechanism entered from the other side: the arm has to clear `_cfo` AFTER the call, not before it. A LITERAL ARGUMENT is parsed by PARSE_FACTOR, which arms the fold (`_cfo = 1`, `_cfp` at that literal); clearing before the call does nothing, the call and the field load are emitted, and the following operator folds by rewinding to the literal — deleting the call and the load. `mkp(3).y + 1` became 4 and `mk8(4).a * 10` folded from the argument literal. The arm now ends with `_cfo = 0;` after the load. RULE, stated for the next arm: any parse path that CONSUMES a sub-expression the fold may have armed — a call's arguments, a subscript's index, a parenthesised operand — clears `_cfo` once that sub-expression is fully emitted, i.e. as its LAST act; test it with a literal inside the sub-expression and an operator after it. (The name still says four; five is the count.) See CHANGELOG [6.4.74], [6.4.80], [6.4.81], [6.6.12] B04."
 category = "cyrius"
-tags = ["_cfo", "_cfp", "const-fold", "code-pointer-rewind", "SCP", "PARSE_TERM", "PEXPR", "PARSE_FACTOR", "EMIT_OP_DISPATCH", "operator-overload", "grep-the-shape-not-the-operator", "byte-identical-is-not-coverage", "mutation-proof", "aliasing-helper", "v6.4.74", "v6.4.80", "v6.4.81"]
+tags = ["_cfo", "_cfp", "const-fold", "code-pointer-rewind", "SCP", "PARSE_TERM", "PEXPR", "PARSE_FACTOR", "EMIT_OP_DISPATCH", "operator-overload", "grep-the-shape-not-the-operator", "byte-identical-is-not-coverage", "mutation-proof", "aliasing-helper", "_call_field", "clear-after-the-call", "v6.4.74", "v6.4.80", "v6.4.81", "v6.6.12"]
 
 [[entries]]
 name = "cybs_cannot_lex_gtgtgt_the_cycc_fixpoint_does_not_substitute_for_seed_derive"
-description = "v6.4.74's constant folder first spelled its arithmetic shift `v >>> _CF_FACTOR(S)`. It compiled, self-hosted, and FIXPOINTED byte-identical on `build/cycc` — then `scripts/seed-derive-cycc.sh` failed at step [3/5] with a bare `syntax error` and nothing else. Cause: **cybs, the hand-assembly bootstrap compiler the 29 KB seed assembles, cannot lex `>>>`** — `bootstrap/cybs.cyr`'s `lexer_shr` knows only `>`, `>=`, `>>`, so it tokenised `>>` `>`. The `>>>` operator has existed since v6.4.46; cybs never learned it. Fixed by writing `_CF_ASR`, which sign-extends using only `>>`/`<<` and masks the count to 6 bits to match the backend's `sar`. This is the cleanest available demonstration of Release Gate item 2: **the cycc self-host fixpoint does NOT cover the seed chain.** `build/cycc` is a full v6.x compiler; cybs is far more limited and fails SILENTLY, or with an unattributed one-line error, on constructs `build/cycc` compiles fine — too many global/string-literal references in one function (the ceiling that forced `_var_grow` into its `_grow_g1..g7` tail-call chain, that made v6.4.77 split the 67-entry `TOKNAME_BUILTIN` out of `TOKNAME`, and that made v6.4.81 split `PP_FNAME_TOO_LONG` out of an already-heavy `PREPROCESS`), tail calls, and now newer operators. PRACTICAL RULES: run `seed-derive-cycc.sh` for ANY `src/` change on EVERY release, not only at closeouts (a doc/lib-only bump is the sole exception); when writing compiler source prefer the OLDEST spelling that works; when a new helper carries a large literal table, expect the ceiling and split the fn before the gate tells you to; and note that gen1 (cybs's output) being ~72 KB smaller than `build/cycc` is NORMAL — only `gen2 == build/cycc` matters, do not chase it. RECOGNITION: a bare `syntax error` from step [3/5] with no file, no line and no token is the signature — read it as cybs hitting a ceiling, not as a defect in your source. See CHANGELOG [6.4.74]."
+description = "v6.4.74's constant folder first spelled its arithmetic shift `v >>> _CF_FACTOR(S)`. It compiled, self-hosted, and FIXPOINTED byte-identical on `build/cycc` — then `scripts/seed-derive-cycc.sh` failed at step [3/5] with a bare `syntax error` and nothing else. Cause: **cybs, the hand-assembly bootstrap compiler the 29 KB seed assembles, cannot lex `>>>`** — `bootstrap/cybs.cyr`'s `lexer_shr` knows only `>`, `>=`, `>>`, so it tokenised `>>` `>`. The `>>>` operator has existed since v6.4.46; cybs never learned it. Fixed by writing `_CF_ASR`, which sign-extends using only `>>`/`<<` and masks the count to 6 bits to match the backend's `sar`. This is the cleanest available demonstration of Release Gate item 2: **the cycc self-host fixpoint does NOT cover the seed chain.** `build/cycc` is a full v6.x compiler; cybs is far more limited and fails SILENTLY, or with an unattributed one-line error, on constructs `build/cycc` compiles fine — too many global/string-literal references in one function (the ceiling that forced `_var_grow` into its `_grow_g1..g7` tail-call chain, that made v6.4.77 split the 67-entry `TOKNAME_BUILTIN` out of `TOKNAME`, and that made v6.4.81 split `PP_FNAME_TOO_LONG` out of an already-heavy `PREPROCESS`), tail calls, and now newer operators. ⭐ **6.6.12 — cybs refuses a CALL WITH MORE THAN SIX ARGUMENTS** (measured: `f(1,2,3,4,5,6,7)` is a bare `syntax error`, rc 1; the same program with six arguments compiles; DEFINING a 7-parameter fn is accepted, so a 7-param helper called with six compiles and only the 7-arg call site trips it). It surfaced as the same bare `syntax error` at seed-derive step [3/5] while the preprocessor's aarch64-region helper was being written; the fix packed two of its arguments into one (`_pp_a64_open`'s kind and state). `build/cycc` takes any arity (the retired ≤6-args rule was a Win64 codegen bug, fixed v6.4.64); cybs genuinely does not, so compiler SOURCE keeps every call at six arguments or fewer. PRACTICAL RULES: run `seed-derive-cycc.sh` for ANY `src/` change on EVERY release, not only at closeouts (a doc/lib-only bump is the sole exception); when writing compiler source prefer the OLDEST spelling that works; when a new helper carries a large literal table, expect the ceiling and split the fn before the gate tells you to; and note that gen1 (cybs's output) differing in size from `build/cycc` is NORMAL — only `gen2 == build/cycc` matters, do not chase it in either direction (this entry said '~72 KB smaller'; the sign has flipped since: at 6.6.12 gen1 is 1,545,384 B against `build/cycc`'s 1,470,944 B, ~74 KB LARGER, and gen2 == build/cycc). RECOGNITION: a bare `syntax error` from step [3/5] with no file, no line and no token is the signature — read it as cybs hitting a ceiling, not as a defect in your source. See CHANGELOG [6.4.74]."
 category = "cyrius"
-tags = ["cybs", "seed-derive", "bootstrap-chain", "gtgtgt", "arithmetic-shift", "_CF_ASR", "release-gate-item-2", "silent-failure", "global-reference-ceiling", "fixpoint-is-not-enough", "v6.4.74"]
+tags = ["cybs", "seed-derive", "bootstrap-chain", "gtgtgt", "arithmetic-shift", "_CF_ASR", "release-gate-item-2", "silent-failure", "global-reference-ceiling", "fixpoint-is-not-enough", "call-arity-six", "v6.4.74", "v6.6.12"]
 
 [[entries]]
 name = "the_heap_map_is_machine_read_prose_on_the_map_line_is_parsed_as_the_size_and_unit_suffixes_were_invisible"
@@ -1655,7 +1655,7 @@ be hot-fixed for an already-published version.
 
 [[entries]]
 name = "a_cap_is_declared_in_one_place_and_believed_in_five_sweep_every_consumer"
-description = "MERGED v6.6.1 from seven entries. Every cap in cycc is declared once and then RE-STATED as a guard, a comment, a scratch size, a clear-loop bound and a doc line. Raising the declaration without sweeping the restatements is the single most repeated defect class in this compiler — it has produced a silent miscompile, an unsound DCE, and a SIGSEGV, across v3.3.17 through v6.5.50"
+description = "MERGED v6.6.1 from seven entries; an eighth instance at 6.6.12 (a hand-kept write length beside its literal). Every cap in cycc is declared once and then RE-STATED as a guard, a comment, a scratch size, a clear-loop bound and a doc line. Raising the declaration without sweeping the restatements is the single most repeated defect class in this compiler — it has produced a silent miscompile, an unsound DCE, and a SIGSEGV, across v3.3.17 through v6.5.50"
 category = "cyrius"
 ---
 ⟳ **Replaces seven entries** (`stale_fixed_cap_drift`, `any_fn_indexed_side_table_must_reach_32768…`,
@@ -1689,6 +1689,17 @@ failure is always *silent and late*.
 - **A ceiling that is physical, not arbitrary.** The identifier pool at `S+0x60000` can only
   be raised in place while its END stays under `0x100000`; above that the compiler hangs
   rather than erroring.
+- **A byte count kept by hand beside the string it measures (6.6.12).** The PE "routed
+  numbers" note (`_pe_warn_unrouted`, src/frontend/parse_expr.cyr) is one literal
+  written with `syscall(SYS_WRITE, 2, "  note: CYRIUS_TARGET_WIN=1 routes ... .\n", 1584);` —
+  the length is a second, hand-kept statement of the literal. Adding the 0xF04B GetLastError
+  reroute grew the literal and the first build printed the note WITHOUT the new entry: the
+  stale 1550 simply cut the write short. No warning, no error, a plausible-looking message.
+  It is the same class at its smallest — one number restated once — and the fix was to
+  recount (1550 -> 1584, measured by counting the literal's bytes). Every
+  `syscall(SYS_WRITE, fd, "<literal>", N)` in the compiler carries this hazard; when you edit
+  such a literal, recount N in the same edit, and check the OUTPUT (the whole note printed,
+  as tests/gates/platform/pe_last_error_reroute.sh does), not just that it compiled.
 
 ⭐ **THE HABIT.** When you change a cap, `grep` the NUMBER — the old one and the new one —
 across `src/`, the heap map comment block, and the gates, and fix every hit in the same
@@ -1944,7 +1955,7 @@ through the compiler is the only sound enumeration method.
 
 [[entries]]
 name = "any_pass_that_walks_or_moves_emitted_bytes_must_know_every_site_in_the_stream"
-description = "CLASS — 4 recurrences merged v6.6.1, a 5th at 6.6.5 (a byte classifier whose stages disagreed). The code buffer is not pure instructions: inline switch tables, hand-emitted jumps outside any registry, and fn-boundary offsets all live in or beside it. A scanner that assumes 'instructions only' desynchronises; a mover that repairs only the tables it knows about corrupts the rest — and a length decoder that is ONE BYTE SHORT is worse than one that admits it does not know"
+description = "CLASS — 4 recurrences merged v6.6.1, a 5th at 6.6.5 (a byte classifier whose stages disagreed), a 6th at 6.6.12 (a raw emit the IR was not told about, for one width only). The code buffer is not pure instructions: inline switch tables, hand-emitted jumps outside any registry, and fn-boundary offsets all live in or beside it. A scanner that assumes 'instructions only' desynchronises; a mover that repairs only the tables it knows about corrupts the rest — and a length decoder that is ONE BYTE SHORT is worse than one that admits it does not know"
 category = "cyrius"
 ---
 ⟳ **Replaces four entries.** One subject: **the emitted byte stream contains more than
@@ -1989,6 +2000,24 @@ predicate (`_ra_plain_slot_mov`) that all three stages call — a slot is promot
 `[rbp+disp32]` reference to it is a form the rewriter handles. The byte scan is also disp32-only,
 so an rbp-disp8 or SIB operand read would be invisible to all three stages; that dependency is now
 a census gate (0 in 180,445 corpus functions) rather than an assumption.
+
+**6 — A raw emit the IR is not told about, for ONE WIDTH (6.6.12).** Under `CYRIUS_IR=3` the IR
+pass rewrites code around the nodes it recorded; bytes an emitter writes directly must be marked
+with an `IR_RAW_EMIT` node or the pass treats rax as unchanged across them. x86's
+`EFIELD_LOAD_W(S, width)` records that marker only for `width == 1 || 2 || 4`
+(src/backend/x86/emit.cyr) — and a SIGNED narrow load is requested with a NEGATIVE width
+(`_EMIT_NLOAD_RCX` takes -1/-2/-4 for movsx), which fails all three tests and reaches the IR
+unrecorded. Signed struct FIELDS have been loaded that way since v6.3.35 and still read right
+under `CYRIUS_IR=3` (measured on 6.6.12: i8 / i16 / i32 fields of a global and a local) — their
+address reaches rcx through `EFLADDR_X1` / `EVADDR_X1`. The typed-array subscript
+(`_arr_sub_load`) builds its address in rax out of RECORDED IR ops (`EADDR` is `IR_ADD`, then
+`EMOVCA` is `IR_MOV_CA`) and follows them with the unrecorded movsx, and there an `i8` element
+read wrong under `CYRIUS_IR=3` only — right in the default build. Fixed at the caller
+(`if (w < 0) { _IR_REC0(S, IR_RAW_EMIT); }`; a second record for the backends that already
+mark is harmless). ⚠ The recorder's guard is still unsigned-only, so the NEXT caller that
+hands `EFIELD_LOAD_W` a signed width inherits the gap — record at the call, or widen the guard
+to `|width|`. Check any new path under `CYRIUS_IR=3` as well as the default build: this class
+of miss is invisible to the default build by construction.
 
 ⭐ **THE HABIT.** Before widening any pass over emitted bytes, enumerate (a) every table
 embedded in the stream, (b) every stored code position, (c) every site emitted outside the
@@ -5145,3 +5174,40 @@ header: dropping the raw-LF `SCLINE` turns axis 6 red; dropping the escaped-LF o
 CHANGELOG [6.6.11] (B05, N1/N2/N3) and language/features.cyml
 `string_literal_escapes_and_line_accounting_v6611`.
 """
+
+[[entries]]
+name = "flags_reflect_rax_is_emitter_state_so_a_load_after_an_eaddr_must_clear_it"
+description = "x86 `_flags_reflect_rax` says 'the CPU flags already reflect rax', and the condition path then SKIPS its `test rax, rax`. Arithmetic emitters (EADDR = add rax, rcx) set it; a narrow field load through `EFIELD_LOAD_W` deliberately leaves it alone. So a new path that computes an address with EADDR and then loads through it must clear the flag itself, or `if (x)` branches on the ADDRESS (6.6.12, the typed-array subscript)"
+category = "cyrius"
+tags = ["x86", "peephole", "flags", "_flags_reflect_rax", "ETESTAZ", "EADDR", "EFIELD_LOAD_W", "subscript", "v5.6.8", "v6.6.12"]
+---
+**The mechanism (v5.6.8, "flag-result reuse").** A bare condition `if (x)` needs ZF/SF to
+reflect rax. The condition path (src/frontend/parse_ctrl.cyr) emits `test rax, rax` via
+`ETESTAZ` — unless `_flags_reflect_rax == 1`, meaning the LAST emitter was an arithmetic op
+that updated rax in place and therefore already set the flags. x86 emitters maintain it:
+`EADDR` (`add rax, rcx`), `ESUBR`, the logic ops, `xor rax, rax` set it to 1; a `mov`, a
+multiply, a compare and `EVLOAD_W`'s narrow load set it to 0. aarch64 emits non-S add/sub
+and never sets it, and cx declares the variable and never sets it either, so on both the
+test always fires — the skip, and this trap, are x86 (and x86 Mach-O / PE) only.
+
+**The trap.** `EFIELD_LOAD_W` — the narrow `[rcx]` load the field path uses — deliberately
+does NOT touch the flag (its comment says so: the field-load path must leave it as the caller
+set it). That is right for the paths it was written for, and wrong for a new caller whose
+address arithmetic ends in `EADDR`: the flag is still 1 from the `add`, the load replaces rax
+with the element, and the condition skips its test and branches on the flags of the ADDRESS
+computation — nonzero, so `if (a[i])` was taken for every element. It was found while building
+the 6.6.12 typed-array subscript: `_arr_sub_addr` ends with `EADDR` (&a + i * sizeof(T)),
+`_arr_sub_load` does `EMOVCA` + `EFIELD_LOAD_W`, and now ends with `_flags_reflect_rax = 0;`
+(src/frontend/parse_expr.cyr). The default build — no IR mode needed.
+
+**Recognition.** A condition on a freshly loaded value that is taken (or not) regardless of
+the value, while `var t = <expr>; if (t)` — which stores and reloads — behaves. Disassemble:
+the `jz`/`jnz` follows the load with no `test rax, rax` in between.
+
+**Rule.** The flag is emitter STATE that describes the last instruction, and every emitter
+that changes rax without setting the flags must clear it. When you add a load path, either
+go through an emitter that clears it (`EVLOAD_W`) or clear it yourself after the load; when you
+add an emitter, decide its effect on the flag explicitly. A helper that "leaves the flag as the
+caller set it" is a promise about its callers — read that comment before you become one.
+Gate: tests/tcyr/crossos/typed_array_subscript.tcyr's `if` / `while` on an element rows
+(reverting the clear is one of the five mutations in its header).
