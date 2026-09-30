@@ -36,6 +36,20 @@
 # cannot flank `*`" gotcha (fixed v6.4.83) is corrected.
 # Updated: async_await_futures_v6311 — the reactor resumes a coroutine whose `await` did not
 # park (it used to finish it with 0; the "force it yourself" advice is withdrawn).
+# v6.6.12 (2026-09-30): +7 entries — typed_array_subscripts_v6612 (`a[i]`, `a[i] = v`,
+# `a[i] OP= v` on an integer `var a: T[N]`; the language had no subscript before),
+# struct_literals_generic_heads_and_nested_values_v6612 (`Box<Pt> { p, 5 }`, a whole struct
+# value for a nested field, nested leaves written at their own width),
+# field_chains_any_depth_and_call_result_fields_v6612 (`n.v.v.x`, `mk(3).v.y`),
+# struct_field_arguments_and_toplevel_copy_init_v6612 (`take(r.v)` copies, `var B: Pt = A;`
+# at top level; the source must be declared ABOVE), unterminated_string_literal_is_an_error_v6612,
+# aarch64_xattr_statx_rlimit_fchown_wrappers_and_native_region_exemption_v6612 (the 1000+N
+# alias band again; no raw-literal warning inside an aarch64-only region; the 3-arg kill arity
+# warning is back on x86-Linux), cx_tail_calls_and_cxvm_guest_traps_v6612 (CVE-58).
+# Updated: multi_width_types (a narrow variable is written and read at its width on the `for`
+# step and compound-operator paths too; the zero-initialised narrow-global clobber is still
+# open), generics_monomorphization_v639_v6310 (the generic struct literal and the bare
+# explicit-generic statement `id<i32>(4);`).
 # v6.4.4 (2026-07-05): +1 entry f32v4_packed_single_simd — SIMD arc
 # Phase 1 (128-bit packed single, structured-descriptor encoding, x86).
 # v6.4.5 (2026-07-05): SIMD arc Phase 2 — f32v_fmadd/f32v_dot matmul ops
@@ -203,6 +217,38 @@ correctly addresses the high half. The pre-v5.8.16 workaround
 (`var buf[16]; pass as pointer`) still works but is no longer
 needed — `var x: u128 = 0;` is fully load-bearing today. See
 slice_type_v58x for the same fix on slices.
+
+⚠ EVERY STORE PATH IS WIDTH-CORRECT SINCE 6.6.12 — two were not. Narrow
+GLOBALS are PACKED (`var a: u8 = 1; var b: u8 = 2;` puts `b` at `a + 1`),
+so an 8-byte store to `a` writes over the next seven bytes of globals:
+  - the classic-`for` STEP kept its own copy of the assignment store and
+    it was always 8 bytes. On a u8 global,
+    `for (a = 250; a != 252; a = a + 1)` zeroed the packed globals after
+    `a` (a neighbour set to 7 read 0), and a step `a += 1` wrapping 255
+    carried into the next global (7 became 8). On a u8 LOCAL stepped
+    past 255 the 8-byte slot held 256 — the narrow read showed 0, so the
+    loop looked right — until a compound op read the whole slot:
+    `i >>= 1` gave 128, not 0;
+  - a COMPOUND operator's load read 8 bytes and did not sign-extend:
+    with packed u8 globals `a = 4` and `b = 1`, `a >>= 1` shifted b's byte
+    into `a` (130, not 2), and `c /= 2` on an i8 local -8 gave 124, not -4.
+Both now go through the statement's store (`_asg_store_slot`) and the
+expression read's width-and-sign load, on x86, aarch64, PE, both Mach-O
+backends and cx (whose narrow store/load emitters were 8 bytes wide as
+well). The `for` step also draws the statement's narrowing warning now.
+Every shape above was measured wrong on 6.6.11 and right on 6.6.12 (x86;
+aarch64 under qemu and cx under cxvm right on 6.6.12 too). A plain
+statement `a += 1` was already right: the statement arm always stored
+at the slot's width.
+
+⚠ STILL OPEN at 6.6.12 (backlog, not fixed by the above): in the leading
+declaration block, a narrow global initialised to ZERO clobbers the narrow
+global after it — `var a: u8 = 0; var b: u8 = 7;` reads `b` as 0 (the u8
+pair on x86, aarch64 under qemu and PE under wine, and an i32 pair on x86;
+cx reads 7; 6.6.11 the same). A non-zero initialiser,
+the reverse order, or the pair declared after the first top-level
+statement reads 7. Until it is fixed, give such a global a non-zero
+initialiser or set it at run time.
 
 BACKWARD COMPATIBLE: Untyped variables remain i64. The compiler
 source uses no type annotations.
@@ -3286,9 +3332,34 @@ SYNTAX:
     var t = add(3, 4);                       # inferred (i64) receiver
 
     struct Box<T> { val: T; }                # generic struct
-    var b: Box<i32> = Box { 7 };
+    var b: Box<i32> = Box<i32> { 7 };        # literal names its instance (6.6.12)
     struct Holder<T> { v: T; tag: i64; }
     var h: Holder<Point> = ...;              # struct type-argument
+    id<i32>(4);                              # explicit call as a bare statement (6.6.12)
+
+GENERIC STRUCT LITERALS (6.6.12): `Box<Point> { p, 5 }`, `Box<Point> { 1, 2, 5 }`,
+`Pair<i32> { 40, 2 }` build the INSTANCE — in a fn, in the leading declaration block
+and after the first top-level statement. Before 6.6.12 every one of them was
+`undefined variable 'Box'` (the three literal heads committed only on `Name {`). It
+is the instance an annotation names, so `var b: Box<Point> = Box<i64> { 1, 2 };` is
+refused ("struct literal type does not match the declared type of this variable"),
+and `Box { .. }` with no arguments is the base (all-i64) struct. See
+struct_literals_generic_heads_and_nested_values_v6612.
+
+EXPLICIT GENERIC CALL AS A STATEMENT (6.6.12): `id<i32>(4);` on its own was
+`expected '=', got '<'` (in a fn and at top level) while the inferred `id(4);` and the
+expression `var r = id<i32>(4);` worked — PARSE_STMT sent only `IDENT (` to the call
+path. It now behaves exactly like the `IDENT (` statement: the result is dropped for
+every return class, a `.field` / `.method()` on the result works, `#must_use` warns,
+and a postfix `?` on a `Result`-returning generic propagates both halves
+(`g<i32>(n, d)?;`). `a < b;` never reaches it (the lookahead needs a generic callee
+and `name<..>(`). ⚠ STILL OPEN at 6.6.12 (backlog): the EXPRESSION form
+`var v = g<i32>(n, d)?;` on a `Result`-returning generic exits 139 — the expression
+side recognises a pair-returning callee only as `name (`, not `name<T>(` (and
+`var t, p = g<i32>(n, d);` is refused: "multi-value destructure needs a call on the
+right-hand side"). Use the statement form, or the INFERRED call, which reaches the
+i64 instance and handles both (`var v = g(n, d)?;`, `var t, p = g(n, d);` — measured
+right on 6.6.12).
 
 HOW IT WORKS — instantiate-once:
     In an i64-everywhere language the BASE fn/struct IS its own i64
@@ -4164,3 +4235,457 @@ tests/gates/frontend/struct_result_type_refused.sh (30 refusals at 3 / 8 / 16 / 
 same-type acceptances, each against a field-by-field control),
 tests/tcyr/crossos/generic_struct_inference.tcyr `run_globals`, and
 tests/gates/frontend/generic_type_arg_unknown_refused.sh axis Q.
+
+
+[[entries]]
+name = "typed_array_subscripts_v6612"
+description = "Since cycc 6.6.12 an integer element-typed array `var a: T[N]` (T = i8..i64, u8..u64) takes a subscript: `a[i]`, `a[i] = v` and all ten `a[i] OP= v`, in a fn, at top level, in a `for` step and inside a closure. `a[i]` is exactly the element at `&a + i * sizeof(T)`, read sign- or zero-extended by T and stored truncated to T. There is NO bounds check and a fn-local array is NOT zero-initialised. A bare `var a[N]`, `stack var a[N]`, a scalar, a pointer, a u128 element and an f64 / f32 / bool / struct element are refused by name"
+category = "cyrius"
+tags = ["arrays", "subscript", "typed-array", "element-width", "sign-extension", "v6.6.12"]
+---
+Before 6.6.12 the language had NO subscript, read or write: `return a[1];` was
+`expected ';', got '['` and `a[i] = 5;` was `expected '=', got '['` — local or global, in a
+fn or at top level — so `store64(&a + i * 8, v)` was the only spelling. (The roadmap item
+"`var c: i64[4];` inside a fn is refused" was this same diagnostic misread as a declaration
+error; the declaration always compiled.)
+
+    var g: u32[3];                 # a global array (zeroed, like every global)
+    fn f(): i64 {
+        var t: i8[8];              # a fn-local array: NOT zeroed, see below
+        var i = 0;
+        while (i < 8) { t[i] = 0 - 120 - i; i = i + 1; }
+        t[2] += 1;                 # all ten: += -= *= /= %= &= |= ^= <<= >>=
+        var s = 0;
+        for (var k = 0; k < 8; k = k + 1) { s = s + t[k]; }   # -987: i8 sign-extends
+        var u: u8[4];
+        u[0] = 300;                # stores 44: a store truncates to the element
+        if (t[0]) { s = s + 1; }   # tests the ELEMENT
+        return s;
+    }
+    g[2] = 7;                      # top level works too
+    g[2] <<= 2;                    # 28
+
+WHAT `a[i]` IS. The bytes `load16(&t + i * 2)` / `store16(&t + i * 2, v)` touch for an
+`i16[N]`: the element at `&a + i * sizeof(T)`, read at T's width (i8/i16/i32 sign-extended,
+u8/u16/u32 zero-extended) and written at T's width. The `load*` / `store*` idiom stays valid.
+The index is any expression — a call, another subscript (`a[b[1]] + a[two()]`). A subscript
+read carries T's width as the expression width, so storing an `i64` element into a narrower
+slot draws the usual "narrowing assignment" warning.
+
+⚠ NO BOUNDS CHECK. `a[N]` and `a[0 - 1]` compile and touch the neighbouring bytes, silently.
+A `slice<T>` local keeps its own bounds-checked `s[i]` (slice_type_v58x), unchanged.
+
+⚠ A FN-LOCAL ARRAY IS NOT ZERO-INITIALISED. Measured on 6.6.12: a fn fills its
+`var b: i64[8]` with 77 and returns; a second fn reads its own `var a: i64[8]` before any
+store, and `a[3]` is 77 — the first frame's leftovers. Globals are zeroed; a stack array is
+whatever the stack held. Initialise before you read. (An array local over the per-fn frame
+budget, about 120 KB, keeps STATIC storage and the compiler warns so.)
+
+⚠ INSIDE A CAPTURING CLOSURE the subscript reads and writes the closure's captured COPY,
+exactly as `&a` there does — captures are by value. Measured: `a[1] = 10`, then a closure
+doing `a[1] = a[1] + 5; return a[1];` returns 15 while the enclosing fn's `a[1]` is still 10.
+
+REFUSED BY NAME — one message, `cannot subscript 'a': ...`, that lists the reasons:
+
+    var a[8];              # bare: no element width (bytes in a fn, slots at top level)
+    stack var a[8];        # same
+    var a: f64[4];         # f64 / f32 / bool / struct (Pt[4]) element: integer only
+    var a = 5;             # a scalar
+    var a: *i64 = p;       # a pointer: pointer subscripts are not in the language
+    var a: u128[4];        # own message: a u128 element does not fit one register -
+                           #   use load64/store64 on its two halves
+
+For a bare array keep `load*` / `store*` at an explicit byte offset, or declare the width:
+`var a: u8[N]` for bytes, `var a: i64[N]` for slots.
+
+⚠ STILL OPEN at 6.6.12 (backlog): INSIDE A FN, `var a: f64[N]` AND `var a: Pt[N]` RESERVE
+ONLY N BYTES. The fn-local path sizes a float or struct element array like a bare `var a[N]`
+(the element type is not passed to it). Measured: two adjacent `var a: f64[4]; var b: f64[4];`
+(or `Pt[4]`) sit 8 bytes apart, where two `i64[4]` sit 32 apart, so `store64(&a + 16, ..)`
+writes into whatever follows. Top level sizes them N*8. Until it is fixed, spell a fn-local
+float buffer `var a: i64[N]` (the same 8-byte slots) and move f64 bit patterns through
+`load64` / `store64`, or alloc() it.
+
+HOW IT IS BUILT. The declaration records a one-byte element descriptor (width 1/2/4/8/16,
+0x40 = signed): a stack array keeps it in its depth word (`SLAEW` / `GLAEW`), a global — and a
+fn-local array that fell back to static storage — in the per-var sign table as `0x100 | desc`,
+a range disjoint from that table's scalar 0/1 (no heap-map change). `_arr_sub_addr`
+(src/frontend/parse_expr.cyr) resolves the base exactly as `&a` does (a local, a closure
+capture, a global) and computes the address; `_arr_sub_read`, `_arr_sub_stmt` and
+`_arr_sub_assign` (shared with the classic-for step) load and store at the width, the compound
+operators through the shared `_asg_compound_op`. Two compiler traps were closed on the way:
+field_notes/compiler/gotchas.cyml `flags_reflect_rax_is_emitter_state_so_a_load_after_an_eaddr_must_clear_it`
+and the sixth instance of `any_pass_that_walks_or_moves_emitted_bytes_must_know_every_site_in_the_stream`.
+
+BEHAVIOUR CHANGE: a global array redeclared with a different element type (`var a: u8[8];`
+then `var a: i8[8];`) is now the "redeclared with a different type or size" error —
+signedness is part of a global's shape, as it already was for scalars. 6.6.11 accepted it.
+
+NOT PART OF THIS: `*T` pointer subscripts, slice writes, an opt-in bounds-checked mode.
+
+GATES: tests/tcyr/crossos/typed_array_subscript.tcyr (69 rows: every width, local and
+global, canaries around every array, the ten compound operators, index expressions, `if` /
+`while` on an element, the for step, a closure capture, top level; green on x86,
+`CYRIUS_IR=3`, aarch64, PE, cx and the four real hosts) and
+tests/gates/frontend/array_subscript_forms.sh (15 refusals, 4 typed controls). The guide's
+"Subscripts" section is the reference.
+
+
+[[entries]]
+name = "struct_literals_generic_heads_and_nested_values_v6612"
+description = "Since cycc 6.6.12 a positional struct literal fills the struct's LEAVES in declaration order at every nesting depth, each at its own offset and width (a nested field used to be flattened at 8 bytes per inner field and never descended, writing past the object); a nested struct field also takes a whole struct VALUE of its type; and a generic struct literal names its instance, `Box<Pt> { p, 5 }` — it was `undefined variable 'Box'`"
+category = "cyrius"
+tags = ["structs", "struct-literal", "generics", "nested-structs", "silent-corruption", "v6.6.12"]
+---
+THREE THINGS ABOUT `Name { ... }`, all on every backend (the literal is frontend-only).
+
+1. NESTED LEAVES ARE WRITTEN AT THEIR OWN OFFSET AND WIDTH.
+
+       struct Odd { a: i8; b: i16; }            # 8 bytes with padding
+       struct HO  { o: Odd; t: i8; u: i32; }
+       var H = HO { 0x11, 0x2222, 0x33, 0x44444444 };
+
+   Before 6.6.12 the literal flattened a nested struct field as ONE 8-BYTE STORE PER INNER
+   FIELD, whatever the inner widths, and never recursed: that literal wrote at +0, +8, +16,
+   +17 — 13 bytes past the object, over the next global or (fn-local) the caller's frame —
+   and every field but the first read back wrong. Measured with a canary global declared right
+   after `H`: 6.6.11 got `H.o.a` right and nothing else, canary included; 6.6.12 gets all five.
+   A struct nested TWO levels deep was never descended at all, so it took the wrong NUMBER of
+   values. An all-i64 nesting is byte-identical before and after, which is why cycc's own
+   fixpoint never noticed.
+
+2. A NESTED STRUCT FIELD TAKES A WHOLE STRUCT VALUE.
+
+       struct Point { x; y; }
+       struct Box   { v: Point; n; }
+       struct Outer { t; b: Box; }
+       var a = Point { 2, 3 };
+       var o  = Outer { 1, a, 4 };          # a fills Box.v (Point is Box's FIRST field's type)
+       var o2 = Outer { 5, mkp(7), 9 };     # a call returning Point, likewise
+       var b  = Box { a, 7 };               # the direct case
+
+   The value may be a local, a parameter, a global, a struct-typed field, a call, a method or
+   an operator result; it is copied byte for byte. A value whose type is on the field's
+   FIRST-field chain fills that inner struct; a struct of any other type is refused by name
+   ("cannot copy 'q' into a struct field of a different struct type: 'p'"). At TOP LEVEL a
+   call returning a struct has no frame to land in and is refused by name ("'mkp' returns a
+   struct by value, and a struct result needs storage in a fn's frame — call it inside a
+   fn"), as the ONLY error. Before 6.6.12 `B2 { p, 5 }` with `p: Pt` was `unexpected '}'`;
+   only the flattened `B2 { 1, 2, 5 }` worked.
+
+3. A GENERIC STRUCT LITERAL NAMES ITS INSTANCE.
+
+       struct Box<T> { v: T; n; }
+       var G = Box<Pt> { 1, 2, 5 };                   # leading declaration block
+       fn f() { var b = Box<Pt> { p, 7 }; var c: Box<i64> = Box<i64> { 9, 6 }; }
+
+   All three literal heads (PARSE_VAR, the pass-1 global lookahead and the leading-block
+   replay) committed only on `Name {`, so every form above was `undefined variable 'Box'` on
+   6.6.11. One recogniser, `_lit_head`, now resolves the instance with the annotation's own
+   resolver, so `var b: Box<Pt> = Box<i64> { .. }` is refused ("struct literal type does not
+   match the declared type of this variable"). The leading declaration block now compares a
+   literal with its annotation at all — `var G: Pt = Q { 1, 2 };` compiled on 6.6.11.
+
+GATES: tests/tcyr/crossos/struct_field_value_copy.tcyr (every field AND a canary after the
+object, leading-block global and fn-local, two-level rows, 16 whole-value rows),
+tests/tcyr/crossos/generic_struct_inference.tcyr (the LIT group) and
+tests/gates/frontend/struct_literal_type_refused.sh (16 refusals, 4 acceptances). See also
+generics_monomorphization_v639_v6310.
+
+
+[[entries]]
+name = "field_chains_any_depth_and_call_result_fields_v6612"
+description = "Since cycc 6.6.12 a field chain reaches any depth for reading and writing (`n.v.v.x = 3;` stopped after two levels), and a `.field` applies to a call that returns a struct — in any expression position and as a bare statement, with chains, widths, f64 typing, a method on the result and a struct-typed field taken whole. At top level it is refused by name (no frame), as is an assignment to a result's field and a field of a call that returns no struct"
+category = "cyrius"
+tags = ["structs", "field-access", "call-result", "temporaries", "v6.6.12"]
+---
+Both were LOUD before 6.6.12 — syntax errors, nothing compiled wrong.
+
+FIELD CHAINS OF ANY DEPTH. `_resolve_leaf_field`, which serves the field load and the field
+store, descended exactly ONE nested level (an `if`), so `n.v.v.x = 3;` was
+`expected '=', got '.'` and `var r = n.v.v.x;` was `expected ';', got '.'` — through a local,
+a global (inline or pointer-mode) and a by-value or `*T` parameter alike. It is a loop now
+(a `..` range and a `.method(` after a nested field keep their own paths).
+
+A `.field` ON A CALL RESULT:
+
+    struct Pt  { x; y; }
+    struct Box { v: Pt; n; }
+    fn mk(a): Box { var b: Box; b.v.x = a; b.v.y = a + 1; b.n = 5; return b; }
+    fn Box_total(self: Box): i64 { return self.n + self.v.x; }
+    fn take(p: Pt): i64 { return p.x + p.y; }
+    fn demo(): i64 {
+        var y = mk(3).v.y;          # 4
+        var s = mk(3).n + 1;        # 6 — an INTEGER (6.6.11 typed s as Box, wanted Box_add)
+        var q: Pt = mk(7).v;        # a struct-typed field, copied whole
+        var t = mk(2).total();      # a method on the result itself
+        mk(3).total();              # ... and as a bare statement
+        return y + s + take(mk(1).v) + q.x + t;
+    }
+
+Inside a fn the result lands in a frame temporary and the field is read through the same code
+a named receiver uses: widths, sign-extension, f64 typing, deeper chains. Every return class
+works (a <= 8 B struct in rax, 9-16 B in rax:rdx, larger through a retptr; a `Str` handle into
+a pointer-mode slot).
+
+REFUSED BY NAME:
+- at TOP LEVEL, for every return class — `var G = mk(3).n;` and the bare `mk(3).n;` get
+  "'mk' returns a struct by value, and a struct result needs storage in a fn's frame — call
+  it inside a fn";
+- an assignment to a result's field, `mk(3).n = 5;` — "cannot assign to a field of a call
+  result: the result is a temporary";
+- a field of a call that returns no struct — "cannot take a field of the result of 'sc': it
+  does not return a struct".
+
+STILL NOT SUPPORTED (unchanged, as for a named struct): a method on a NESTED field —
+`mk(3).v.sum()`, like `b.v.sum()`, is `expected ';', got '.'`. Bind the field first.
+
+COMPILER NOTE: the new factor arm parses its own call and must clear the literal-fold flag
+AFTER the call, not before — see field_notes/compiler/gotchas.cyml
+`cfo_const_fold_rewind_class_four_occurrences_grep_the_shape_not_the_operator_and_every_tier_that_reenters_the_fold`
+(occurrence 5).
+
+GATES: tests/tcyr/lang/struct_field_chain_depth.tcyr (29 rows: 3- and 4-level read and
+write through every base, packed i8/i16/i32 leaves checked on the storage, an f64 leaf),
+tests/tcyr/crossos/generic_struct_inference.tcyr (the CF group, 30 rows; cx has no
+register-pair struct return, so those rows are off there) and
+tests/gates/frontend/call_result_field.sh (18 rows).
+
+
+[[entries]]
+name = "struct_field_arguments_and_toplevel_copy_init_v6612"
+description = "Since cycc 6.6.12 a struct-typed FIELD passed to a by-value struct parameter (`take(r.v)`) is a COPY inside a fn (the field's own address at top level), and a top-level struct copy-init (`var B: Pt = A;`, `var G: Pt = BX.v;`) gives the global its own bytes. Both used the source's FIRST WORD as the struct's address and SIGSEGV'd. The source of a top-level copy must be declared ABOVE the copy; a source of another struct type is refused by name"
+category = "cyrius"
+tags = ["structs", "by-value", "copy-init", "globals", "declaration-order", "sigsegv", "v6.6.12"]
+---
+Two more places where a struct moved as one word, both SIGSEGV (rc 139 on x86 and aarch64,
+a page fault on PE, 0 on cx) before 6.6.12. The 6.6.11 half (a struct copied OUT of a
+field into a variable) is struct_value_copies_and_result_type_checks_v6611.
+
+1. A STRUCT-TYPED FIELD AS A BY-VALUE ARGUMENT.
+
+       struct P3 { a; b; c; }
+       struct R  { k; v: P3; }
+       fn take(p: P3): i64 { p.a = 100; return p.a + p.b + p.c; }
+       fn f(): i64 { var r = R { 1, 10, 20, 30 }; return take(r.v); }   # 150; r.v.a stays 10
+
+   A by-value struct parameter over 8 bytes is address-passed. For `take(r.v)` the call
+   pushed the field's first word as that address, so the callee dereferenced 10 — from a
+   local, a global, a by-value parameter and a pointer-mode base, and through `mk<P3>(r.v)`.
+   Now, INSIDE A FN the callee gets a byte-exact COPY in a frame temporary, so its writes do
+   not reach `r.v` (unlike a NAMED struct argument, which is still address-passed and
+   aliases the caller). AT TOP LEVEL there is no frame, so the callee gets the field's own
+   address, as a named global argument does — measured: `take(BX.v)` at top level leaves
+   `BX.v.a == 100`. A field of a different struct type is refused ("cannot pass 'v' to a
+   by-value parameter of a different struct type in a call to 'take'").
+
+2. TOP-LEVEL COPY-INIT.
+
+       var A  = P3 { 3, 4, 5 };
+       var B: P3 = A;              # B has its OWN 24 bytes; A.a = 99 later leaves B.a == 3
+       var BX = R { 1, 7, 8, 9 };
+       var G: P3 = BX.v;           # from a global's field, any chain depth
+
+   Pass 1 knew only the LITERAL form as an inline struct global, so `var B: P3 = A;` got ONE
+   8-byte pointer-mode slot holding A's first word and `B.a` dereferenced 3 — in the leading
+   declaration block and after the first statement alike. One predicate (`_gci_src`) is now
+   asked by pass 1, by the leading-block replay and by PARSE_VAR's top-level arm: a whole
+   source of the declared struct registers the global inline and byte-copies it. A source of
+   another struct type is refused ("cannot copy 'A' into a variable of a different
+   struct/vector type: 'B'"). A POINTER-MODE source (`var p: P3 = mk();` in a fn, or a
+   pointer-mode global) keeps the pointer copy, as in a fn.
+
+⚠ DECLARE THE SOURCE ABOVE THE COPY.
+
+       var B: P3 = A;              # error: cannot copy-init 'B' from a global declared
+       var A = P3 { 3, 4, 5 };     #   below it (declare the source first): 'A'
+
+   Pass 1 cannot see a global declared later (so it registered the pointer-mode slot) while
+   the replay sees a whole `P3`, and the store that disagreement fell back to was the crash
+   again. And a global initialised at run time is initialised in DECLARATION ORDER, so even an
+   inline copy would read the source before its init. The refusal covers a struct over 8
+   bytes (measured at 12, 16 and 24 B); an 8-byte struct copy-init from a global declared
+   below it compiles and reads 0 (measured: `G.a` is 0 for a `{ a: i32; b: i32; }`), as any
+   forward reference to a run-time-initialised global does (`var b = a; var a = f();` —
+   6.6.11 the same). The value is 0, not a crash, and the rule is the same: declare the
+   source first.
+
+GATES: tests/tcyr/crossos/struct_field_value_copy.tcyr (15 field-argument rows, 11
+copy-init rows, 94/94 on x86, aarch64, PE and the four real hosts) and
+tests/gates/frontend/struct_copy_source_type_refused.sh (12 refusals, each the only error;
+every one compiled clean on 6.6.11).
+
+
+[[entries]]
+name = "unterminated_string_literal_is_an_error_v6612"
+description = "Since cycc 6.6.12 a string literal still open at the end of the source is `unterminated string literal`, reported at the OPENING quote's file:line:col — including at the end of an INCLUDED file, where the literal used to run on into the preprocessor's `#@file` resume marker and the error landed in the main file, on the wrong token"
+category = "cyrius"
+tags = ["lexer", "strings", "diagnostics", "include", "v6.6.12"]
+---
+LEX's string loop treated end-of-input as a closing quote, so the error surfaced later and
+somewhere else. It never compiled (the exit status was never 0), but the message pointed at
+the wrong place:
+
+    var a = 1;
+    var s = "abc                 # 6.6.11: error:5:9: expected ';', got end of file
+                                 # 6.6.12: error:<source>:2:9: unterminated string literal
+
+    "abc                         # a bare one — 6.6.11: unexpected string
+
+A `\` as the very last byte read one byte past the source as its escape; it now escapes
+nothing and reaches the same report.
+
+⚠ THE INCLUDED-FILE CASE was the misleading one, and it is the usual shape in a
+`cyrius build` project. The preprocessor splices an included file into one stream and follows
+it with a resume marker line, `#@file "<parent>" N`. A literal left open at the end of the
+included file did not reach end-of-input at all: it ran into that marker, closed on the
+marker's own quote, and every later quote paired wrongly. With `part.cyr` ending in
+`var s = "oops;` and the includer declaring `var source = "fine";`:
+
+    6.6.11: error:7:16: undefined variable 'source'      # the main file, a VALID literal
+    6.6.12: error:part.cyr:2:13: unterminated string literal
+
+Mechanism: a LF inside a literal followed by a WHOLE line in the marker's exact shape
+(`#@file "<name>" <digits>`) is taken as the end of the included file. The whole line is
+matched, so a valid string that merely contains `#@file ` still compiles.
+
+GATE: tests/gates/frontend/lexer_errors_name_file_line.sh axis 4 (eight unterminated rows —
+single-line, multi-line naming the opening line, trailing backslash, bare statement, four in
+an included file — plus two anti-vacuous rows; 6.6.11 fails all eight). The escape rules and
+line accounting are string_literal_escapes_and_line_accounting_v6611.
+
+
+[[entries]]
+name = "aarch64_xattr_statx_rlimit_fchown_wrappers_and_native_region_exemption_v6612"
+description = "cycc 6.6.12 names the xattr family, fchown, statx and getrlimit in the stdlib (`sys_{,l,f}{set,get,list,remove}xattr`, `sys_fchown`, `sys_statx`, `sys_getrlimit`); on ELF-aarch64 most of them could not be reached by number at all, so the aarch64 peer spells them through the 1000+N private alias band. The raw-syscall literal warning is no longer raised inside a region compiled only for aarch64 (where the number IS native), and a wrong 3-arg `kill` warns again on x86-Linux"
+category = "cyrius"
+tags = ["syscalls", "aarch64", "esysxlat", "alias-band", "xattr", "statx", "diagnostics", "darwin", "v6.6.12"]
+---
+THE WRAPPERS. Fifteen, in lib/syscalls_linux_common.cyr:
+
+    sys_setxattr  sys_lsetxattr  sys_fsetxattr     sys_getxattr  sys_lgetxattr  sys_fgetxattr
+    sys_listxattr sys_llistxattr sys_flistxattr    sys_removexattr sys_lremovexattr sys_fremovexattr
+    sys_fchown(fd, uid, gid)   sys_statx(dirfd, path, flags, mask, buf)   sys_getrlimit(resource, rlim)
+
+with `SYS_*` names in the x86_64, aarch64, x86-macOS and Windows peers. Linux: real
+everywhere. macOS: `sys_fchown` and `sys_getrlimit` are real (Darwin 123 / 194 —
+`RLIMIT_NOFILE` is 8 there, not 7); the xattr calls and `sys_statx` return -78, because
+Darwin's xattr calls take two extra arguments and Darwin has no statx. PE and agnos: -38 for
+all fifteen. Measured on 6.6.12: statx of `/`, getrlimit(7), getxattr on a missing path
+(-2) and fchown(fd, -1, -1) all right on x86 and on aarch64 under qemu.
+
+WHY aarch64 NEEDED THE ALIAS BAND. `ESYSXLAT`'s aarch64-Linux arm renumbers x86-compat
+numbers so raw x86 syscalls keep working on ARM — and those row SOURCES are native aarch64
+numbers too: fstat 5, lstat 6, poll 7, mmap 9, mprotect 10, munmap 11, brk 12, ioctl 16,
+getsockopt 55. So native setxattr 5 ran fstat, lgetxattr 9 ran mmap, fremovexattr 16 ran
+ioctl, fchown 55 ran getsockopt (qemu-aarch64 -strace). And the x86 numbers were no use
+either: x86 lremovexattr 198 / fremovexattr 199 are aarch64's own socket / socketpair. So the
+aarch64 peer declares them in the v6.5.7 **private alias band** — a source number >= 1000 no
+OS will ever mint, spelled `1000 + native`:
+
+    SYS_SETXATTR = 1005 ... SYS_FREMOVEXATTR = 1016   SYS_FCHOWN = 1055   SYS_STATX = 1291
+    SYS_GETRLIMIT = 163      # native: neither a row source nor a row product
+
+renumbered by fourteen pure rows at the TAIL of the ELF chain (below every compat row whose
+source their product would re-match). getxattr 8, flistxattr 13, removexattr 14,
+lremovexattr 15 and statx 291 are not row sources but take the band anyway: declaring
+`SYS_GETXATTR = 8` natively would have silenced the raw-literal warning for x86 lseek (8),
+because the generator drops a warning row for any number the aarch64 peer declares below 1000.
+Cost: ESYSXLAT rows are emitted inline at every syscall site, so each ELF-aarch64 syscall site
+grew 14 x 12 B = 168 B (the native aarch64 compiler +66 KB); x86 `cycc` is unaffected.
+Mechanics and the ordering rule: field_notes/language/platform_abi.cyml
+`raw_syscall_numbers_on_aarch64_and_the_darwin_at_flag_divergence`.
+
+THE NATIVE-REGION EXEMPTION. The raw-literal warning (v6.5.51) runs in the parser, after the
+preprocessor has already dropped the `#ifdef`, so a correct native call was told the x86 name:
+
+    fn a(): i64 {
+    #ifdef CYRIUS_ARCH_AARCH64
+        return syscall(8, path, name, buf, n);   # 6.6.11: "raw syscall 8 is x86_64 `lseek`;
+    #endif                                       #  on ELF-aarch64 that number is `getxattr`.
+        return 0;                                #  Use SYS_LSEEK ..." — 6.6.12: silent
+    }
+
+and spelling it through an `enum` folded to the same literal, so there was no way to mark a
+number native. Since 6.6.12 the preprocessor writes `#@a+` / `#@a-` marker lines where a
+TAKEN branch whose condition implies aarch64 opens and closes — `#ifdef CYRIUS_ARCH_AARCH64`,
+`#ifplat aarch64`, `#ifndef CYRIUS_ARCH_X86`, and the `#else` of their opposites — and the
+warning is skipped for a call inside one (a literal or an enum constant alike). Source text
+that spells a marker is neutralised like a forged `#@file`. Outside such a region the warning
+is unchanged.
+
+⚠ SILENT IS NOT SAFE. The exemption removes a WRONG suggestion; it does not route anything.
+A native number that is also a compat-row source is still rewritten before the `svc`, and now
+without a word: measured on 6.6.12, `syscall(9, ...)` (native lgetxattr) inside
+`#ifdef CYRIUS_ARCH_AARCH64` compiles silently and runs `mmap` under qemu. The guide's rule 3
+stands: never write the aarch64-native number — use the peer's `SYS_*` name or the wrapper.
+
+THE 3-ARG `kill` ARITY WARNING IS BACK ON x86-LINUX. 6.6.10 skipped the arity check for
+Darwin's `kill(pid, sig, posix)` with no target test, and the Linux arity table runs on every
+non-aarch64 backend, so `syscall(62, pid, sig, x)` compiled SILENTLY on x86-Linux from 6.6.10
+on (6.6.9 warned). The skip is x86-macOS only now: x86-Linux warns `syscall arity mismatch`,
+x86-macOS is silent for the 3-arg form and still warns for a 1-arg one (measured).
+
+GATES: tests/tcyr/crossos/xattr_statx_rlimit_fchown_wrappers.tcyr (62 rows; Linux, macOS,
+PE, agnos), tests/gates/platform/esysxlat_row_order.sh (every alias the peer declares has its
+row, in order), tests/gates/diagnostics/raw_syscall_native_exempt_and_kill_arity.sh (19 rows:
+eight native shapes silent, six anti-vacuous rows still warn, the kill rows).
+
+
+[[entries]]
+name = "cx_tail_calls_and_cxvm_guest_traps_v6612"
+description = "Since cycc 6.6.12 the cx backend compiles `return f(args);` as a real tail call (it was a call plus epilogue, so deep tail recursion overran cxvm's stacks and returned garbage), and cxvm TRAPS a guest fault instead of corrupting itself: every load/store, the syscall buffers, both VM stacks, the guest stack, a negative pc and an unknown opcode are checked (CVE-58). A trap prints `cxvm: <what> <value> at pc <N>` and exits 1. cxvm is still NOT a sandbox — the syscall opcode passes other numbers to the host raw"
+category = "cyrius"
+tags = ["cx", "cxvm", "bytecode", "tail-call", "sandbox", "CVE-58", "v6.6.12"]
+---
+TAIL CALLS. cx `ETAILJMP` emitted a normal call + epilogue, under a comment claiming a jump
+broke when the arguments contained nested calls. They do not — the shared tail path has
+popped every argument into r3.. before `ETAILJMP` — so it is now `mov sp, fp; popc fp;
+jmp f`, the x86 `mov rsp, rbp; pop rbp; jmp` shape. Measured:
+
+    fn tr(n, acc): i64 { if (n == 0) { return acc; } return tr(n - 1, acc + 1); }
+    syscall(60, tr(2000000, 0) % 256);
+    # 6.6.12 cycc_cx + cxvm: exit 128 (correct, 2.3 s interpreted)
+    # 6.6.11 cycc_cx + cxvm: exit 1 — garbage from the 513th frame on
+
+GUEST FAULTS TRAP (CVE-58). Before 6.6.12 `programs/cxvm.cyr` checked nothing a guest
+controls: a guest address past the 1 MB data segment (or negative) read and wrote cxvm's own
+heap — the register file, the stacks, the loaded code; guest address 0 (the in-memory copy of
+the bytecode) stored silently; the 1024-entry call stack had no bound, so the 513th nested
+frame overwrote the loaded code; `read` / `write` / `getrandom` / `clock_gettime` buffers ending
+past 1 MB had the HOST kernel write cxvm's heap; an unknown opcode was a silent no-op. Now:
+
+    fn f(): i64 { store64(2000000, 5); return 3; }
+    # cxvm: guest address out of range: 2000000 at pc 44        (exit 1; 6.6.11 exited 3)
+    store64(0, 5)          # cxvm: guest address out of range: 0 at pc 40
+    load64(0 - 8)          # cxvm: guest address out of range: -8 at pc 48
+    fn d(n) { return 1 + d(n + 1); }    # cxvm: guest stack overflow, sp 160 at pc 16
+
+- every load / store is checked for its FULL width against `[8, _CX_MEM_SIZE)` — `[0, 8)` is
+  the null page;
+- the translated syscall buffers are checked for their full length (a path up to its NUL) and
+  answer `-EFAULT` without reaching the host;
+- both VM stacks hold 65536 entries (512 KiB each) and trap on overflow and underflow, so the
+  guest's own 1 MB — not the host arrays — bounds recursion (non-tail depth 5000 returns the
+  right value; it gave garbage past 512 before);
+- `sub sp` traps before the guest stack reaches the loaded image (its globals and the
+  `lib/alloc_cx.cyr` heap);
+- a negative pc traps, an unknown opcode traps (`cxvm: unknown opcode 0xNN at pc <N>`).
+
+No `.cyx` format bump: a newer `.cyx` on an older cxvm is refused only by the new cxvm's trap.
+
+⚠ STILL NOT A SANDBOX. The syscall opcode (0x70) passes every number other than the
+translated ones to the host kernel AS-IS, with the guest's raw register values — a guest can
+issue any syscall the cxvm process may. Treat a `.cyx` you did not build like a native binary:
+verify its origin, and run cxvm under the OS's own isolation when the input is not yours. The
+contract is docs/platform-status.md "cyrius-x guest contract (cxvm)" in the cyrius repo.
+
+ALSO cx at 6.6.12: a store to a narrow slot wrote 8 bytes (`EVSTORE_W` / `EFLSTORE_W`
+ignored the width), clobbering packed narrow globals; both directions now use the sized
+cxvm opcodes and a signed load sign-extends (see multi_width_types). And `thread_join` no
+longer issues a FUTEX_WAIT with a guest offset (it spun on a Linux host): it returns -1 on
+cx, where no thread can exist.
+
+GATE: tests/gates/codegen/cx_tailcall_and_vm_traps.sh (axis A tail calls — a 2M-deep self
+recursion, mutual recursion, nested-call arguments, a >6-arg call; axes B-D the traps; axis
+E the narrow stores; every trap reddened by its own revert).
