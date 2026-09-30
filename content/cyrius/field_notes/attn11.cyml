@@ -3,6 +3,12 @@
 # hand-derived backprop, and the Adam optimizer — written in Cyrius on raw
 # f64 arrays. No BLAS, no libc, no autodiff. The thing TRAINS, it doesn't
 # just infer. These are the things you learn when the gradients are yours.
+#
+# Corrected 2026-09-30 (cycc 6.6.12): TRAP 2 in an_f64_is_an_i64_wearing_a_costume
+# ("long float literals mis-parse") is RETIRED — false since cycc 6.6.10, which
+# made every decimal float literal correctly rounded — and its `3.0e-3` example
+# was never a cyrius literal (there is no exponent form). The original text is
+# kept below, marked, because the bug it records was real when it was written.
 
 [[entries]]
 name = "attn11_overview"
@@ -63,11 +69,33 @@ boundary where a NaN could be born (a div, an exp, a sqrt of something that
 might be negative). A NaN that slips past the guard does not crash — it
 propagates, and twelve ops later your loss prints "nan" with no clue where.
 
-TRAP 2 — long float literals mis-parse. Write a constant like 3.0e-3 with enough
-digits and the lexer mangles it. You will stare at a learning rate that is
-silently wrong by orders of magnitude. The fix is a habit: build precise
-constants from integer ratios at runtime — f64_div(f64_from(3), f64_from(1000))
-for 3e-3 — never from a long decimal literal. Once it is a reflex it is free.
+TRAP 2 — RETIRED (corrected at cycc 6.6.12). As first written: "long float
+literals mis-parse. Write a constant like 3.0e-3 with enough digits and the
+lexer mangles it. You will stare at a learning rate that is silently wrong by
+orders of magnitude. The fix is a habit: build precise constants from integer
+ratios at runtime — f64_div(f64_from(3), f64_from(1000)) for 3e-3 — never from
+a long decimal literal."
+
+What was true: the lexer used to carry a decimal literal as a numerator /
+denominator pair divided at run time. Until cycc 6.5.28 a literal past about
+nine significant digits compiled to a DIFFERENT number (3.141592653589793 came
+out 0.061575), and until 6.6.10 one with more than 18 fraction digits was
+garbage while 16-18-digit literals could be 1 ulp off. Since 6.6.10 a float
+literal is the CORRECTLY ROUNDED binary64 of the digits as written, any number
+of digits, converted at compile time and emitted as one immediate. Measured on
+6.6.12: a 36-digit pi literal is exactly 0x400921FB54442D18, and `0.003` equals
+f64_div(f64_from(3), f64_from(1000)) bit for bit. (cycc 6.6.9 still got that pi
+literal wrong.)
+
+What was never true: `3.0e-3` is not a cyrius literal. There is NO exponent
+form — the lexer reads `3.0`, then an identifier `e`, and the compiler says
+`expected ';', got identifier 'e'` (6.6.9 and 6.6.12 alike). Spell small
+constants out: `0.003`, `0.000000001`.
+
+So today: write the decimal literal. The integer-ratio construction still
+works and is still how you build a constant from COMPUTED integers, but it is
+no longer needed for accuracy. Full mechanism:
+field_notes/compiler/gotchas.cyml `float_literal_rational_divided_at_runtime`.
 
 The deeper lesson: in this language the float is not a primitive the compiler
 protects. It is data you are choosing to interpret a certain way, and the
