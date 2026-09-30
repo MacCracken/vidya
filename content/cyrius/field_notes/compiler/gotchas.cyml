@@ -19,7 +19,7 @@
 #   the prefix used to mean. Live paths were repaired at the v6.6.1 audit; remaining
 #   mentions are inside narratives about bugs found when the file was called that.
 #
-# 121 entries (re-DERIVED at 6.6.10 bite 8 — it read 119 against a live 120; first derived at v6.6.6 bite 21 review with `grep -c '^\[\[entries\]\]'`, which is the only
+# 122 entries (re-DERIVED at 6.6.11 after the CVE-55 line-counter entry; at 6.6.10 bite 8 it read 119 against a live 120; first derived at v6.6.6 bite 21 review with `grep -c '^\[\[entries\]\]'`, which is the only
 # way this number should ever be written. v6.6.1 was an AUDIT that took it 158 -> 62; it then
 # drifted to a live 63 while still reading 62, to 96 while 6.6.5 was in flight, and to 100
 # while still reading 98 — the header was not re-derived when an entry was appended.)
@@ -5078,4 +5078,58 @@ not look at the i64 arithmetic one line above it. Gates:
 `tests/tcyr/crossos/float_literal_precision.tcyr` and
 `tests/gates/frontend/integer_literal_overflow_refused.sh`. See CHANGELOG [6.5.28] and
 [6.6.10].
+"""
+
+[[entries]]
+name = "file_attribution_is_a_line_lookup_so_the_lexer_line_counter_is_a_security_boundary"
+description = "`private` is enforced on FM_FILEID(line): a token's FILE is a range lookup of its LINE in the `#@file` span table, so every input to that lookup is part of the security boundary. Three instances, three different inputs: the span arithmetic (v6.5.3, an unmasked base collapsed every line to one file), the markers (CVE-45, a forged `#@file`), and at cycc 6.6.11 the lexer's own line counter — LEX's string loop did not count a newline inside a string literal, every later token sat one line high per newline, tokens near an include boundary resolved to the NEIGHBOURING file, and a call to another file's private fn compiled (CVE-55). Nothing was forged; the only input was an ordinary multi-line string."
+category = "cyrius"
+tags = ["lexer", "line-numbers", "private", "visibility", "FM_FILEID", "file-map", "security", "CVE-55", "CVE-45", "v6.5.3", "v6.6.11"]
+content = """
+**The chain.** The preprocessor flattens every `include` into one buffer and brackets each
+file with a `#@file "NAME" BASE` marker; `FM_BUILD` turns the markers into spans (start line,
+line count, source base) and `FM_FILEID(S, line)` answers a token's file by finding the span
+its LINE falls in. `private` is decided on that answer. The line is whatever LEX stamped on the
+token, so a lexer that miscounts lines moves tokens between files without touching a marker.
+
+**The miscount.** LEX's string loop stored a raw LF, and the LF of a backslash-newline escape,
+without calling `SCLINE`. After a literal holding N newlines every later token was N lines
+high. Symptoms, mildest first:
+  * diagnostics one line high per newline — "errors in backend/x86/fixup.cyr are one line
+    high" was filed separately (N3); its trigger was the one raw-newline literal in
+    src/frontend/parse_expr.cyr, and the `#@file` bookkeeping it was blamed on was correct;
+  * line 1 of the next include reported on that include's own marker line, as a bare
+    `error:4:12:` with no file name;
+  * a call after a multi-line string near an include boundary attributed to the DEFINING
+    file, so a cross-file call to a `private` fn COMPILED, and a privacy error, when one
+    fired, landed on an innocent name.
+
+**Why it is a CVE and not a diagnostics bug (CVE-55, P2).** No marker was wrong and nothing
+was forged. Any source file could bypass `private` with a string literal. Same impact as
+CVE-45, different vector.
+
+**The class: three inputs to one lookup, each fixed on its own.**
+  1. v6.5.3, the span arithmetic. `FM_BUILD` packs the source base into the high 32 bits of
+     the line-count word; `FM_FILEID` read it unmasked, `start + lines` overflowed, the first
+     span matched every line, and every token collapsed to one file id (access wrongly
+     ALLOWED).
+  2. CVE-45 (6.6.6; the first copier was guarded at v6.5.21), the markers. `FM_BUILD` accepts
+     `#@file` at any offset, so an included file, a `#define` body or a `#derive` tail could
+     mint a span and claim to be another file.
+  3. CVE-55 (6.6.11), the key: the line numbers the lookup is indexed by.
+Each fix guarded the input its repro used. None asked what else the lookup reads.
+
+**The rule.** When a security decision is DERIVED (file = f(line), owner = f(offset)), list
+every input to the derivation and treat each one as boundary code: the table, the arithmetic
+over it, and the key. Here the key is the lexer's line counter, which nobody reads as security
+code. Every path in the lexer that consumes a newline byte has to count it.
+
+**Fix and pin.** Both string-loop paths call `SCLINE`; the string token keeps its OPENING line
+(the column its diagnostic head prints). `tests/gates/frontend/lexer_errors_name_file_line.sh`
+axis 6 pins, after a multi-line string, the diagnostic's line, the include's file name and the
+`private` refusal of a cross-file call that compiled on 6.6.10. Mutations recorded in its
+header: dropping the raw-LF `SCLINE` turns axis 6 red; dropping the escaped-LF one turns
+`ml_bslf` red. The same bite closed the escape list (an unknown escape is a lex error). See
+CHANGELOG [6.6.11] (B05, N1/N2/N3) and language/features.cyml
+`string_literal_escapes_and_line_accounting_v6611`.
 """
