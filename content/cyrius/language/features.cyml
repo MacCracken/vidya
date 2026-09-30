@@ -25,6 +25,11 @@
 # Updated: enum_namespacing (the qualifier must name the variant's own enum — it was
 # ignored), sizeof_operator (whole type names; mulh64 whole word; `return sizeof(..)`),
 # compile_time_assert_v6610 (no-`;` assert ends at its line; failing asserts report all).
+# +1 entry struct_value_copies_and_result_type_checks_v6611 — `q = b.v` copies whole, a
+# struct result is type-checked at every size (incl. the leading declaration block), a
+# <= 8 B typed `self` is by value, `var y: Q = x` from a by-value param copies. Updated:
+# unions (the field caps fire after a union), derive_str_fields (a re-derived struct with a
+# different layout is refused).
 # v6.4.4 (2026-07-05): +1 entry f32v4_packed_single_simd — SIMD arc
 # Phase 1 (128-bit packed single, structured-descriptor encoding, x86).
 # v6.4.5 (2026-07-05): SIMD arc Phase 2 — f32v_fmadd/f32v_dot matmul ops
@@ -264,6 +269,17 @@ IMPLEMENTATION:
     as union flag. ISUNION(S, si) checks bit 63. FIELDOFF returns
     0 for all union fields. STRUCTSZ returns max field size
     instead of sum.
+
+    ⚠ The flag rides in the field COUNT, so every reader of that
+    count must mask it. Until 6.6.11 ADDFIELD / ADDFIELDTYPED /
+    ADDFIELDFK used it raw: the count was negative, so the
+    256-fields-per-struct cap never fired for a union (a 300-field
+    union compiled rc 0), and the flag leaked into the field-pool
+    top, so after ANY union the 8192-entry pool cap stopped firing
+    for every later struct too (40 structs of 250 fields wrote past
+    the pool and failed with an unrelated "passing integer literal
+    8 to 'alloc'"). Both caps fire now ("too many struct fields
+    (max 256)"); compiled output is unchanged.
 
 [[entries]]
 name = "bitfield_builtins"
@@ -810,6 +826,19 @@ ALSO AVAILABLE — #derive(accessors):
     #derive(accessors) struct Point { x; y; }
     Generates: Point_x(p), Point_set_x(p, v), Point_y(p),
     Point_set_y(p, v)
+
+    A derived struct NAME declared twice (6.6.11): the parser keeps
+    the FIRST layout, so a second `#derive`d definition whose field
+    names, order or size differ is refused —
+        #derive: struct 'A' is defined again with different field
+        names, order or size -- the FIRST definition is the layout
+        used, so these accessors would read and write the wrong bytes
+    Before 6.6.11 it built with warnings only: a larger second
+    definition's setters wrote past the first one's sizeof, and
+    `{ x; y; }` redefined as `{ y; x; }` had every setter write the
+    OTHER field. The same names at the same offsets still build —
+    one struct vendored by two libraries, or field TYPES that differ
+    at the same width (`f64` in one copy, `i64` in the other).
 
 PP_DERIVE handles both — same preprocessor codegen pattern.
 
@@ -3992,3 +4021,78 @@ multi-line string, the include's file name, and the `private` refusal of a cross
 that compiled on 6.6.10; axis 4: the escape rules). CROSS-REF:
 field_notes/compiler/gotchas.cyml
 `file_attribution_is_a_line_lookup_so_the_lexer_line_counter_is_a_security_boundary`.
+
+
+[[entries]]
+name = "struct_value_copies_and_result_type_checks_v6611"
+description = "Since cycc 6.6.11 a struct copied OUT of a struct-typed field (`q = b.v`, `var p: P3 = b.v`) is a whole byte-exact copy; a struct-valued call / method / operator result is type-checked against a struct destination at EVERY size (field, assignment, declaration; in a fn, at top level and in the leading declaration block); a typed `self: T` of 8 bytes or less is passed BY VALUE; and `var y: Q = x` from an address-passed struct parameter copies instead of aliasing the caller"
+category = "cyrius"
+---
+Five shapes that each stored ONE WORD (or aliased) silently before 6.6.11, on x86, aarch64,
+PE and cx alike. The 6.6.10 half (a struct copied INTO a field) is in
+field_notes/language/semantics_runtime.cyml
+`struct_field_types_checked_and_f64_fields_typed_since_6_6_10`.
+
+1. A STRUCT VARIABLE TAKEN FROM A STRUCT-TYPED FIELD COPIES THE WHOLE STRUCT.
+
+       struct Pt { x; y; }
+       struct Box { v: Pt; n; }
+       q = b.v;              # into a local, a global or a by-value param
+       var p: Pt = b.v;      # p is its OWN copy — writing p.x leaves b.v alone
+
+   Before 6.6.11 the assignment copied one word (`q.y` stayed stale) and the declaration
+   stored that word into a slot typed `Pt` that was not inline, so the next `p.x`
+   dereferenced it — rc 139 on x86 and aarch64, a page fault on PE, garbage on cx. A field of
+   a DIFFERENT struct type is refused by name.
+
+2. A TYPED `self: T` OF 8 BYTES OR LESS IS PASSED BY VALUE — `x.m()` passes `self` exactly as
+   `T_m(x)` would.
+
+       struct Odd { a: i8; b: i16; }          # 3 bytes
+       fn Odd_sum(self: Odd) { return self.a + self.b; }
+       x.sum();                               # 3, same as Odd_sum(x)
+
+   Writing `self.a` inside such a method changes the method's copy, not `x`. Before 6.6.11 the
+   dot form pushed `&x` for EVERY self, so a small typed self read its fields out of an
+   address (-23905 / 11130 / 4047 on x86 / aarch64 / cx, want 3). Unchanged: an UNTYPED self
+   (the `impl` form) is the receiver's address, and a struct over 8 bytes is address-passed.
+
+3. A STRUCT RESULT IS TYPE-CHECKED AGAINST A STRUCT DESTINATION AT EVERY SIZE. A call,
+   method or operator returning a different struct is refused, whatever its size and whichever
+   way it is stored:
+
+       p = mkq();                 # cannot copy 'mkq' into a variable of a different
+                                  #   struct/vector type: 'p'
+       var z: Odd = y.same();     # fn return struct-id differs from declared var type
+       h.o = y + y;               # cannot copy 'Odd_add' into a struct field of a
+                                  #   different struct type: 'o'
+
+   Before 6.6.11: a result of 8 bytes or less from a METHOD or OPERATOR was never checked (it
+   arrives in rax untyped), and an ASSIGNMENT `p = mkq()` from a call returning a different
+   struct compared the type only on some exits and otherwise fell to the scalar store — 24-,
+   16- and 3-byte mismatches all compiled and stored one word. A generic whose inferred
+   instance differs is refused too: `s = mk(r.v)` into a `Box<Pt>` infers `T = i64` (a FIELD
+   argument is not a whole argument), so the call reaches `Box<i64>` — copy the field into a
+   `Pt` first (`var p: Pt = r.v; s = mk(p);`).
+
+4. `var y: Q = x;` FROM AN ADDRESS-PASSED BY-VALUE STRUCT PARAMETER COPIES. A by-value
+   struct parameter over 8 bytes holds the caller's address; `y = x;` has copied through it
+   since 6.6.6, but the DECLARATION bound `y` as a second pointer to the CALLER's struct, so
+   `y.a = 9` changed the caller and `return y;` returned garbage. It is a copy now.
+
+5. GLOBALS: THE LEADING DECLARATION BLOCK IS CHECKED LIKE EVERYTHING ELSE. Globals declared
+   before the first top-level statement are replayed by a separate path (EMIT_GVAR_INITS), and
+   that path had no struct checks at all:
+     - `var G: W1<Pt> = ...;` there was typed as the generic BASE `W1` (`v: T` an i64), so
+       `G.v.x` failed to parse and `w1s(G)` read the wrong storage. It is the `W1<Pt>`
+       instance now, as after a statement.
+     - a struct-valued call there — `var G: Pt = mkp(2);`, generic or not — built and
+       SIGSEGV'd on `G.x`. It is refused as at any other top-level position: "'mkp' returns a
+       struct by value, and a struct result needs storage in a fn's frame — call it inside a
+       fn". A mismatched method / operator result into a struct global is refused too.
+
+GATES: tests/tcyr/crossos/struct_field_value_copy.tcyr (18 new rows, cross-OS),
+tests/gates/frontend/struct_result_type_refused.sh (30 refusals at 3 / 8 / 16 / 24 B plus 11
+same-type acceptances, each against a field-by-field control),
+tests/tcyr/crossos/generic_struct_inference.tcyr `run_globals`, and
+tests/gates/frontend/generic_type_arg_unknown_refused.sh axis Q.
