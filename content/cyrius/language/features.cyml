@@ -22,6 +22,9 @@
 # v6.6.11 (2026-09-29): +1 entry string_literal_escapes_and_line_accounting_v6611 —
 # an unknown escape is a lex error, `\`+newline keeps its bytes, a newline inside a
 # string counts as a line (diagnostics were one line high per newline; CVE-55).
+# Updated: enum_namespacing (the qualifier must name the variant's own enum — it was
+# ignored), sizeof_operator (whole type names; mulh64 whole word; `return sizeof(..)`),
+# compile_time_assert_v6610 (no-`;` assert ends at its line; failing asserts report all).
 # v6.4.4 (2026-07-05): +1 entry f32v4_packed_single_simd — SIMD arc
 # Phase 1 (128-bit packed single, structured-descriptor encoding, x86).
 # v6.4.5 (2026-07-05): SIMD arc Phase 2 — f32v_fmadd/f32v_dot matmul ops
@@ -207,8 +210,8 @@ SYNTAX:
     var n = sizeof(Point);   # recursive struct size
 
 IMPLEMENTATION:
-    Detected in PARSE_FACTOR as an identifier matching "sizeof"
-    (6-byte packed comparison). NOT a lexer keyword — the klen=6
+    Detected in PARSE_FACTOR as an IDENTIFIER spelled `sizeof`
+    (`_is_sizeof_word`, parse.cyr). NOT a lexer keyword — the klen=6
     lexer keyword block had a code-size issue that silently dropped
     sizeof recognition. Identifier-based detection in the parser
     is more robust.
@@ -216,6 +219,28 @@ IMPLEMENTATION:
     Parses: sizeof ( TypeName ) → EMOVI(S, size)
     For scalars: direct byte width.
     For structs: STRUCTSZ(S, sid-1) recursively sums field widths.
+
+⚠ WHOLE NAMES ONLY — BOTH THE WORD AND THE TYPE:
+    - The word (6.6.10): the test compared a 6-byte PREFIX, so
+      `sizeofzz(P)` was read as `sizeof`. It now compares 7 bytes,
+      the terminator included.
+    - The type (6.6.11): the scalar ladder matched a type-name
+      PREFIX, so `sizeof(i16v8)` was 2, `sizeof(i8zz)` was 1 and
+      `#assert sizeof(i16v8) == 2` PASSED. Both sizeof sites now
+      use the whole-name `_field_scalar_width` (6.6.10 had fixed
+      only the struct-field ladders); a name that is neither a
+      scalar nor a struct is `sizeof: unknown type`.
+    - The twin (6.6.11): `mulh64` was matched the same 6-byte way,
+      so a user fn named `mulh64x(a, b)` compiled as the intrinsic.
+      `_is_mulh64_word` is the whole-word test now.
+
+⚠ `return sizeof(T);` AND `return mulh64(a, b);` WORK SINCE 6.6.11.
+    Both are IDENT-spelled intrinsics lowered inline, but the tail-
+    call path saw `return NAME(..)` and jumped to a fn of that name
+    that does not exist, so the build was refused on every backend
+    ("undefined function 'sizeof'") while the same expression
+    through a local compiled. `_tc_callee_divert` now sends them to
+    the normal return path (`_is_ident_intrinsic`).
 
 [[entries]]
 name = "unions"
@@ -471,19 +496,46 @@ SYNTAX:
 SEMANTICS:
     Enum.VARIANT works everywhere an expression is valid:
     assignments, comparisons, function arguments, return values,
-    array indices.
+    array indices — and, since 6.6.10, `#assert` operands and
+    array sizes (`var buf[Sz.BUF]`).
 
-    The parser resolves Enum.VARIANT by checking if the identifier
-    after the dot is a global variable (which enum variants are
-    compiled as). If it is, the dot expression is treated as an
-    enum variant access. If not, it falls back to struct field
-    access.
+    ⚠ THE QUALIFIER IS CHECKED (cycc 6.6.11). The base must name an
+    enum, and VARIANT must be a member of an enum of THAT name:
+
+        enum E1 { EA = 1; EB = 2; }
+        enum E2 { EC = 3; }
+        Foo.EB     # error: 'Foo' is not an enum
+        E2.EB      # error: 'EB' is not a variant of 'E2'
+
+    The same resolver (`_enum_qual_resolve`, parse.cyr) serves
+    expressions, `#assert` and array sizes, and each mistake is
+    reported once. An enum NAME may be declared more than once
+    (every lib/syscalls*.cyr declares `Signal`); the variant is
+    looked up across all enums of that name.
+
+    Two enums may share a variant name, and the qualified form is
+    how you pick one: with `enum A { X = 1; }` and
+    `enum B { X = 2; }`, `A.X` is 1 and `B.X` is 2. The BARE `X`
+    keeps "last definition wins" (2) and warns
+    `duplicate symbol 'X' redefined with conflicting value`.
+
+    BEFORE 6.6.11 THE QUALIFIER WAS IGNORED. The parser only asked
+    whether the name after the dot was a global, so `Foo.EB` and
+    `E2.EB` compiled to EB's value, `Nope.gz` loaded a plain global
+    `gz`, and `A.X` read the LAST enum's X (A.X * 10 + B.X was 22,
+    not 12). Code that compiled only because of that now fails —
+    at the 6.6.11 cut, four consumers carried stale kavach
+    spellings (`Backend.PROCESS` for the renamed `KavachBackend`,
+    `KavachError.OK` for `KavachError.KAVACH_ERR_OK`, which had
+    been reading whichever global named `OK` came last). Across
+    1,655 ecosystem builds nothing else changed.
 
 IMPLEMENTATION:
-    No enum metadata table needed. Enum variants are already
-    compiled as global variables (e.g., Color_RED). The parser
-    just needs to recognize the Enum.VARIANT pattern and map it
-    to the global variable name.
+    Enum variants are still compiled as global constants; the
+    qualifier is resolved through the enum table (`_enum_id_of`,
+    `_enum_variant_in`) rather than by treating `Enum.` as noise.
+    A base that is a VARIABLE is a field access, not an enum
+    access (`p.x` never consults the enum table).
 
 [[entries]]
 name = "ref_directive"
@@ -3835,7 +3887,32 @@ form: `var buf[E.EB]`, `var a: i64[E.EB]` and the fn-local `var b[E.EB]` were re
 
 ⚠ `sizeof` MUST BE THE WHOLE WORD. The recogniser compared a 6-byte prefix, so
 `#assert sizeofzz(P) == 16` compiled as if it said `sizeof` (v6.6.10 compares 7 bytes,
-including the terminator).
+including the terminator). So must its TYPE (6.6.11): `#assert sizeof(i16v8) == 2` used to
+PASS because the scalar ladder matched the `i16` prefix; `i16v8` and `i8zz` are now
+`sizeof: unknown type` (see `sizeof_operator`).
+
+⚠ `Enum.NAME` MUST NAME NAME'S OWN ENUM (6.6.11). `#assert Nope.EB == 2` is refused with
+`'Nope' is not an enum`, and `E2.EB` with `'EB' is not a variant of 'E2'` — in #assert, in
+array sizes and in expressions alike (one resolver; see `enum_namespacing`). Before 6.6.11 the
+qualifier was ignored and any base compiled.
+
+⚠ AN `#assert` WITH NO `;` ENDS AT THE END OF ITS LINE (6.6.11). It took the line of the
+token at the cursor — already the NEXT line's — so
+
+    fn f() {
+        #assert 1 == 1
+        return 42;
+    }
+
+dropped `return 42;` and f returned garbage, rc 0, on every backend. The message may still
+wrap onto the next line (`#assert X,` then `"msg";` below it): a string at the cursor
+continues the assert.
+
+⚠ A FAILING `#assert` NO LONGER STOPS THE COMPILE ON THE SPOT (6.6.11). It exited during the
+declaration phase, so an earlier syntax error in the same file (`var x = ;` above a failing
+top-level assert) was never reported. Now each failing assert records its error and the parse
+continues: every failing assert and every other error is printed, and no binary is written.
+An assert inside an `#inline` body replayed per call reports once.
 
 ⚠ ONE MISTAKE, ONE ERROR. A bad operand is reported by name — "expected a number, sizeof(T)
 or an enum constant" — and no longer followed by a message-less "#assert failed" for the same
