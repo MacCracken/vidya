@@ -809,10 +809,19 @@ every libssl call that can write. **Open:** `lib/net.cyr`'s `sock_send` / `sock_
    a syscall-set change as a ⚠ behaviour change whenever a stdlib leaf switches syscall.
 2. **A child-process test passes vacuously under an inherited ignore** — SIG_IGN survives execve.
    The child calls `signal_default(SIGPIPE)` first; a death by signal comes back from `wait_pid`
-   as 128 + signo, so 141 is the assertion.
+   as 128 + signo, so 141 is the assertion. And the other way round: **GitHub's runner starts its
+   steps with SIGPIPE IGNORED**, so a test that ASSERTS "still SIG_DFL" without setting it reads 1
+   on CI only (6.6.14 handoff: `tls_libssl_sigpipe`). Every test sets the disposition it depends on;
+   reproduce CI with `perl -e '$SIG{PIPE}="IGNORE"; exec @ARGV' ./test`.
 3. **There are two write loops** (plain, and the deadline's non-blocking one): protect the LEAF
    both share and test every row with and without a deadline (gotchas
-   `a_guard_inside_one_copier_covers_only_that_copier`). CHANGELOG [6.6.14] CVE-66.
+   `a_guard_inside_one_copier_covers_only_that_copier`).
+4. **A forked test peer that writes its records in SEVERAL writes races the side under test**, which
+   reads the first, refuses, alerts and closes: a peer descheduled between writes meets the closed
+   socket. Before the fix that was a rare SIGPIPE death; after it, a `TLS_ERR_IO` and a wrong child
+   exit code — CI's ARM runner hit it, a loaded pi failed 4 of 20 (`tls_native_alert_mapping`) and
+   3 of 3 (`tls_native_ccs_deadline`'s write hook). Seal everything the peer sends at that point into
+   ONE buffer and write it once. CHANGELOG [6.6.14] CVE-66.
 
 [[entries]]
 name = "a_winsock_socket_is_not_a_file_handle"
