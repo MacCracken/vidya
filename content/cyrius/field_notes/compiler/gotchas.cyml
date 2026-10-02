@@ -19,7 +19,7 @@
 #   the prefix used to mean. Live paths were repaired at the v6.6.1 audit; remaining
 #   mentions are inside narratives about bugs found when the file was called that.
 #
-# 123 entries (re-DERIVED at 6.6.12 after the flags_reflect_rax entry — the other four 6.6.12 notes went INTO existing entries per the admission rule: cybs's six-argument CALL limit, the fifth `_cfo` occurrence, the sixth emitted-bytes instance, the eighth cap instance; 122 at 6.6.11 after the CVE-55 line-counter entry; at 6.6.10 bite 8 it read 119 against a live 120; first derived at v6.6.6 bite 21 review with `grep -c '^\[\[entries\]\]'`, which is the only
+# 126 entries (re-DERIVED at 6.6.14 after the TLS-stack traps entry — the other 6.6.14 notes went INTO existing entries per the admission rule: libssl is main-thread only (the fdlopen TCB entry), three deadline-route instances (the one-copier guard), two green-gate instances, a shared-mapping re-derivation (counter-model), agnos's ACK-synchronous send (the agnos class); 125 at 6.6.13; 123 at 6.6.12 after the flags_reflect_rax entry — the other four 6.6.12 notes went INTO existing entries per the admission rule: cybs's six-argument CALL limit, the fifth `_cfo` occurrence, the sixth emitted-bytes instance, the eighth cap instance; 122 at 6.6.11 after the CVE-55 line-counter entry; at 6.6.10 bite 8 it read 119 against a live 120; first derived at v6.6.6 bite 21 review with `grep -c '^\[\[entries\]\]'`, which is the only
 # way this number should ever be written. v6.6.1 was an AUDIT that took it 158 -> 62; it then
 # drifted to a live 63 while still reading 62, to 96 while 6.6.5 was in flight, and to 100
 # while still reading 98 — the header was not re-derived when an entry was appended.)
@@ -259,9 +259,9 @@ oversized-`var[]`-on-constrained-target overflow.
 
 [[entries]]
 name = "libssl_needs_fdlopen_not_dynlib_open"
-description = "libssl's OPENSSL_init_ssl uses a recursive pthread mutex whose __kind field lives in the glibc TCB. cyrius's dynlib_bootstrap_tls zeroed TCB reads __kind=0 (non-recursive); same-thread re-entry deadlocks on futex. Use lib/fdlopen.cyr (foreign-dlopen) instead."
+description = "libssl's OPENSSL_init_ssl uses a recursive pthread mutex whose __kind field lives in the glibc TCB. cyrius's dynlib_bootstrap_tls zeroed TCB reads __kind=0 (non-recursive); same-thread re-entry deadlocks on futex. Use lib/fdlopen.cyr (foreign-dlopen) instead. The same TCB rule makes libssl MAIN-THREAD ONLY: a cyrius worker's thread pointer is cyrius's own block, so lib/tls.cyr refuses every libssl call off the main thread since 6.6.14"
 category = "cyrius"
-tags = ["dynlib", "tls-loader", "fdlopen", "v5.6.37"]
+tags = ["dynlib", "tls-loader", "fdlopen", "libssl", "threads", "glibc-tcb", "v5.6.37", "v6.6.14"]
 content = """
 **The trap**: cyrius has two ways to load shared libraries at
 runtime:
@@ -307,6 +307,20 @@ Conversely, dynlib is fine for:
 **Recognize again**: any "dlopen succeeds, dlsym returns valid
 pointer, calling that pointer hangs forever" shape on a
 shared library that uses pthread mutexes.
+
+**The same rule, one thread over: libssl is MAIN-THREAD ONLY (6.6.14).**
+fdlopen gives glibc a real thread block on the thread that bootstrapped
+it. A `thread_create` worker is a raw `CLONE_THREAD` clone whose thread
+pointer holds cyrius's OWN thread-local block, so libssl called from it
+reads garbage through `%fs`: measured on 6.6.13, `tls_available()` on main
+then one fetch on a worker was a SIGSEGV, and a worker's cold first use
+hung. Since 6.6.14 every libssl arm of lib/tls.cyr checks
+`gettid() == getpid()` first and refuses without touching libssl
+(`TLS_ERR_WRONG_THREAD` -23, 0 or -1 — language/stdlib_modules.cyml
+`tls_module_contract_v6614`). Read both FRESH, never a cached pid: a
+forked child inherits the cache, and once the parent dies its pid can be
+recycled as a worker's tid. Anything else brought in through fdlopen has
+the same limit.
 
 Full backstory: v5_6.cyml's `libssl_needs_fdlopen_not_dynlib_open`.
 """
@@ -1832,9 +1846,22 @@ category = "cyrius"
    on macOS for four minors while thread bodies ran **serially** — every assertion was
    honestly true, because a serial fallback satisfies every property the tests checked. The
    corpus could not distinguish a real thread from an inline call.
+   ⟶ 6.6.14: a "this verb refuses off the main thread" test compared each verb's result with
+   its refusal value; deleting each of 31 guards in turn left 8 GREEN, because the real call
+   answers the same 0 (a fresh connection's `tls_get_session`; a setter whose libssl symbol is a
+   C macro and never resolves). Two of the 8 were a real regression — an unguarded worker CLAIMED
+   a one-time latch with null pointers and main's SPKI read returned 0 for the life of the
+   process. Assert on what the defect changes: a counting spy in EVERY pointer slot the library
+   holds (resolved or not), a "made no call" row per verb, the shared state afterwards — and
+   require every guard deletion RED.
 3. **The environment made the code unreachable.** The suite ran every test with `envp={NULL}`
    for reproducibility, so nothing could exercise `getenv` at all — the tests were green
    about a code path they never entered.
+   ⟶ 6.6.14: the Windows trust-store test read the real `Disallowed` store — EMPTY on cass —
+   so it passed with the Disallowed check deleted. Build the state instead of borrowing the
+   host's: `CERT_STORE_PROV_MEMORY` stores filled with exactly the certificate and properties
+   each row names (Windows stores ANY blob for a property id, so every malformed and fail-closed
+   path is reachable, deterministically, with no admin rights and no machine state touched).
 4. **Self-host does not exercise it.** The growable pressure tables never grow during cycc's
    own compile, so the grow path had zero coverage from the fixpoint. Force it with a
    low-cap build. ⚠ Generalise this: **the byte-identical fixpoint is coverage ONLY for
@@ -2067,7 +2094,7 @@ releases and two prior investigations apiece.
 
 [[entries]]
 name = "agnos_is_an_x86_host_that_is_not_linux_and_the_predefines_do_not_say_so"
-description = "CLASS — 3 recurrences merged v6.6.1. `CYRIUS_ARCH_X86` is predefined on EVERY x86-hosted build including the AGNOS ring-3 target, so `#ifdef CYRIUS_ARCH_X86` alone silently selects Linux syscall numbers on agnos. Add that agnos has no /proc and a stub written against an older kernel ABI rots silently, and agnos needs a precedence check in three separate places"
+description = "CLASS — 3 recurrences merged v6.6.1, a 4th at 6.6.14 (its sock_send waits for the ACK inside the call, so no user-space deadline bounds a write). `CYRIUS_ARCH_X86` is predefined on EVERY x86-hosted build including the AGNOS ring-3 target, so `#ifdef CYRIUS_ARCH_X86` alone silently selects Linux syscall numbers on agnos. Add that agnos has no /proc and a stub written against an older kernel ABI rots silently, and agnos needs a precedence check in three separate places"
 category = "cyrius"
 ---
 ⟳ **Replaces three entries.** One subject: **agnos looks like x86 Linux to every mechanism
@@ -2090,6 +2117,16 @@ returns a plausible CONSTANT, strictly harder to spot. Now `uptime_us` (#95, rdt
 
 **3 — agnos has no /proc**, so `getenv()` walks the exec-stack envp from `_agnos_init_rsp`.
 Anything that reaches for `/proc/self/*` is a Linux assumption wearing portable clothes.
+
+**4 — Its sockets are not Linux sockets (6.6.14, measured with a fake-kernel probe whose #48
+takes 8 s).** `sock_send#48` is ACK-SYNCHRONOUS: `tcp_send_ex` sends one segment and blocks INSIDE
+the call until it is ACKed, up to `TCP_PROGRESS_US` = 8 s, and #48 takes no time argument (a4 is
+unused). There is no writability readiness for a conn (`epoll_wait#21` reports EPOLLIN only, and
+only for `VFS_SOCK` fds) and no non-blocking send, so no user-space deadline can cut a write
+short: native TLS under a +1 s deadline returned `TLS_ERR_TIMEOUT` ~8.25 s late, and smaller
+chunks do not help (each waits for its own ACK). The fix is kernel-side — #48 honouring a4 as a
+µs bound; `tcp_send_ex` already takes the bound as a parameter. (A dead connection answers -1,
+never a signal.)
 
 ⭐ **THE HABIT.** Ask "is this check TARGET-specific or ARCH-specific?" — on agnos the two
 disagree, and only the target question is safe. Gate with
@@ -2309,6 +2346,16 @@ only, so it proved alignment for the one position this bug never
 touched, and its pass was then cited in the guide and in
 docs/ffi/fncall-abi.md as proof of the general claim. A gate
 proves the position it tests.
+
+**6.6.14 — an "independent" re-derivation that shared the MAPPING.** The
+Windows trust-store test re-derived the exported bundle from the `ROOT`
+store certificate by certificate, with its own reading of the root-program
+properties — and read property 104 as "distrusted for certificates issued
+after this date", exactly as the code did (104 is the Disable date; the
+issuance bound is 126). The two agreed, the row was green, and the first
+cut exported the three Entrust roots as full TLS anchors. A different way
+means a different SOURCE for the fact (wincrypt.h's names, a dump of the
+host's real properties), not a second copy of the same belief.
 """
 
 [[entries]]
@@ -4432,6 +4479,16 @@ space rather than inserting a byte, so the region keeps its LENGTH and no
 line or column shifts. The v6.5.21 version inserted, and had to carry a
 caveat about shifted columns inside comments.
 
+**6.6.14: THREE MORE, ONE SHAPE — a protection placed in one of the two routes through a verb,
+the plain one and the deadline's.** The native SIGPIPE fix had two write loops to cover (the
+plain one and `_tn_nb_write_all`); a mutant reverting only the deadline loop failed only the
+deadline rows. The libssl sticky-error wrapper was missing from the deadline branch
+(`_tls_ssl_io`) and read GREEN until every row was re-run with a deadline set. The libssl
+SIGPIPE hold's first live suite reached neither the deadline loop nor the 0-RTT pair — twelve
+call sites in all, pinned only when spies stood in for every `SSL_*` pointer. Fix shape each
+time: the protection lives on the LEAF every route shares (`_tn_os_write`, `_tls_ssl_call`), and
+each test row runs once per route.
+
 [[entries]]
 name = "a_degrade_becomes_a_permission_once_rules_are_written_around_it_6_6_6"
 description = "lib/io.cyr's xrmdir returned -1 on PE for four minors because no RemoveDirectoryW reroute was wired, and the -1 was documented as an honest degrade. By 6.6.6 THREE separate rules had been written around it: a crossos test asserted its own xrmdir only `if (rd == 0)`, the same test kept a FIXED directory name under #ifdef CYRIUS_TARGET_WIN because a per-pid one could never be cleaned up, and a tree-write gate carried a `win_guarded` allowlist RULE whose stated reason was the gap. Each rule made the gap cheaper to live with and the fix look bigger; the one target where the call could fail was the one target not asserting it."
@@ -5257,3 +5314,68 @@ is outside a closure.
 **Recognise it again:** any new "resolve the source by name" helper — ask what happens when the name is a
 capture. Gate: tests/tcyr/crossos/closure_capture_struct_copy.tcyr and
 tests/gates/diagnostics/closure_capture_struct_copy_mismatch.sh.
+
+[[entries]]
+name = "tls_the_obvious_reading_of_a_protocol_field_was_wrong_seven_times"
+description = "Seven traps in cyrius's own TLS stack (lib/tls_native_*.cyr, the libssl shim, the Windows store reader), all met in 6.6.14 (CVE-64/65/67 and the libssl follow-ups), each a check that stopped at the obvious reading of a protocol field: possession read as identity, a 1.2 signature scheme read as a curve, supported_groups read as a certificate label, the ctx's current state read as an event, OpenSSL's ZERO_RETURN read as a clean close, Windows root-store membership read as trust, and any `*.` read as a wildcard. What the OTHER implementation (OpenSSL, the Windows chain engine) reads the field as decides both interop and security"
+category = "cyrius"
+tags = ["tls", "tls_native", "libssl", "mtls", "x509", "ecdsa", "wildcard", "windows", "crypt32", "trust-store", "security", "CVE-64", "CVE-65", "CVE-67", "v6.6.14"]
+---
+1. **Client authentication is THREE checks, in every version the ctx accepts (CVE-64).** The 1.3
+   server checked the CertificateVerify against whatever leaf arrived — proof of POSSESSION — and
+   never chained it, so a self-signed leaf was an identity and a server with no roots accepted
+   everyone; the 1.2 server never sent a CertificateRequest, and a server ctx accepts 1.2 by
+   default, so a client offering only 1.2 connected unauthenticated under FAIL_IF_NO_PEER_CERT.
+   The checks: ASK (1.2 and 1.3); verify the chain to the SERVER's own roots with the CLIENT
+   purpose, failing closed with no roots; verify the CertificateVerify over the right transcript
+   (1.2: every handshake message before it — Ed25519 signs the messages, so a running hash cannot
+   stand in). One verifier serves both roles: `_tn_verify_chain(ctx, leaf, inters, now, purpose)`.
+   Review rule: a server "verify" flag that only decides whether a message is REQUESTED is not
+   verification — find the call that verifies the chain with the client purpose.
+2. **TLS 1.2's ECDSA scheme names the HASH, not the curve.** `ecdsa_secp256r1_sha256` (0x0403) is
+   P-256 + SHA-256 in 1.3, but `{sha256, ecdsa}` for ANY ECDSA key in 1.2: `s_client -tls1_2`
+   signs SHA-256 with a P-384 key. 1.2 hashes with the scheme and verifies on the key's curve
+   (sigil's digest-taking cores); 1.3 keeps the binding. ⚠ The 1.2 ServerKeyExchange check on the
+   client still binds the curve (backlog).
+3. **supported_groups is a promise about the KEY EXCHANGE.** OpenSSL refuses a 1.2 ECDSA
+   certificate — the client's own included — on a curve the client did not list ("wrong curve",
+   RFC 8422 §5.1.1). Listing it also offers ECDHE on it, which the x25519-only native 1.2 client
+   cannot do, so a server-preference server ranking that curve first now fails the handshake; the
+   server-certificate twin is OpenSSL's "no shared cipher". The fix is ECDHE on P-256 / P-384,
+   which wants a constant-time ECDH from sigil — not another list entry.
+4. **Publish an identity on the EVENT, not the current STATE.** The client's leaf is kept once its
+   chain verifies, BEFORE its CertificateVerify, so the getter cannot answer from the slot. The
+   first cut answered "while the ctx is not ERROR": that hid a failed handshake's leaf, but any
+   later I/O error also sets ERROR, so a server lost a verified identity when its client left
+   without close_notify. A latch set where the handshake completes and never cleared
+   (`_tn_server_connected`) is the answer. Same release: three 1.3 encrypted-read sites returned
+   an error without FAILING the ctx (`LAST_ERR` 0) — every negative result must fail it.
+5. **OpenSSL's re-read after a fatal alert is `SSL_ERROR_ZERO_RETURN`.** It sets
+   RECEIVED_SHUTDOWN on any alert and leaves `warn_alert` at 0 — close_notify's code — so a naive
+   mapping reports an attacked stream as a clean end. Keep the FIRST error sticky in the shim, and
+   never call `SSL_shutdown` after `SSL_ERROR_SYSCALL` / `SSL_ERROR_SSL` (OpenSSL forbids it).
+6. **A Windows root store's MEMBERSHIP is not trust (CVE-65).** CurrentUser\ROOT is a logical
+   store (cass: 59 ⊇ LocalMachine\ROOT 59 ⊇ AuthRoot 47), and the root program speaks in
+   PROPERTIES: purposes (9, a DER SEQUENCE OF OID; absent = all), a **Disable** date (104, scope
+   122: not trusted at all after it), a **NotBefore** date (126, scope 127: what it issues after
+   that is not trusted), name constraints (84), plus the separate Disallowed store. ⛔ 104 is NOT
+   the issuance-date distrust — 126 is; the first cut mapped 104 that way, never read 126, and
+   exported the three Entrust roots as full anchors. Read the names out of `wincrypt.h` and dump
+   every property of every root on the host before writing a policy. Size-query every property (a
+   fixed-size read fails ERROR_MORE_DATA and silently drops a trusted root); CRYPT_E_NOT_FOUND
+   (0x80092004) means absent and any other failure fails closed; and a purpose parser serving both
+   an allow-list (9) and a deny-scope (122 / 127) needs THREE answers — names TLS / well formed
+   without it / malformed — because "malformed" fails closed in OPPOSITE directions for the two.
+   Out of reach of any enumeration: roots Windows has not auto-downloaded yet, and the registry's
+   auto-updated disallowed CTL (~97 hashes on cass, whose Disallowed STORE is empty).
+7. **A dNSName is a wildcard only by OpenSSL's `valid_star` (CVE-67).** Native read any `*.`
+   prefix as a wildcard over the first label with a star matching any bytes: `*.com` verified
+   every `.com` host and `*.example.com` verified `a_b.example.com`. Port the reference
+   (`v3_utl.c` `valid_star` / `wildcard_match` under NO_PARTIAL_WILDCARDS) rather than writing the
+   rule from memory, and keep two backends in step with ONE table asked of BOTH live — OpenSSL's
+   column computed by `X509_check_host`, never transcribed (`tls_hostname_verdicts.tcyr`). Note
+   that `X509_check_host` reads a host starting with `.` as a SUBDOMAIN pattern: give such a host
+   no identity before OpenSSL sees it.
+
+CHANGELOG [6.6.14]; cyrius `docs/development/lib-tls-contract.md`. User-facing behaviour:
+language/stdlib_modules.cyml `tls_module_contract_v6614`.

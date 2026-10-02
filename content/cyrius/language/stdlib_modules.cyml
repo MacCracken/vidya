@@ -1,7 +1,11 @@
 # Cyrius — Stdlib Modules (per-module usage)
 # How to use specific stdlib modules — APIs, conventions, gotchas.
-# 21 entries (re-derived 6.6.12) — a CURATED subset of the 104 lib/*.cyr modules
-# (6.6.12; not the full surface). 6.6.12 (2026-09-30): +1 entry
+# 22 entries (re-derived 6.6.14) — a CURATED subset of the lib/*.cyr modules (not the full
+# surface). 6.6.14 (2026-10-02): +1 entry tls_module_contract_v6614 — the `tls_*` contract as a
+# consumer meets it (libssl main-thread only, native mTLS servers, SIGPIPE, Winsock, the
+# Windows store, SNI, sigil 3.13.7's strict/lenient PEM decode); thread_local_slot_allocator
+# gained the Windows heap block and file_read_whole_errno_contract_v6612 the capped
+# `file_read_all`. 6.6.12 (2026-09-30): +1 entry
 # file_read_whole_errno_contract_v6612 — the unbounded `file_read_whole` now passes the
 # negative errno through `*len_out` (it overwrote it with 0). Header refreshed 2026-08-07 at v6.5.10: `file_locking`
 # gained the v6.5.7 additions to the portable x* wrapper set
@@ -979,6 +983,17 @@ THE ALLOCATOR (v6.4.65):
   `TLOCAL_MAX_SLOTS` went 16 → 128; the Windows per-thread
   `TlsSetValue` block grew 128 → 1024 B to match.
 
+  ⚠ ON WINDOWS THAT BLOCK IS HEAP, allocated on the thread's FIRST
+  thread-local use (a Linux worker's block comes with the thread via
+  CLONE_SETTLS; macOS and agnos use a process-global block). So
+  `alloc_used()` for the same work differs by exactly 1024 between the
+  main thread and a fresh worker — and a first crypto call IS a first
+  thread-local use (sigil's `cbank()`). 6.6.14's
+  `tls_first_use_threads.tcyr` compared a bundle load measured on main
+  with a worker's: 1159168 vs 1160192 B on cass, every repetition, and
+  green everywhere else. Measure a per-thread cost on a thread in the
+  same state as the one under test.
+
 RULE FOR LIBRARY AUTHORS: never write a slot-index literal. Allocate at
 first use behind a once-gate. If you are reading someone's `= 8` or
 `= 3`, that is a pre-v6.4.65 hazard, not a convention to copy.
@@ -1023,6 +1038,13 @@ returned buffer tells them apart: 0 vs a buffer), but the one form with no bound
 could not say WHICH failure it was. Measured: a missing path gives `n == -2` on 6.6.12 and
 `n == 0` with the 6.6.11 stdlib; a directory gives `n == -21`.
 
+⚠ `file_read_all(path, buf, maxlen)` IS NOT A WHOLE-FILE READ. It stops at `maxlen` and
+returns `maxlen` — the same answer as a file of exactly that size. Native TLS's
+`tls_ctx_use_certificate_file` read through it into a fixed 64 KiB buffer until 6.6.14: a
+certificate past the first 64 KiB was not found, and one before it was accepted from a
+truncated file. For a file that must be read whole, size the buffer to the file and refuse over
+a NAMED cap (`file_read_whole_max`: -EFBIG past `max`; the TLS verbs now: `TLS_CREDFILE_MAX`).
+
 HOW TO READ IT: test the buffer, then the length. All 24 in-tree callers and every ecosystem
 caller surveyed at 6.6.12 already test the buffer for 0 before reading the length; code that
 loops `while (i < n)` without testing the buffer runs zero times on a negative `n`, exactly
@@ -1037,3 +1059,107 @@ doubling asked alloc for 2^31 + 1, got 0 and copied through NULL).
 GATES: tests/tcyr/crossos/file_read_whole_bounded.tcyr (a missing file: 0 and `n < 0`) and
 tests/gates/toolchain/manifest_read_whole_file.sh axes 5 and 6 (a directory, and /dev/zero
 under `ulimit -v`); restoring the overwrite reddens all three.
+
+[[entries]]
+name = "tls_module_contract_v6614"
+description = "lib/tls.cyr — the `tls_*` verbs over two backends: the native stack (TLS 1.2/1.3, client AND server, over sigil; the default) and libssl through fdlopen (opt-out). As of cyrius 6.6.14: libssl is MAIN-THREAD ONLY and refuses off it (`TLS_ERR_WRONG_THREAD`, -23); a native mTLS server verifies the client's chain to its OWN roots in TLS 1.2 and 1.3; a TLS write never raises SIGPIPE; native TLS runs over Winsock with a real deadline; Windows roots come from the CurrentUser ROOT store; no SNI for an IP literal; a failed connection stays failed on both backends. The authority is cyrius docs/development/lib-tls-contract.md"
+category = "cyrius"
+tags = ["stdlib", "tls", "tls_native", "libssl", "mtls", "trust-store", "sigpipe", "windows", "threads", "deadline", "v6.6.13", "v6.6.14"]
+---
+The contract is cyrius `docs/development/lib-tls-contract.md`; this entry is what a consumer
+must know without reading it. Backend: native by default; libssl with `-D CYRIUS_TLS_LIBSSL`
+(a libssl-only build) or `tls_set_backend(TLS_BACKEND_LIBSSL)` in a default build — set once,
+before any thread connects. Verbs and return values agree across backends unless noted.
+
+THREADS. Native: any number of threads, each on its OWN ctx; first use is race-free from any
+thread (6.6.13). libssl: **main thread only, and it fails closed off it (6.6.14)** — the glibc
+fdlopen bootstraps needs a glibc thread block on the CALLING thread, and a `thread_create`
+worker carries cyrius's own (gotchas `libssl_needs_fdlopen_not_dynlib_open`). Off main, with no
+libssl call made:
+
+    tls_read / tls_write / tls_set_deadline                        -> TLS_ERR_WRONG_THREAD (-23)
+    connect / accept / *_complete / tls_available / introspection /
+      session verbs / tls_dlsym                                    -> 0
+    tls_set_alpn / tls_set_verify / tls_ctx_* config / 0-RTT I/O   -> -1
+    tls_close                                                      -> 0, and frees NOTHING
+
+-23 is not a connection failure: the ctx is unchanged, so make the same call on main. "Main" is
+`gettid() == getpid()`, read fresh, so a forked child's main thread qualifies. TLS on worker
+threads means the native backend.
+
+A FAILED CONNECTION STAYS FAILED, on both backends since 6.6.14. After any negative result other
+than `TLS_ERR_WOULD_BLOCK`, every later `tls_read` returns that code and every later `tls_write`
+returns `TLS_ERR_PROTOCOL`; libssl gets no further `SSL_read` / `SSL_write` / `SSL_shutdown`.
+Until 6.6.14 a libssl RE-read after a fatal alert returned 0, a clean end of stream (gotchas
+`tls_the_obvious_reading_of_a_protocol_field_was_wrong_seven_times`, item 5).
+On any negative: `tls_close`.
+
+SIGPIPE: NEVER, on either backend (CVE-66, 6.6.14). A write to a reset peer (`tls_write`, a
+handshake flight, the close_notify `tls_close` sends) is `TLS_ERR_IO` (`*_complete`: 0), and the
+process disposition is never touched. ⚠ This changed the syscalls: on Linux a native socket write
+is `sendto(2)`, on macOS each connection adds a `setsockopt(2)`, and a deadline adds `fcntl` +
+`poll` — a seccomp allowlist that admits `write` but not `sendto` KILLS a native TLS writer on its
+first record. A pipe or file transport, and a custom `tls_native_set_transport`, keep their own
+SIGPIPE (platform_abi
+`a_write_to_a_reset_peer_raises_sigpipe_and_a_library_may_neither_rely_on_nor_change_the_disposition`).
+
+DEADLINE. `tls_set_deadline(ctx, clock_now_ns() + ns)` (6.6.13), set between `*_alloc` and
+`*_complete`, bounds the handshake and every later read and write (`TLS_ERR_TIMEOUT`, ctx
+failed). A real per-call bound on Linux, macOS and — since 6.6.14, native TLS over Winsock —
+Windows, where a bounded write leaves the socket BLOCKING (FIONBIO cannot be read back). Checked
+only between calls: a custom transport, a Windows HANDLE that is not a socket. ⚠ agnos: a write
+can overshoot by one ~8 s `sock_send` (gotchas
+`agnos_is_an_x86_host_that_is_not_linux_and_the_predefines_do_not_say_so`, item 4).
+
+SERVER IDENTITY (the client side). The host is classified once, for both backends
+(`lib/tls_hostid.cyr`). An IP literal matches iPAddress SANs only. A DNS name matches dNSName
+SANs by OpenSSL's rules: a wildcard is `*.` plus two or more LDH labels, and its star is ONE
+non-empty LDH label; any other dNSName (`*.com`, `*.example.com.`, `f*.example.com`) is compared
+literally — native took any `*.` as a wildcard until 6.6.14 (CVE-67). No CN fallback, no
+public-suffix list (`*.co.uk` matches `a.co.uk` on both). `0`, `""`, `[::1]`, `fe80::1%eth0` and
+a host starting with `.` have NO identity and are refused while verifying. SNI is sent for a DNS
+name only, never an IP literal (RFC 6066 §3; native since 6.6.14).
+
+CLIENT CERTIFICATES ON A SERVER (native; CVE-64, 6.6.14). In the accept hook:
+
+    tls_set_verify(handle, 3, 0);                                   # PEER | FAIL_IF_NO_PEER_CERT
+    tls_ctx_load_verify_locations(handle, "clients-ca.pem", 0);     # the roots clients chain to
+
+Modes: 0 is NONE; any mode with bit 2 is FAIL_IF_NO_PEER_CERT, with or without PEER (stricter
+than libssl, which ignores 2 / 4 / 8 without PEER); any other non-zero mode is PEER. A presented
+certificate must chain to the SERVER's roots (with no roots, every presented certificate is refused), be in
+its validity window, permit client authentication (keyUsage digitalSignature or keyAgreement;
+extendedKeyUsage clientAuth or any) and sign the CertificateVerify — in TLS 1.2 exactly as in 1.3
+(a server ctx accepts 1.2 by default). Not native: RSA client certificates, and a verify CALLBACK
+(never run — one that would ACCEPT fails closed, so install that certificate or its CA as a root;
+a pin belongs after the handshake). `tls_get_peer_spki_der(ctx, …)` on a server returns the
+CLIENT's key once the handshake completed — 0 before then, and 0 if it failed after the chain
+verified — and keeps it through a later connection error.
+
+CLIENT CERTIFICATES ON A CLIENT. `tls_ctx_use_certificate_file` / `_private_key_file` (client ctx
+only) read the whole file, at most `TLS_CREDFILE_MAX` (1 MiB), from the ctx's allocator; a larger
+file is refused (0), never truncated (until 6.6.14: a 64 KiB global-heap buffer per call, and a
+longer file parsed cut short). The native 1.2 client now answers a CertificateRequest. ⚠ Holding
+a P-256 / P-384 certificate, its 1.2 ClientHello lists that curve (OpenSSL refuses an ECDSA client
+certificate on a curve the client did not list) while its ECDHE stays x25519 — so it FAILS
+(`TLS_ERR_HANDSHAKE_FAILED`) against a 1.2 server that ranks that curve above X25519 by its own
+preference, asked for a certificate or not.
+
+TRUST STORE. `tls_ctx_set_verify_paths` / `tls_native_set_ca_system`: POSIX reads the first of
+`/etc/ssl/cert.pem`, `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`,
+`/etc/ssl/ca-bundle.pem`. **Windows reads none of them (CVE-65, 6.6.14):** it exports the
+CurrentUser `ROOT` store through crypt32 (loaded from System32 at first use), keeping only roots
+the root program trusts for serverAuth and counting those it refuses whole. A root Windows has not
+auto-downloaded yet is not there; add it with `tls_ctx_load_verify_locations`, which natively
+REPLACES the ctx's roots (libssl ADDS) and reads at most `TLS_CAFILE_MAX` (16 MiB).
+`tls_native_ca_skipped(ctx)` counts what could not be used: installed + skipped == the PEM blocks
+(plus, on Windows, the refused roots).
+
+PEM DECODE: STRICT OR LENIENT (sigil 3.13.7, which cyrius 6.6.14 folds). `pem_decode_certs_into`
+is all-or-nothing: one bad block fails the input. `pem_decode_certs_lenient_into(pem, len, chain,
+max, pool, pool_size, &skipped)` skips and counts a malformed block (an unmatched BEGIN, bad
+base64) and resumes at the NEXT BEGIN; size `chain` with `pem_count_cert_blocks(pem, len)` (decoded
++ skipped == blocks; -1 only for a bad argument or a well-formed block with no room). Choose by what the caller wants.
+THESE certificates (a chain, the leaf as block 0 — `tls_native_set_client_cert`) -> strict: a
+lenient decode would hand back the NEXT certificate as the leaf. ANY usable ones (a bundle of
+independent roots) -> lenient: under a strict decode one corrupt block installs zero roots.

@@ -94,7 +94,7 @@ a subshell environment." No example, no warning. Easy to miss.
 
 [[entries]]
 name = "bash_pre_increment_set_e_zero_exit"
-description = "`(( i++ ))` evaluates to the OLD value of i; when i=0 that's exit code 0 → set -e aborts the script"
+description = "`(( i++ ))` evaluates to the OLD value of i; when i=0 that's exit code 0 → set -e aborts the script. The general class: under `set -e` the status of a command you meant to INSPECT is consumed before you can read it — `cmd; rc=$?` is dead code for a failing cmd (sigil 3.13.7's fuzz loop, cyrius's release gate); write `rc=0; cmd || rc=$?`"
 category = "cyrius"
 ---
 THE TRAP:
@@ -149,6 +149,28 @@ GENERAL RULE for bash ports in vidya: **never use `(( i++ ))`
 or `(( i-- ))` as a standalone statement**. Use
 `i=$((i+1))` / `i=$((i-1))`. It's two extra characters and
 it's safe under any `set` flags.
+
+THE SAME CLASS, WIDER: under `set -e`, a status you meant to
+INSPECT is consumed by `set -e` first.
+
+    timeout 5 "$bin" >/dev/null 2>&1
+    rc=$?                                  # never reached when rc != 0
+    if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then ...   # 124 accepted
+
+sigil's scripts/check.sh ran its fuzz harnesses in exactly this
+shape until 3.13.7 (found by the cyrius 6.6.14 sigil lane):
+fuzz_ed25519 (~11 s) hit the 5 s timeout and the audit exited 124
+with NO summary on every run — after its tests and benches had
+passed, so it read as "the audit is slow", not "the audit is
+broken". cyrius's release gate graded check.sh the same way
+(field_notes/compiler/methodology.cyml, `grading_a_subprocess_...`).
+The shape that works:
+
+    rc=0
+    timeout 5 "$bin" >/dev/null 2>&1 || rc=$?
+
+RULE: under `set -e`, every `cmd; rc=$?` is dead code for a
+failing `cmd`. Write `rc=0; cmd || rc=$?`.
 
 [[entries]]
 name = "grep_dash_c_prints_zero_and_exits_one"

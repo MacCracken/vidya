@@ -17,8 +17,10 @@
 # stack-arg codegen fix, and PURE cyrius has no arity limit at all
 # (5-20 args verified on real hardware). A rule that tells you to
 # restructure code around codegen is a bug report, not a rule.
-# 12 entries (v6.6.6 — DERIVE with `grep -c "^\[\[entries\]\]"`, do not increment; the
-# line said 10 while the file held 11, which is why it says DERIVE).
+# 15 entries (re-DERIVED at 6.6.14 after three class entries: the drive-relative rooted path
+# (CVE-54/57/65 + the DLL search order), SIGPIPE (CVE-66 + the open net.cyr writers), and the
+# Winsock socket that is not a file handle — DERIVE with `grep -c "^\[\[entries\]\]"`, do not
+# increment; at v6.6.6 the line said 10 while the file held 11, which is why it says DERIVE).
 
 [[entries]]
 name = "per_os_target_flags_win_vs_linux"
@@ -709,9 +711,138 @@ Two more things the same bite measured, worth having before you write one of the
   * **Writing into a child that already exited kills the WRITER with SIGPIPE**, default
     disposition, no diagnostic — exit 141 from a runner that looks like it crashed. That is
     unrelated to the deadline and is still open in this tree (pre-6.6.6 behaviour); a pump
-    with no SIGPIPE handling reports a dead child as its own death.
+    with no SIGPIPE handling reports a dead child as its own death. One instance of the class
+    in `a_write_to_a_reset_peer_raises_sigpipe_and_a_library_may_neither_rely_on_nor_change_the_disposition`.
 
 `syscall(7, &pfd, 1, ms)` is the portable spelling: the backend translates 7 to Darwin poll
 (230) and to aarch64 `ppoll` (73) with the ms->timespec shift, which is why `lib/net.cyr`
 has used that literal since v6.2.10.
 """
+
+[[entries]]
+name = "a_rooted_posix_path_is_drive_relative_on_windows_and_any_local_user_can_plant_it"
+description = "CLASS — three CVEs in four releases. On Windows a rooted path such as /etc/hosts resolves against the CURRENT drive (C:\\etc\\hosts), and any authenticated user may create a folder at the root of the system drive, so a stdlib that opens a POSIX config path on every target lets one local user configure every other user's program. CVE-54 (6.6.11, hosts + resolv.conf), CVE-57 (6.6.12, sandhi's resolver), CVE-65 (6.6.14, the TLS trust store); still open in sigil (tools spawned by rooted path). The loader's DLL search order is the same planting, one level down"
+category = "cyrius"
+tags = ["platform", "windows", "pe", "security", "path-planting", "dll-search-order", "crypt32", "callptr", "CVE-54", "CVE-57", "CVE-65", "v6.6.11", "v6.6.12", "v6.6.14"]
+---
+**THE MECHANISM.** `file_open` hands a rooted path to `CreateFileW`, and Windows resolves
+`\etc\...` against the current drive — `C:\etc\ssl\cert.pem` for a program started on C:.
+Creating `C:\etc` needs no privilege. Nothing fails and nothing warns: the file is absent until
+someone plants it, and from then on it is trusted.
+
+| CVE | release | opened on Windows | what the planter controlled |
+|---|---|---|---|
+| 54 | 6.6.11 | `/etc/hosts`, `/etc/resolv.conf` (`lib/net.cyr`), plus a fallback nameserver 127.0.0.1:53 — port 53 is not privileged on Windows | every other user's name resolution |
+| 57 | 6.6.12 | `/etc/resolv.conf` (the folded sandhi resolver) | every other user's DNS server |
+| 65 | 6.6.14 | `/etc/ssl/cert.pem` + three sibling bundles (`_tn_ca_read`) | every other user's TLS trust anchors — measured on cass, a planted `cert.pem` became the ONLY root |
+
+**Still open** (sigil's repo, roadmap backlog): its TPM / LUKS / dm-verity helpers probe
+`/dev/tpmrm0` and spawn `/usr/bin/tpm2_*`, `/usr/sbin/cryptsetup`, `/usr/sbin/veritysetup` by
+rooted path — an EXECUTABLE planted at `C:\usr\bin\...`, should those paths become reachable on PE.
+
+**THE RULE.** A rooted path literal in `lib/` is a POSIX-only path: it sits under
+`#ifndef CYRIUS_TARGET_WIN`, and the Windows arm asks the OS (getaddrinfo, the adapters' DNS
+servers, the certificate store). Audit by grepping `lib/` AND every folded dep's source for `"/`
+literals — each of the three was found one module at a time, by whoever happened to be in it.
+⚠ Wine does NOT show the class (it maps a rooted path to the unix root); only real Windows (cass)
+proves it. A test plants the file itself at the exact path the old code opened, asserts the plant
+exists, and removes only what it created.
+
+**THE SAME PLANTING THROUGH THE DLL SEARCH ORDER.** An IAT import of a DLL that is not a KnownDLL
+(`HKLM\...\Session Manager\KnownDLLs`: kernel32, ws2_32 and shell32 are; crypt32, dxgi and
+bcryptprimitives are not) is looked for in the APPLICATION DIRECTORY first, so a `crypt32.dll`
+dropped beside the program runs at its load. CVE-65's store reader therefore does not import
+crypt32: it loads it from System32 at first use, with no compiler change at all —
+
+    var k  = syscall(0xF013, "kernel32.dll");          # GetModuleHandleA
+    var ll = syscall(0xF014, k, "LoadLibraryExA");      # GetProcAddress
+    var c  = callptr(ll, "crypt32.dll", 0, 0x800);      # LOAD_LIBRARY_SEARCH_SYSTEM32
+    var f  = syscall(0xF014, c, "CertOpenStore");        # then callptr(f, ...): 5+ args go on the stack
+
+— and it keeps crypt32 out of the startup of every program that never verifies. Mask a BOOL /
+DWORD result (`& 0xFFFFFFFF`: the upper half is undefined) and read `GetLastError` (0xF04B)
+straight after the call it explains. CHANGELOG [6.6.11] [6.6.12] [6.6.14].
+
+[[entries]]
+name = "a_write_to_a_reset_peer_raises_sigpipe_and_a_library_may_neither_rely_on_nor_change_the_disposition"
+description = "CLASS. write(2) to a socket whose peer has reset raises SIGPIPE, whose default action kills the WHOLE process — every connection of a server, on the say-so of any client that disconnects. An application may ignore the signal; a LIBRARY may neither assume it did nor change the process-wide disposition for it. Per OS: Linux MSG_NOSIGNAL per call; macOS SO_NOSIGPIPE per socket, failing CLOSED when xnu refuses it; a library that does not own the write (libssl) holds SIGPIPE off in the calling thread around the call. CVE-66 (6.6.14) was both TLS backends at once; lib/net.cyr's plain writers are the open instance"
+category = "cyrius"
+tags = ["platform", "linux", "macos", "signals", "sigpipe", "sockets", "security", "seccomp", "tls", "libssl", "CVE-66", "v6.4.51", "v6.6.14"]
+---
+**THE TRIGGER IS ORDINARY.** The peer closes; our next write reaches a closed socket and its
+kernel answers RST; the write after that is EPIPE — with SIGPIPE, unless the write said
+otherwise. Measured against the 6.6.13 lib: a native TLS writer exited 141 on x86_64, pi, ecb and
+ach (one of the five rows was the ClientHello, the handshake's own first write), and a libssl
+SERVER died in `tls_accept_complete` answering a client that had connected and hung up.
+
+**INSTANCES.** v6.4.51 `signal_ignore(SIGPIPE)` — right for an APPLICATION (sandhi's server
+calls it), wrong inside a library. 6.6.6: a pump writing into a child that already exited dies of
+it (`pollout_promises_pipe_buf_not_the_whole_write`). 6.6.14, CVE-66: every native TLS write, and
+every libssl call that can write. **Open:** `lib/net.cyr`'s `sock_send` / `sock_send_all`,
+`lib/http.cyr` and `lib/ws.cyr` are still flagless writes on Linux and macOS (roadmap backlog).
+
+**THE FIX, PER MECHANISM** (`_tn_os_write` / `_tn_nosigpipe` in `lib/tls_native_conn.cyr`,
+`_tls_ssl_call` in `lib/tls.cyr`):
+
+- **Linux:** `sys_sendto(fd, buf, n, 0x4000 /*MSG_NOSIGNAL*/, 0, 0)`; on ENOTSOCK (-88) fall
+  back to `write(2)` — a pipe or a file keeps its SIGPIPE, as no per-call flag exists for one.
+- **macOS:** no `MSG_NOSIGNAL` in the API; `setsockopt(fd, 0xFFFF, 0x1022 /*SO_NOSIGPIPE*/)`
+  before the connection's first write. ⛔ xnu REFUSES it (EINVAL) on a socket shut down both
+  ways — exactly the state an RST leaves — so "set it, ignore failure, write" is the hole itself:
+  any failure but ENOTSOCK (38) fails the write closed. A mutant ignoring the failure read 141 on
+  ecb and ach.
+- **A write you do not own** (OpenSSL's socket BIO calls `write(2)`; Linux has no per-socket
+  flag): libpq's pattern, per call — `rt_sigprocmask(SIG_BLOCK, {SIGPIPE}, &old)`; if SIGPIPE was
+  ALREADY blocked, note with `rt_sigpending` whether one was pending (that one is the caller's);
+  make the call; if none was pending before and one is now, take it with a zero-timeout
+  `rt_sigtimedwait`; restore `old`. Consume unconditionally — without errno from inside libssl you
+  cannot know whether a write hit EPIPE, and a SIGPIPE left pending fires when the mask is restored.
+  ~1.1 µs per call. Wrap EVERY call that can write: `SSL_read` (alerts, KeyUpdate answers),
+  `SSL_connect` / `SSL_accept`, `SSL_shutdown` and 0-RTT too, not only `SSL_write`.
+- Windows and agnos raise no such signal (agnos `sock_send#48` answers -1 for a dead connection).
+
+**THREE TRAPS ON THE WAY.**
+1. **The fix changes the SYSCALL SET.** A native TLS socket write is now `sendto` (44 x86_64,
+   206 aarch64), macOS adds a `setsockopt`. A seccomp allowlist that admits `write` but not
+   `sendto` — kavach's `basic` profile, which kills on a miss — now SIGSYS-kills the writer on its
+   first record, and a fallback cannot help because a seccomp kill is not an error return. Record
+   a syscall-set change as a ⚠ behaviour change whenever a stdlib leaf switches syscall.
+2. **A child-process test passes vacuously under an inherited ignore** — SIG_IGN survives execve.
+   The child calls `signal_default(SIGPIPE)` first; a death by signal comes back from `wait_pid`
+   as 128 + signo, so 141 is the assertion.
+3. **There are two write loops** (plain, and the deadline's non-blocking one): protect the LEAF
+   both share and test every row with and without a deadline (gotchas
+   `a_guard_inside_one_copier_covers_only_that_copier`). CHANGELOG [6.6.14] CVE-66.
+
+[[entries]]
+name = "a_winsock_socket_is_not_a_file_handle"
+description = "On Windows `sys_read` / `sys_write` are ReadFile / WriteFile, and those FAIL on a Winsock SOCKET made with WSA_FLAG_OVERLAPPED (lib/net.cyr's sockets), so any stdlib leaf that bottoms out in them cannot carry a socket — native TLS did not run over a net.cyr socket on Windows at all until 6.6.14, and nothing noticed because no cross-OS test ran TLS over a socket. Use ws2_32 recv / send, and keep the file leaf as the fallback for a HANDLE. The rest of the Winsock spellings differ too"
+category = "cyrius"
+tags = ["platform", "windows", "pe", "winsock", "sockets", "deadline", "testing", "tls", "v6.6.14"]
+---
+**THE LEAF** (`_tn_os_read` / `_tn_os_write`, `lib/tls_native_conn.cyr`):
+
+    r = syscall(0xF048 /*recv*/ or 0xF047 /*send*/, fd, buf, min(n, 0x7FFFFFFF), 0)
+    on failure: e = syscall(0xF024 /*WSAGetLastError*/) & 0xFFFFFFFF
+      10038 WSAENOTSOCK, 10093 WSANOTINITIALISED -> sys_read / sys_write (a pipe or file HANDLE)
+      anything else -> -e
+
+Measured on cass against the 6.6.13 lib: `tls_native_connect` / `_accept` over a loopback pair
+returned `TLS_ERR_IO` at once — 34 of the socket-transport test's 44 assertions failed.
+
+**THE OTHER SPELLINGS.** Mask `WSAGetLastError` to 32 bits — only eax is defined (⚠
+`lib/syscalls_windows.cyr`'s `fd_wait_ready` still returns it unmasked; backlog). Readiness is
+`WSAPoll` (POLLRDNORM / POLLWRNORM), sockets only: a HANDLE answers -10038, which must route to
+the between-calls fallback, not to an error. Would-block is WSAEWOULDBLOCK 10035, not EAGAIN.
+Non-blocking is `ioctlsocket(FIONBIO)`, which CANNOT be read back — so a bounded write leaves
+the socket blocking (the mode net.cyr creates it in) where Linux / macOS restore saved F_GETFL
+flags; ⚠ and an accepted socket INHERITS a non-blocking listener's FIONBIO, so native TLS with no
+deadline on it fails `TLS_ERR_IO` (backlog).
+
+**A TEST TRAP: AFD TAKES THE WHOLE SEND.** A non-blocking `send` of 64 MiB to a peer that never
+reads returned 67108864 in ONE call on cass: Windows admits a send whole while the socket's
+buffered bytes are under SO_SNDBUF; only the NEXT send sees WSAEWOULDBLOCK. Linux and macOS block
+after a few hundred KB. So a "fill the send buffer, expect the deadline" row writes in a loop until
+a write does not complete, and asserts the ELAPSED time — once a deadline has passed every later
+call answers `TLS_ERR_TIMEOUT` before any I/O, so the result code alone proves nothing.
+CHANGELOG [6.6.14] (roadmap backlog j).
