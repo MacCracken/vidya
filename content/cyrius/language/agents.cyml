@@ -17,6 +17,11 @@
 # closed at v5.9.41, and the 41 live shell gates under `tests/*.sh` carry
 # topic names); the CLAUDE.md closeout pass is 12 steps, not 11. Added a
 # threaded-exit rule (`sys_exit` ends only the calling thread).
+# Corrected 2026-10-02 at cycc 6.6.14, by running the compiler: the entry-point
+# rule said "Cyrius has NO auto main() call" — false since v5.9.37, and it
+# contradicted field_notes/language/semantics_runtime.cyml (corrected there at
+# 6.6.5). A source that defines `fn main` and also calls it runs the body twice.
+# The "include fdlopen before tls" note was stale since 6.6.9.
 # 3 entries.
 
 [[entries]]
@@ -29,25 +34,46 @@ must know before writing Cyrius code." Each rule cites the
 slot or memory entry where an agent (often me) made the
 mistake first.
 
-== TOP-LEVEL CODE IS THE PROGRAM ENTRY POINT ==
+== TOP-LEVEL CODE RUNS FIRST; A DEFINED `fn main` IS THEN CALLED ==
 
-Cyrius has NO auto `main()` call. The program is whatever
-top-level statements appear at file scope, executed in
-order. A `fn main() { ... }` definition is just a function;
-nothing calls it unless you do.
+⛔ CORRECTED 6.6.14 — this rule read "Cyrius has NO auto
+`main()` call" long after it stopped being true. Since v5.9.37
+cycc emits `call main` after the top-level statements whenever
+a `fn main` exists, and the program exits with main's return
+value. Re-measured on cycc 6.6.14:
 
-    # WRONG — main() never runs:
-    fn main() {
-        syscall(60, 42);
-        return 0;
-    }
+    fn main(): i64 { return 42; }              # exit 42, runs once
+    fn main() { syscall(60, 42); return 0; }   # exit 42 — the
+                                               # "main() never runs"
+                                               # example this rule
+                                               # used to show
 
-    # RIGHT — top-level statement is the entry:
+THE LIVE TRAP is the reverse: the auto-call does not know you
+already called `main`. Define it AND call it at top level
+without exiting, and the body runs TWICE and the exit code is
+the SECOND run's return:
+
+    fn main(): i64 { assert_eq(1, 2, "x"); return 0; }
+    var ec = main();
+    var r = assert_summary();   # prints "0 passed, 1 failed",
+                                # then main runs again: exit 0
+
+A .tcyr in that shape is green over any number of failures.
+THE THREE CORRECT SHAPES:
+
+    # (a) no fn main — top level is the program:
+    var r = assert_summary();
+    syscall(60, r);
+
+    # (b) fn main that RETURNS the exit value; never call it:
+    fn main(): i64 { return 42; }
+
+    # (c) call it, then exit EXPLICITLY (before the auto-call):
     var rc = main();
     syscall(60, rc);
 
-    # OR — skip the wrapper:
-    syscall(60, 42);
+Detail + measurements: field_notes/language/semantics_runtime.cyml
+`fn_main_is_not_the_entry_point`.
 
 == `.tcyr` TESTS NEED EXPLICIT EXIT ==
 
@@ -106,9 +132,10 @@ Common ones agents miss:
 - `lib/syscalls.cyr` — provides `SYS_*` constants and the
   `syscall` builtin. (Actually `syscall` is intrinsic, but
   the constants come from this file.)
-- `lib/fdlopen.cyr` — required by `lib/tls.cyr` (PP cap
-  blocks auto-include). Tests using TLS must include
-  fdlopen first.
+- NOT `lib/fdlopen.cyr` for TLS any more: since 6.6.9
+  `lib/tls.cyr` includes its own definers (fdlopen.cyr for the
+  libssl backend, tls_native.cyr). The old "include fdlopen
+  first" advice is stale.
 - `lib/sha1.cyr`, `lib/keccak.cyr`, `lib/ct.cyr` — required
   by sigil consumers.
 

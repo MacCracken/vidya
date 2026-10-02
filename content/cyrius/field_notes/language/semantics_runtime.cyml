@@ -182,102 +182,44 @@ struct type directly.
 
 [[entries]]
 name = "fn_main_is_not_the_entry_point"
-description = "⛔ CORRECTED v6.6.5 — SINCE v5.9.37 CYCC DOES AUTO-CALL `main()`, and this entry said the opposite for eighteen minors. The live traps are now the reverse: a source that defines `fn main` AND calls it at top level without exiting runs the body TWICE and exits with the SECOND run's value. Top-level statements are still the entry; `main` is called after them."
+description = "⛔ CORRECTED v6.6.5, RE-MEASURED v6.6.14 — CYCC AUTO-CALLS `main()` (since v5.9.37), and this entry said the opposite for eighteen minors. The live trap is the reverse: a source that defines `fn main` AND calls it at top level without exiting runs the body TWICE and exits with the SECOND run's value — a trailing `var r = assert_summary();` is dead for the exit code. Top-level statements still run first; `main` is called after them."
 category = "cyrius"
 ---
-⛔ **CORRECTED v6.6.5 — READ THIS FIRST. The claim below ("cyrius has no auto-call for it")
-WAS TRUE AND HAS NOT BEEN SINCE v5.9.37.** `src/main.cyr` walks the fn table for an exact
-`"main\0"` match at the end of the entry code and emits `call main` when it finds one, so a
-source consisting only of `fn main(): i64 { … return 42; }` exits **42**. Measured at 6.6.5.
-The original v5.6.33 diagnosis below is kept because the MECHANISM it explains is still how
-the entry works — top-level statements are the program, `main` is called after them — and
-because it is the record of how the wrong conclusion was reached.
+⛔ **CORRECTED v6.6.5, RE-MEASURED v6.6.14.** At the end of the entry code `src/main.cyr` looks
+`main` up in the fn table (`_find_fn_by_name(S, "main", 4)`) and emits `call main` when it has a
+body; the program then exits with main's return value. This entry said the opposite for eighteen
+minors, and `language/agents.cyml` kept saying it until 6.6.14.
 
-⭐ **THE LIVE TRAP IS NOW THE REVERSE, and it fails SILENTLY GREEN.** The auto-call is
-unconditional: it does not check whether you already called `main` yourself. So
+Measured on cycc 6.6.14 (`./build/cycc < p.cyr > p && ./p`):
 
-    fn main(): i64 { …asserts… return 0; }
-    var ec = main();
-    var r = assert_summary();
+| source | stdout | exit |
+|---|---|---|
+| `fn main(): i64 { return 42; }` | — | 42 |
+| `fn main() { syscall(60, 42); return 0; }` | — | 42 |
+| no `fn main`; top level ends `var r = helper();` (helper returns 5) | — | 5 |
+| `fn main` (prints, returns `count + 10`), then `var ec = main(); var r = 7;` | body TWICE | **12** — the second run; `r` ignored |
+| the same, then `syscall(60, ec);` after the call | body once | 11 |
+| `fn main` with a failing `assert_eq`, then `var ec = main(); var r = assert_summary();` | FAIL twice, `0 passed, 1 failed` | **0** |
 
-runs the body **twice** and exits with the SECOND run's return value — the trailing
-`assert_summary()` is dead for the exit code. Measured while writing
-`tests/tcyr/crossos/syscall_shm_fd_passing.tcyr` at 6.6.5: the deliberately-broken control
-build printed `19 passed, 30 failed` and still **exited 0**. A .tcyr in that shape reports
-green over any number of failures. The source comment in `src/main.cyr` claimed the
-auto-call was "purely a fallback for the no-wire case" because "any user-side syscall(60)
-already exited" — true only when the top level ENDS in an explicit exit; corrected in place.
+⭐ **THE LIVE TRAP fails SILENTLY GREEN.** The auto-call is unconditional — it does not know you
+already called `main` — so the last row reports a failure and exits 0. At 6.6.5 a control build
+of `tests/tcyr/crossos/syscall_shm_fd_passing.tcyr` printed `19 passed, 30 failed` and exited 0;
+at 6.6.14 a draft TLS test in the same shape hid 42 failed assertions.
 
 THREE SHAPES ARE CORRECT:
-  (a) no `fn main` at all — top level ends on the value to exit with (`var r = assert_summary();`);
+  (a) no `fn main` at all — top level ends on the value to exit with (`var r = assert_summary();`
+      then `syscall(SYS_EXIT, r);`);
   (b) `fn main` that RETURNS the value and is NOT called at top level — the auto-call runs it once;
-  (c) `fn main` called at top level FOLLOWED BY an explicit `syscall(SYS_EXIT, r);` — which exits
+  (c) `fn main` called at top level FOLLOWED BY an explicit `syscall(SYS_EXIT, r);`, which exits
       before the auto-call is reached. This is what the `tests/tcyr/crossos/` syscall tests use.
 
----
-
-THE ORIGINAL ENTRY (v5.6.33, pre-5.9.37 — the auto-call did not exist yet):
-
-THE TRAP:
-
-    fn main() {
-        syscall(60, 42);
-        return 0;
-    }
-
-Compiles clean. Runs. Exits with 0, or 1, or whatever argc was
-— but never 42.
-
-WHY:
-
-Cyrius does not have a C-style `int main(void)` convention.
-There is no implicit `bl _main` / `call main` emitted by the
-compiler. The entry point is the top-level statements in the
-compilation unit, emitted in order after all function bodies.
-See `src/main.cyr` / `src/main_aarch64.cyr`:
-
-    (pass 2) parse + emit every `fn` body into codebuf
-    EPATCH(jmp_patch)            ← branch-over-fn-bodies lands here
-    PARSE_ENUM_DEF(init pass)    ← enum init code
-    EMIT_GVAR_INITS(S)           ← gvar init code
-    PARSE_PROG(S)                ← YOUR top-level stmts run here
-    EVLOAD(last_var); EEXIT(S)   ← exit with last-assigned var, or x0
-
-A source consisting of only `fn main() { … }` has no top-level
-code. After the parser finishes emitting `main`'s body as a
-function (never called from anywhere), `PARSE_PROG` sees EOF
-and emits nothing. The initial `b jmp_patch` that the entry
-prologue emitted (to skip past the fn bodies) is then patched
-to land directly on `EEXIT`, which exits with whatever was in
-x0 / rax.
-
-On Mach-O arm64 this is dramatic: the argv prologue pushes
-x0 (argc) before the branch, so the `EEXIT` tail's
-`movz x16,#1; svc #0x80` (= BSD `_exit(x0)`) exits with argc,
-which is 1 when invoked from the shell.
-
-CORRECT SHAPE:
-
-    syscall(60, 42);
-
-At top level. If you want helpers, define them as `fn`s and
-call them from top level:
-
-    fn add3(a, b, c) { return a + b + c; }
-    syscall(60, add3(10, 20, 12));
-
-WHERE THIS BIT US:
-
-v5.6.33 was pinned as "macOS arm64 runtime regression" on
-`ssh ecb` based on a `fn main()` fixture exiting 1 not 42.
-There was no compiler regression; the fixture never exercised
-what it thought it did. `otool -tv` showed `fn main`'s body
-correctly emitting `adrp x16, 4; ldr x16, [x16]; br x16`
-through `__got[0] = _exit` — it just never executed.
-
-Linux has the same trap but argc is often 0 at process entry,
-so the symptom looks like "exit 0" instead of "exit argc." Same
-root cause; different flavor of wrong answer.
+THE MECHANISM (from the v5.6.33 entry, which predates the auto-call): top-level statements ARE
+the program. The entry branches over every fn body, runs enum inits, global inits and the
+top-level statements in source order, then — since v5.9.37 — `call main` if one exists, and exits
+with main's return, else with the last top-level `var`'s value. Before v5.9.37 a source holding
+only `fn main() { … }` exited with whatever was in rax / x0 (argc on Mach-O arm64, so 1), which
+is how a "macOS arm64 runtime regression" was filed at v5.6.33 against a fixture whose body never
+ran. Two wrong conclusions, both from reading the doc instead of running the compiler.
 
 [[entries]]
 name = "var_buf_in_library_functions"
