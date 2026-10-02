@@ -4689,3 +4689,37 @@ cx, where no thread can exist.
 GATE: tests/gates/codegen/cx_tailcall_and_vm_traps.sh (axis A tail calls — a 2M-deep self
 recursion, mutual recursion, nested-call arguments, a >6-arg call; axes B-D the traps; axis
 E the narrow stores; every trap reddened by its own revert).
+
+[[entries]]
+name = "v6613_language_changes_builtins_array_sizes_global_layout"
+description = "cyrius 6.6.13 language-visible changes: `f64_le` / `f64_ge` / `f64_trunc` are compiler BUILTINS (reserved names; no `lib/math.cyr` needed); `var a: T[N]` reserves N * sizeof(T) for EVERY element type; every global starts at its natural alignment; narrow globals initialise at their own width; a captured struct copies its bytes inside a closure; the Str -> `: cstring` warning sees call results, globals, fields, tail and method calls"
+category = "cyrius"
+tags = ["v6.6.13", "builtins", "f64_le", "f64_ge", "f64_trunc", "reserved", "typed arrays", "alignment", "globals", "closures", "Str", "cstring", "diagnostics"]
+---
+**Builtins (I5).** `f64_le(a, b)`, `f64_ge(a, b)` and `f64_trunc(x)` compile inline like `f64_lt` /
+`f64_floor` (x86 `roundsd $3`, aarch64 `frintz`, cx opcode 0x6E). NaN semantics are unchanged: `f64_le`
+and `f64_ge` are false when either side is NaN. The three names are now RESERVED (TOKNAME_BUILTIN holds
+79 names), so a repo that still vendors a pre-6.6.13 `lib/math.cyr` (which defines them) fails with
+`reserved keyword` at a pin bump until `cyrius deps` re-vendors it.
+
+**Array sizes (M2).** `var a: T[N]` reserves `N * sizeof(T)` for every element type — f64 8, f32 4,
+struct / union / generic instance STRUCTSZ, `*T` 8, vectors 16 / 32, bool / enum 8 — and the subscript
+stride agrees. It used to reserve 8 bytes inside a fn for `f64[4]` or `Pt[2]` (N x 8 at top level for
+structs). A generic `var a: T[N]` sizes its instance by STRUCTSZ. An unknown element type name is an
+error. `var x[N]` (no type) is still N BYTES locally.
+
+**Global layout (I9).** Every global starts at its natural alignment (1/2/4 for narrow scalars, 8 for
+anything else). `var a: u8[N]` still gives N usable bytes; up to 7 bytes of padding may follow it. Code
+that reached the NEXT global by adding to a global's address was always wrong; it is now visibly wrong.
+
+**Narrow globals (M1).** `var a: u8 = 0;` (or a non-constant / call initialiser) stores 1 byte, not 8 —
+it used to clobber the globals after it.
+
+**Closures (M3).** Inside a closure, `b.v = p`, `var q: Pt = p` and struct literals copy a CAPTURED struct's
+bytes, as outside a closure.
+
+**Str -> `: cstring` (I11).** The warning fires for a `Str` named local or param, a call returning `Str`,
+a `: Str` global (declared or inferred from its initializer), a `: Str` field, tail calls and method
+calls, `x.data` and `str_data(x)` (a Str's data pointer is not NUL-terminated at its length). The fix is
+`str_cstr(x)` (a NUL-terminated copy), `str_eq_cstr(x, "lit")` for comparisons, or a `: Str` parameter —
+never `str_data(x)`. Warnings only: no binary changes.

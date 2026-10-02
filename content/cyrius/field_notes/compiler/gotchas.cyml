@@ -5211,3 +5211,49 @@ add an emitter, decide its effect on the flag explicitly. A helper that "leaves 
 caller set it" is a promise about its callers — read that comment before you become one.
 Gate: tests/tcyr/crossos/typed_array_subscript.tcyr's `if` / `while` on an element rows
 (reverting the clear is one of the five mutations in its header).
+
+[[entries]]
+name = "packed_globals_misalign_every_later_word_and_aarch64_atomics_sigbus"
+description = "Global data used to be laid out PACKED: a `var a: u8[363]` (or a lone `u8` / `i16` / odd-sized struct global) left the next 64-bit global at an odd address, and every one after it until another odd size happened to realign. x86 tolerates it; aarch64 `ldaxr` / `stlxr` / `ldar` raise an alignment fault (SIGBUS) on a Pi 4 and on Apple Silicon. Since 6.6.13 every global starts at its NATURAL alignment (1/2/4 for narrow scalars, 8 for everything else) on every backend (6.6.13, I9)"
+category = "cyrius"
+tags = ["layout", "globals", "alignment", "aarch64", "atomics", "SIGBUS", "ldaxr", "GVOFF", "v6.6.13"]
+---
+**How it surfaced.** agnostic 0.1.7's aarch64 binary died with SIGBUS at startup on a Pi 4: the folded
+sankoch declares three `u8` arrays (630 bytes, ≡ 6 mod 8), and 1,101 of agnostic's 1,962 globals came
+after them misaligned — among them a dozen of sigil's atomic init flags, so the first hash faulted in
+`atomic_cas` (`ldaxr x4, [x0]` with x0 = 0xa200f6). It had been recorded downstream as "SIGBUS under qemu,
+needs real hardware" for four releases.
+
+**The trap.** The var-area offset is a PREFIX SUM, and it is computed in several places that must agree:
+x86 FIXUP (both the object-mode and the main loop), aarch64 FIXUP, PE `_pe_layout`'s mirror, and
+`main_cx.cyr` — plus re-sum walks that recomputed the offset instead of reading GVOFF. Change the rule in
+one and the image disagrees with the code that addresses it. 6.6.13 puts the rule in one helper
+(`_GV_ALIGN`, `src/common/util.cyr`) and replaces the re-sum walks with GVOFF.
+
+**Why natural alignment and not "8 for everything".** Narrow scalars stay packed against each other, so
+an over-width store into one still clobbers its neighbour — which keeps M1-class defects (an 8-byte store
+into a `u8` slot) DETECTABLE by narrow-narrow tests instead of being masked by padding.
+
+**Recognise it again:** an aarch64-only SIGBUS (or a split-lock fault on x86 under
+`split_lock_detect=fatal`) in an atomic on a global — print `&g % 8`. Gate:
+tests/tcyr/crossos/global_alignment.tcyr (run natively on pi and ecb by the release gate).
+
+[[entries]]
+name = "name_based_copy_resolvers_need_the_capture_rung"
+description = "Struct-copy paths that resolve their SOURCE by name (`_fsc_name_src`, `_try_aggregate_copy_assign`, `_try_struct_copy_init`) looked a name up as local, then global. Inside a closure a captured struct is NEITHER — so the resolver found nothing, fell back to an 8-byte store, and copied the struct's ADDRESS into the field (`b.v = p` with a captured `Pt p` returned 80 instead of 34). The lookup order must be local, CAPTURE, global (6.6.13, M3)"
+category = "cyrius"
+tags = ["closures", "capture", "struct copy", "aggregate", "_fsc_name_src", "v6.6.10", "v6.6.13"]
+---
+**The shape.** 6.6.10 made a field store of a struct copy its bytes (`_fsc_*`). Every resolver that
+answers "is this name an inline struct, and where is it?" was written against two tables — the frame's
+locals and the globals. A closure body sees a THIRD kind of name, its captures (the env object), and the
+resolvers did not consult it: the silent fallback was the 8-byte scalar store, i.e. the address.
+
+**Fix.** A capture rung between FINDLOCAL and FINDVAR in each name-based resolver, plus the enclosing
+fn's pointer-slot count carried in `_cl_save_locals`' trailer so a capture can tell an inline struct from a
+pointer-mode one. A copy between DIFFERENT struct types through a capture is now refused by name, as it
+is outside a closure.
+
+**Recognise it again:** any new "resolve the source by name" helper — ask what happens when the name is a
+capture. Gate: tests/tcyr/crossos/closure_capture_struct_copy.tcyr and
+tests/gates/diagnostics/closure_capture_struct_copy_mismatch.sh.
