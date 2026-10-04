@@ -7,7 +7,9 @@
 # For design / convention patterns see patterns.cyml.
 # For non-obvious internal traps see gotchas.cyml.
 #
-# 23 entries (re-DERIVED at 6.6.14 with `grep -c '^\[\[entries\]\]'` — the line read 16 while
+# 23 entries (still 23 at 6.6.15: its three test-harness hooks — a KAT through the entropy hook,
+# state-keyed fault injection, secrets sampled at the write hook — went INTO the two-ended entry;
+# re-DERIVED at 6.6.14 with `grep -c '^\[\[entries\]\]'` — the line read 16 while
 # the file held 22; 6.6.14 added the two-ended protocol test entry and folded two more instances
 # into the fixture-order and scratch-space entries. Older history: header read "11" while the file held 13 — corrected v6.5.4; .63 added real-flow gate vs self-host placebo; v6.4.2 added stdlib
 # public-fn addition trips three hygiene gates; v6.5.4 added the vacuous-fixture
@@ -887,9 +889,9 @@ category = "cyrius"
 
 [[entries]]
 name = "a_two_ended_protocol_test_where_two_threads_cannot_be_assumed_replay_to_a_fixed_point_or_spawn_yourself"
-description = "6.6.14. A TLS handshake test needs both ends running, and where THREADS_CONCURRENT is 0 (Intel-Mac, agnos, and — as lib/thread_win.cyr declares it — Windows) a test cannot count on a second thread. Two recipes that run unchanged on x86_64, pi, ecb, ach and cass: replay both ends single-threaded to a FIXED POINT over an in-memory transport, or have the test SPAWN ITSELF as the peer over real sockets"
+description = "6.6.14. A TLS handshake test needs both ends running, and where THREADS_CONCURRENT is 0 (Intel-Mac, agnos, and — as lib/thread_win.cyr declares it, though CreateThread threads were measured running concurrently on cass — Windows) a test cannot count on a second thread. Two recipes that run unchanged on x86_64, pi, ecb, ach and cass: replay both ends single-threaded to a FIXED POINT over an in-memory transport, or have the test SPAWN ITSELF as the peer over real sockets. 6.6.15 added three hooks the replay harness gives for free: a KAT installed through the entropy hook, one allocation failed by ctx STATE, and secrets sampled at the write hook"
 category = "cyrius"
-tags = ["testing", "crossos", "tls", "determinism", "process", "spawn", "windows", "macos", "v6.6.14"]
+tags = ["testing", "crossos", "tls", "determinism", "process", "spawn", "windows", "macos", "kat", "fault-injection", "zeroisation", "allocator", "v6.6.14", "v6.6.15"]
 ---
 **REPLAY TO A FIXED POINT** (`tests/tcyr/crossos/tls_native_client_auth.tcyr`, 236 assertions,
 ~4 s on x86_64, ~35 s on pi). Install an in-memory transport (`tls_native_set_transport(read,
@@ -917,3 +919,29 @@ TLS ctx — so a regression fails a row instead of hanging the cross-OS leg. A d
 back as 128 + signo (141 = SIGPIPE): that is how a "the process lived" row asserts survival. Cost
 ~0.3 s per spawned scenario on x86_64, ~2.5 s on pi; preloading one end
 (`tls_native_deadline_ccs.tcyr`) stays cheaper when only ONE side must run.
+
+**THREE HOOKS THE SAME HARNESS GIVES YOU (6.6.15)** — each reached a path no other test did.
+
+- **KAT a key exchange THROUGH the entropy hook.** sigil's `ecdh_p256_keygen` / `_p384_` map 40 /
+  56 random bytes c to d = (c mod (n - 1)) + 1 (FIPS 186-5 A.2.1), so c = 8 zero bytes ‖ BE(d - 1)
+  yields exactly d. Install RFC 5903's i that way (`tls_native_set_entropy(&fixed)`, filling ONLY
+  a draw of the expected length and returning 0 for any other) and assert g^i in the
+  ClientKeyExchange and g^ir as the premaster. That also pins "one draw, of the right size,
+  through the hook": a mutant calling getrandom directly goes RED on the public key. Clear the
+  hook after — it is process-global (`tls12_client_ecdhe.tcyr`).
+- **Fail ONE allocation by ctx STATE, not by counting.** A cleanup only an allocation failure
+  reaches (the 1.2 client zeroing its premaster on the exits before the master secret) stayed
+  green with its memset deleted. An arena sized to run out "at the right allocation" moves with
+  every unrelated allocation; instead wrap the ctx's Allocator with an alloc fn that refuses the
+  first allocation made once a ctx slot proves the code is past the point of interest
+  (`load64(ctx + TLS_CTX_OFF_SHARED) != 0`). Keep the SAME arena as state (the ctx hands
+  `allocator_state(a)` to sigil as a raw arena, and anything else crashes there), set the watched
+  ctx to 0 until `tls_native_new_client_in` returns, and assert the refused SIZE too — or a
+  refactor silently moves the fault onto a different exit (`tls_native_client_auth.tcyr`).
+- **Sample secrets at the transport's WRITE hook.** A driver that wipes on its way out MASKS
+  every missing inline wipe: checked after the handshake, the secret is always gone. Record at
+  each write whether the writing side still holds a byte of its ephemeral key or shared secret;
+  the flight after the one that carried its key share must leave with both zero. Each inline-wipe
+  mutant went RED there and nowhere else. A buffer REPLACED mid-handshake (a 1.3 client's x25519
+  key when a HelloRetryRequest asks for P-256) needs its old pointer remembered, or a missing
+  wipe of the orphan is invisible (`tls_native_ecdhe_groups.tcyr`; CVE-70).

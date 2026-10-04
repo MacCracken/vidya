@@ -1,7 +1,11 @@
 # Cyrius — Stdlib Modules (per-module usage)
 # How to use specific stdlib modules — APIs, conventions, gotchas.
-# 22 entries (re-derived 6.6.14) — a CURATED subset of the lib/*.cyr modules (not the full
-# surface). 6.6.14 (2026-10-02): +1 entry tls_module_contract_v6614 — the `tls_*` contract as a
+# 22 entries (re-derived 6.6.15) — a CURATED subset of the lib/*.cyr modules (not the full
+# surface). 6.6.15 (2026-10-03): no new entry — tls_module_contract_v6614 (the name keeps its
+# release of origin) gained KEY EXCHANGE (ECDHE on x25519 / P-256 / P-384 everywhere,
+# `tls_native_set_groups`, HelloRetryRequest), EPHEMERAL SECRETS (CVE-70) and sigil 3.13.9's
+# ECDH API + constant-time signing (CVE-68); its 6.6.14 client-certificate trade-off is gone.
+# 6.6.14 (2026-10-02): +1 entry tls_module_contract_v6614 — the `tls_*` contract as a
 # consumer meets it (libssl main-thread only, native mTLS servers, SIGPIPE, Winsock, the
 # Windows store, SNI, sigil 3.13.7's strict/lenient PEM decode); thread_local_slot_allocator
 # gained the Windows heap block and file_read_whole_errno_contract_v6612 the capped
@@ -1062,9 +1066,9 @@ under `ulimit -v`); restoring the overwrite reddens all three.
 
 [[entries]]
 name = "tls_module_contract_v6614"
-description = "lib/tls.cyr — the `tls_*` verbs over two backends: the native stack (TLS 1.2/1.3, client AND server, over sigil; the default) and libssl through fdlopen (opt-out). As of cyrius 6.6.14: libssl is MAIN-THREAD ONLY and refuses off it (`TLS_ERR_WRONG_THREAD`, -23); a native mTLS server verifies the client's chain to its OWN roots in TLS 1.2 and 1.3; a TLS write never raises SIGPIPE; native TLS runs over Winsock with a real deadline; Windows roots come from the CurrentUser ROOT store; no SNI for an IP literal; a failed connection stays failed on both backends. The authority is cyrius docs/development/lib-tls-contract.md"
+description = "lib/tls.cyr — the `tls_*` verbs over two backends: the native stack (TLS 1.2/1.3, client AND server, over sigil; the default) and libssl through fdlopen (opt-out). As of cyrius 6.6.14: libssl is MAIN-THREAD ONLY and refuses off it (`TLS_ERR_WRONG_THREAD`, -23); a native mTLS server verifies the client's chain to its OWN roots in TLS 1.2 and 1.3; a TLS write never raises SIGPIPE; native TLS runs over Winsock with a real deadline; Windows roots come from the CurrentUser ROOT store; no SNI for an IP literal; a failed connection stays failed on both backends. As of 6.6.15: native ECDHE on x25519 / P-256 / P-384 in both versions and both roles (`tls_native_set_groups`, HelloRetryRequest both ways, the 1.2 server's group and certificate-curve choice), every ephemeral key and shared secret zeroed at its last use (CVE-70), and sigil 3.13.9's constant-time `ecdh_p256_*` / `ecdh_p384_*` and constant-time ECDSA signing (CVE-68). The authority is cyrius docs/development/lib-tls-contract.md"
 category = "cyrius"
-tags = ["stdlib", "tls", "tls_native", "libssl", "mtls", "trust-store", "sigpipe", "windows", "threads", "deadline", "v6.6.13", "v6.6.14"]
+tags = ["stdlib", "tls", "tls_native", "libssl", "mtls", "trust-store", "sigpipe", "windows", "threads", "deadline", "ecdhe", "ecdh", "p-256", "p-384", "hrr", "zeroisation", "sigil", "v6.6.13", "v6.6.14", "v6.6.15"]
 ---
 The contract is cyrius `docs/development/lib-tls-contract.md`; this entry is what a consumer
 must know without reading it. Backend: native by default; libssl with `-D CYRIUS_TLS_LIBSSL`
@@ -1139,11 +1143,46 @@ verified — and keeps it through a later connection error.
 CLIENT CERTIFICATES ON A CLIENT. `tls_ctx_use_certificate_file` / `_private_key_file` (client ctx
 only) read the whole file, at most `TLS_CREDFILE_MAX` (1 MiB), from the ctx's allocator; a larger
 file is refused (0), never truncated (until 6.6.14: a 64 KiB global-heap buffer per call, and a
-longer file parsed cut short). The native 1.2 client now answers a CertificateRequest. ⚠ Holding
-a P-256 / P-384 certificate, its 1.2 ClientHello lists that curve (OpenSSL refuses an ECDSA client
-certificate on a curve the client did not list) while its ECDHE stays x25519 — so it FAILS
-(`TLS_ERR_HANDSHAKE_FAILED`) against a 1.2 server that ranks that curve above X25519 by its own
-preference, asked for a certificate or not.
+longer file parsed cut short). The native 1.2 client now answers a CertificateRequest. A P-256 /
+P-384 client certificate is no trade-off since 6.6.15: every curve the 1.2 client lists it can
+also do ECDHE on, so 6.6.14's failure against a server ranking that curve above X25519 is gone.
+
+KEY EXCHANGE (native, 6.6.15). ECDHE on x25519, secp256r1 and secp384r1, TLS 1.3 and 1.2, client
+and server: sigil's constant-time `ecdh_p256_*` / `ecdh_p384_*`, every key drawn through the
+`tls_native_set_entropy` hook, the peer's point validated by sigil and an all-zero x25519 secret
+refused (CVE-71). `tls_native_set_groups(ctx, groups, n)` — `groups` points at 1 to 3 i64
+`TLS_GROUP_X25519` (29) / `_SECP256R1` (23) / `_SECP384R1` (24), preference order, none twice;
+anything else is `TLS_ERR_INVALID_PARAM` with the ctx unchanged — sets what a client offers or a
+server accepts (default: all three, x25519 first). Native only; a server sets it in its accept
+hook. `tls_native_get_group(ctx)` reports the negotiated group on both roles.
+  - 1.3 CLIENT: ONE key_share, on its first group. A P-256 share up front would cost a second key
+    pair on every connection (2.7 ms against x25519's 2.4 ms) to save a round trip only to servers
+    without X25519 — OpenSSL's and the browsers' choice too. A server taking none of it answers
+    with ONE HelloRetryRequest, which the client takes once (cookie echoed, message_hash
+    transcript; a second is `TLS_ERR_PROTOCOL`), at ~2.8 KB more handshake memory.
+  - 1.3 SERVER: a usable share wins over asking for a preferred group; otherwise ONE
+    HelloRetryRequest for its first group the client lists. A key_share without supported_groups,
+    or the reverse, is refused (missing_extension — a hand-built test ClientHello needs both), and
+    supported_versions ALONE makes a hello 1.3. With a non-empty client session id it sends the
+    RFC 8446 §D.4 dummy CCS after its first handshake message.
+  - 1.2 SERVER: the first of its groups the client lists (its own first if the client sends none);
+    a client listing none of them, or omitting the server's ECDSA certificate's curve (RFC 8422
+    §5.1; Ed25519 is not bound), gets handshake_failure. Suites: only ECDHE_ECDSA with
+    AES-256-GCM-SHA384 or ChaCha20-Poly1305 — what its ServerHello can name.
+  - 1.2 CLIENT: offers the ctx's groups, x25519 first, with or without a client certificate; the
+    ServerKeyExchange's ECDSA scheme names the hash and the key names the curve.
+Until 6.6.15 only the 1.2 client did a NIST curve: the 1.3 client failed every HelloRetryRequest
+(`s_server -tls1_3 -groups P-256`), the 1.3 server took an x25519 share or nothing, and the 1.2
+server sent every client x25519.
+
+EPHEMERAL SECRETS (CVE-70, 6.6.15). Each side zeroes its ephemeral private key once the shared
+secret exists (and a 1.3 client's first key when a HelloRetryRequest replaces it), and the shared
+secret / premaster once the handshake (1.3) or master (1.2) secret is derived — so its NEXT flight
+already leaves without them — and `tls_native_connect`, `tls_native_accept` and
+`tls_native_accept_12` wipe both again on every exit. Until 6.6.15 only the 1.2 client did, and on
+the global heap every past connection's secrets stayed in the process — forward secrecy gone to
+any later memory read. What stays: traffic secrets live as long as the ctx, and a global-heap ctx
+is never freed — reclaim with `tls_*_alloc_in` + `reset_via`.
 
 TRUST STORE. `tls_ctx_set_verify_paths` / `tls_native_set_ca_system`: POSIX reads the first of
 `/etc/ssl/cert.pem`, `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`,
@@ -1163,3 +1202,20 @@ base64) and resumes at the NEXT BEGIN; size `chain` with `pem_count_cert_blocks(
 THESE certificates (a chain, the leaf as block 0 — `tls_native_set_client_cert`) -> strict: a
 lenient decode would hand back the NEXT certificate as the leaf. ANY usable ones (a bundle of
 independent roots) -> lenient: under a strict decode one corrupt block installs zero roots.
+
+ECDH AND SIGNING (sigil 3.13.9 — with 3.13.8 — folded at cyrius 6.6.15). New in `lib/sigil.cyr`,
+byte strings big-endian, each returning 0 or -1 with every output zeroed:
+`ecdh_p256_keygen(rnd, rnd_len, priv_out, pub_out)` takes at least `ECDH_P256_RAND_LEN` (40)
+CSPRNG bytes and uses exactly 40 — d = (c mod (n - 1)) + 1 (FIPS 186-5 A.2.1, no rejection loop),
+`pub_out` 65 bytes `0x04 ‖ X ‖ Y`; `ecdh_p256_shared(priv, peer_pub, peer_pub_len, secret_out)`
+writes x(d·Q), 32 bytes, and returns -1 unless the peer key is exactly 65 bytes uncompressed with
+X, Y < p on the curve, d is in [1, n - 1] and d·Q is not the identity. `ecdh_p384_*` likewise at
+56 random bytes, 48-byte scalars and 97-byte points; lengths as
+`ECDH_P{256,384}_{RAND,PRIV,PUB,SECRET}_LEN`. Constant-time in the random input and the key,
+thread-safe, and each call wipes the stack it used (~2.6 ms P-256, ~7.3 ms P-384 on the x86_64 dev
+host). ECDSA P-256 / P-384 SIGNING — and so native-TLS CertificateVerify — now runs on the same
+constant-time engine (CVE-68: every field operation on the nonce path had branched on secret
+data since sigil 3.5.9): signatures byte-identical, and faster (P-256 13.3 -> 2.7 ms). On Windows
+the TPM / Secure Boot / IMA / dm-verity / LUKS helpers fail closed (CVE-73). The lessons: features
+`secret_var_compound_ops` (WHAT IT DOES NOT COVER) and platform_abi
+`a_rooted_posix_path_is_drive_relative_on_windows_and_any_local_user_can_plant_it`.

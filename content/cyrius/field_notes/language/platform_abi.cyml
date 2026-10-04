@@ -721,9 +721,9 @@ has used that literal since v6.2.10.
 
 [[entries]]
 name = "a_rooted_posix_path_is_drive_relative_on_windows_and_any_local_user_can_plant_it"
-description = "CLASS — three CVEs in four releases. On Windows a rooted path such as /etc/hosts resolves against the CURRENT drive (C:\\etc\\hosts), and any authenticated user may create a folder at the root of the system drive, so a stdlib that opens a POSIX config path on every target lets one local user configure every other user's program. CVE-54 (6.6.11, hosts + resolv.conf), CVE-57 (6.6.12, sandhi's resolver), CVE-65 (6.6.14, the TLS trust store); still open in sigil (tools spawned by rooted path). The loader's DLL search order is the same planting, one level down"
+description = "CLASS — FOUR CVEs in five releases (6.6.11 to 6.6.15), each found one module at a time. On Windows a rooted path such as /etc/hosts resolves against the CURRENT drive (C:\\etc\\hosts), and any authenticated user may create a folder at the root of the system drive, so a stdlib that opens a POSIX path on every target lets one local user answer every other user's program. CVE-54 (6.6.11, hosts + resolv.conf), CVE-57 (6.6.12, sandhi's resolver), CVE-65 (6.6.14, the TLS trust store), CVE-73 (6.6.15, sigil's TPM / Secure Boot / IMA / dm-verity / LUKS helpers — a planted file answered trust questions and received a LUKS key). Two of the four were in FOLDED stdlib. The loader's DLL search order is the same planting, one level down"
 category = "cyrius"
-tags = ["platform", "windows", "pe", "security", "path-planting", "dll-search-order", "crypt32", "callptr", "CVE-54", "CVE-57", "CVE-65", "v6.6.11", "v6.6.12", "v6.6.14"]
+tags = ["platform", "windows", "pe", "security", "path-planting", "dll-search-order", "crypt32", "callptr", "sigil", "tpm", "fail-closed", "CVE-54", "CVE-57", "CVE-65", "CVE-73", "v6.6.11", "v6.6.12", "v6.6.14", "v6.6.15"]
 ---
 **THE MECHANISM.** `file_open` hands a rooted path to `CreateFileW`, and Windows resolves
 `\etc\...` against the current drive — `C:\etc\ssl\cert.pem` for a program started on C:.
@@ -735,18 +735,27 @@ someone plants it, and from then on it is trusted.
 | 54 | 6.6.11 | `/etc/hosts`, `/etc/resolv.conf` (`lib/net.cyr`), plus a fallback nameserver 127.0.0.1:53 — port 53 is not privileged on Windows | every other user's name resolution |
 | 57 | 6.6.12 | `/etc/resolv.conf` (the folded sandhi resolver) | every other user's DNS server |
 | 65 | 6.6.14 | `/etc/ssl/cert.pem` + three sibling bundles (`_tn_ca_read`) | every other user's TLS trust anchors — measured on cass, a planted `cert.pem` became the ONLY root |
+| 73 | 6.6.15 (sigil 3.13.9) | `/dev/tpmrm0`, the IMA securityfs files, `/sys/module/dm_verity`, `/usr/bin/mokutil`, a `/tmp` staging dir | "is there a TPM", "what did IMA measure" (and `ima_write_policy` WROTE into the plant), "is dm-verity available" — and `luks_write_keyfile` staged a LUKS key in a directory the planter owns |
 
-**Still open** (sigil's repo, roadmap backlog): its TPM / LUKS / dm-verity helpers probe
-`/dev/tpmrm0` and spawn `/usr/bin/tpm2_*`, `/usr/sbin/cryptsetup`, `/usr/sbin/veritysetup` by
-rooted path — an EXECUTABLE planted at `C:\usr\bin\...`, should those paths become reachable on PE.
+**CVE-73 was listed here as "still open" at 6.6.14 — for the TPM helpers only.** The fix found
+the class in EVERY sigil trust core. Its shape is the reusable one when a POSIX mechanism has no
+Windows equivalent at all: one predicate (`agnosys_rooted_paths_untrusted()`, 1 on Windows) asked
+before every probe of a fixed rooted path, and each probe FAILS CLOSED — `tpm_detect` 0,
+`secureboot_detect_state` not-supported, `ima_get_status` inactive, the operations Err — rather
+than answering from whatever is there. Not covered by any of the four fixes: a rooted path a
+CALLER passes in on Windows (`tpm_seal`'s output dir, an EFI variable path) — the caller's to
+resolve.
 
 **THE RULE.** A rooted path literal in `lib/` is a POSIX-only path: it sits under
 `#ifndef CYRIUS_TARGET_WIN`, and the Windows arm asks the OS (getaddrinfo, the adapters' DNS
-servers, the certificate store). Audit by grepping `lib/` AND every folded dep's source for `"/`
-literals — each of the three was found one module at a time, by whoever happened to be in it.
+servers, the certificate store) or fails closed. Audit by grepping `lib/` AND every folded dep's
+SOURCE for `"/` literals — two of the four (sandhi, sigil) were in folds, and each of the four was
+found one module at a time, by whoever happened to be in it; a fifth module is likelier than not.
 ⚠ Wine does NOT show the class (it maps a rooted path to the unix root); only real Windows (cass)
 proves it. A test plants the file itself at the exact path the old code opened, asserts the plant
-exists, and removes only what it created.
+exists, and removes only what it created — or, to plant every path without touching C:, maps a
+scratch directory to a drive letter with `subst` and runs from that drive (sigil
+`scripts/cass-rooted-paths.sh`).
 
 **THE SAME PLANTING THROUGH THE DLL SEARCH ORDER.** An IAT import of a DLL that is not a KnownDLL
 (`HKLM\...\Session Manager\KnownDLLs`: kernel32, ws2_32 and shell32 are; crypt32, dxgi and
@@ -761,7 +770,7 @@ crypt32: it loads it from System32 at first use, with no compiler change at all 
 
 — and it keeps crypt32 out of the startup of every program that never verifies. Mask a BOOL /
 DWORD result (`& 0xFFFFFFFF`: the upper half is undefined) and read `GetLastError` (0xF04B)
-straight after the call it explains. CHANGELOG [6.6.11] [6.6.12] [6.6.14].
+straight after the call it explains. CHANGELOG [6.6.11] [6.6.12] [6.6.14] [6.6.15]; sigil `docs/audit/2026-10-03-3.13.9-pin-bump-windows-rooted-paths-audit.md` §F8.
 
 [[entries]]
 name = "a_write_to_a_reset_peer_raises_sigpipe_and_a_library_may_neither_rely_on_nor_change_the_disposition"

@@ -458,7 +458,10 @@ The WHOLE return convention survives the defer bodies (cycc 6.6.7): an
 Ok/Err payload, a tuple / ret2 pair, a two-word struct, an f64, an
 f64v2/f64v4 — on x86 rax/rdx/r8/xmm0/xmm1, on aarch64 x0/x2/x3/q0/q1,
 on cx r0-r5. Before 6.6.7 only rax was kept, so a defer that called
-anything could zero an Ok payload.
+anything could zero an Ok payload. Since 6.6.15 the 64-byte area those
+registers are saved in is CLEARED before it is released (+74 B x86_64,
++16 B aarch64 per fn with a defer or secret var): it used to outlive a
+`secret var` wipe, holding whatever the return registers held (CVE-69).
 
 EVERY RETURN PATH (cycc 6.6.7):
   A defer (and every `secret var` zeroise) runs on every return, a
@@ -483,6 +486,13 @@ WHERE IT MAY APPEAR (cycc 6.6.7 — each used to compile silently wrong):
     for a closure's `secret var`)
   - in a coroutine async fn it runs once, at completion; an `await`
     inside a defer body is refused
+  - not in a `#naked` fn (6.6.15, CVE-72): a naked fn has no epilogue,
+    so the block never ran and a `secret var` was never zeroised —
+    both now refused by name, as `return` always was. On cx `#naked` is
+    inert and the defer runs.
+  The five ways a `secret var` wipe has been skipped or copied around:
+  field_notes/compiler/gotchas.cyml
+  `secret_var_zeroisation_skipped_four_ways_and_copied_around_once_enumerate_every_exit_and_every_epilogue_store`.
 
 USAGE:
   fn process_file(path) {
@@ -896,7 +906,7 @@ PP_DERIVE handles both — same preprocessor codegen pattern.
 
 [[entries]]
 name = "secret_var_compound_ops"
-description = "Cyrius syntax extras — struct init, &local arch dispatch, #regalloc, secret var"
+description = "Cyrius syntax extras — struct init, &local arch dispatch, #regalloc, secret var (an array zeroised on every return path — and what it does NOT cover: callee frames, vector registers, the heap, timing; the sigil 3.13.8 / CVE-68 and CVE-70 lessons, 6.6.15)"
 category = "cyrius"
 ---
 A grab-bag of syntactic additions consolidated for agent reference.
@@ -929,12 +939,51 @@ SECRET VAR:
     secret var key[32];
     load_key(&key);
     if (ct_eq_bytes(&key, candidate, 32) == 1) { ... }
-Marks an ARRAY whose comparison must be constant-time. Scalar
-form (`secret var x = 0;`) is rejected at compile time —
-secret-tagged storage requires `secret var name[N]` array
-declaration. Used by sigil's PQC code (ML-DSA signature
-verification, certpin in agnosys 1.1.2+). Stdlib-side helpers
-live in `lib/ct.cyr`:
+Declares a fn-local ARRAY that is ZEROISED on every return path —
+the wipe is a synthetic `defer` the epilogue walker runs, so every
+rule of `defer_statement` applies (owned by its closure, never
+tail-called or inlined, refused at top level and, since 6.6.15, in a
+`#naked` fn). Scalar form (`secret var x = 0;`) is rejected —
+`secret var name[N]` only. The keyword does NOT make code
+constant-time: comparisons go through `lib/ct.cyr` (below). Used
+throughout sigil and by agnosys certpin.
+
+WHAT IT DOES NOT COVER — the sigil 3.13.8 and native-TLS lessons
+folded at cyrius 6.6.15. `secret var` wipes ITS array; key material
+also lives in:
+  - a CALLEE's dead frame. The HMAC_DRBG context sigil's ECDSA signer
+    used sat ~43 KB down holding the nonce k (HMAC never wiped its
+    context, and its final state IS the MAC); k plus one signature is
+    the private key (CVE-68 part B). Wipe a context in the code that
+    owns it; to scrub a deep call tree, burn the stack from a PLAIN
+    wrapper AFTER the secret callee has returned, so the burn also
+    covers that callee's epilogue (sigil burns 128 / 160 KB).
+  - vector registers. SHA-NI / AES-NI leave state in xmm0..; an asm
+    block computing on secrets clears the registers it used (a later
+    `secret var` epilogue used to spill them to dead stack — CVE-69).
+  - the heap. Native TLS kept every connection's ephemeral key and
+    shared secret in ctx buffers until 6.6.15 (CVE-70): zero each at
+    its last use AND on every exit of the driver.
+  - TIMING. sigil's ECDSA signing (3.5.9 through 3.13.7) ran its
+    ladder over field ops that branched on their operands — final
+    subtracts, `if` carry fix-ups, early-exit compares, aarch64's
+    software high-half multiply — a fixed-vs-random Welch t-test
+    gave |t| = 6.3 at 400 samples, the Minerva / TPM-Fail lattice
+    class (CVE-68). Constant time is a property of EVERY primitive
+    under the secret, not of the top-level algorithm: two earlier
+    fixes had removed only the coarse leaks and audits had filed the
+    arithmetic as INFO. sigil 3.13.8's engine (src/ec_ct.cyr:
+    branch-free Montgomery arithmetic, complete formulas, fixed
+    window with a full-table masked lookup) was verified two ways:
+    |t| = 0.7 at 1200, and EVERY conditional branch of the compiled
+    engine, x86_64 and aarch64, accounted for by disassembly as a
+    loop bound, public exponent bit, public size or public verdict.
+    Not claimed: operand-value timing via power / frequency
+    (Hertzbleed class).
+The compiler-side holes in the wipe itself: field_notes/compiler/
+gotchas.cyml `secret_var_zeroisation_skipped_four_ways_...`.
+
+Stdlib-side helpers live in `lib/ct.cyr`:
   - `ct_select(cond, a, b)`             — branchless select (v3.x)
   - `ct_eq_bytes(a, b, n)`              — branchless byte-array
                                           equality, equal-length
@@ -4096,7 +4145,7 @@ RELATED: `enum` constants as array sizes (`var buf[Sz.BUF]`), `sizeof`, and
 
 [[entries]]
 name = "string_literal_escapes_and_line_accounting_v6611"
-description = "String-literal escapes are a CLOSED list: since cycc 6.6.11 any other byte after `\\` is `unknown string escape`; `\\` + newline KEEPS the newline (it is not a C line-splice); and a newline inside a string counts as a source line, so diagnostics after a multi-line string name the right line and file"
+description = "String-literal escapes are a CLOSED list: since cycc 6.6.11 any other byte after `\\` is `unknown string escape`; `\\` + newline KEEPS the newline (it is not a C line-splice); and a newline inside a string counts as a source line, so diagnostics after a multi-line string name the right line and file. Since 6.6.15 identical literals share storage and a literal differing in any byte (an embedded NUL included) never does"
 category = "cyrius"
 ---
 THE WHOLE ESCAPE LIST for string literals (char literals have their own, shorter ladder):
@@ -4160,6 +4209,14 @@ multi-line string, the include's file name, and the `private` refusal of a cross
 that compiled on 6.6.10; axis 4: the escape rules). CROSS-REF:
 field_notes/compiler/gotchas.cyml
 `file_attribution_is_a_line_lookup_so_the_lexer_line_counter_is_a_security_boundary`.
+
+SHARED STORAGE (6.6.15). Identical literals share one copy (pointer-equal); a literal that
+differs in ANY byte — an embedded NUL included — never shares. Until 6.6.15 a literal holding a
+NUL could be aliased onto the tail of an earlier one and lose bytes to the next literal
+(`"a\0a"` after `"a"` read `'z'` at offset 2 once `"zzzz"` followed), silently — so a project
+rule of the form "no NUL bytes in string literals" (sankoch's ADR 004) is no longer needed.
+Mechanism: field_notes/compiler/gotchas.cyml
+`an_intern_search_that_writes_the_candidate_before_searching_must_stop_at_the_committed_end`.
 
 
 [[entries]]
