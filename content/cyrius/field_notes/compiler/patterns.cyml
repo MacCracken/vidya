@@ -8,7 +8,8 @@
 # For non-obvious internal traps see gotchas.cyml.
 # For full backstory + retrospective context see retros/.
 #
-# 7 entries.
+# 9 entries (DERIVED at 6.6.16 with `grep -c '^\[\[entries\]\]'`: +2 — an allocator-aware path is
+# only as arena-clean as its deepest callee, and a test that may hang must fail, not hang).
 
 [[entries]]
 name = "ship_now_swap_backend_later"
@@ -553,4 +554,80 @@ that cyrius opts route around with peephole patterns.
 Full backstory: retros/v4.cyml's removed
 `dce_cfg_research_roundup_440` (kept here distilled — full
 research is in the cyrius v4.4.0 ship docs).
+"""
+
+[[entries]]
+name = "an_allocator_aware_path_is_only_as_arena_clean_as_its_deepest_callee"
+description = "A per-connection path that threads an Allocator still leaks if ONE callee allocates for itself: cache the answer for an input that does not change, keyed on its CONTENT, published without making any caller wait (6.6.16, the native TLS server's PEM key)"
+category = "cyrius"
+tags = ["stdlib", "allocator", "arena", "memory", "cache", "threads", "atomics", "tls", "sigil", "pem", "v6.6.16"]
+content = """
+**The trap.** `tls_accept_alloc_in(a, …)` threads an arena through the whole native server: the
+ctx, the handshake, the record buffers. A server that rewinds `a` per connection is flat… except
+for one callee that took no allocator. Loading a PEM key called sigil's `pem_decode_privkey`, and
+its DER scratch was `alloc(pem_len)` on the GLOBAL heap — 120 B per request, a decoded private key
+each time, through 6.6.15. Nothing in the allocator-aware signature shows it; the only evidence is
+`alloc_used()` read across N calls. sandhi's probe did that; no cyrius test did.
+
+**Review rule:** for an `_in(a, …)` path, read `alloc_used()` before and after N iterations with
+`a` rewound each time, and require 0 — for every input SHAPE the path accepts (PEM and DER, each
+key type), because the leak was in one branch only.
+
+**The fix shape, when the leaking callee is in another stdlib (sigil is fixed upstream, never in
+the fold) and its input never changes between calls:**
+1. **Cache the answer once per process, on the global heap.** It must outlive every arena reset.
+2. **Key on CONTENT, not the pointer.** The caller rebuilt its creds struct per accept, and a
+   buffer refilled with a different key must miss. Compare length first, then bytes, against a
+   private copy of the input — comparing against the caller's own pointer would always hit.
+3. **Cache the AUTHORITATIVE verdict, not an intermediate form a looser path re-parses.** Caching
+   the decoded DER and running it through the raw-DER branch would have ACCEPTED a PEM whose label
+   lies about its body: that branch tries each typed parser in turn, and the PEM decoder refuses
+   the mislabeled key. Cache what the decoder answered (key material + algorithm, or the refusal).
+4. **Publish without making anyone wait.** Entries are immutable once published: prepend each
+   under a release fence (aarch64; x86 is TSO) with `atomic_store` of the head; look up lock-free
+   behind an acquire fence; on a miss TRY a claim (`atomic_cas(&claim, 0, 1)`) — the holder
+   re-looks, decodes, publishes and releases; a miss that loses the claim falls back to the
+   uncached path. Spinning on the claim (the `_tn_ca_load` shape) is right when a duplicate costs a
+   megabyte; here a duplicate costs ~120 B once, while a spin could last for ever on a claim
+   inherited through `fork`.
+5. **Bound it, and make past-the-bound the OLD behaviour, not an error.** 32 texts here; a process
+   that keeps minting keys degrades to 6.6.15, never to a failure.
+
+Gate: `tests/tcyr/crossos/tls_native_pem_key_once.tcyr`, 204 assertions on x86_64, pi, ecb, ach and
+cass — growth rows for every key form, refusal rows (both label/body mismatches), same-length and
+refilled-buffer rows, 8 racing loaders and the capacity row. The 6.6.15 lib fails 24 of them on
+every host. User-facing: language/stdlib_modules.cyml `tls_module_contract_v6614`.
+"""
+
+[[entries]]
+name = "a_test_that_may_hang_must_fail_not_hang"
+description = "A regression in blocking code must turn a test RED with a count, never hang the gate: the main thread makes no call that can block, polls workers' done flags with a deadline, and on expiry reports and ends every thread (6.6.16, chan_blocking_threads.tcyr and net-1's pipe rows)"
+category = "cyrius"
+tags = ["testing", "threads", "deadline", "hang", "channels", "sockets", "exit_group", "v6.6.16"]
+content = """
+**The shape** (`tests/tcyr/crossos/chan_blocking_threads.tcyr`):
+- the main thread makes NO call that can block, including calls that should answer at once (a
+  drain of a full channel, a receive on a closed one): each runs on a one-shot worker;
+- the main thread polls the workers' done flags with a deadline (`clock_now_ms` + `sleep_ms(1)`),
+  and joins a thread only after seeing its done flag, set as the thread's last act;
+- an expired deadline reports and then ends EVERY thread (`sys_exit_group`, or `syscall(60)` on
+  Darwin, where exit(2) already ends the process).
+
+**The single-threaded version** (net-1, `net_plain_write_peer_reset.tcyr`): a row that writes into
+a pipe and then reads it back blocks for ever when the write regresses to an error — nothing was
+written and the write end is still open. Close the write end before reading: an empty pipe then
+reads EOF and the row fails with a count. Found by a mutant (the ENOTSOCK fallback removed), which
+is the only way to learn that a row hangs instead of failing.
+
+**Two traps that go with it:**
+- a top-level program's epilogue is SYS_EXIT (60), which on Linux ends only the calling thread, so
+  a test that returns with a worker still parked lingers (field_notes/language/platform_abi.cyml
+  `sys_exit_is_per_thread_use_sys_exit_group`);
+- `fn main` is called AUTOMATICALLY at the end of the top-level code when it is defined
+  (field_notes/language/semantics_runtime.cyml `fn_main_is_not_the_entry_point`). It bit this
+  test's first draft: `fn main` + `var r = main(); var r = assert_summary();` ran main twice, the
+  second time against stale globals. The driver is now `_cb_run`.
+
+**Why it matters:** a hung gate is not a red gate — CI times it out as infrastructure, a human
+re-runs it, and the regression it was written to catch reads as flakiness.
 """

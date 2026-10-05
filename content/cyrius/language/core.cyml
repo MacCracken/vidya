@@ -1,6 +1,10 @@
 # Cyrius — Core Reference
 # Overview, syntax, compiler architecture, dev loop, current limitations,
 # porting guide, stdlib catalog.
+# 2026-10-05 at v6.6.16: +1 entry type_names_v6616 (the one type-name vocabulary,
+# whole names, refusals by name); syntax's POINTERS line (a local *i8/*i16/*i32 no
+# longer truncates its address) and INCLUDES block (three resolution steps — the
+# store fallback honours CYRIUS_HOME); stdlib's thread.cyr line (MPMC, CHAN_BLOCKING).
 # 2026-09-30 at v6.6.12: overview version/size line re-stamped (cycc
 # 1,470,944 B, .text 1,297,064 from readelf; .tcyr / lib / shell-gate counts
 # DERIVED; the v6.6.1 check.sh / heap-map / api-surface / self_compile
@@ -331,7 +335,14 @@ POINTERS:
     var p = &x;        # address-of
     var v = *p;        # dereference
     *p = 99;           # write through pointer
-    var p: *i64 = &buf; *(p + 1);  # typed (scales by element size)
+    var p: *i64 = &buf; *(p + 1);  # typed: a local *i64 steps 8 bytes
+    # A `*T` variable is an 8-byte address WHATEVER T is (6.6.16: a LOCAL
+    # *i8/*i16/*i32 was stored in 1/2/4 bytes — the address truncated, `p ==
+    # &buf` false, `load8(p + 1)` SIGSEGV). `*p` always loads 8 bytes. Only
+    # `p + n` depends on the spelling, unchanged: local *i8/*i16/*i32 step 1,
+    # other local *T 8, a param 1, a declaration-block global 8, a global
+    # after the first statement 1/2/4/8 by T. T must name a type
+    # (`type_names_v6616`).
 
 STRUCTS:
     struct Point { x; y; }
@@ -375,17 +386,24 @@ SYSCALLS:
     syscall(60, code);         # exit
 
 INCLUDES:
-    include "lib/string.cyr"   # textual inclusion, CWD-relative first
-    # v6.5.7: if CWD-relative resolution fails, cycc retries against
-    # the ENTRY FILE's directory, so `src/sub/a.cyr` can
-    # `include "b.cyr"` for its neighbour. The directory rides
-    # in-band as `#@incdir <dir>` on line 1, written by
-    # `cyrius build` (`#` opens a comment, so older cycc / cybs /
-    # the cx + JS forks skip it untaught). The marker is honoured
-    # ONLY at byte 0 and ONLY when the directory is relative and
-    # `..`-free — a hostile .cyr can write one, so it may never
-    # name an absolute path. `cyrius build /abs/dir/x.cyr` gets no
-    # marker and keeps the old CWD-only behaviour.
+    include "lib/string.cyr"   # textual inclusion; resolved in this order:
+    #   1. CWD-relative.
+    #   2. A `lib/...` path only: this cycc's own store slot —
+    #      CYRIUS_HOME/versions/<VERSION>/lib/ when CYRIUS_HOME is set and
+    #      non-empty, else HOME/.cyrius/versions/<VERSION>/lib/ (v6.6.16;
+    #      before that HOME only, whatever the comments said). The same home
+    #      the `cyrius` CLI uses. A set CYRIUS_HOME is authoritative: a leaf
+    #      its slot lacks is an error, never HOME's copy. Linux-hosted cycc
+    #      only (macOS / cycc.exe have no store fallback).
+    #   3. v6.5.7: the ENTRY FILE's directory, so `src/sub/a.cyr` can
+    #      `include "b.cyr"` for its neighbour. The directory rides
+    #      in-band as `#@incdir <dir>` on line 1, written by
+    #      `cyrius build` (`#` opens a comment, so older cycc / cybs /
+    #      the cx + JS forks skip it untaught). The marker is honoured
+    #      ONLY at byte 0 and ONLY when the directory is relative and
+    #      `..`-free — a hostile .cyr can write one, so it may never
+    #      name an absolute path. `cyrius build /abs/dir/x.cyr` gets no
+    #      marker and keeps the old CWD-only behaviour.
 
 INLINE ASM:
     asm { 0x90; }              # raw bytes
@@ -398,6 +416,72 @@ KERNEL MODE:
 
 OBJECT MODE:
     object;                    # emit ELF .o relocatable (PIC)
+
+[[entries]]
+name = "type_names_v6616"
+description = "The one type-name vocabulary: every annotation, sizeof and #assert sizeof match WHOLE names; a non-type is refused by name (6.6.16)"
+category = "cyrius"
+---
+THE VOCABULARY (src/frontend/parse_types.cyr `_tn_resolve`, struct lookup first):
+    i8 i16 i32 i64 / u8 u16 u32 u64    1 2 4 8      (u128: a keyword, 16)
+    f32 f64                            4 8
+    bool cstring Result Option Tagged  8            plain words
+    Vec  (and Vec<T>)                  8            a vec_new() handle, as a field takes it
+    an enum (declared either side)     8
+    f64v2 f32v4 i8v16 u8v16 i16v8 u16v8 i32v4 u32v4 i64v2 u64v2   16
+    f64v4 f32v8                        32
+    a struct / union                   STRUCTSZ     (a struct NAMED like a
+                                                     scalar — u8pair — is the struct)
+    a type parameter in scope          its argument; the i64 base 8
+                                       (BOUND, it IS its argument: in g<f64> `var y: T`
+                                        is an f64 and `T[N]` holds 8-byte f64s; in g<i8>
+                                        `var y: T` sign-extends — before 6.6.16 a 9-byte
+                                        untyped word / zero-extended)
+
+WHERE: a var annotation (local, global in both zones), `*T`, `[T]`,
+`slice<T>`, `[*T]`, a param, a return type, a multi-value return
+element, a struct field, an array element, sizeof, #assert sizeof.
+
+RULES:
+  - WHOLE names. `i8x`, `u8garbage`, `f64zz`, `i16q` are not types (they
+    were i8 / u8 / f64 / i16 by prefix before 6.6.16 — `var a: i8x = 300`
+    read 44). A miss is ONE error naming the type and site:
+      unknown type 'Nope' for variable 'a'
+      unknown type 'Nope' as the target of pointer 'p'
+      unknown type 'Nope' as the element of slice 's'
+      unknown type 'Nope' for parameter 'a'
+      unknown type 'Nope' as a fn return type
+      unknown type 'Nope' in a multi-value return type
+      unknown type 'Nope' in sizeof / in #assert sizeof
+      unknown array element type 'Nope'          (6.6.13's own message)
+      unknown type 'Nope' for struct field 'f'   (6.6.10's own message)
+    plus `note: 'i8x' is not 'i8' - a type name must match whole` for a
+    misspelt prefix, and the vocabulary with "(missing include?)".
+  - A param ALSO takes Str, cstring, Result, Option, Tagged and the vector
+    names BY NAME — `s: Str` in a unit without lib/str.cyr is the by-name
+    handle the param ABI always took.
+  - A return type keeps its set: a struct, i8..i64, f64, a vector,
+    Result / Option / Tagged / cstring. `fn f(): u8` (or f32, bool, Vec,
+    an enum) is `type 'u8' cannot be a fn return type` — return an i64.
+    Its `<..>` is skipped with it: `fn f(): Vec<i64>` is ONE error.
+  - sizeof and a multi-value return element take no type arguments
+    (`sizeof(Vec<i64>)`, `(Box<i64>, i64)` are `expected ')'`, as they
+    always were — for every generic type, not only Vec).
+  - A multi-value return element takes ANY type name (as an i64 slot);
+    only a non-type is refused.
+  - A struct declared BELOW a declaration-block global that names it is
+    `type 'Late' is declared after its use` (a local or param finds it).
+  - `--syntax-only` (cyrius lint) resolves nothing and refuses nothing.
+
+WHY: about nine ladders, three behaviours on a miss (silent i64, a named
+error, an unnamed error), two matching rules (prefix vs whole), and two
+vocabularies that disagreed (bool was an 8-byte array element and a
+refused field). The internal codes sit in a band of their own
+(0x7E000000 | class << 16 | val) read only through accessors, so none can
+reach SLTYPE / SVTYPE / GFRS / GFRT / GLTYPE / pscale.
+If a downstream build newly fails with `unknown type`, the annotation names
+nothing: a typo, a missing include, or a C type (`ptr`, `usize`). Fix the
+annotation — or drop it (an unannotated var is an i64).
 
 [[entries]]
 name = "compiler_architecture"
@@ -720,7 +804,7 @@ assert.cyr      — Test assertions: assert_eq, assert_ne, assert, assert_summar
 bench.cyr       — Benchmarking: bench_start/end/report + bench_batch_start/stop (sub-µs)
 bounds.cyr      — Array bounds checking
 callback.cyr    — Callback patterns: fork_with_pre_exec
-thread.cyr      — Threads (clone+mmap): thread_create / thread_join, thread_create_detached + thread_is_done (v6.5.8), MPSC channels (chan_send / chan_recv / chan_try_recv / chan_close)
+thread.cyr      — Threads (clone+mmap): thread_create / thread_join, thread_create_detached + thread_is_done (v6.5.8), MPMC channels (chan_send / chan_recv / chan_try_send / chan_try_recv / chan_close; blocking where CHAN_BLOCKING == 1, since 6.6.16)
 sync.cyr        — Portable mutex (MUTEX_SIZE=8; three-state futex on Linux since v6.5.9 — uncontended lock/unlock never enters the kernel)
 async.cyr       — Async primitives (cooperative Future runtime; async_await_readable / async_await_readable_ms v6.5.6, async_with_timeout, combinators)
 freelist.cyr    — Freelist allocator (O(1) alloc/free)

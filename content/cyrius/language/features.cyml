@@ -89,51 +89,91 @@
 #   * +1 entry threads_detached_and_is_done_v658 — thread_create_detached
 #     / thread_is_done, and why sys_exit_group (v6.5.6) is the correct
 #     epilogue once any thread exists.
-# 66 entries.
+# v6.6.16 (2026-10-05): +4 entries — chan_blocking_capability_v6616 (CHAN_BLOCKING; the
+# channel is MPMC and blocks on arm64 macOS + Windows), indirect_calls_at_top_level_since_6_6_16
+# (top-level callptr / fncallN on a capturing closure), struct_assignment_handle_and_value_v6616
+# (handle <-> value assignment copies), struct_parameter_is_a_copy_v6616 (a struct parameter is
+# the callee's copy). REWRITTEN: byte_array_literal (`var X: T[N] = {..}` is N elements of T,
+# baked into the image; the old body was wrong on three counts), sizeof_operator (every type
+# name — f64, u8, bool, vectors, enums; `sizeof(T)` with T = f64 read 9). Updated:
+# struct_field_widths (bool fields), struct_storage_class_v665 (`d = c` copies),
+# threads_concurrent_capability_v6544 (Windows is 1; a gate can enforce an under-report),
+# stack_enum_unboxed_payload_variants_v6555 (three RULES bullets stale since 6.6.0; generic and
+# method spellings), the ATTRIBUTES block (#deprecated on every call path), the 6.6.11 / 6.6.12
+# struct-parameter entries (the copy is the callee's now).
+# 87 entries (DERIVED at 6.6.16 with `grep -c '^\[\[entries\]\]'` — this line read 66 while the
+# file held 83: nobody re-derived it from v6.5.10 to 6.6.15).
 
 [[entries]]
 name = "byte_array_literal"
-description = "var foo[N] = { 0x.., ... }; — fixed-size byte-array literal (v5.11.51)"
+description = "var X: T[N] = { .. } — N elements of T baked into the image; the bare var b[N] = { .. } is a byte list (v5.11.51; typed and baked 6.6.16)"
 category = "cyrius"
 ---
-SYNTAX:
-    var bytes[16] = { 0xDE, 0xAD, 0xBE, 0xEF,
-                      0x00, 0x11, 0x22, 0x33,
-                      0x44, 0x55, 0x66, 0x77,
-                      0x88, 0x99, 0xAA, 0xBB };
+SYNTAX (module scope):
+    enum Op { ADD = 1; SUB = 2; }
+    var table: u16[4] = {0xFFFF, Op.SUB, 1 << 8, -1};   # 0xFFFF, 2, 256, 0xFFFF
+    var scale: f64[2] = {1.5, -0.25};                   # exact binary64 bits
+    var half:  f32[2] = {0.1, 3.4};                     # rounded to f32, ties to even
+    var wide:  u128[1] = {0xFF};                        # low 8 bytes; high 8 are 0
+    var guid[2] = { 0x8B, 0xE4, 0xDF, 0x61, 0x93, 0xCA, 0x11, 0xD2,
+                    0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C };   # the BARE form: bytes
 
-    # EFI GUIDs, UTF-16LE strings, packed flag arrays — anywhere
-    # a fixed N-byte literal needs to land at a known offset.
-    var guid[16]  = { 0xa1, 0xb2, ..., 0x16-bytes };
-    var utf16[14] = { 'H',0, 'e',0, 'l',0, 'l',0, 'o',0, 0,0, 0,0 };
+SEMANTICS (6.6.16):
+    `var X: T[N] = { e, .. }` is N elements of T. An element is an integer
+    literal, an enum constant (`A` or `E.A`, declared on either side), or a
+    constant expression of them (`1 << 4`, `E.A * 2`, `-5`); an f64 / f32
+    element also takes a float literal, optionally negated. Elements past
+    the list are 0. More than N elements is refused, naming N.
+    RANGE: one window per width, -2^(8w-1) .. 2^(8w)-1 — `0xFF` into an i8
+    and `-1` into a u8 are the same bits; a value that would be truncated is
+    refused. i64 / u64 / bool / an enum / *T take any 64-bit value.
+    The BARE `var b[N] = { .. }` is a list of BYTES in [0, 255], at most
+    N * 8 of them at top level (its historical meaning — a bare top-level
+    `var b[N]` is N * 8 bytes), and takes enum constants and constant
+    expressions too. A shorter list was always legal; the rest is 0.
+    REFUSED BY NAME: a call, variable or string element ("must be
+    constants"); a float literal in an integer array; a struct, union,
+    vector, slice, cstring, Str, Result / Option / Tagged or Vec element
+    type ("store the elements explicitly").
+    POSITION: the same declaration after the first top-level statement means
+    the same thing. Inside a top-level block (while / if / elif / else / for
+    and its init clause / a switch case or default arm / match / @unsafe / a
+    bare { }) a list is refused — a baked list would hold its values once,
+    where a scalar's initializer runs every time the block does.
+    A fn-local array takes no list.
+    REDECLARATION: a list is a constant initializer (6.6.6's value rule).
+    Over an earlier `= 0` or computed initializer of the name it is the value
+    from program start — `var a = f(); var a[1] = {0, 4};` runs f() and reads
+    0x400; over an earlier scalar constant it keeps the bytes it does not list
+    (`var a = 0x0506; var a[1] = {9};` reads 0x0509); two lists overlay in
+    order; a constant scalar after a list wins whole.
 
-SEMANTICS:
-    `var name[N] = { ... };` declares a byte array of size N and
-    initializes it with the listed byte values. Element count
-    must equal N (compile-time check). Each value occupies one
-    byte; values must fit in i8 / u8 range. Reads via `load8`,
-    writes via `store8` to the array's base address.
+CODEGEN (6.6.16):
+    NONE on an image target. Pass 1 (PARSE_GVAR_ARR) checks the element type
+    and the count; the replay (EMIT_GVAR_INITS -> _gai_replay) evaluates each
+    element with the constant folder (_CF_TRY, enum arm on) into the slot's
+    blob (_vgai_base); every image writer copies the blob into the var area
+    (_EMIT_GVAR_STATIC_INITS -> _gai_bake), x86 ELF / aarch64 / PE / EFI /
+    Mach-O x86 and arm64 alike. So the values hold from the first
+    instruction — in a `kernel;` build too, where the old run-time stores ran
+    after a top-level program that never returns (B read 0). cx too: a .cyx
+    carries its var data after the bytecode and cxvm copies it into the
+    guest, so main_cx.cyr bakes the same blob there. An initializer that runs
+    earlier — even one reading the array before its declaration — sees the
+    list. (Compiler side: field_notes/compiler/gotchas.cyml
+    `a_guard_in_the_loop_implies_a_second_pass_somebody_has_to_write`.)
 
-    Equivalent to N consecutive `store8(&name + i, val_i);`
-    statements at the var's gvar-init position, but the literal
-    form is one declaration site instead of N+1.
-
-CODEGEN (pre-v5.11.66 — peephole pinned for later):
-    Each byte init goes through the existing store8(...) expr
-    path: `EVADDR + EADDRA_IMM + EPUSHR + EMOVI + EPOPC +
-    ESTORE8 + EXORAA` (~21 bytes/byte of emit). v5.11.66/.67
-    will collapse this to `mov byte [rcx+disp8], imm8` (4
-    bytes/byte) via a peephole — 5× emit compression for the
-    `gnoboot` UTF-16 strings + EFI GUIDs.
+⚠ UNTIL 6.6.16 the list was a byte list WHATEVER T was:
+    `var t: i64[3] = {1, 2, 42};` read t[0] == 0x2A0201, t[1] == t[2] == 0
+    on every target; 256, -3, 1.5 and an enum constant were refused, and
+    Pt[2] / bool[2] / i8v16[2] lists compiled silently into bytes. The old
+    entry here also said "element count must equal N" (never true) and
+    described a store8 sequence per byte (removed by the bake).
 
 CONSUMER:
-    `gnoboot` (sovereign UEFI bootloader) — primary user. EFI
-    GUIDs (`gEfiLoadedImageProtocolGuid` etc.) and UTF-16LE
-    panic strings sit directly in source rather than living in
-    a separate `.rodata` blob.
-
-CROSS-ARCH: byte-array literal is parser-level; emit per-arch
-(x86 + aarch64 + cx). Shipped same-slot across all three.
+    gnoboot (sovereign UEFI bootloader, `kernel;` + CYRIUS_TARGET_EFI=1):
+    29 bare lists — EFI GUIDs and UTF-16LE strings. Same bytes since 6.6.16,
+    now in the image (the binary lost 2 KB of stores).
 
 [[entries]]
 name = "efi_main_entry_convention"
@@ -255,49 +295,50 @@ source uses no type annotations.
 
 [[entries]]
 name = "sizeof_operator"
-description = "sizeof(Type) compile-time constant"
+description = "sizeof(Type) compile-time constant — every type name, matched whole (6.6.16)"
 category = "cyrius"
 ---
 SYNTAX:
-    var n = sizeof(i8);      # 1
-    var n = sizeof(i16);     # 2
-    var n = sizeof(i32);     # 4
-    var n = sizeof(i64);     # 8
-    var n = sizeof(u128);    # 16
-    var n = sizeof(Point);   # recursive struct size
+    var n = sizeof(i8);      # 1      sizeof(u8)  1
+    var n = sizeof(i16);     # 2      sizeof(u16) 2
+    var n = sizeof(i32);     # 4      sizeof(u32) 4
+    var n = sizeof(i64);     # 8      sizeof(u64) 8
+    var n = sizeof(u128);    # 16     (also in #assert since 6.6.16)
+    var n = sizeof(f32);     # 4      sizeof(f64) 8
+    var n = sizeof(bool);    # 8      cstring, Result, Option, Tagged, Vec, an enum: 8
+    var n = sizeof(f64v2);   # 16     every 128-bit vector 16; f64v4 / f32v8 32
+    var n = sizeof(Point);   # STRUCTSZ — unpadded, recursive
+    fn g<T>(p: T): i64 { var k = sizeof(T); return k; }   # T's argument's size; the i64 base 8
 
-IMPLEMENTATION:
-    Detected in PARSE_FACTOR as an IDENTIFIER spelled `sizeof`
-    (`_is_sizeof_word`, parse.cyr). NOT a lexer keyword — the klen=6
-    lexer keyword block had a code-size issue that silently dropped
-    sizeof recognition. Identifier-based detection in the parser
-    is more robust.
+IMPLEMENTATION (6.6.16):
+    PARSE_FACTOR spots the IDENT `sizeof` (`_is_sizeof_word`, whole word —
+    NOT a lexer keyword); `#assert` reads the same through
+    `_EVAL_CONST_ATOM`. Both call `_tn_sizeof` (src/frontend/parse_types.cyr):
+    a bound type parameter is its argument's size, else the one type-name
+    resolver `_tn_resolve` (struct lookup FIRST, then the builtin names,
+    matched WHOLE), and `_tn_bytes` gives the size — exactly what
+    `var a: T[N]` reserves per element, so the array is N * sizeof(T) by
+    construction. The vocabulary: language/core.cyml `type_names_v6616`.
 
-    Parses: sizeof ( TypeName ) → EMOVI(S, size)
-    For scalars: direct byte width.
-    For structs: STRUCTSZ(S, sid-1) recursively sums field widths.
+⚠ UNTIL 6.6.16 sizeof knew only i8..i64, u128 and structs: `sizeof(f64)`,
+    `sizeof(u8)`, `sizeof(bool)`, `sizeof(cstring)`, an enum and every vector
+    type were `sizeof: unknown type`, and `#assert sizeof(u128)` was
+    `expected ')', got u128`. A generic's `sizeof(T)` with T = f64 read 9
+    (the f64 return code -9 taken as a width); under CYRIUS_MONOMORPH=0 an
+    unbound T was `unknown type`.
 
-⚠ WHOLE NAMES ONLY — BOTH THE WORD AND THE TYPE:
-    - The word (6.6.10): the test compared a 6-byte PREFIX, so
-      `sizeofzz(P)` was read as `sizeof`. It now compares 7 bytes,
-      the terminator included.
-    - The type (6.6.11): the scalar ladder matched a type-name
-      PREFIX, so `sizeof(i16v8)` was 2, `sizeof(i8zz)` was 1 and
-      `#assert sizeof(i16v8) == 2` PASSED. Both sizeof sites now
-      use the whole-name `_field_scalar_width` (6.6.10 had fixed
-      only the struct-field ladders); a name that is neither a
-      scalar nor a struct is `sizeof: unknown type`.
-    - The twin (6.6.11): `mulh64` was matched the same 6-byte way,
-      so a user fn named `mulh64x(a, b)` compiled as the intrinsic.
-      `_is_mulh64_word` is the whole-word test now.
+⚠ A NAME THAT IS NO TYPE is refused naming it: `unknown type 'i8zz' in
+    sizeof` / `... in #assert sizeof` (plus `note: 'i8zz' is not 'i8' - a type
+    name must match whole`), and an #assert whose operand was refused does
+    not add a second `#assert failed`. `ptr` is not a cyrius type (`*T` is the
+    pointer spelling). History: the word was matched by a 6-byte prefix until
+    6.6.10 (`sizeofzz(P)` was sizeof; `mulh64x(a, b)` was the intrinsic until
+    6.6.11); the TYPE by a prefix until 6.6.11 (`sizeof(i16v8)` was 2 — it is
+    16 now, a vector).
 
 ⚠ `return sizeof(T);` AND `return mulh64(a, b);` WORK SINCE 6.6.11.
-    Both are IDENT-spelled intrinsics lowered inline, but the tail-
-    call path saw `return NAME(..)` and jumped to a fn of that name
-    that does not exist, so the build was refused on every backend
-    ("undefined function 'sizeof'") while the same expression
-    through a local compiled. `_tc_callee_divert` now sends them to
-    the normal return path (`_is_ident_intrinsic`).
+    Both are IDENT-spelled intrinsics lowered inline; the tail-call path
+    used to jump to a fn of that name (`_is_ident_intrinsic` diverts it).
 
 [[entries]]
 name = "unions"
@@ -379,6 +420,12 @@ SEMANTICS:
     compiler does NOT auto-pad — write padding fields explicitly
     if a downstream consumer needs C ABI compatibility.
 
+⚠ 6.6.16: `bool` is a field type — 8 bytes, a plain word like u8..u64 (it was
+    refused here while an array element took it). The field vocabulary is the
+    one type-name resolver's (`_tn_resolve`, language/core.cyml
+    `type_names_v6616`); the refusal note lists bool, Result, Option and
+    Tagged, and a misspelt prefix gets the `'i8x' is not 'i8'` hint.
+
 [[entries]]
 name = "struct_storage_class_v665"
 description = "Where a struct lives: inside a fn it is a PER-CALL, PER-THREAD frame object; at top level it is one shared object; `var p: T = <expr>` yielding an address is a POINTER to someone else's struct (v6.6.5)"
@@ -390,6 +437,7 @@ SYNTAX AND MEANING:
         var b: P;                 # per call, per thread
         var c: P = mk();          # a POINTER to what mk() returned — not a copy
         var d: P = a;             # a COPY of a (all STRUCTSZ bytes)
+        d = c;                    # since 6.6.16: a COPY of what c points at (c is a pointer)
         return a.x + c.y;
     }
     var G = P { 1, 2 };           # ONE shared object in the data section
@@ -1047,7 +1095,17 @@ ATTRIBUTES — #must_use, @unsafe, #deprecated:
     fn sha1_init() { ... }
 
 #must_use warns at expression-statement discard. @unsafe is
-advisory only. #deprecated warns at every call site.
+advisory only. #deprecated("why, and what to use instead")
+warns ONCE per call, on that call's line, however the fn is
+reached: a plain call, `return f(x);`, a call written BEFORE
+the definition, `&f`, `o.m()` for a top-level `fn T_m`, an
+overloaded operator, a struct-valued receive (`var q: P3 =
+f()`), a generic instance (`g<i32>(..)`), or a call inside an
+`#inline` / generic body (once, not once per expansion) — all
+since 6.6.16; before, only three call paths warned. The
+message is required: a bare `#deprecated` is refused by name.
+It changes no code. Inside an `impl` body a `#deprecated` is
+refused (deprecate the method with a top-level `fn T_m`).
 
 [[entries]]
 name = "slice_type_v58x"
@@ -2333,7 +2391,8 @@ INTENDED PATTERN (bote streaming dispatch):
 UNDERLYING:
     chan_* shipped at v5.5.31 (MPSC, futex + mutex backed,
         chan_new/send/recv/close). chan_try_recv added v5.11.15
-        completes the non-blocking surface.
+        completes the non-blocking surface. MPMC-safe, and blocking
+        wherever CHAN_BLOCKING == 1, since 6.6.16.
     cancel_token_* backed by lib/atomic.cyr's atomic_load /
         atomic_store (aligned i64 ops on x86_64 + aarch64; explicit
         API documents the atomicity intent). No busy-wait — worker
@@ -3926,14 +3985,18 @@ category = "cyrius"
 ---
 Every cyrius target exposes the same threading surface (`thread_create` / `thread_join` /
 `thread_create_detached` / `thread_is_done` / `gettid` / the `chan_*` family), but not every
-target runs bodies on a SECOND thread. Three peers run them INLINE at `thread_create` —
+target runs bodies on a SECOND thread. Two peers (x86-macOS, agnos) run them INLINE at `thread_create` —
 correct results, serially. `THREADS_CONCURRENT` says which you have:
 
     1  Linux (real clone(2) threads)
     1  arm64-macOS  (real Darwin threads via __got[5] pthread_create, v6.5.44)
+    1  Windows      (real CreateThread threads since v6.0.61; the flag read 0 until 6.6.16)
     0  x86-macOS    (static LC_UNIXTHREAD binary: no libSystem, no __got)
-    0  Windows
     0  agnos
+
+For the channel, ask `CHAN_BLOCKING` (6.6.16, `chan_blocking_capability_v6616`): real threads
+do not imply a blocking channel, and arm64 macOS and Windows had the first without the second
+through 6.6.15.
 
 Use it to guard anything whose CORRECTNESS depends on two things running at once — a
 rendezvous, a producer/consumer handoff, a benchmark that claims parallel speedup:
@@ -3949,9 +4012,55 @@ cross-host concurrency corpus was green throughout, because every assertion in i
 ran", "join returned 0", "the count is exact", "the mutex excluded") is honestly satisfiable by
 an inline call. See the field note `a_corpus_that_cannot_tell_real_threads_from_inline_calls`.
 
+⚠ A BACKEND CAN ALSO UNDER-REPORT (6.6.16 — the mirror image). Windows had real threads from
+v6.0.61 but declared 0 from v6.5.44 to 6.6.15, and the "honesty" gate
+(`macos_arm64_real_threads.sh` axis 6) hard-coded it in its serial list, so the gate ENFORCED
+the wrong value. An honesty gate asserts each backend's value from its mechanism (clone /
+pthread_create / CreateThread -> 1, inline `fncall1` -> 0), never from a frozen list.
+
 ⚠ A `0` PEER IS NOT BROKEN. Bodies run and results are correct; only the parallelism is
 absent. Code that uses threads for THROUGHPUT still works there, just serially — so guard on
 this only where concurrency is a correctness precondition, not everywhere threads appear.
+
+[[entries]]
+name = "chan_blocking_capability_v6616"
+description = "CHAN_BLOCKING — ask whether chan_recv / chan_send block, instead of assuming it from the target or from THREADS_CONCURRENT (v6.6.16)"
+category = "cyrius"
+tags = ["threads", "channels", "chan", "capability", "macos", "windows", "v6.6.16"]
+---
+`THREADS_CONCURRENT` says whether `thread_create` starts a second thread. It does NOT say whether
+the channel waits. Through 6.6.15 the two disagreed on arm64 macOS and Windows: real threads, but
+a `chan_recv` that answered 0 on an empty channel and a `chan_send` that failed on a full one.
+`CHAN_BLOCKING` answers the channel question, and every thread peer exports it:
+
+    1  Linux        futex-parked ring
+    1  arm64-macOS  __ulock-parked ring (6.6.16)
+    1  Windows      ring whose waiters block on an I/O completion port (6.6.16)
+    0  x86-macOS    serial ring: chan_recv answers 0 when empty, chan_send -1 when full
+    0  agnos        serial ring, the same
+    0  cx           one guest thread: a wait that only another thread could end spins
+
+On 1 the ring is locked and shared safely by any number of producer and consumer threads
+(MPMC — the Linux ring deadlocked with several producers AND consumers until 6.6.16, see
+field_notes/compiler/gotchas.cyml `one_futex_word_two_kinds_of_waiter_wake_one_strands_the_other_kind`).
+chan_recv blocks until a value arrives and returns 0 once the channel is closed AND empty.
+chan_send blocks while the ring is full and returns -1 once the channel is closed.
+chan_try_send / chan_try_recv / chan_close keep one contract on every target.
+
+A pool of workers that loops on `chan_recv` and treats 0 as "closed" needs CHAN_BLOCKING == 1.
+Off it, serve inline:
+
+    if (CHAN_BLOCKING == 1) {
+        # spawn workers; each loops `v = chan_recv(ch); if (v == 0) break; ...`
+    }
+    if (CHAN_BLOCKING == 0) {
+        # serve on this thread — a worker's first chan_recv would answer 0 at once
+    }
+
+⚠ DO NOT KEY THIS ON THE TARGET NAME, and do not key it on THREADS_CONCURRENT. sandhi 1.10.7
+keyed its pooled server on CYRIUS_TARGET_LINUX because no capability existed. A target guard
+stays wrong after the peer gains the behaviour. THREADS_CONCURRENT was 1 on arm64 macOS while its
+channel did not block, so it was the wrong question.
 
 [[entries]]
 name = "stack_enum_unboxed_payload_variants_v6555"
@@ -3992,15 +4101,20 @@ RULES, all enforced or diagnosed:
   rule read "exactly 1", which refused `enum Option: stack { None(); Some(v); }` outright.)
 - **Bare variants are unchanged** — still integer constants, still sharing the discriminant
   numbering with the payload variants.
-- **The destructuring bind is function-only.** `var t, v = f();` at top level is rejected with
-  "multi-var destructure only supported inside functions".
-- **A pair must be bound as a pair (v6.5.67).** `var r = SOk(9);` keeps the tag and drops the
-  payload, so it is refused: *"a `: stack` enum returns two values — bind both: `var tag, val =
-  f();`"*. The check follows the value through `return`, so a forwarding wrapper is caught too.
-- **`?` does not apply, and now says so.** The propagation operator desugars to
-  `load64(rax + 8)` — it dereferences its operand — so on a pair it read the *tag* as a pointer
-  and the program SIGSEGV'd after compiling clean. It is a diagnostic as of v6.5.67:
-  *"'?' does not apply to a `: stack` enum — destructure it: `var tag, val = f();`"*.
+- **The destructuring bind works anywhere** (top level since v6.6.0).
+- **A pair must be bound as a pair.** `var r = f();` (v6.5.67), `r = f();` and `store64(&slot, f());`
+  (v6.6.0) are refused: *"a `: stack` enum returns two values — bind both: `var tag, val = f();`"*. The
+  check follows the value through `return`, so a forwarding wrapper is caught too. It is a fn-body check: a
+  top-level `var v = f();` is not refused yet (roadmap backlog).
+- **`?` propagates the pair** (v6.6.0), in expression position and as a statement; the Err path re-emits
+  both halves. (v6.5.67 to 6.6.0 it was a diagnostic; before that it read the tag as a pointer.)
+- **`f` is any call spelling** (v6.6.16): `f(..)`, an explicit generic `g<T>(..)` and a method `p.m(..)`
+  behave the same for all three rules above. Before 6.6.16 the generic and method spellings were not
+  recognised: `?` crashed (rc 139), the single binds dropped the payload silently, and their destructure was
+  "multi-value destructure needs a call" (field_notes/language/semantics_runtime.cyml
+  `pair_callee_any_spelling_6_6_16`).
+- **A `return f(..)` inside a closure body is the closure's** (v6.6.16): it no longer marks the enclosing
+  fn as a pair fn (`closure_returns_belong_to_the_closure_since_6_6_16`).
 
 ⚠ **OPT-IN, AND THE DEFAULT DELIBERATELY DID NOT CHANGE.** The boxed layout is not an internal
 detail; it is the documented representation. `?` reads `+8`, `lib/result.cyr`'s `is_ok` /
@@ -4251,7 +4365,9 @@ field_notes/language/semantics_runtime.cyml
    Writing `self.a` inside such a method changes the method's copy, not `x`. Before 6.6.11 the
    dot form pushed `&x` for EVERY self, so a small typed self read its fields out of an
    address (-23905 / 11130 / 4047 on x86 / aarch64 / cx, want 3). Unchanged: an UNTYPED self
-   (the `impl` form) is the receiver's address, and a struct over 8 bytes is address-passed.
+   (the `impl` form) is the receiver's address. A typed self OVER 8 bytes is address-passed —
+   and since 6.6.16 copied on entry like every struct parameter, so it is a value too
+   (struct_parameter_is_a_copy_v6616).
 
 3. A STRUCT RESULT IS TYPE-CHECKED AGAINST A STRUCT DESTINATION AT EVERY SIZE. A call,
    method or operator returning a different struct is refused, whatever its size and whichever
@@ -4511,7 +4627,7 @@ tests/gates/frontend/call_result_field.sh (18 rows).
 
 [[entries]]
 name = "struct_field_arguments_and_toplevel_copy_init_v6612"
-description = "Since cycc 6.6.12 a struct-typed FIELD passed to a by-value struct parameter (`take(r.v)`) is a COPY inside a fn (the field's own address at top level), and a top-level struct copy-init (`var B: Pt = A;`, `var G: Pt = BX.v;`) gives the global its own bytes. Both used the source's FIRST WORD as the struct's address and SIGSEGV'd. The source of a top-level copy must be declared ABOVE the copy; a source of another struct type is refused by name"
+description = "Since cycc 6.6.12 a struct-typed FIELD passed to a by-value struct parameter (`take(r.v)`) is a COPY (inside a fn from 6.6.12; everywhere since 6.6.16, when the callee makes it), and a top-level struct copy-init (`var B: Pt = A;`, `var G: Pt = BX.v;`) gives the global its own bytes. Both used the source's FIRST WORD as the struct's address and SIGSEGV'd. The source of a top-level copy must be declared ABOVE the copy; a source of another struct type is refused by name"
 category = "cyrius"
 tags = ["structs", "by-value", "copy-init", "globals", "declaration-order", "sigsegv", "v6.6.12"]
 ---
@@ -4529,11 +4645,12 @@ field into a variable) is struct_value_copies_and_result_type_checks_v6611.
    A by-value struct parameter over 8 bytes is address-passed. For `take(r.v)` the call
    pushed the field's first word as that address, so the callee dereferenced 10 — from a
    local, a global, a by-value parameter and a pointer-mode base, and through `mk<P3>(r.v)`.
-   Now, INSIDE A FN the callee gets a byte-exact COPY in a frame temporary, so its writes do
-   not reach `r.v` (unlike a NAMED struct argument, which is still address-passed and
-   aliases the caller). AT TOP LEVEL there is no frame, so the callee gets the field's own
-   address, as a named global argument does — measured: `take(BX.v)` at top level leaves
-   `BX.v.a == 100`. A field of a different struct type is refused ("cannot pass 'v' to a
+   Now the callee gets a COPY, so its writes do not reach `r.v`. From 6.6.12 to 6.6.15 the copy
+   was the CALLER's (a frame temporary), so it existed only inside a fn: at top level the callee
+   got the field's own address and wrote it (`take(BX.v)` left `BX.v.a == 100`), and a NAMED
+   struct argument was never copied at all. Since 6.6.16 the callee copies every struct
+   parameter on entry, so both hold everywhere (struct_parameter_is_a_copy_v6616). A field of a
+   different struct type is refused ("cannot pass 'v' to a
    by-value parameter of a different struct type in a call to 'take'").
 
 2. TOP-LEVEL COPY-INIT.
@@ -4780,3 +4897,121 @@ a `: Str` global (declared or inferred from its initializer), a `: Str` field, t
 calls, `x.data` and `str_data(x)` (a Str's data pointer is not NUL-terminated at its length). The fix is
 `str_cstr(x)` (a NUL-terminated copy), `str_eq_cstr(x, "lit")` for comparisons, or a `: Str` parameter —
 never `str_data(x)`. Warnings only: no binary changes.
+
+[[entries]]
+name = "indirect_calls_at_top_level_since_6_6_16"
+description = "Since cycc 6.6.16 `callptr(f, ..)` and `fncall0..8(f, ..)` work at top level exactly as inside a fn, capturing closures included: a top-level `callptr` compiles (it was refused), and a top-level `fncallN` on a capturing closure that a fn built and returned no longer crashes (SIGSEGV; 0xC0000005 on Windows; 0 on cx)"
+category = "cyrius"
+tags = ["closures", "fnptr", "callptr", "fncall", "top-level", "cx", "v6.6.16"]
+---
+    include "lib/alloc.cyr"
+    include "lib/fnptr.cyr"
+    fn mk(b) { return |x| b + x; }      # captures b
+    var g = mk(41);
+    var a = fncall1(g, 1);              # 42 — top level, no wrapper fn needed (6.6.16+)
+    var c = callptr(g, 1);              # 42 — a compile error before 6.6.16
+    fncall1(g, 1);                      # statement position works too
+
+Before 6.6.16 a top-level `fncallN` skipped the closure-aware lowering and called lib/fnptr.cyr,
+which jumps to the closure's bit-63-tagged value; on cx it returned 0 for EVERY callee, plain fn
+pointers too. The workaround was to call the closure from inside any fn
+(`fn call1(f, a) { return fncall1(f, a); }`); it still works and is no longer needed.
+A top-level indirect call opens its own small stack frame (on Windows with the usual stack
+probe); inside a fn nothing changed. Still NOT closure-aware: an address-taken `&fncallN`
+called through another indirect call runs lib/fnptr.cyr directly (and returns 0 on cx).
+Compiler side: field_notes/compiler/gotchas.cyml
+`top_level_has_no_frame_so_a_lowering_that_needs_one_must_refuse_or_bring_its_own`.
+
+[[entries]]
+name = "struct_assignment_handle_and_value_v6616"
+description = "Since cycc 6.6.16 a struct ASSIGNMENT between a handle (a variable whose slot holds a plain struct's address: a pointer-mode local or global, a `*T` parameter) and a struct VALUE copies the struct — out of the pointee, or into it (`*a = q`). handle <- handle stays a pointer rebind at any pair of types; the DECLARATION `var q: T = a;` stays an alias from a pointer-mode local or global (from a parameter, a `*T` one included, it copies, as since 6.6.11)."
+category = "cyrius"
+tags = ["structs", "assignment", "copy", "pointer-mode", "handle", "v6.6.16"]
+---
+TERMS (plain structs over 8 bytes; Str / Result / Option / Tagged and <= 8 B structs are unchanged):
+    HANDLE  one slot holding the struct's ADDRESS:
+              var a: P3 = alloc(24);        # a pointer-mode local
+              var G: P3 = 0; G = alloc(24); # a pointer-mode global
+              fn f(p: *P3)                  # a `*T` parameter
+    VALUE   the struct itself: an inline local or global (`var q: P3;`, `var G = P3{..}`), a
+            by-value parameter (`q: P3`), a closure capture, a field `b.v`, a call / method /
+            operator result.
+
+THE RULE, for the assignment `dst = src;`:
+    value  <- handle   copy the struct src points at            q = a;
+    handle <- value    copy INTO the struct dst points at       a = q;  a = mk3(..);  a = b.v;
+                       (`*a = q` in C) — a keeps its address    a = q.f();  a = l + r;  a = param;
+    handle <- handle   REBIND (one word), at ANY struct types   b = a;  G = a;  p = q (two *T params)
+    value  <- value    copy (unchanged)
+    A source that is not a struct value — an untyped pointer, `alloc(..)`, a Str-returning call —
+    still binds the handle. A struct value of a DIFFERENT type into a handle is refused by name
+    (`cannot copy 'r' into a variable of a different struct/vector type: 'a'`).
+
+WHAT IT WAS (every release before 6.6.16, x86 and aarch64 alike): each assignment arm stored ONE
+word:
+    q = a;      q.x = a's ADDRESS, q.y stale (printed 1397460178042889 where 12 is right)
+    a = q;      a's slot = q.x's VALUE, the next a.x SIGSEGV'd; same for a = G, a = mk(..),
+                a = b.v, a = q.dbl(), a = l + r, G = q
+    a = q;      from a by-value PARAMETER: a pointed at the CALLER's struct (a.x = 9 wrote it)
+
+THE ASYMMETRY IS DELIBERATE:
+    var q: P3 = a;   # declaration: q takes its storage class FROM a. From a pointer-mode local
+                     # or global -> a second pointer (alias). From a PARAMETER -> a COPY, and a
+                     # `p: *P3` parameter counts (the 6.6.11 by-value parameter copy-init).
+    var q: P3; q = a;# assignment: q is already inline -> a COPY
+    The declaration chooses q's layout; an assignment cannot change it. For a private copy of a
+    handle's struct, declare first and assign.
+
+ONE SHAPE CHANGED MEANING: smuggling a handle through an inline struct variable —
+    var w: P3; w = a; f(w);     # f(v) untyped, reads load64(v + 8)
+now passes w's first FIELD (w is a real copy). Pass `a`, or `&w`. Nothing in the ecosystem did it.
+Also: two `*T` parameters, `a = b;` — a rebind now (it copied `*b` into `*a`).
+
+[[entries]]
+name = "struct_parameter_is_a_copy_v6616"
+description = "Since cycc 6.6.16 a parameter annotated with a plain struct is a VALUE at every width: over 8 bytes the struct still travels by address, but the callee copies it into its own frame on entry, so a write to the parameter never reaches the caller — whatever the argument (local, global, pointer-mode local, forwarded parameter, typed self, generic instance, fn pointer, field, top level). `p: *T` (called `f(&x)`) and an untyped self are the spellings for a callee that mutates. An `async fn` refuses such a parameter by name."
+category = "cyrius"
+tags = ["structs", "by-value", "parameters", "copy", "self", "async", "abi", "v6.6.16"]
+---
+THE RULE (decided by the user, 2026-10-02):
+
+    fn bump(p: P3): i64 { p.x = p.x + 1; return p.x; }
+    var q: P3 = mk3(3, 0, 0);
+    bump(q); bump(q);          # 4, 4 — and q.x is still 3
+
+    fn bumpp(p: *P3): i64 { p.x = p.x + 1; return p.x; }
+    bumpp(&q); bumpp(&q);      # 4, 5 — q.x is 5: a pointer parameter IS the caller's struct
+
+  The same for a 16 B struct, an inline global (in a fn or at top level), a pointer-mode local
+  (`var h: P3 = alloc(24);` — its heap object stays put), a parameter passed on, a typed
+  `self: P3` (`q.bump()` == `P3_bump(q)`), a generic `bumpg<T>(p: T)` with T = P3, a call through
+  `fncall1(&bump, &q)`, a field (`bump(b.v)`) and a top-level `take(BX.v)`. Untyped parameters,
+  untyped `self`, `p: *T`, `Str` / `Result` / `Option` / `Tagged` (heap handles) and structs of
+  8 bytes or less (values in a register) are unchanged.
+
+WHAT IT WAS (every release before 6.6.16): the parameter was the CALLER's struct. `bump(q)` twice
+gave 4 then 5 and left q.x at 5, for every argument form above; only a field argument inside a fn
+was copied (6.6.12, caller-side — top level had no frame for it). The guide documented the alias.
+
+HOW: the copy is made in the CALLEE's prologue (`_sptr_params_localize`, parse_fn.cyr), after
+`_stkp_flush` has homed every parameter slot — a stack-passed pointer (SysV 7th+, aarch64 9th+,
+Win64 5th+) is not in its slot before that. One site covers every caller, fn pointers included,
+and the calling convention is unchanged. From there the parameter is an ordinary inline local.
+
+CONSEQUENCES worth knowing:
+  - A bare `q` where an untyped value is expected (`var k = q;`, `raw(q)` into an untyped
+    parameter, `load64(q)`) is the struct's FIRST FIELD, as for any inline struct local. Before
+    6.6.16 it was the caller's address. Write `&q` for the address (of the copy).
+  - The copy happens on entry, so passing something that is not a struct's address (`take(0)`
+    for a `q: P3`, e.g. to bind a generic's T) faults there even if the body never reads `q`.
+  - An `async fn` with such a parameter is refused: "async fn parameter 'p' is a struct passed by
+    value, which an `async fn` does not capture yet — pass a pointer to it (`p: *Pt`)". The body
+    runs at force time, so an entry copy would read the caller's struct late.
+  - Cost: one byte-exact copy per call (8/4/2/1-byte chunks) plus the struct's size in frame.
+    cycc's own source declares no such parameter (self-compile unchanged).
+
+GATES: tests/tcyr/crossos/struct_arg_is_copy.tcyr, struct_param_byvalue_copy.tcyr,
+struct_ptrmode_assign_copy.tcyr; tests/gates/frontend/coroutine_midbody_suspend.sh (the async
+refusal). Compiler side: field_notes/compiler/gotchas.cyml
+`a_cap_is_declared_in_one_place_and_believed_in_five_sweep_every_consumer` (the `*T` record moved
+out of a 64-bit slot mask).

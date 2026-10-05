@@ -11,7 +11,9 @@
 #    compiler appends it to the `error:` line. Corrected in both entries.
 #  · every capacity figure re-verified against `_capacity_warnings` and the
 #    `src/main.cyr` heap map; the code-buffer warning fires at 75 %, not 85 %.
-# 6 entries.
+# v6.6.16: +1 entry type_name_refusals_v6616 (a non-type annotation is one named error;
+# nine shapes compiled silently before).
+# 7 entries (DERIVED at 6.6.16 with `grep -c '^\[\[entries\]\]'`).
 
 [[entries]]
 name = "the_gvar_wall"
@@ -407,3 +409,38 @@ bits of the existing `tok_lines` entry. And the watchdog is cheap for
 the same reason the EOF clamp was cheap: `PEEKT` already had an
 `_had_error` guard, and the runaway is post-error only, so clamping
 inside it measured at −0.07 % on self_compile.
+
+[[entries]]
+name = "type_name_refusals_v6616"
+description = "Every type name is resolved whole and a non-type is refused once, by name — including the shapes that compiled silently before 6.6.16"
+category = "cyrius"
+---
+WHAT CHANGED (6.6.16). These all compiled rc 0 with no diagnostic before:
+    var a: Nonexist = 3;            # a silent i64
+    var a: i8x = 300;               # an i8 by PREFIX — read 44
+    var p: *Nonexist = 0;           # local and global
+    var s: [Nonexist] = 0;          # and slice<Nonexist>, [*Nonexist]: width 8
+    fn f(a: Nonexist) / fn f(a: i16q)
+    fn f(): (i64, Nonexist)
+Each is now one `error:` naming the type (see language/core.cyml
+`type_names_v6616` for the messages and the vocabulary), reported AT the name.
+
+HOW IT STAYS ONE ERROR:
+  - `_tn_refuse` clears the panic latch it set, so the declaration parses on
+    as a plain i64: `fn f(a: Nope1, b: Nope2): Nope3` is three errors, and
+    `sizeof(N1) + sizeof(N2)` two — not one plus a resync that eats the rest.
+  - A generic fn's body is parsed for its base and once per instance; a
+    per-token byte map (`_tn_once`) reports each name the first time only.
+    (Before, an unknown array element in a generic body printed once per
+    instance.)
+  - An `#assert sizeof(Nope)` operand latches the panic as the old error did,
+    so the #assert does not add `#assert failed`.
+
+STILL ACCEPTED: Str/cstring/Result/Option/Tagged params by name; enums on
+either side; a fn's type parameters (first, second, a THIRD, and all of them
+under CYRIUS_MONOMORPH=0 — read from the `<..>` tokens); a struct declared
+below a local or param that names it.
+
+If a downstream build newly fails with `unknown type`, the annotation names
+nothing: a typo, a missing include, or a C type (`ptr`, `usize`). Fix the
+annotation — or drop it (an unannotated var is an i64).

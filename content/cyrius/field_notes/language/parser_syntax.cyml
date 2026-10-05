@@ -5,7 +5,10 @@
 # `float_bit_intrinsics_cannot_flank_term_operators` is ✅ FIXED (v6.4.83 —
 # found by the v6.4.82 sweep that this entry's own examples failed), and
 # `include` resolution gained the entry-file-relative fallback at v6.5.7.
-# 13 entries.
+# v6.6.16: +1 entry a_fn_is_defined_at_top_level_since_6_6_16 (a nested fn is refused by
+# name — it compiled and crashed); the include entry gained the store fallback (CYRIUS_HOME).
+# 15 entries (DERIVED at 6.6.16 with `grep -c '^\[\[entries\]\]'` — this line read 13 while
+# the file held 14).
 
 [[entries]]
 name = "the_logical_shift_trap"
@@ -689,6 +692,16 @@ change meaning — it can only turn an error into a success. If a
 same-named file exists in both the CWD and the entry file's directory,
 **the CWD one wins**. Do not rely on the retry to shadow anything.
 
+⚠ **BETWEEN THE TWO SITS THE STORE FALLBACK, for a `lib/...` path only** —
+this cycc's own slot, `CYRIUS_HOME/versions/<VERSION>/lib/` when
+CYRIUS_HOME is set and non-empty, else `HOME/.cyrius/versions/<VERSION>/lib/`.
+Until 6.6.16 it read `HOME` only (its comments said CYRIUS_HOME), and it
+read `/proc/self/environ` into 4,096 bytes, so a large environment ahead
+of HOME made the fallback vanish. A set CYRIUS_HOME is authoritative: a
+leaf its slot lacks is an error, never HOME's copy. Linux-hosted cycc only.
+(field_notes/compiler/gotchas.cyml
+`an_environment_reader_that_stops_at_a_buffer_is_a_silently_missing_variable`.)
+
 ⚠ **RAW `cat x.cyr | cycc` HAS NO MARKER AT ALL** and never will —
 that path is for the compiler's own self-host, and the CLI is what
 writes the marker. This is one more reason the repo rule says to invoke
@@ -825,3 +838,59 @@ fn's body flush left, and `cyrius doc --check` never counted an
 `#inline fn` (or a `pub fn`) and took a `#inline` line above a fn for its
 doc comment. The preprocessor directives (`#include`, `#ifdef`,
 `#define`, `#derive`, …) are whole-LINE directives and are unaffected.
+
+[[entries]]
+name = "a_fn_is_defined_at_top_level_since_6_6_16"
+description = "A named `fn` / `async fn` inside a fn body, a closure, an impl method or a generic body is a compile error since cycc 6.6.16 (`fn 'inner' is defined inside fn 'outer'; define it at top level`). Before that it compiled and crashed. A local function is a closure. A fn inside a top-level block is still allowed."
+category = "cyrius"
+---
+cycc 6.6.15 and older, x86: a nested fn compiled and the program crashed.
+
+    fn outer(): i64 { fn inner(): i64 { return 3; } return inner(); }
+    var r = outer();        # compiled rc 0; ran SIGILL (132)
+
+The program also crashed with `return 7;` in place of the call. A multi-line, untyped, `if`-nested or
+generic-instance form ran SIGSEGV (139). In other positions the error named something else: in a switch case
+`unexpected fn` + `expected ';'`, for a nested `async fn` `unexpected async`, inside a closure
+`undefined variable 'x'`, in an impl method `undefined function 'inner'` + "refusing to emit binary". The
+aarch64 build of the one-liner happened to return 3, but the construct was unsound there too.
+
+WHY: every fn body, block and closure body is parsed by PARSE_PROG, and its `fn` arm is the relaxed-ordering
+feature for TOP-LEVEL code. Inside a fn it ran PARSE_FN_DEF for the inner fn while the OUTER fn was still being
+emitted. That clobbered the outer fn's locals, frame, return patches and `_cur_fn_ix`, and the inner fn's end
+cleared the in-fn flag, so the rest of the outer body was compiled as top-level code. Pass 1 never registered
+the inner fn.
+
+SINCE 6.6.16:
+
+    error:<source>:1:19: fn 'inner' is defined inside fn 'outer'; define it at top level
+        fn outer(): i64 { fn inner(): i64 { return 3; } return inner(); }
+                          ^
+      note: a local function is a closure (`var f = |x| { .. };`); a fn inside a top-level block is allowed
+
+- One error per definition. A generic instance or an `#inline` replay re-parses the same tokens and does
+  not report it again.
+- The nested fn's tokens are skipped, so nothing cascades. A call to it does not add `undefined function`, and
+  the outer body's own errors are still reported.
+- The message reads `inside a closure` for a closure body. For an impl method it names the mangled method
+  (`fn 'P_m'`).
+- The check is in the shared frontend, so it applies on every target (measured on x86, aarch64, PE and cx).
+
+WHAT TO WRITE INSTEAD:
+
+    fn inner(): i64 { return 3; }              # at top level
+    fn outer(): i64 { return inner(); }
+
+    fn outer(b): i64 {                          # or a closure, which can capture —
+        var inner = |x| x + b;                  # include "lib/alloc.cyr" (its heap env)
+        return fncall1(inner, 3);               # and "lib/fnptr.cyr"; outer(4) == 7
+    }
+
+STILL LEGAL: a fn inside a TOP-LEVEL block, which is the relaxed-ordering feature and runs correctly.
+
+    var on = 1;
+    if (on == 1) { fn f(): i64 { return 3; } on = f(); }    # on == 3
+
+Survey: an instrumented compiler found no nested fn in the compiler, the stdlib, cyrius's tests or 1,350
+ecosystem units across 125 repos, so no shipped code changes behaviour. Gate:
+tests/gates/diagnostics/nested_fn_refused.sh. See CHANGELOG [6.6.16].

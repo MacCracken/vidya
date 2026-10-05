@@ -6,7 +6,12 @@
 # CHUNKS since v6.1.19 (measured — 400 MB in 100 MB bites succeeds), so the
 # old "exhaust the heap segment in 9 allocs" story no longer describes it;
 # three entries added from v6.5.8/.9.
-# 27 entries (DERIVED: grep -c "^\[\[entries\]\]"; this line read 17 while the file held 18).
+# 33 entries (DERIVED at 6.6.16: grep -c "^\[\[entries\]\]"; this line read 27 while the file held
+# 30, and earlier 17 while it held 18).
+# v6.6.16: +3 entries — closure_returns_belong_to_the_closure_since_6_6_16, pair_callee_any_spelling_6_6_16,
+# typed_pointer_local_slot_v6616. Updated: the `_str` suffix entry (what "Str-typed" means — globals,
+# fields, call results; the dispatcher's capture rung), global_init_order_silent_zero (enum-naming
+# and all-constant struct / array initializers are baked; the x86 kernel late-replay warning).
 # v6.6.5: `private` covers the whole file, and forward references are checked; a struct
 # declared inside a fn is per call and per thread, and an over-budget array local warns that
 # its storage is static.
@@ -291,6 +296,18 @@ name = "global_init_order_silent_zero"
 description = "✅ FIXED in v5.7.32 (cyrlint warning) + v5.7.36 (string-literal awareness) — original bug behavior + workaround pattern preserved below for pre-v5.7.32 toolchain users"
 category = "cyrius"
 ---
+⭐ **6.6.16 — WHAT IS A CONSTANT INITIALIZER NOW.** An initializer that names an enum
+constant (`var x = A;`, `E.A`, `A + 1`, `var x: u8 = A;`), the enum declared above or below,
+is a constant: baked into the image like `var x = 42;`. The name resolves as a read of it
+does — a later global that hides the enum constant wins. So is a struct literal whose every
+field is a constant, and an array list (`var t: i64[3] = {1, 2, E.A};`). The startup store
+still runs; the visible difference is an EARLIER initializer reading it, which now sees the
+value instead of 0. KERNEL BUILDS: an x86 `kernel;` build runs every OTHER initializer after
+the top-level program (the multiboot shim must run first), so a kernel that never returns
+never runs them; the compiler warns once per such declaration (not for a host build, an
+aarch64 kernel, or an EFI application with `efi_main`). Compiler side: field_notes/compiler/
+gotchas.cyml `a_guard_in_the_loop_implies_a_second_pass_somebody_has_to_write`.
+
 ⚠ **RE-MEASURED at v6.6.5 — the example below no longer reads 0, and the rule now sees
 wrapped initializers.** Since v6.4.74 a global whose initializer is a CONSTANT is static-
 folded, so `var COMPUTED = FLAG_A | FLAG_B | FLAG_C;` over later `var FLAG_A = 0x1;` …
@@ -666,7 +683,7 @@ which had been working AROUND this bug with an inline `dir_walk` +
 
 [[entries]]
 name = "str_int_cstr_are_reserved_fn_name_suffixes_that_rewrite_your_call_sites"
-description = "**`_str`, `_int` and `_cstr` are RESERVED FUNCTION-NAME SUFFIXES in cyrius, not free-form naming.** If `X` and `X_str` both exist, the compiler REWRITES a call `X(a, ...)` into `X_str(a, ...)` whenever argument 1 is `Str`-typed — likewise `X_int` for an i64-returning call argument. Registration is bidirectional at `REGFN`, so include order does not save you. The mechanism exists for genuine type variants (`println(cstr)` / `println_str(Str)`) and it is invisible until it misfires. **THE RULE: `X_str` must be the Str-taking variant of `X` — a cstr+len form may NEVER occupy that name.** Violating it means calls to `X` silently execute `X_str`. This is not hypothetical: bayan named its cstr+len entries `bayan_json_v_parse_str(buf, len)` alongside `bayan_json_v_parse(src)`, so every `bayan_json_v_parse(someStr)` in the ecosystem became a **1-argument call to a 2-argument function** — `len` bound to garbage, parse returned 0 for every input including valid documents — and the only outward sign was one `expects 2 arguments, got 1` warning line lost in build output. It cost bayan a BREAKING public-API rename (1.3.0, `_str` -> `_buf`) to escape, and sakshi carried the same collision latently (`_sk_write_str/5` shadowing the unrelated `_sk_write/2`). **As of cyrius 6.5.1 the compiler is arity-aware** — it only redirects when the target's parameter count matches the arguments you actually supplied — and a wrong argument count is now a hard ERROR that withholds the binary rather than a warning. **`_int` IS DIFFERENT FROM `_str`, and as of 6.5.2 it has an explicit condition.** The `_int` route only ever fired for a bare FN-CALL first argument — never a literal, never a variable — so `take(v)` and `take(42)` called the base while `take(mk())` ran `take_int`: the same value dispatching differently depending on whether it had passed through a variable. From 6.5.2 the route requires the base's parameter 0 to be explicitly annotated **`: cstring`**, which is the condition it was always approximating (\"this param wants a POINTER, so convert the number for it\"). Practical rule: if you want `X`/`X_int` auto-dispatch, annotate X's first parameter `: cstring`; if you do NOT want it, leave it unannotated and the pair is inert. **Also 6.5.2: passing an integer LITERAL to a `: cstring` parameter is now a hard error** — it used to compile silently and SIGSEGV, since the callee dereferences the number as a `char*` (`println(42)` printed nothing and died on signal 11). `0` remains legal as NULL. An i64 VARIABLE or a fn-call result passed to a `: cstring` param is still only a warning, and always will be: under ADR-002's i64-everywhere tenet those are genuinely indistinguishable from a pointer. A literal is the one case the compiler can actually judge. So the trap is defused on 6.5.1+, but the NAMING rule still stands: pick `_buf` (or anything that is not `_str` / `_int` / `_cstr`) for a pointer+length form, because a suffix that lies about a function's type is confusing even when it is no longer dangerous. See CHANGELOG [6.5.1], bayan CHANGELOG [1.3.0]."
+description = "**`_str`, `_int` and `_cstr` are RESERVED FUNCTION-NAME SUFFIXES in cyrius, not free-form naming.** If `X` and `X_str` both exist, the compiler REWRITES a call `X(a, ...)` into `X_str(a, ...)` whenever argument 1 is `Str`-typed — likewise `X_int` for an i64-returning call argument. **What \"Str-typed\" means, since 6.6.16:** the WHOLE first argument is a Str — a Str local, param or closure capture, a `: Str` or inferred-Str global (`var g = str_from(..)`), a `: Str` field one step past a name or a call (`h.name`, `mkh().name`), or a call or method declared `: Str` (`mk()`, `g<T>(..)`, `s.cat(t)`, `h.getname()`, `mk().clone()`). A call or method result is typed by its OWN declared return, never by its receiver: `s.len()` and `s.data()` are not Str. Two steps (`a.b.name`, `h.name.clone()`) and a generic whose return is `T` (`id<Str>(s)`) are not typed. Before 6.6.16 only a Str LOCAL or param routed, so `println(gs)` on a Str global printed the header's pointer bytes and `strlen(gs)` answered 3; and `x.data`, `x.len`, `x.len()` and `x + 8` on a Str local were routed by the base's type into `X_str`, which read the value as a header (memory-unsafe). An untyped local, param or capture named like a Str global is NOT a Str. The I11 warning (\"passing Str-typed X … which expects a cstring\") uses the same classifier, so a call that can be routed is never warned about. Registration is bidirectional at `REGFN`, so include order does not save you. The mechanism exists for genuine type variants (`println(cstr)` / `println_str(Str)`) and it is invisible until it misfires. **THE RULE: `X_str` must be the Str-taking variant of `X` — a cstr+len form may NEVER occupy that name.** Violating it means calls to `X` silently execute `X_str`. This is not hypothetical: bayan named its cstr+len entries `bayan_json_v_parse_str(buf, len)` alongside `bayan_json_v_parse(src)`, so every `bayan_json_v_parse(someStr)` in the ecosystem became a **1-argument call to a 2-argument function** — `len` bound to garbage, parse returned 0 for every input including valid documents — and the only outward sign was one `expects 2 arguments, got 1` warning line lost in build output. It cost bayan a BREAKING public-API rename (1.3.0, `_str` -> `_buf`) to escape, and sakshi carried the same collision latently (`_sk_write_str/5` shadowing the unrelated `_sk_write/2`). **As of cyrius 6.5.1 the compiler is arity-aware** — it only redirects when the target's parameter count matches the arguments you actually supplied — and a wrong argument count is now a hard ERROR that withholds the binary rather than a warning. **`_int` IS DIFFERENT FROM `_str`, and as of 6.5.2 it has an explicit condition.** The `_int` route only ever fired for a bare FN-CALL first argument — never a literal, never a variable — so `take(v)` and `take(42)` called the base while `take(mk())` ran `take_int`: the same value dispatching differently depending on whether it had passed through a variable. From 6.5.2 the route requires the base's parameter 0 to be explicitly annotated **`: cstring`**, which is the condition it was always approximating (\"this param wants a POINTER, so convert the number for it\"). Practical rule: if you want `X`/`X_int` auto-dispatch, annotate X's first parameter `: cstring`; if you do NOT want it, leave it unannotated and the pair is inert. **Also 6.5.2: passing an integer LITERAL to a `: cstring` parameter is now a hard error** — it used to compile silently and SIGSEGV, since the callee dereferences the number as a `char*` (`println(42)` printed nothing and died on signal 11). `0` remains legal as NULL. An i64 VARIABLE or a fn-call result passed to a `: cstring` param is still only a warning, and always will be: under ADR-002's i64-everywhere tenet those are genuinely indistinguishable from a pointer. A literal is the one case the compiler can actually judge. So the trap is defused on 6.5.1+, but the NAMING rule still stands: pick `_buf` (or anything that is not `_str` / `_int` / `_cstr`) for a pointer+length form, because a suffix that lies about a function's type is confusing even when it is no longer dangerous. See CHANGELOG [6.5.1], bayan CHANGELOG [1.3.0]."
 category = "cyrius"
 
 [[entries]]
@@ -1289,3 +1306,133 @@ return with T a struct returns that struct (it returned its address).
 FINDFN the base — the first 6.6.10 cut missed the register-pair return check and the
 assignment paths, and each miss was silent or a regression.
 ⚠ The stub scan is lexical, so it errs toward MORE stubs — a loud refusal, never a silent 0.
+
+[[entries]]
+name = "closure_returns_belong_to_the_closure_since_6_6_16"
+description = "Since cycc 6.6.16 a `return f(..)` inside a closure body (`|x| { .. }`, `|| { .. }`) is the closure's own: a fn that builds such a closure is no longer treated as returning a `: stack` pair, refused 'bind both' at its callers, or warned for its own plain return — and a closure that mixes a pair return with a plain one is warned as its own fn"
+category = "cyrius"
+---
+cycc 6.6.0 - 6.6.15, wrong diagnostics: with `fn h(x) { return Ok(x); }`,
+
+    fn mk(b) { var g = |x| { return h(x + b); }; return g; }   # returns ONE value: the closure
+    fn main() { var g = mk(41); return 0; }                    # error: "bind both"
+
+was refused, because the two post-parse scans that find pair-returning fns
+(`_pair_prescan`, `_warn_mixed_pair_returns` in src/frontend/parse.cyr) skipped a nested
+body only at a `fn` token, and a closure literal has none — so the closure's
+`return h(..)` was booked to `mk`. Consequences: every single-variable bind of `mk(..)`
+inside a fn was a hard error (top level: a warning), the flag propagated through
+forwarding wrappers, `mk`'s own `return g;` drew "returns a `: stack` pair on another path
+but a SINGLE value here", a real pair fn whose closure said `return 0;` was warned, and a
+real mixed-return fn was warned at the closure's return instead of its own.
+⛔ Following the error's hint was WRONG CODE: `var t, v = mk(41);` compiled (warning only)
+and `v` was a stale rdx — `fncall1(v, 1)` exited 139. The workaround hisab shipped (3.3.1+)
+is still valid: bind both halves inside the closure and `return 0;`.
+
+SINCE 6.6.16: both scans skip a closure body — a `{` immediately after `|` or `||` (exact:
+closure params are untyped with no return annotation, and `{` never starts an expression).
+The closure's OWN pair-ness is untouched: its body parses as its own fn, so
+`var t, v = fncall1(g, 1)` on a closure that returns `Ok(..)` gets both halves. A brace-less
+closure (`|x| h(x)`) never had the problem (an expression has no `return`).
+
+A CLOSURE IS A FN FOR THE MIXED-RETURN RULE. Each closure body is judged as its own unit, at
+any depth: if its own body (nested closures and fns skipped) says `return f(..)` or `f(..)?`
+with f a pair fn, every other return must be a variant too, or the first plain one is warned
+"a closure in `mk` returns a `: stack` pair on another path but a SINGLE value here" ("a
+closure returns ..." at top level / in an impl method). So
+
+    var g = |x| { if (x > 0) { return h(x); } return 0; };    # warned at `return 0;`
+    var t, v = fncall1(g, 0);                                   # v would be a stale rdx
+
+Return `Err(..)` (or `None()` for an Option) on that path. `return None();` beside
+`return Some(x);` is a whole value and stays silent, as in a fn.
+
+⚠ For compiler work: (1) skipping a nested body is HALF the job — whatever skips a unit must
+also judge it as its own, or the skip silently deletes the only diagnostic that unit had (the
+first cut of this fix did exactly that; the gate's mutation ledger row c pins it). (2) If
+closure params or a return type ever gain annotations (`|x: i64|: R { .. }`),
+`_tok_is_closure_body` must scan the param list instead of looking one token back — the
+closure parser (parse_expr.cyr) carries a comment saying so.
+Gate: tests/gates/frontend/stack_enum_closure_return_scope.sh. CHANGELOG [6.6.16]
+
+[[entries]]
+name = "pair_callee_any_spelling_6_6_16"
+description = "Since cycc 6.6.16 an explicit generic call `g<T>(..)` and a method call `p.m(..)` are the same call as `f(..)` for a `: stack` pair: `?` propagates it, `var a, b = ..` destructures it, and a single bind / assignment / store of it is refused. Before that they were not recognised: `?` exited 139 and a single bind dropped the payload silently."
+category = "cyrius"
+---
+cycc 6.6.15 and older, x86 and aarch64 (Result is the `: stack` value form since 6.6.0):
+
+    fn gdiv<T>(n: T, d: T) { if (d == 0) { return Err(99); } return Ok(n / d); }
+    struct Pt { x; y; }
+    fn Pt_div(self: Pt, d) { if (d == 0) { return Err(99); } return Ok(self.x / d); }
+
+    fn a(n, d) { var v = gdiv<i32>(n, d)?; return Ok(v); }   # rc 139
+    fn b(p: Pt, d) { var v = p.div(d)?; return Ok(v); }      # rc 139
+    fn c(n, d) { var v = gdiv<i32>(n, d); return v; }        # compiled; Ok(3) read 0 (payload gone)
+    fn e(n, d) { var t, v = gdiv<i32>(n, d); }               # "multi-value destructure needs a call"
+    fn g(p: Pt, d) { p.div(d)?; return Ok(0); }              # "expected ';', got unknown"
+
+The plain spellings `pdiv(n, d)?` / `Pt_div(p, d)?` were right, and `var v = pdiv(n, d);` was refused.
+
+WHY: every place that asks "does this call return a pair" — `?`'s lowering choice, the lossy-bind refusals,
+`return`'s wrapper propagation, the destructure, and the forward-reference prescan — tested for `IDENT (`
+only. `g<i32>(` has a `<` there and `p.div(` a `.`, so all of them answered "no pair": `?` took the BOXED
+lowering, which dereferences its operand, and read the tag (0 or 1) as a pointer.
+
+SINCE 6.6.16 one resolver answers for every asker, in the three spellings: `name(`, `name<..>(` (the generic
+template carries the pair flag) and `x.m(` with x a single name whose struct is known (a local, a closure's
+capture, or a struct global — the order the method call itself resolves it in). So:
+
+    var v = gdiv<i32>(n, d)?;     var v = p.div(d)?;     p.div(d)?;      # propagate both halves
+    var t, v = gdiv<i32>(n, d);   var t, v = p.div(d);                   # in a fn, a closure, top level
+    var v = gdiv<i32>(n, d);      x = p.div(d);   store64(&s, p.div(d)); # refused: bind both
+
+A wrapper `fn w(..) { return p.div(d); }` forwards the pair, before or after its caller. `return g<T>(..)` /
+`return p.m(..)` beside `return Ok(..)` is a whole variant (no mixed-return warning); the same spellings
+returning ONE value still warn there.
+
+FORWARD WRAPPERS: a caller parsed ABOVE its wrapper learns that the wrapper forwards a pair from a token
+pass that runs before the wrapper is parsed (no locals exist yet). That pass finds `p` BY SCOPE (walking
+back from the call; a block closed before it is skipped, and a closure looks through to the fn whose locals
+it captures) and types it from a `: T` annotation (a param's `: *T` too), a struct literal, a
+struct-returning call, or a generic's `: T` return bound at that call. A receiver typed only per instance (a
+generic fn's own `p: T`) resolves when every struct's `_m` agrees on the pair flag; otherwise the call is
+unknown — no flag, and no mixed-return warning. The first cut took the lexically LAST `p: T` and refused a
+correct one-value bind; a wrong answer is worse than "unknown", so the pass returns "unknown" rather than
+guess.
+
+NOT COVERED (no call path types these receivers either): `a.b.m()`, `f().m()`, an untyped impl `self`. A
+top-level `var v = f();` of any pair callee is not refused (the refusal is a fn-body check).
+
+ECOSYSTEM: a new refusal in a consumer is a payload that was being dropped there. Fix it the way the message
+says — `var tag, val = p.m(..);` — or propagate with `?`. Tests: tests/tcyr/crossos/method_pair_result.tcyr,
+generic_struct_inference.tcyr (SQ rows); gates stack_enum_lossy_context.sh (axis 14),
+stack_enum_mixed_return_warning.sh. See CHANGELOG [6.6.16].
+
+[[entries]]
+name = "typed_pointer_local_slot_v6616"
+description = "A local `*i8` / `*i16` / `*i32` truncated the address it held (fixed 6.6.16) — and `p + n` still steps differently per spelling"
+category = "cyrius"
+---
+⛔ BEFORE 6.6.16: `var buf: i64[4]; var p: *i8 = &buf;` — the `*T` ladder gave
+*i8/*i16/*i32 pointer scale 1/2/4, PARSE_VAR wrote it as the local's SLTYPE,
+and a positive SLTYPE below 8 is a narrow scalar's WIDTH. The slot stored
+1/2/4 bytes of the address: `p == &buf` false, `load8(p + 1)` SIGSEGV, on
+every backend (a Windows stack can sit below 4 GiB, which hid *i32 there).
+Globals and params never had it (8-byte slots). Fix: `_sl_ptr_type` — a
+`*T` local is SLTYPE 0 for those three (a plain 8-byte word), SLTYPE 8 for
+every other *T, as before. Test: tests/tcyr/crossos/typed_pointer_slot_width.tcyr.
+The 8-byte slot keeps its POINTER-ness for the expression type, so
+`var q: *i16 = p;` / `= p + 1` are not "assigning non-pointer to typed
+pointer". No emitted byte changed for the 8-byte case. (A `*T` PARAM, and a
+`*T` local captured by a closure, still draw that warning when copied into a
+typed pointer — pre-existing at 6.6.15.)
+
+THE STEP OF `p + n` WAS NOT CHANGED, and it is not uniform:
+    local  *i8 / *i16 / *i32         +1   (the scalar path's reset)
+    local  *i64 / *u8 / *Pt / ...    +8
+    param  *T                        +1   (whatever T)
+    global *T, declaration block     +8   (whatever T)
+    global *T, after 1st statement   +1 / +2 / +4 for *i8/*i16/*i32, else +8
+`*p` always loads 8 bytes. When the step matters, compute the byte offset on
+an untyped address (`&buf + i * 4`) — and do not lean on `*u8` meaning +1.

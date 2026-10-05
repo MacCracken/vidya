@@ -17,6 +17,10 @@
 # stack-arg codegen fix, and PURE cyrius has no arity limit at all
 # (5-20 args verified on real hardware). A rule that tells you to
 # restructure code around codegen is a bug report, not a rule.
+# 16 entries (re-DERIVED at 6.6.16 after one: the IOCP-as-a-wake-slot entry; the other 6.6.16
+# notes went INTO existing entries — CVE-74 + four test traps into the SIGPIPE class, accept's
+# inherited non-blocking mode and the Win64 eax mask into the Winsock entry, the agnos decline
+# stub into agnos_two_sided_abi_mirror).
 # 15 entries (re-DERIVED at 6.6.14 after three class entries: the drive-relative rooted path
 # (CVE-54/57/65 + the DLL search order), SIGPIPE (CVE-66 + the open net.cyr writers), and the
 # Winsock socket that is not a file handle — DERIVE with `grep -c "^\[\[entries\]\]"`, do not
@@ -406,6 +410,8 @@ THE a4=r10 5-ARG FORM. agnos's 4-arg syscalls pass the 4th arg in r10 (§1a). In
 
 The band: `SND_OPEN=64, SND_CONFIG=65, SND_WRITE=66, SND_CLOSE=67, SND_DRAIN=68, SND_AVAIL=69`; seven wrappers (write + write_nb share #66). Frozen ABI is a single 48000 Hz / 16-bit / stereo S16-interleaved output stream, slot 0..3, and #65–#69 reject a slot not owned by the caller (-1).
 
+A PORTABLE WRAPPER THE PEER LACKS IS A LINK FAILURE — ANSWER IT WITH A DECLINE STUB, NEVER A LINUX NUMBER (v6.6.16). Because the peer is standalone, every portable `sys_*` wrapper must be re-declared there or it does not exist on agnos. `sys_setsockopt` did not: an agnos build reaching it failed the reachable-undefined check ("refusing to emit binary with N reachable undefined function(s)"), and yantra / abaco each wrapped their `TCP_NODELAY` call in an agnos `#ifdef` to compile. THE TRAP is the obvious fix: minting `SYS_SETSOCKOPT = 54` on the peer would compile and then dispatch to agnos **#54 = udp_unbind** — silently unbinding a UDP listener (yantra's pre-1.0.7 bug, when it used a raw `syscall(54, …)`). The Linux numbers land on live, unrelated agnos calls throughout the low band (#44 sched_yield, #47 sock_connect, #76/#77 blk_open/blk_read). THE RULE: a call agnos cannot honour gets an explicit `return 0 - 38;` stub in the peer's decline block, with a comment naming why and the portable alternative (here `sock_set_recv_timeout` / `sock_set_send_timeout`, which set the peer's per-socket deadlines). A crossos `.tcyr` that calls the wrapper UNGUARDED makes `tcyr_corpus_cross_compiles.sh`'s agnos leg catch the next missing one. Still absent from the peer (backlog): `sys_socket`, `sys_bind`, `sys_listen`, `sys_connect`, `sys_accept4`. See also field_notes/compiler/gotchas.cyml `agnos_is_an_x86_host_that_is_not_linux_and_the_predefines_do_not_say_so`.
+
 
 [[entries]]
 name = "sys_exit_is_per_thread_use_sys_exit_group"
@@ -774,9 +780,9 @@ straight after the call it explains. CHANGELOG [6.6.11] [6.6.12] [6.6.14] [6.6.1
 
 [[entries]]
 name = "a_write_to_a_reset_peer_raises_sigpipe_and_a_library_may_neither_rely_on_nor_change_the_disposition"
-description = "CLASS. write(2) to a socket whose peer has reset raises SIGPIPE, whose default action kills the WHOLE process — every connection of a server, on the say-so of any client that disconnects. An application may ignore the signal; a LIBRARY may neither assume it did nor change the process-wide disposition for it. Per OS: Linux MSG_NOSIGNAL per call; macOS SO_NOSIGPIPE per socket, failing CLOSED when xnu refuses it; a library that does not own the write (libssl) holds SIGPIPE off in the calling thread around the call. CVE-66 (6.6.14) was both TLS backends at once; lib/net.cyr's plain writers are the open instance"
+description = "CLASS. write(2) to a socket whose peer has reset raises SIGPIPE, whose default action kills the WHOLE process — every connection of a server, on the say-so of any client that disconnects. An application may ignore the signal; a LIBRARY may neither assume it did nor change the process-wide disposition for it. Per OS: Linux MSG_NOSIGNAL per call; macOS SO_NOSIGPIPE per socket, failing CLOSED when xnu refuses it; a library that does not own the write (libssl) holds SIGPIPE off in the calling thread around the call. CVE-66 (6.6.14) was both TLS backends at once; CVE-74 (6.6.16) the plain-socket writers — lib/net.cyr's sock_send* (and so http, ws, ws_server, yantra, sandhi's client paths) and the async send / relay writers — now through one private leaf, `_fd_write_nosigpipe` (lib/syscalls.cyr)"
 category = "cyrius"
-tags = ["platform", "linux", "macos", "signals", "sigpipe", "sockets", "security", "seccomp", "tls", "libssl", "CVE-66", "v6.4.51", "v6.6.14"]
+tags = ["platform", "linux", "macos", "signals", "sigpipe", "sockets", "security", "seccomp", "tls", "libssl", "async", "CVE-66", "CVE-74", "v6.4.51", "v6.6.14", "v6.6.16"]
 ---
 **THE TRIGGER IS ORDINARY.** The peer closes; our next write reaches a closed socket and its
 kernel answers RST; the write after that is EPIPE — with SIGPIPE, unless the write said
@@ -787,19 +793,31 @@ SERVER died in `tls_accept_complete` answering a client that had connected and h
 **INSTANCES.** v6.4.51 `signal_ignore(SIGPIPE)` — right for an APPLICATION (sandhi's server
 calls it), wrong inside a library. 6.6.6: a pump writing into a child that already exited dies of
 it (`pollout_promises_pipe_buf_not_the_whole_write`). 6.6.14, CVE-66: every native TLS write, and
-every libssl call that can write. **Open:** `lib/net.cyr`'s `sock_send` / `sock_send_all`,
-`lib/http.cyr` and `lib/ws.cyr` are still flagless writes on Linux and macOS (roadmap backlog).
+every libssl call that can write. 6.6.16, CVE-74: `lib/net.cyr`'s `_net_os_send` (under
+`sock_send` / `sock_send_all` / `sock_send_a`, so http, ws, ws_server, yantra and sandhi's client
+paths) and the async backends' `async_send` task (a raw `SYS_WRITE` on epoll) and
+`async_relay_once` — all flagless `write(2)`s, all exit 141 on x86_64, qemu-aarch64, pi, ecb and
+ach. They share ONE leaf now, `_fd_write_nosigpipe(fd, buf, n)` in `lib/syscalls.cyr`, so net.cyr
+and both async backends cannot drift; the TLS transport keeps its per-ctx copy (`_tn_os_write` /
+`_tn_nosigpipe`).
 
 **THE FIX, PER MECHANISM** (`_tn_os_write` / `_tn_nosigpipe` in `lib/tls_native_conn.cyr`,
 `_tls_ssl_call` in `lib/tls.cyr`):
 
 - **Linux:** `sys_sendto(fd, buf, n, 0x4000 /*MSG_NOSIGNAL*/, 0, 0)`; on ENOTSOCK (-88) fall
   back to `write(2)` — a pipe or a file keeps its SIGPIPE, as no per-call flag exists for one.
-- **macOS:** no `MSG_NOSIGNAL` in the API; `setsockopt(fd, 0xFFFF, 0x1022 /*SO_NOSIGPIPE*/)`
-  before the connection's first write. ⛔ xnu REFUSES it (EINVAL) on a socket shut down both
-  ways — exactly the state an RST leaves — so "set it, ignore failure, write" is the hole itself:
-  any failure but ENOTSOCK (38) fails the write closed. A mutant ignoring the failure read 141 on
-  ecb and ach.
+- **macOS:** `setsockopt(fd, 0xFFFF, 0x1022 /*SO_NOSIGPIPE*/)` — per connection for TLS (the
+  ctx caches the fd), per CALL for the plain leaf, because a socket made by a raw `sys_socket`
+  (sandhi's IPv6 paths) never passes a creation hook. Darwin DOES define `MSG_NOSIGNAL` (0x80000;
+  measured working on ach's 13.7.8 and ecb's 27.0.1 — the SDK header guards it with
+  `__DARWIN_C_LEVEL >= 200809L`, which is where "macOS has no MSG_NOSIGNAL" came from, and this
+  entry said so until 6.6.16); it is not relied on because `SO_NOSIGPIPE` works on every Darwin and
+  is what libraries there use. The option set on a LISTENER is inherited by the accepted socket,
+  and a bit set before an RST keeps protecting after it. ⛔ But xnu REFUSES to set it (EINVAL) on a
+  socket shut down both ways — exactly the state an RST leaves — so "set it, ignore failure,
+  write" is the hole itself: any failure but ENOTSOCK (38) fails the write closed (the plain leaf
+  answers -EPIPE and writes NOTHING, the errno the write would have given). A mutant ignoring the
+  failure read 141 on ecb and ach.
 - **A write you do not own** (OpenSSL's socket BIO calls `write(2)`; Linux has no per-socket
   flag): libpq's pattern, per call — `rt_sigprocmask(SIG_BLOCK, {SIGPIPE}, &old)`; if SIGPIPE was
   ALREADY blocked, note with `rt_sigpending` whether one was pending (that one is the caller's);
@@ -810,7 +828,7 @@ every libssl call that can write. **Open:** `lib/net.cyr`'s `sock_send` / `sock_
   `SSL_connect` / `SSL_accept`, `SSL_shutdown` and 0-RTT too, not only `SSL_write`.
 - Windows and agnos raise no such signal (agnos `sock_send#48` answers -1 for a dead connection).
 
-**THREE TRAPS ON THE WAY.**
+**TRAPS ON THE WAY.**
 1. **The fix changes the SYSCALL SET.** A native TLS socket write is now `sendto` (44 x86_64,
    206 aarch64), macOS adds a `setsockopt`. A seccomp allowlist that admits `write` but not
    `sendto` — kavach's `basic` profile, which kills on a miss — now SIGSYS-kills the writer on its
@@ -830,13 +848,36 @@ every libssl call that can write. **Open:** `lib/net.cyr`'s `sock_send` / `sock_
    socket. Before the fix that was a rare SIGPIPE death; after it, a `TLS_ERR_IO` and a wrong child
    exit code — CI's ARM runner hit it, a loaded pi failed 4 of 20 (`tls_native_alert_mapping`) and
    3 of 3 (`tls_native_ccs_deadline`'s write hook). Seal everything the peer sends at that point into
-   ONE buffer and write it once. CHANGELOG [6.6.14] CVE-66.
+   ONE buffer and write it once.
+5. **A reset row that stops at the FIRST failed write is not a RED test on Linux.** Which errno the
+   first failing write sees depends on whether the peer's FIN or its RST was processed first: a
+   write that finds `ECONNRESET` pending returns it WITHOUT a signal (`sk_stream_error` signals
+   only for EPIPE), and only the write after it is EPIPE + SIGPIPE. Keep writing after the first
+   failure (net_plain_write_peer_reset.tcyr does three more) so the pre-fix build really dies, and
+   accept the SET {EPIPE, ECONNRESET} (Linux 32/104, Darwin 32/54) — never one exact errno, which
+   is a flake on loaded hosts.
+6. **A CONTROL row keeps a survival test honest:** one child writes the same reset connection with
+   a raw `write(2)` and must DIE 141. If the host (or an inherited disposition the child failed to
+   reset) would not have killed the writer, the "lives" rows prove nothing — the control turns
+   that from a silent pass into a failure on every run.
+7. **A spawn-self child does not run under qemu-user** without a binfmt registration: the emulated
+   `execve` of an aarch64 ELF fails and the child exits 127 (why `tls_native_socket_transport.tcyr`
+   and `regression_wait_unobserved.tcyr` fail under a bare `qemu-aarch64` on the dev box). A test
+   that only needs a separate PROCESS, not a fresh image, forks on POSIX — it then runs under qemu
+   too — and spawns itself only on Windows.
+8. **A regression must FAIL, not HANG.** A row that writes into a pipe and then reads it back
+   blocks for ever when the write regresses to an error (nothing was written, the write end is
+   still open). Close the write end before reading: an empty pipe then reads EOF and the row fails
+   with a count (found by net-1's ENOTSOCK-fallback mutant; field_notes/compiler/patterns.cyml
+   `a_test_that_may_hang_must_fail_not_hang`).
+
+CHANGELOG [6.6.14] CVE-66; [6.6.16] CVE-74.
 
 [[entries]]
 name = "a_winsock_socket_is_not_a_file_handle"
-description = "On Windows `sys_read` / `sys_write` are ReadFile / WriteFile, and those FAIL on a Winsock SOCKET made with WSA_FLAG_OVERLAPPED (lib/net.cyr's sockets), so any stdlib leaf that bottoms out in them cannot carry a socket — native TLS did not run over a net.cyr socket on Windows at all until 6.6.14, and nothing noticed because no cross-OS test ran TLS over a socket. Use ws2_32 recv / send, and keep the file leaf as the fallback for a HANDLE. The rest of the Winsock spellings differ too"
+description = "On Windows `sys_read` / `sys_write` are ReadFile / WriteFile, and those FAIL on a Winsock SOCKET made with WSA_FLAG_OVERLAPPED (lib/net.cyr's sockets), so any stdlib leaf that bottoms out in them cannot carry a socket — native TLS did not run over a net.cyr socket on Windows at all until 6.6.14, and nothing noticed because no cross-OS test ran TLS over a socket. Use ws2_32 recv / send, and keep the file leaf as the fallback for a HANDLE. The rest of the Winsock spellings differ too — and two more surfaced at 6.6.16: an accepted socket inherits a non-blocking listener (on macOS too, never on Linux), and a Win64 int / BOOL result is only eax, so a reroute's rax must be masked"
 category = "cyrius"
-tags = ["platform", "windows", "pe", "winsock", "sockets", "deadline", "testing", "tls", "v6.6.14"]
+tags = ["platform", "windows", "pe", "winsock", "sockets", "deadline", "testing", "tls", "accept", "nonblocking", "macos", "eax", "v6.6.14", "v6.6.16"]
 ---
 **THE LEAF** (`_tn_os_read` / `_tn_os_write`, `lib/tls_native_conn.cyr`):
 
@@ -848,14 +889,43 @@ tags = ["platform", "windows", "pe", "winsock", "sockets", "deadline", "testing"
 Measured on cass against the 6.6.13 lib: `tls_native_connect` / `_accept` over a loopback pair
 returned `TLS_ERR_IO` at once — 34 of the socket-transport test's 44 assertions failed.
 
-**THE OTHER SPELLINGS.** Mask `WSAGetLastError` to 32 bits — only eax is defined (⚠
-`lib/syscalls_windows.cyr`'s `fd_wait_ready` still returns it unmasked; backlog). Readiness is
+**THE OTHER SPELLINGS.** Mask `WSAGetLastError` to 32 bits — only eax is defined (see A WIN64
+`int` RESULT IS ONLY eax below; 6.6.16 masked the remaining sites). Readiness is
 `WSAPoll` (POLLRDNORM / POLLWRNORM), sockets only: a HANDLE answers -10038, which must route to
 the between-calls fallback, not to an error. Would-block is WSAEWOULDBLOCK 10035, not EAGAIN.
 Non-blocking is `ioctlsocket(FIONBIO)`, which CANNOT be read back — so a bounded write leaves
 the socket blocking (the mode net.cyr creates it in) where Linux / macOS restore saved F_GETFL
-flags; ⚠ and an accepted socket INHERITS a non-blocking listener's FIONBIO, so native TLS with no
-deadline on it fails `TLS_ERR_IO` (backlog).
+flags.
+
+**AN ACCEPTED SOCKET INHERITS THE LISTENER'S NON-BLOCKING MODE — on Windows AND macOS, not
+Linux** (6.6.16). BSD/macOS accept(2) copies the listener's O_NONBLOCK onto the new socket and
+Windows accept() copies FIONBIO; Linux accept(2) never does (accept4 SOCK_NONBLOCK is opt-in).
+Before 6.6.16 `sock_accept` passed the OS's socket through, so a server with a non-blocking
+listener got non-blocking connections on Windows and macOS only — and native TLS, whose
+no-deadline read and write need a blocking socket, failed TLS_ERR_IO at once there (an empty recv
+under SO_RCVTIMEO returned in 0 ms on cass, ecb, ach). Since 6.6.16 `sock_accept`'s contract is
+"the accepted socket is BLOCKING on every target": Windows resets FIONBIO with one ioctlsocket per
+accept (it cannot be read back), macOS clears O_NONBLOCK via F_GETFL/F_SETFL only when set, and a
+failed reset closes the socket and returns the error. The raw `sys_accept` / `sys_accept4`
+wrappers stay OS mirrors and still inherit. A test of "is this fd blocking" that must hold on
+Windows cannot read the flag: time an empty recv under a short SO_RCVTIMEO (>= ~250 ms of a
+300 ms timeout) instead.
+
+**A WIN64 `int` / BOOL RESULT IS ONLY eax — MASK BEFORE YOU COMPARE IT** (6.6.16). Win64 returns
+a C `int`, `BOOL` or `DWORD` in eax and leaves rax[63:32] undefined. A cyrius `syscall(0xF0xx, ...)`
+reroute hands back the whole of rax, and only some PE emitters extend it: the 0xF045-0xF04A socket
+band is sign-extended (`movsxd`), GetLastError (0xF04B) and the 0xF03D-0xF044 kernel32 BOOLs are
+zero-extended (`mov eax, eax`), but WSAGetLastError (0xF024) and the older ws2_32 band
+(closesocket, bind, getsockopt, WSAIoctl, connect, WSARecv, WSASend, getaddrinfo, setsockopt,
+listen, getpeername, getsockname) are NOT. So in lib code read them as
+`syscall(0xF024) & 0xFFFFFFFF`, test `(r & 0xFFFFFFFF) == 0`, or go through `_net_wsa_rc` /
+`_net_wsa_err` (net.cyr), `_sw_wsa_err` (syscalls_windows.cyr), `_tn_win_sockerr` (tls_native). An
+unmasked `== 0` reads a success as a failure under dirty bits; an unmasked
+`0 - syscall(0xF024)` is a huge non-errno; `!= 997` misses WSA_IO_PENDING. The ws2_32 builds
+measured on cass happen to zero-extend, so nothing fails today — which is exactly why it is
+pinned by a STATIC gate (`tests/gates/platform/pe_wsa_lasterr_masked.sh`) rather than a runtime
+row. A `callptr` to a Win64 BOOL function (ConnectEx, AcceptEx) is the same: mask it. The same
+class on the C side: CVE-60 (6.6.13), libssl's `int` returns read zero-extended.
 
 **A TEST TRAP: AFD TAKES THE WHOLE SEND.** A non-blocking `send` of 64 MiB to a peer that never
 reads returned 67108864 in ONE call on cass: Windows admits a send whole while the socket's
@@ -864,3 +934,39 @@ after a few hundred KB. So a "fill the send buffer, expect the deadline" row wri
 a write does not complete, and asserts the ELAPSED time — once a deadline has passed every later
 call answers `TLS_ERR_TIMEOUT` before any I/O, so the result code alone proves nothing.
 CHANGELOG [6.6.14] (roadmap backlog j).
+
+[[entries]]
+name = "win32_iocp_as_a_per_waiter_wake_slot_pooled_not_per_object"
+description = "On PE an I/O completion port is a lib-only wake-up slot for a blocked thread; pool the ports per waiter, never keep them per channel, and create them with a large concurrency value (6.6.16, lib/thread_win.cyr's blocking channel)"
+category = "cyrius"
+tags = ["platform", "windows", "pe", "iocp", "threads", "channels", "handles", "v6.6.16"]
+---
+PE routes no WaitOnAddress, condition variable, event or semaphore. A lib-only blocking wait can
+still be built on the IOCP reroutes lib/async_win.cyr already uses:
+- PostQueuedCompletionStatus (0xF021) leaves a token in a port;
+- GetQueuedCompletionStatus(INFINITE) (0xF020) takes one, and blocks while there are none;
+- a token posted before its waiter arrives waits in the port, so a wake-up cannot be lost.
+
+lib/thread_win.cyr's channel (6.6.16) gives each WAITER its own port. The waiter queues a node
+{next, port} in its own frame on the channel's receiver or sender FIFO, under the channel lock;
+a waker unlinks the oldest node of the other kind under the lock and posts that port one token
+after unlocking. The waiter leaves its wait only with its token, and the token is posted only
+after the unlink, so a frame never leaves a dangling node behind.
+
+⚠ DO NOT KEEP PORTS PER OBJECT. The first draft kept a receiver port and a sender port in each
+channel, created lazily and never closed (channels are never freed). A consumer that makes a
+reply channel per request then leaks a kernel handle per request: measured on cass, 400 such
+channels took a process from 84 handles to 484. Ports come from a process-wide pool instead: a
+call takes one when it first has to wait and gives it back when it returns, so handles scale with
+the threads waiting at once (the same 400 channels: 85). The pool lives in static storage, never
+the heap, because alloc_reset would pull it out from under a waiter.
+
+⚠ A port goes back to the pool, or is closed, only when no token can still reach it. A closed
+handle's VALUE can be reused by the next port created, and a token in flight would then wake that
+port's waiter with its node still queued. If GetQueuedCompletionStatus fails without a token,
+unlink the node if no waker claimed it; if one did, abandon the port rather than close it.
+
+⚠ CreateIoCompletionPort's 4th argument is the port's CONCURRENCY. 0 means "one running thread per
+CPU", and the port then RELEASES NO FURTHER WAITER while that many threads it released are still
+running, even with tokens queued. That is right for an I/O reactor and wrong for a wake-up slot.
+Pass 0x7FFFFFFF. User-facing surface: language/features.cyml `chan_blocking_capability_v6616`.
