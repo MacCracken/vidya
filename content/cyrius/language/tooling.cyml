@@ -1834,3 +1834,41 @@ NOT covered: a read that jumps a whole redzone into a live neighbour, a read pas
 inside one allocation, stack and static memory, agnos and cx `alloc()`; no guard pages (backlog).
 Before 6.6.18 `--poison` reached `fl_alloc` only and COUNTED violations nobody read (0 of 194
 ecosystem harnesses). CHANGELOG [6.6.18] (Poison — P6); the cyrius guide's "Fuzzing with --poison".
+
+[[entries]]
+name = "embed_data_files_as_name_fns_v6619"
+description = "Since cyrius 6.6.19 (P2) `[embed] NAME = \"path\"` in cyrius.cyml gives every compile the file's bytes as `NAME()` (a NUL-terminated string) and `NAME_len()`, read at build time — no generated .cyr to check in, nothing to drift. `[lib] embed = [\"NAME\"]` / `[lib.P] embed` carry named embeds into a distlib bundle, and `distlib --check` goes STALE when the data file changes. Every bad entry is refused by name, exit 1"
+category = "cyrius"
+tags = ["embed", "manifest", "cyrius.cyml", "distlib", "include_str", "data-files", "refusals", "p2", "v6.6.19"]
+---
+== USE ==
+
+    [embed]
+    PRESET_LEAN = "src/presets/lean.json"
+    FACE        = "fonts/face.ttf"
+
+    var p = PRESET_LEAN();         # a fn, NOT a var: a top-level string var is a deferred
+    var n = PRESET_LEAN_len();     # runtime store, which a `kernel;` build runs after its program
+
+    [lib.face]
+    embed = ["FACE"]               # an embed-only profile is legal: a bundle of the bytes
+
+cbt generates `fn NAME(): i64 { return "<escaped>"; }` + `fn NAME_len()` ahead of `#@srcline`, so
+diagnostics keep their `<source>` line numbers. Bytes 0x20–0x7E stay raw except `"` / `\`; every
+other byte (NULs included) is `\xHH`. `--print-config` lists the entries. A bundle carries ONLY the
+embeds its `embed` key names, and is verified alone (no `[embed]` prelude, no `[build] modules`).
+
+REFUSED, by name: absolute paths, `..`, `\`, `:` anywhere (NTFS streams), control bytes; any symlink,
+junction or hard link (`st_nlink > 1`) on the path; any `.git` component and its aliases (`.git.`,
+`GIT~1`, any `~`+digit 8.3 name, HFS+-ignorable code points); a missing / non-regular file; one file
+over 2,097,150 B or a set over cycc's 2 MiB string pool; a NAME that is malformed, reserved (119
+names, incl. `sizeof` / `mulh64` / `fncall0..8`), duplicated, `X` beside `X_len`, or ALREADY
+DECLARED by the stdlib snapshot or the project (a silent "last definition wins" otherwise); the
+`{dir, glob}` / inline-table / array set forms (explicit entries only, so order is yours).
+
+LIMITS: the 2 MiB pool is shared with the program's own literals; every binary of the project
+(every test binary too) carries every declared embed, even unused, even under DCE; cyrius-lsp does
+not read the manifest, so `NAME()` shows undefined there. Linux and x86 macOS open the file by an
+`openat` walk; Windows and macOS arm64 use a whole-path O_NOFOLLOW open (an intermediate-directory
+link race remains there — backlog). CHANGELOG [6.6.19] (Embed — P2); the cyrius guide's "Embedding
+data files: [embed]".

@@ -1265,3 +1265,25 @@ data since sigil 3.5.9): signatures byte-identical, and faster (P-256 13.3 -> 2.
 the TPM / Secure Boot / IMA / dm-verity / LUKS helpers fail closed (CVE-73). The lessons: features
 `secret_var_compound_ops` (WHAT IT DOES NOT COVER) and platform_abi
 `a_rooted_posix_path_is_drive_relative_on_windows_and_any_local_user_can_plant_it`.
+
+[[entries]]
+name = "x86_macos_real_threads_and_async_await_readable_ms_everywhere_v6619"
+description = "Since cyrius 6.6.19 x86 macOS runs real threads (THREADS_CONCURRENT = CHAN_BLOCKING = 1 on BOTH Mach-O arches; before, `thread_create` ran the body inline and `chan_recv` answered 0 when empty), and `async_await_readable_ms(fd, ms)` exists on Linux, macOS, Windows and agnos — the legacy `async_await_readable(fd)` really waits on all of them instead of returning 0 at once"
+category = "cyrius"
+tags = ["thread", "macos", "x86-macho", "bsdthread", "gs-base", "async", "async_await_readable_ms", "agnos", "windows", "v6.6.19"]
+---
+x86 macOS (`lib/thread_macos.cyr`): raw `bsdthread_register` / `bsdthread_create` (PTHREAD_START_CUSTOM,
+2 MiB mmap'd stack + PROT_NONE guard) / `bsdthread_terminate` — no libSystem. Per-thread TLS lives
+behind the gs base (machdep call 3), which the kernel restores on every switch; a program that never
+creates a thread never touches gs. `thread_join` / `thread_is_done` / `thread_create_detached` and the
+`__ulock`-parked blocking channel are shared with arm64. Test the CAPABILITY, not the OS: gate a
+pool on `CHAN_BLOCKING` / `THREADS_CONCURRENT`, not on `CYRIUS_TARGET_LINUX` (agnos is still serial).
+
+    if (async_await_readable_ms(sfd, 100) == 1) { /* accept / read now */ }   # 0 = timeout / EINTR / not open
+
+Per target: Linux epoll; macOS one BSD `poll` (via `fd_wait_ready`); Windows `WSAPoll` — SOCKETS
+only, any other HANDLE answers 0 at once; agnos a readiness STASH in the socket adapter (it
+pre-accepts a pending conn or peeks one byte, handed back by the next accept / read), polled with a
+1→32 ms sleep backoff — a pipe / file / keyboard fd answers 1 at once there. A cooperative server
+that does non-blocking accept → EAGAIN → `async_await_readable(sfd)` no longer spins at 100 % CPU on
+macOS, Windows or agnos. CHANGELOG [6.6.19] (Threads / async).

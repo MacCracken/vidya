@@ -5994,3 +5994,26 @@ name = "two_check_sh_selectors_in_one_worktree_race_on_build_cyrius_check"
 description = "6.6.18 integration. check.sh builds its driver to a FIXED path, `build/cyrius_check`, so two selectors started in parallel in ONE worktree overwrite each other's driver mid-run. Parallel check.sh runs are safe only across worktrees; within one, run selectors sequentially. (The 6.6.18 plan's 'in parallel if you like' was wrong.)"
 category = "cyrius"
 tags = ["check.sh", "worktree", "parallel", "race", "fixed-output-path", "process", "v6.6.18"]
+
+[[entries]]
+name = "interning_by_scan_was_quadratic_and_an_index_reproduces_it_only_for_nul_free_literals"
+description = "6.6.19 B0b. LEX interned each new string literal by scanning EVERY segment of the string pool, so N literals cost N x pool bytes: 9,000 small literals 4.98 s, and one 1.9 MB literal ahead of 3,000 small ones 11.4 s (0.92 s placed after them) — exactly the shape `[embed]` makes, since cbt writes embeds first. An FNV-1a index of the pool's NUL-delimited segments made it ~0.9 s and self_compile −6.7 %, with BYTE-IDENTICAL output — but only because of a property worth knowing before touching it"
+category = "cyrius"
+tags = ["lex", "interning", "string-pool", "quadratic", "fnv", "byte-identical", "embed", "perf", "v6.6.19"]
+---
+The scan returns the FIRST offset whose bytes match. For a literal with no NUL, that first match is
+always the first pool SEGMENT of equal content, so an index keyed on each segment's first offset
+reproduces the scan byte-for-byte. A literal holding an embedded NUL can match ACROSS segment
+boundaries (`"b"` after `"a\0b"` lands at X+2), which no segment index sees — so those keep the old
+committed-window scan (`_lex_intern_scan`, verbatim). The index is `alloc`'d (no heap-map / brk
+change), catches up segment-aligned before each lookup, and rebuilds from 0 if the pool is wound
+back below it (a `#deprecated` message is).
+
+How it was proven, the recipe for any "faster, same output" compiler change: two-step self-host
+fixpoint (old-built and new-built compilers emit the same compiler); every tcyr + 135 programs /
+fuzz / bench / cbt sources compiled by BOTH compilers with every binary AND every diagnostic
+compared; seed-derive (cybs, the hand-assembly bootstrap, also got fewer references from LEX losing
+its loop); a scaling gate with RATIO rows (N vs 2N < 3.0x; 1.9 MB before vs after < 2.0x) that the
+old scan fails (3.8x / 13.8x) and a mutant restoring it fails (3.7x / 11.6x). Measure scaling as a
+ratio on one box, never an absolute time. CHANGELOG [6.6.19] (Compiler — B0b);
+`tests/gates/frontend/string_intern_scale_linear.sh`.
