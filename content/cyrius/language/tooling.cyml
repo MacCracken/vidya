@@ -48,7 +48,11 @@
 # gained the TS modes (--lex-ts/--parse-ts/--emit-js), --pie/CYRIUS_PIE,
 # and CYRIUS_JSX_PRAGMA. Prior: 2026-06-07 at v6.0.87 (compiler_binaries
 # entry — names/bootstrap-chain/sizes).
-# 15 entries.
+# 6.6.17 (2026-10-05): +3 entries — manifest_key_vocabulary_and_precedence_v6617 (`cyrius help
+# manifest`, `--print-config`, argument > environment > manifest > default, `[build] test` / `dce` /
+# `defines` read, `strict` / `target` held, `features` dropped), coverage_run_programs_v6617
+# (`--programs`, `--per-entry`), lib_sync_relock_v6617 (`lib sync` re-locks; `--relock`).
+# 18 entries (DERIVED 2026-10-05: grep -c '^\[\[entries\]\]').
 
 [[entries]]
 name = "compiler_binaries"
@@ -1652,3 +1656,113 @@ Heavy verbs (install / update / uninstall / setup / cmdtools)
 use `exec_cmd` to shell out where the operation is fundamentally
 shell-shaped (tarball extraction, curl downloads). Light verbs
 (version / list / which / home / help / use) are full native.
+
+[[entries]]
+name = "manifest_key_vocabulary_and_precedence_v6617"
+description = "Since cyrius 6.6.17 cyrius.cyml is the build tool's configuration: one declared key vocabulary (`cyrius help manifest`), one reader of the whole manifest as TOML, one precedence rule for every key — argument > environment > manifest > default — and `cyrius build --print-config` to see each value with its origin. `[build] test`, `dce` and `defines` are read; `strict` and `target` are held; `features` is dropped"
+category = "cyrius"
+tags = ["cyrius.cyml", "manifest", "build", "precedence", "print-config", "toml", "v6.6.17"]
+---
+== SEE WHAT A BUILD WILL USE ==
+
+    cyrius build --print-config [<source> [<output>]]      # abridged sketch of its output:
+      build.entry  = "src/main.cyr"    (manifest: [build] src)    <- names the synonym read
+      build.output = "build/app"       (argument: <output>)
+      build.dce    = true              (environment: CYRIUS_DCE)
+      build.strict = ...               [held: no effect since 6.3.2]
+
+It exits 0 BEFORE the dep resolver runs, so it writes neither `lib/` nor `build/`.
+
+== PRECEDENCE — the same for every key, no exceptions ==
+
+    argument  >  environment  >  manifest  >  default
+
+A key with no argument or environment channel just lacks that rung.
+
+== THE [build] KEYS ==
+
+    entry / src   read     the source (`src` is a declared synonym of `entry`)
+    output        read     a DEFAULT, not an assertion; `cyrius init --bin` writes build/{PROJ}
+    test          read     bare `cyrius test` runs it (a file, a dir of .tcyr, or a list) FIRST,
+                           then the tests/ walk — each file once; a missing path is a named failure
+    dce           read     --dce / CYRIUS_DCE=1|0 (empty = unset; anything else refused) / dce = true
+    defines       read     -D NAME / CYRIUS_DEFINES=A,B / defines = ["A", "B"] — every `cyrius build`
+                           in the project; -D on test / run / bench stays a command-line choice
+    strict        HELD     warned, not read: `cycc --strict` has had no effect since 6.3.2
+    target        HELD     warned, not read (recognised; use the CLI's target flags)
+    features      DROPPED  warned by name; nothing ever read it
+
+An unknown `[build]` key (a typo) is warned by name; `[coverage] programs` is read by
+`cyrius coverage`. `cyrius help manifest` prints the whole vocabulary (every section, each key's
+status, synonyms, channels and reader), and the guide's "Manifest keys" table is gated equal to it.
+
+== THE READER ==
+
+The whole file (refused by name past 16 MiB), the CYML prose body cut off, values as TOML:
+`"…"` with escapes and `\uXXXX`, `'…'` verbatim, `true` / `false`, arrays with comments. Keys
+compare WHOLE (`dev-stdlib` is never `stdlib`). Before 6.6.17 every key family had its own capped
+scanner (a `[build]` past 32,767 B was invisible) and its own value rule (`entry = '…'` read as
+absent; `path = '../foo'` took the next double-quoted string in the file).
+
+== WHY A GATE MUST NOT SHARE THE CODE'S SPELLING ==
+
+v6.5.49's `[build]` fallback read `src` while 120 of 125 manifests wrote `entry`, and its gate
+passed because its fixture used `src` too. 6.6.17's inventory gate takes its expected keys from
+what consumers WRITE (an ecosystem census, the init templates, package-format.md). See
+field_notes/compiler/gotchas.cyml `check_which_manifest_key_CONSUMERS_write_not_the_one_your_repo_writes`.
+
+CHANGELOG [6.6.17] (Manifest — P1).
+
+[[entries]]
+name = "coverage_run_programs_v6617"
+description = "Since cyrius 6.6.17 `cyrius coverage` takes RUN programs as a corpus — `[coverage] programs = [\"programs/*_test.cyr\"]` in cyrius.cyml or `--programs <glob>` (repeatable; it replaces the manifest list) — and `--per-entry` lists which public fns each corpus entry references. It is TEXT coverage (references), not execution coverage"
+category = "cyrius"
+tags = ["coverage", "cyrius.cyml", "run-programs", "per-entry", "P5", "v6.6.17"]
+---
+    [coverage]
+    programs = ["programs/*_test.cyr"]
+
+    cyrius coverage                          # tests/**/*.tcyr + the declared programs
+    cyrius coverage --programs 'bench/*.cyr' # replaces the manifest list (argument > manifest)
+    cyrius coverage --per-entry              # per corpus entry: the public fns it references
+
+- each matched program is counted exactly as a `.tcyr` is: whole identifiers in code, with
+  comments and strings blanked;
+- `*` / `?` stay inside one path segment (`programs/*_test.cyr` does not reach `programs/sub/`);
+- a glob that matches nothing, or a program that does not exist, is a named failure — a typo must
+  not silently drop the corpus;
+- a corpus program is a test, never measured surface (a file that DEFINES a fn would otherwise
+  "reference" it by declaring it).
+
+⚠ TEXT coverage, the reference count `.tcyr` corpora get since 6.6.8 — not execution coverage.
+Instrumented-build-and-run coverage (P5-B) is v6.7.x, with the bounds-checked mode.
+CHANGELOG [6.6.17] (Coverage — P5-A).
+
+[[entries]]
+name = "lib_sync_relock_v6617"
+description = "Since cyrius 6.6.17 `cyrius lib sync` (scoped and `--full`) re-locks the files it writes in cyrius.lock and is held to the same stdlib-leaf guard as `cyrius deps`: under an unchanged pin a lib/ file whose locked hash differs from the snapshot is refused by name and nothing is written. `--relock` accepts a moved snapshot explicitly. After a pin move, run `lib sync` BEFORE `deps` / `build`"
+category = "cyrius"
+tags = ["lib-sync", "cyrius.lock", "deps", "pin-move", "relock", "v6.6.17"]
+---
+== THE PIN-MOVE RECIPE ==
+
+    # edit [package] cyrius = "6.6.17"
+    cyrius lib sync --full        # re-vendors the new snapshot AND re-locks what it wrote
+    cyrius deps --verify          # passes
+
+What `lib sync` does now: plan every (snapshot file, lib/ destination) pair; run the 6.6.4 guard
+over every destination (a pin change re-locks; an unchanged pin with a mismatching locked hash is
+refused and NOTHING is written; `--dry-run` refuses too); then re-hash only the rows for files it
+wrote, drop rows for files gone from disk, keep every other row byte for byte (so a local edit to
+a file it did not write still fails `deps --verify`), and carry commit pins forward. A project
+with no lock gets none from `lib sync` — the first lock still comes from `cyrius deps`.
+
+⚠ ORDER: `cyrius deps` / `build` run after the pin edit but BEFORE `lib sync` stamp the new pin
+over lock rows for files deps does not vendor; those rows still hold the previous pin's bytes,
+and look exactly like "the snapshot moved under an unchanged pin". `lib sync` then refuses them
+by name. If the pin really was just moved: `cyrius lib sync --full --relock`. If it was NOT,
+the installed snapshot changed under it — reinstall that version; do not `--relock`.
+
+Before 6.6.17 `lib sync` never touched the lock, so every pin move ended in `deps --verify`
+failures until the lock was regenerated from empty (kriya 1.7.3: 72 verified, 39 failed).
+CHANGELOG [6.6.17] (t1).

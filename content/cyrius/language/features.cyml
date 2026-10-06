@@ -50,6 +50,11 @@
 # step and compound-operator paths too; the zero-initialised narrow-global clobber is still
 # open), generics_monomorphization_v639_v6310 (the generic struct literal and the bare
 # explicit-generic statement `id<i32>(4);`).
+# v6.6.17 (2026-10-05): +5 entries — pointer_fields_returns_and_linked_lists_v6617 (`next: *Node`,
+# `fn f(): *Node`, dot syntax on `*Struct` locals / globals / results, chains through pointer fields),
+# typed_pointer_step_is_sizeof_t_v6617 (`p + n` = sizeof(T) at every site; `q - p` counts elements),
+# method_chains_v6617, nested_closure_capture_v6617 (the "captured closures are flat" rule is gone),
+# nested_generic_type_arguments_v6617 (`Vec<Box<i64>>`, `sizeof(Box<i32>)`, `(Box<i64>, i64)`).
 # v6.4.4 (2026-07-05): +1 entry f32v4_packed_single_simd — SIMD arc
 # Phase 1 (128-bit packed single, structured-descriptor encoding, x86).
 # v6.4.5 (2026-07-05): SIMD arc Phase 2 — f32v_fmadd/f32v_dot matmul ops
@@ -5015,3 +5020,166 @@ struct_ptrmode_assign_copy.tcyr; tests/gates/frontend/coroutine_midbody_suspend.
 refusal). Compiler side: field_notes/compiler/gotchas.cyml
 `a_cap_is_declared_in_one_place_and_believed_in_five_sweep_every_consumer` (the `*T` record moved
 out of a 64-bit slot mask).
+
+[[entries]]
+name = "pointer_fields_returns_and_linked_lists_v6617"
+description = "Since cycc 6.6.17 `*T` is a type wherever a type is written: a struct / union field `next: *Node`, a return type `fn f(): *Node` (and a multi-value return element), a local or global `var p: *Node`. A `*Struct` local, global, field or call result takes dot syntax like a `p: *Struct` parameter always did, and a field chain goes THROUGH a pointer field, so a linked list is written the obvious way"
+category = "cyrius"
+tags = ["pointers", "typed-pointer", "structs", "field-chains", "linked-list", "v6.6.17"]
+---
+Before 6.6.17 `next: *Node` and `fn f(): *Node` were `expected identifier, got '*'`, a `var p: *Node`
+local was `no struct type in scope` at `p.val`, and `a.next.val` was `expected ';', got '.'`.
+
+    struct Node { val; next: *Node; }       # a field may point at its OWN struct
+    fn link(n: *Node, v, head: *Node): *Node {
+        n.val = v;
+        n.next = head;
+        return n;
+    }
+    fn push(head: *Node, v): *Node { return link(alloc(sizeof(Node)), v, head); }
+    fn sum(head: *Node): i64 {
+        var s = 0;
+        var p: *Node = head;
+        while (p != 0) { s = s + p.val; p = p.next; }   # the canonical walk
+        return s;
+    }
+    var h: *Node = push(push(push(0, 1), 2), 3);
+    h.next.next.val = 5;                    # chains through pointer fields, reads and writes
+    var v = h.next.val + push(0, 7).val;    # ... and on a `: *Node` call result
+    # (verified on the merged 6.6.17 tree: sum(h) == 10, v == 9, no warning)
+
+`alloc(..)` returns an untyped word, so `var n: *Node = alloc(..);` warns `assigning non-pointer to
+typed pointer`; hand it to a `*Node` parameter (as `push` does) or a `: *Node` fn instead.
+
+RULES:
+- `p = q` on two `*Node` REBINDS the pointer; it never copies the struct.
+- T is resolved by name; an unknown T is refused (`unknown type 'X' as the target of pointer`).
+  T may be the struct being declared or one declared BELOW (two structs can point at each other):
+  such a field records T and is sized when it is used.
+- `*Box<i32>` points at the INSTANCE (`sizeof(Box<i32>)`), not the base generic.
+- The value a `*T` field load, a call, a method call or an explicit generic call yields is a
+  `*T` — `p + n` steps `sizeof(T)` (see `typed_pointer_step_is_sizeof_t_v6617`).
+
+⚠ NOT the same as a struct-typed local: `var p: Node = h;` with `h: *Node` COPIES the struct (a
+walk written that way overwrites nodes), and for a struct of 8 B or less it stores the POINTER.
+Bind vs copy for `Struct = *Struct` is an open v6.7.x question — write `var p: *Node`.
+
+GATES: tests/tcyr/lang/pointer_field_return_types.tcyr (linked / chains / ptr_locals / call_ptr
+groups, a linked-list walk), tests/gates/frontend/typed_pointer_warn_sign.sh axis 9. CHANGELOG
+[6.6.17] (b3).
+
+[[entries]]
+name = "typed_pointer_step_is_sizeof_t_v6617"
+description = "Since cycc 6.6.17 `p + n`, `p - n`, `p += n` and `p -= n` on a `*T` step `sizeof(T)` bytes per element at EVERY site — local, parameter, closure capture, global in either zone, `*T` field, `: *T` result. `q - p` of two `*T` is the element count, a call result is a plain value unless the callee declares `: *T`, and `n + p` steps like `p + n`. Before, the step depended on where `p` was declared"
+category = "cyrius"
+tags = ["pointers", "typed-pointer", "pointer-arithmetic", "sizeof", "behaviour-change", "v6.6.17"]
+---
+THE RULE (6.6.17, user decision):
+
+    var buf: i64[8];
+    var p: *i32 = &buf;
+    p + 1          # &buf + 4      (sizeof(i32))
+    var q: *Pt = arr;
+    q + 2          # arr + 2 * sizeof(Pt)
+    var e = (p + 3) - p;    # 3 — the ELEMENT count, a plain integer
+    2 + p          # same as p + 2
+
+- the same in a fn parameter `p: *T`, a closure capture of any depth, a global declared before
+  or after the first statement, a `name: *T` field and a `fn f(): *T` result;
+- `q - p` with different element sizes (`*i64 - *u8`) is refused by name — a pointer value
+  carries only its step, so two types of one size cannot be told apart; `&a - &b` (untyped
+  addresses) stays a byte difference;
+- a call's result is a plain value unless the callee declares `: *T`: with `p: *i64`,
+  `f(p) + 1`, `load64(p) + 1`, `fncall1(&f, p) + 1` and `q.m(p) + 1` each used to add 8 (the
+  expression scale was ambient state left by the last argument);
+- `*p` still loads 8 bytes; a `*T` slot is always an 8-byte word.
+
+WHAT IT REPLACED (measured on the 6.6.17 slot-open compiler): a local `*i8` / `*i16` / `*i32`
+stepped 1 and every other local `*T` 8 (`*u8` and `*Pt` included); a parameter and a captured
+`*T` 1 whatever T; a declaration-block global 8; a later global 1 / 2 / 4 / 8 by T; `p += n` 1
+everywhere; `p + 1` on a `p: *f32` parameter was an f32 ADD of the pointer's bits and on a
+`p: *Pt` it dispatched `Pt_add`. A `*T` parameter or capture also loaded as a non-pointer, so
+`var q: *T = p;` warned `assigning non-pointer to typed pointer` — it no longer does.
+
+MIGRATION: none measured — no `*T` declaration exists in the `src/` or `lib/` of 143 repos, so
+every shape switched with no transition error (the user accepted that on 2026-10-05). The
+teaching examples here use `*i64` locals, whose step is 8 under both rules.
+
+`p[i]` on a `*T` is still refused (no element descriptor). GATES:
+tests/tcyr/crossos/typed_pointer_step.tcyr, tests/gates/frontend/typed_pointer_warn_sign.sh axes
+10-11. Supersedes the step table in field_notes/language/semantics_runtime.cyml
+`typed_pointer_local_slot_v6616`. CHANGELOG [6.6.17] (b7).
+
+[[entries]]
+name = "method_chains_v6617"
+description = "Since cycc 6.6.17 a method call's result takes `.field` and `.method(..)`, chained to any depth, as a value and as a bare statement — `s.clone().cat(t)`, `p.bump().bump().sum()`, `mkp(3).bump().sum()`. Before, the `.` after a method call was a syntax error in every position"
+category = "cyrius"
+tags = ["methods", "chains", "call-result", "Str", "structs", "v6.6.17"]
+---
+    var u: Str = s.clone().cat(t);       # a Str-returning chain
+    var n = p.big().back().bump().sum(); # struct results of every return class
+    p.bump().mu();                       # statement form; #must_use applies to the LAST method
+
+Each link's result is held the way a free call's result has been since 6.6.12 (a > 16 B struct
+in its retptr temp, 9-16 B in a temp, <= 8 B inline, a `Str` in a pointer-mode slot), so the
+receiver is never touched.
+
+REFUSED BY NAME: at TOP LEVEL a chain on a struct-returning method (`'T_m' returns a struct by
+value, and a struct result needs storage in a fn's frame`); a chain on a method that returns no
+struct (`cannot take a field of the result of 'T_m': it does not return a struct`).
+
+STILL NOT SUPPORTED: a method call on a FIELD (`h.name.len()`, `b.v.sum()`) and compound
+assignment on a field (`h.n += 1`) — bind the field first. An UNTYPED `var u = s.clone();`
+does not take the method's struct type; write `var u: Str = ...`.
+
+GATES: tests/tcyr/crossos/method_chain.tcyr, tests/gates/frontend/call_result_field.sh C1-C3.
+CHANGELOG [6.6.17] (b4).
+
+[[entries]]
+name = "nested_closure_capture_v6617"
+description = "Since cycc 6.6.17 a closure nested inside another closure captures the variables of EVERY enclosing scope — the outermost fn's locals and params, the outer closure's params and locals, and what the outer closure itself captured — by value at construction, at any depth. The old guide rule `captured closures are flat` was a compiler limit written down as a rule, and is gone"
+category = "cyrius"
+tags = ["closures", "capture", "nested", "scoping", "v6.6.17"]
+---
+    fn mk(b) {
+        var g = |x| {
+            var k = |y| { return y + b; };   # b: two levels out
+            return callptr(k, x) + b;        # the outer keeps its own capture too
+        };
+        return g;
+    }
+    var add3 = |a| |b| |c| a + b + c;        # curried, three levels
+
+- capture is BY VALUE at construction, as for one level (closures_v637_v638): a capture of a
+  capture copies the word(s) out of the enclosing closure's env;
+- a `var` declared in a block of a closure body (an `if`, a loop, a `for` header) hides an
+  enclosing name only INSIDE that block — before 6.6.17 it hid it for the whole body, and a
+  later read silently took a GLOBAL of the same name;
+- a struct (by value or pointer-mode), a `cstring` and a `Str` capture keep their own type
+  through every level, so dispatch on them is right;
+- a nested `fn` inside a closure body is still refused by name (6.6.16) — define it at top level.
+
+GATE: tests/tcyr/crossos/closure_nested_capture.tcyr. CHANGELOG [6.6.17] (b1). Compiler side:
+the capture tables (`_cl_ncap`, `_cl_cap_slots`, `_cl_cap_w`) are per-closure state and are
+saved / restored around each nested literal (`_cl_ctx_save` / `_cl_ctx_restore`).
+
+[[entries]]
+name = "nested_generic_type_arguments_v6617"
+description = "Since cycc 6.6.17 type arguments nest wherever a type is written — `Vec<Box<i64>>` (the lexer's folded `>>` / `>>>` close two / three levels), `Box<Vec<i64>>`, `idv<Vec<i64>>(x)`, a field `items: Vec<Box<i64>>;` — `sizeof(Box<i32>)` is the instance's size in an expression and in `#assert`, and a multi-value return element takes type arguments, `(Box<i64>, i64)`"
+category = "cyrius"
+tags = ["generics", "type-arguments", "sizeof", "multi-value-return", "v6.6.17"]
+---
+    struct Box<T> { v: T; w: T; }
+    #assert sizeof(Box<i32>) == 8
+    #assert sizeof(Box<Box<i32>>) == 16
+    var x: Vec<Box<i64>> = vec_new();     # ran to end of file before 6.6.17
+    fn two(a): (Box<i64>, i64) { return (a, 5); }   # was `expected ')', got '<'`
+
+`sizeof(T<..>)` is exactly what `var b: T<..>` occupies (the instance, not the base generic).
+
+STILL NOT SUPPORTED: a generic-struct FIELD `b: Box<i32>;` (`expected identifier, got '<'`);
+`#derive` on a struct with a `Vec<Box<i64>>` field stops its field walk at the nested `<`.
+
+GATE: tests/tcyr/frontend/nested_type_args.tcyr. CHANGELOG [6.6.17] (b5). Compiler side: every
+`<..>` skipper must count levels and be able to OWE a closer to the list around it, because the
+lexer folds `>>` into one token.

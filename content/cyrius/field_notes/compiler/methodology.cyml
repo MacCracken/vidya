@@ -7,7 +7,8 @@
 # For design / convention patterns see patterns.cyml.
 # For non-obvious internal traps see gotchas.cyml.
 #
-# 23 entries (still 23 at 6.6.16 — Windows is THREADS_CONCURRENT = 1 now, corrected in the two-ended
+# 24 entries (DERIVED at 6.6.17 after one: worktree lanes share one stash, one lock and one process table).
+# 23 at 6.6.16 (still 23 at 6.6.16 — Windows is THREADS_CONCURRENT = 1 now, corrected in the two-ended
 # entry's description; still 23 at 6.6.15: its three test-harness hooks — a KAT through the entropy hook,
 # state-keyed fault injection, secrets sampled at the write hook — went INTO the two-ended entry;
 # re-DERIVED at 6.6.14 with `grep -c '^\[\[entries\]\]'` — the line read 16 while
@@ -946,3 +947,8 @@ back as 128 + signo (141 = SIGPIPE): that is how a "the process lived" row asser
   mutant went RED there and nowhere else. A buffer REPLACED mid-handshake (a 1.3 client's x25519
   key when a HelloRetryRequest asks for P-256) needs its old pointer remembered, or a missing
   wipe of the orphan is invisible (`tls_native_ecdhe_groups.tcyr`; CVE-70).
+
+[[entries]]
+name = "worktree_lanes_share_more_than_the_tree_one_stash_one_lock_one_process_table"
+description = "cyrius 6.6.17 ran seven implementation lanes in parallel, one git worktree each, and three resources the worktrees did NOT isolate cost real time. (1) **All worktrees of a repo share ONE `refs/stash`.** Lane man ran `git stash push cbt/` to prove a gate red on the old code; lane lib pushed its own stash in between; man's `git stash pop` took LIB's stash and applied a `lib/async_win.cyr` diff to the wrong lane, and lib's pop would have taken man's. Recovery came from the dangling stash commits (`git fsck` / the sha in the push output). RULE: never `git stash` in a parallel-lane setup — prove old-code behaviour with `git archive <rev>` (or `git worktree add --detach`) into a scratch dir, or a throwaway commit on the lane branch. (2) **A shared lock serialises the lanes it was meant to protect.** The lane plan wrapped every lane's check.sh selectors in one `flock` on a shared file so lanes would not starve each other; one lane's six-selector verify held it and the others queued behind it for about two hours on a 16-core box at load ~2. Removed mid-run; the next plan uses none. RULE: size contention by measuring the box, not by assuming it; a global lock around per-lane work turns N lanes into one. (3) **`pgrep -f` / `pkill -f` match the ISSUING shell's own command line.** A cleanup `pkill -f <pattern>` run through `sh -c` (or any tool wrapper) also matches the shell whose own argv carries the pattern, so it can kill the command issuing it, and a `pgrep -f <pattern>` census counts itself and never reads zero. RULE: match the exact process name (`pgrep -x`), select by ancestry or a private marker (a WINEPREFIX under the gate's mktemp dir), or exclude `$$` — the same lesson as `a_flaky_gate_on_a_shared_box_read_the_PROCESS_TREE_before_theorising`, from the issuing side. All three look like a broken tool or a flaky gate; each is a shared namespace. CHANGELOG [6.6.17] (integration)."
+category = "cyrius"
