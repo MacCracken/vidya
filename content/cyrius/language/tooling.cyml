@@ -1766,3 +1766,71 @@ the installed snapshot changed under it — reinstall that version; do not `--re
 Before 6.6.17 `lib sync` never touched the lock, so every pin move ended in `deps --verify`
 failures until the lock was regenerated from empty (kriya 1.7.3: 72 verified, 39 failed).
 CHANGELOG [6.6.17] (t1).
+
+[[entries]]
+name = "distlib_sidecar_is_what_the_compile_verify_proves_v6618"
+description = "Since cyrius 6.6.18 (P4 option 2) a fold's `dist/<pkg>.deps` sidecar is derived ONLY by the compile-verify fixpoint, over six targets (x86_64 Linux / Windows / macOS / agnos, aarch64 Linux / macOS). The producer's `[deps] stdlib`, its umbrella includes and its test-only leaves (`assert`, `bench`) no longer reach it. Every bundle carries the same leaves as a compile-verified requires block, so `include \"dist/<pkg>.cyr\"` alone compiles. A consumer whose build fails on a leaf it never declared gets a `hint:` naming the leaf"
+category = "cyrius"
+tags = ["distlib", "deps-sidecar", "requires-block", "compile-verify", "p4", "option-2", "undefined-leaf-hint", "migration", "v6.6.18"]
+---
+== PRODUCER, AT THE 6.6.18 PIN BUMP ==
+
+    cyrius distlib --check     # STALE: "the committed bundle predates cyrius 6.6.18's requires block — run cyrius distlib --all"
+    cyrius distlib --all       # regenerates every bundle + sidecar; commit dist/
+
+Expect the sidecar to SHRINK (bayan 13→10, ganita 10→3, yukti 18→3 …) and the bundle to gain
+
+    # Requires (compile-verified; the leaves of dist/<pkg>.deps):
+    include "lib/<leaf>.cyr"      # one per sidecar leaf, same order, families expanded
+
+`[deps] stdlib` still drives auto-prepend and `cyrius deps` for the package's OWN builds. A name
+the converged verify can attribute to nothing is printed as a warning with its targets (a
+deliberate consumer hook shows up there); a non-symbol failure on agnos ALONE is a warning too.
+
+== CONSUMER ==
+
+A leaf you used only because some producer's sidecar OVER-reported it disappears when that
+producer regenerates. Until 6.6.19 re-vendors the folds, put in your own `[deps] stdlib` every leaf
+your build needs — what your code calls AND what a stdlib fold you declare calls (the vendored
+folds include nothing: `lib/sandhi.cyr` needs `sakshi`). The CLI names it under the error:
+
+    hint: 'sakshi_span_enter' is defined by stdlib leaf 'sakshi' — add it to [deps] stdlib in cyrius.cyml
+
+Add it, `cyrius deps`, rebuild; repeat while a `hint:` names another. A family (`lib/unicode/`) is
+one leaf named by the family and expands from the PRODUCER's snapshot, so a consumer pinned to a
+cyrius lacking a member gets a named `cannot open include file` — bump the pin.
+
+Why: the v6.5.10 union published every producer's test leaves to every consumer (75 sidecars named
+`assert`, 68 of those bundles used none of it) and hid real gaps behind a declaration. cyrius
+`docs/development/ecosystem-migration-6.6.18.md`; CHANGELOG [6.6.18] (Distlib — P4 option 2).
+
+[[entries]]
+name = "fuzz_poison_allocator_seam_exit_86_and_ab_v6618"
+description = "Since cyrius 6.6.18 (P6) `cyrius fuzz --poison` poisons `alloc()` (Linux / macOS / Windows), arenas, `fl_alloc` and anything routed through `poison_allocator()`: leading + trailing redzones, a live-block sweep, quarantine on free. The first overwrite prints one `poison: redzone overwrite — …` line and exits 86. Overreads are silent under plain `--poison`; `--poison=ab` runs every harness at fill 0xA5 and 0x5A and fails when the outputs differ"
+category = "cyrius"
+tags = ["fuzz", "poison", "redzone", "allocator-seam", "poison_allocator", "exit-86", "ab-differential", "p6", "v6.6.18"]
+---
+== USE ==
+
+    cyrius fuzz --poison            # writes trap (exit 86); assert_summary() sweeps too
+    cyrius fuzz --poison=ab         # + overreads: two legs, byte-identical stdout required
+
+Route your own allocation through it:
+
+    sd_alloc_set(&poison_alloc);              # a hook-style fn(n): ptr seam
+    var v = vec_new_a(poison_allocator());    # any _a API
+    var a = poison_allocator_over(inner);     # wrap an existing Allocator
+
+`poison_sweep()` checks every live block now and returns the bad count; `poison_trap_set(0)` keeps
+going (then assert on `poison_violations()`); `poison_fill_set(b)` takes 1..255; `poison_reset()`
+resets the COUNTER only; `poison_forget_all()` drops the live list (call it after `alloc_reset()`
+when using the seam without the flag).
+
+⚠ Under poison an arena never re-issues an address after `arena_reset` — a fuzz harness must not
+assert pointer identity across a reset. `--poison=ab` doubles the time, and a harness that prints
+timings or seeds from the clock diverges by itself.
+
+NOT covered: a read that jumps a whole redzone into a live neighbour, a read past a logical bound
+inside one allocation, stack and static memory, agnos and cx `alloc()`; no guard pages (backlog).
+Before 6.6.18 `--poison` reached `fl_alloc` only and COUNTED violations nobody read (0 of 194
+ecosystem harnesses). CHANGELOG [6.6.18] (Poison — P6); the cyrius guide's "Fuzzing with --poison".

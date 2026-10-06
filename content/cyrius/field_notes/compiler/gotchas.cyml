@@ -1136,7 +1136,7 @@ tags = ["arena", "exhaustion-policy", "ARENA_FULL_NULL", "ARENA_FULL_GROW", "ARE
 
 [[entries]]
 name = "the_distlib_deps_sidecar_scanned_includes_not_the_declaration_and_a_wrong_sidecar_switches_off_cyriuss_own_consumer_check"
-description = "`dist/<lib>.deps` says it lists 'stdlib leaves this fold requires in scope', but until v6.5.10 it was built **ONLY by scanning bundled module sources for literal `include \"lib/X.cyr\"` lines** — so it captured what a module INCLUDES and never what it REFERENCES through the manifest declaration. setu 0.8.2 emitted **8** leaves against a declared **12**; the four missing (`result`, `net`, `chrono`, `args`) are all referenced at top level in `src/client.cyr`. **THE CONSEQUENCE IS NOT A MISLEADING FILE — IT IS A DISABLED CHECK.** `cyrius deps` validates a consumer's `[deps] stdlib` against the dep's sidecar, correctly and loudly. The filer measured both directions: with a corrected 12-leaf sidecar an under-declaring consumer got a hard error naming `chrono` and `args`; with the raw 8-leaf one **the same consumer built `OK`, silently**, on agnos. A wrong sidecar switches OFF the machine check that exists to catch exactly that mistake. Fixed by making the sidecar the declared `[deps] stdlib` **UNIONED** with the include-scan, not either alone — the scan can legitimately catch a leaf the author forgot to declare, so the union can never under-report relative to either source. **THE CONSTRAINT THAT KEEPS THE FIX FROM BEING WRONG IN THE OTHER DIRECTION: base bundle only.** A `[lib.X]` PROFILE is a narrow subset of modules, so its true dep set is a SUBSET of the declaration; unioning the whole declaration into e.g. a `sha` profile would OVER-report and could fail a legitimately-narrow consumer against the very check this re-enables. Profiles keep the pruned inference, and `tests/distlib_deps_sidecar.sh` asserts that asymmetry explicitly. **THREE HYPOTHESES WERE MEASURED AND FALSIFIED BY THE FILER BEFORE FILING** — it is not the declaration, not an inline-comment parse bug, not a direct-symbol scan — and they are recorded in the gate so none of them gets re-investigated. See CHANGELOG [6.5.10]."
+description = "⚠ SUPERSEDED in cyrius 6.6.18 (P4 option 2): the union below was REMOVED — the sidecar is now derived only by the compile-verify fixpoint over six targets, which catches the setu case on its own (see `a_verify_that_only_adds_to_a_seed_hides_every_gap_the_seed_happened_to_cover`). Kept for the disabled-check lesson. `dist/<lib>.deps` says it lists 'stdlib leaves this fold requires in scope', but until v6.5.10 it was built **ONLY by scanning bundled module sources for literal `include \"lib/X.cyr\"` lines** — so it captured what a module INCLUDES and never what it REFERENCES through the manifest declaration. setu 0.8.2 emitted **8** leaves against a declared **12**; the four missing (`result`, `net`, `chrono`, `args`) are all referenced at top level in `src/client.cyr`. **THE CONSEQUENCE IS NOT A MISLEADING FILE — IT IS A DISABLED CHECK.** `cyrius deps` validates a consumer's `[deps] stdlib` against the dep's sidecar, correctly and loudly. The filer measured both directions: with a corrected 12-leaf sidecar an under-declaring consumer got a hard error naming `chrono` and `args`; with the raw 8-leaf one **the same consumer built `OK`, silently**, on agnos. A wrong sidecar switches OFF the machine check that exists to catch exactly that mistake. Fixed by making the sidecar the declared `[deps] stdlib` **UNIONED** with the include-scan, not either alone — the scan can legitimately catch a leaf the author forgot to declare, so the union can never under-report relative to either source. **THE CONSTRAINT THAT KEEPS THE FIX FROM BEING WRONG IN THE OTHER DIRECTION: base bundle only.** A `[lib.X]` PROFILE is a narrow subset of modules, so its true dep set is a SUBSET of the declaration; unioning the whole declaration into e.g. a `sha` profile would OVER-report and could fail a legitimately-narrow consumer against the very check this re-enables. Profiles keep the pruned inference, and `tests/distlib_deps_sidecar.sh` asserts that asymmetry explicitly. **THREE HYPOTHESES WERE MEASURED AND FALSIFIED BY THE FILER BEFORE FILING** — it is not the declaration, not an inline-comment parse bug, not a direct-symbol scan — and they are recorded in the gate so none of them gets re-investigated. See CHANGELOG [6.5.10]."
 category = "cyrius"
 tags = ["distlib", "deps-sidecar", "cyrius-deps-validation", "under-report", "union-declaration-with-scan", "base-bundle-only", "profiles-keep-pruned-inference", "over-report-hazard", "setu", "falsified-hypotheses-in-the-gate", "v6.5.10"]
 
@@ -5925,3 +5925,72 @@ value with non-printing bytes escaped. Then grep the JOIN, not the field you wer
 every field it concatenates is a member of this class. Still open (backlog): the read side —
 `modules` entries and a transitive `path`. CHANGELOG [6.6.16]; gate
 `deps_modules_default_or_warned.sh` D8/D9. See also dependencies.cyml (CVE-32).
+
+[[entries]]
+name = "fold_a_hand_written_chain_by_simulating_it_in_its_own_order_and_prove_it_by_interpreting_it"
+description = "6.6.18 XLAT-1/2. ESYSXLAT, the x86 → aarch64 syscall renumbering chain, is a linear cmp/b.ne list whose ORDER is semantics, and it was inlined at every aarch64 syscall site (36 % of cycc-native-aarch64). The fold does not re-derive the mapping: it EMITS the chain, decodes it, and SIMULATES it in emission order with cur = N, keeping only the row bodies that would run — so every ordering rule holds by construction and the row SOURCE the gates read is untouched. The proof was an interpreter, not a corpus: 772 numbers × 1–7 args × ELF / Mach-O × literal / variable, folded result vs the chain interpreted row by row — 0 differences"
+category = "cyrius"
+tags = ["esysxlat", "aarch64", "syscall", "compile-time-fold", "equivalence-check", "interpreter", "naked", "x30", "v6.6.18"]
+---
+Measured: cycc-native-aarch64 2,042,184 → 1,323,392 B (−718,792, −35.2 %); 0 `cmp x8,#imm`
+words left; a variable number calls one shared per-class stub (`ESYSX_STUBS`, between EEXIT and
+FIXUP).
+
+**The row-shape invariant (checked on every fold — a violation is an internal error naming the
+row, never a silent fallback).** A row is `cmp x8,#src` / `b.ne +4k` / k-1 body words; it writes
+x8 only as its LAST word (`movz x8`); on Mach-O it ends in `movz x16`; it reads flags only after
+setting them in its own body; it branches only inside its own body; no ADR/ADRP/LDR-literal/BL,
+FP/SIMD, system instructions or BC.cond. Adding a row that breaks this stops EVERY aarch64 build.
+
+**Why an interpreter beats the corpus here.** The corpus exercises the numbers cyrius happens to
+call; the fold must be right for every number the chain could see. Interpreting the emitted
+chain word by word for the whole number space, at every arity and on both object formats, is
+cheap and exhaustive — and it found the arm64-macOS 7-argument variable site that kept its
+`bl .` placeholder (an infinite loop), which led to refusing `syscall()` past six arguments on
+every target. Known blind spot: a fold that skips its `cur` update is invisible while no live
+re-capture row exists (backlog).
+
+**x30 is live in a `#naked` fn.** Any emitter that introduces a `bl` into user code must keep a
+frameless fn on an inline path — XLAT-2's stub call does. And the stub `bl`s are RESOLVED with
+no fixup-table entry: a future aarch64 code-moving pass (DCE compaction) must repair them.
+CHANGELOG [6.6.18] (aarch64 — the ESYSXLAT compile-time fold).
+
+[[entries]]
+name = "a_verify_that_only_adds_to_a_seed_hides_every_gap_the_seed_happened_to_cover"
+description = "6.6.18 distlib D1/D3. While the `.deps` sidecar was seeded from the producer's `[deps] stdlib` (v6.5.10 union), two blind spots in the compile-verify were invisible, because the declaration covered them. Removing the union (P4 option 2) made both publish broken sidecars — measured before shipping, so they became prerequisites D1 and D3"
+category = "cyrius"
+tags = ["distlib", "deps-sidecar", "compile-verify", "family-directory", "ifdef-arm", "agnos", "masked-defect", "v6.6.18"]
+---
+1. **The depth-0 family blind spot (D1).** The verify's snapshot index read only `lib/*.cyr`, so a
+   symbol from a family directory (`lib/unicode/`) read as "not a stdlib symbol — the consumer's
+   problem" and the fixpoint skipped it. niyama carried `unicode` only because its declaration was
+   unioned in. Fix: a family directory is ONE index entry owned by the family name.
+2. **An in-unit declarer is not proof of definition (D3).** When a name was still undefined on
+   target T and a file declaring it was already in the unit, the verify called it "the target's own
+   gap". But that declarer demonstrably does NOT define it on T (an `#ifdef` arm): mabda includes
+   `lib/syscalls.cyr`, whose peers declare `O_RDWR`, yet on agnos only `lib/io.cyr`'s agnos arm
+   defines it. Skip the in-unit declarer that failed and look for the one that does not.
+
+The general shape: an inference that only ever ADDS to a hand-written seed inherits every
+coverage gap the seed papered over. Before deleting the seed, run the inference ALONE on the
+real producers (here: 11 folds × 6 targets) and see what it misses. Supersedes the v6.5.10 entry
+`the_distlib_deps_sidecar_scanned_includes_not_the_declaration_…`. CHANGELOG [6.6.18].
+
+[[entries]]
+name = "a_changes_rerun_set_must_include_the_check_drivers_own_rows_not_just_the_shell_gates"
+description = "6.6.18 D4 review BLOCKER. The distlib change re-ran 'all 33 gates that invoke distlib' — every tests/gates/*.sh naming it — and the merged regression suite still went RED: `programs/checks/deps_init.cyr`'s `_deps_sidecar_gate` is a CHECK-DRIVER ROW, compiled into the check program, not a shell gate, and it asserted the old contract (the umbrella-only `keccak` in the sidecar)"
+category = "cyrius"
+tags = ["check.sh", "programs-checks", "regression-suite", "rerun-set", "review", "distlib", "v6.6.18"]
+---
+`grep -rl distlib tests/gates` is not the set of things that test distlib. The check driver
+(`programs/checks/main.cyr` and the files it includes — `deps_init.cyr`, `heap_audit.cyr`, …)
+carries its own assertions, and they run only under the full `check.sh` / its `regression`
+selector. When building the re-run set for a behaviour change, grep `programs/checks/` as well as
+`tests/gates/` and `tests/tcyr/`, and run the selector that executes the driver rows. The row now
+asserts the option-2 contract (7a63c931). CHANGELOG [6.6.18] (Distlib, review fixes).
+
+[[entries]]
+name = "two_check_sh_selectors_in_one_worktree_race_on_build_cyrius_check"
+description = "6.6.18 integration. check.sh builds its driver to a FIXED path, `build/cyrius_check`, so two selectors started in parallel in ONE worktree overwrite each other's driver mid-run. Parallel check.sh runs are safe only across worktrees; within one, run selectors sequentially. (The 6.6.18 plan's 'in parallel if you like' was wrong.)"
+category = "cyrius"
+tags = ["check.sh", "worktree", "parallel", "race", "fixed-output-path", "process", "v6.6.18"]
