@@ -1,7 +1,9 @@
 # Cyrius — Stdlib Modules (per-module usage)
 # How to use specific stdlib modules — APIs, conventions, gotchas.
 # 22 entries (re-derived 6.6.16) — a CURATED subset of the lib/*.cyr modules (not the full
-# surface). 6.6.16 (2026-10-05): no new entry — tls_module_contract_v6614 gained PRIVATE KEYS
+# surface). 6.6.20 (2026-10-06): +1 entry boxed_runtime_tag_box_v662 — lib/boxed.cyr, the storable
+# {tag, payload} box (`tagged_new` restored at 6.6.2) and why `payload()` stays deleted.
+# 6.6.16 (2026-10-05): no new entry — tls_module_contract_v6614 gained PRIVATE KEYS
 # (a PEM key decoded once per key text, 0 B per accept) and the rest of the 6.6.16 contract
 # (CVE-75 chain purpose, Ed25519 length, the libssl session cache + sticky failure, blocking
 # accepted sockets, CVE-74); http_module notes the SIGPIPE-free plain writes. 6.6.15 (2026-10-03): no new entry — tls_module_contract_v6614 (the name keeps its
@@ -1265,6 +1267,62 @@ data since sigil 3.5.9): signatures byte-identical, and faster (P-256 13.3 -> 2.
 the TPM / Secure Boot / IMA / dm-verity / LUKS helpers fail closed (CVE-73). The lessons: features
 `secret_var_compound_ops` (WHAT IT DOES NOT COVER) and platform_abi
 `a_rooted_posix_path_is_drive_relative_on_windows_and_any_local_user_can_plant_it`.
+
+[[entries]]
+name = "boxed_runtime_tag_box_v662"
+description = "lib/boxed.cyr (6.6.2, pulled in by lib/tagged.cyr) is the STORABLE runtime-tagged box: 16 bytes {tag @+0, payload @+8}, built by `boxed_new` / `tagged_new` and read by `boxed_tag` / `boxed_payload` / `boxed_is`. Use it where a union must live in a struct field or a vec element: the value-form Result / Option / Either cannot be stored (only the tag survives). `payload()` stays deleted on purpose"
+category = "cyrius"
+tags = ["boxed", "tagged_new", "tagged-union", "result", "value-form", "layout-contract", "v6.6.2"]
+---
+    include "lib/tagged.cyr"          # brings lib/boxed.cyr (and lib/alloc.cyr)
+    var b = tagged_new(KIND_TEXT, s);  # == boxed_new(KIND_TEXT, s)
+    vec_push(blocks, b);               # one pointer: stores like any other value
+    if (boxed_is(b, KIND_TEXT) == 1) { use(boxed_payload(b)); }
+
+THE LAYOUT IS A PUBLISHED CONTRACT:
+
+    +0   the tag       (i64)
+    +8   the payload   (i64)
+    16 bytes from the global bump allocator (`alloc`)
+
+Hand-rolled `load64(p)` / `load64(p + 8)` reads stay correct. A plain (non-`: stack`) enum
+constructor builds the same box, so `boxed_tag` reads either: `enum Shape { Circle(r);
+Square(s); Tri(a); }` then `Tri(11)` gives `boxed_tag` 2 and `boxed_payload` 11 (measured 6.6.20).
+
+THE FIVE FNS:
+- `boxed_new(t, value)`: the box, or 0 if `alloc` failed.
+- `tagged_new(t, value)`: the pre-6.6.0 spelling, a wrapper over `boxed_new`. It was deleted at
+  6.6.0 on a survey that could not see its consumers and restored at 6.6.2. Its meaning never
+  changed, so it kept its name and every ecosystem construction site compiles unedited.
+- `boxed_tag(b)`, `boxed_payload(b)`: `load64(b)`, `load64(b + 8)`.
+- `boxed_is(b, expected)`: 1 or 0.
+
+WHY A BOX AND NOT THE VALUE FORM: since 6.6.0 Result / Option / Either are `enum ...: stack`
+and return a REGISTER PAIR, which is right for a value produced and consumed in one frame and
+wrong for storage. Measured on cycc 6.6.20, with no diagnostic in any of the three:
+
+    vec_push(v, Err(5));  vec_get(v, 0)    # 1: the tag; the 5 is gone
+    var s = S { Err(5), 9 };  s.r           # 1 (`r: Result` field or untyped)
+    fn take(r) { return r; }  take(Ok(7))   # 0: a one-argument boundary keeps rax
+
+A box is one pointer, so it survives all three.
+
+⚠ `boxed_tag` takes a BOX POINTER. Handing it a value-form `t` from `var t, v = f();` reads
+address 0 or 1 and faults, the loud direction on purpose. And `is_tag(t, expected)` compares its
+first argument directly: correct for the value form, silently 0 for every box. Use `boxed_is`.
+
+⛔ WHY `payload()` MUST NOT COME BACK: consumers used that one name on BOTH classes (agnostik's
+`payload(sr)` on a box, `payload(res)` on a Result). Restoring it would make ~518 stale Result
+reads across 23 repos COMPILE, and each would dereference a tag (0 or 1) as a pointer: a named
+compile error turned into a SIGSEGV, or a silent wrong read where the page is mapped. Boxed reads
+go through `boxed_payload`; Result reads bind both halves. `tag()` went at 6.6.2 for the mirror
+reason: it meant `load64(t)` before the flip and `return t;` after, so on a box it silently
+returned the POINTER. A name whose meaning changed is retired, not redefined; a name whose
+meaning held (`tagged_new`) keeps it. A call to either is `undefined function`, and the
+binary is refused.
+
+See CHANGELOG [6.6.2] and cyrius docs/development/ecosystem-migration-6.6.2.md; the value form
+is `tagged_unions` in ecosystem and `tagged_unions_v58x` in language/features.
 
 [[entries]]
 name = "x86_macos_real_threads_and_async_await_readable_ms_everywhere_v6619"
