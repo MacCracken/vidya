@@ -504,17 +504,24 @@ name = "compiler_architecture"
 description = "How the cycc compiler is structured: modules, passes, layout (high-level)"
 category = "cyrius"
 ---
-MODULES (included by src/main.cyr):
-    common/util.cyr  — state accessors, helpers
-    common/ir.cyr    — IR opcode definitions and walker
-    backend/x86/*    — x86_64 emit, jump, fixup
-    backend/aarch64/*— AArch64 emit, jump, fixup
-    backend/macho/*  — Mach-O object/exec emission
-    backend/pe/*     — Windows PE/COFF emission
-    backend/cx/*     — cyrius-x bytecode backend
-    frontend/lex.cyr — tokenizer
-    frontend/parse/* — parser + codegen (split: types/expr/decl/ctrl/fn)
-    frontend/ts/*    — TypeScript-syntax accept layer
+MODULES (included by src/main.cyr and the 6 other per-target forks):
+    common/util.cyr          — state accessors, helpers, caps
+    common/ir.cyr            — IR opcode definitions and walker
+    common/syscall_xlat.cyr  — GENERATED syscall translation table
+    backend/x86/*            — x86_64 emit, jump, fixup, decode, float/SIMD
+    backend/aarch64/*        — AArch64 emit, jump, fixup
+    backend/macho/*          — Mach-O object/exec emission
+    backend/pe/*             — Windows PE/COFF emission
+    backend/cx/*             — cyrius-x bytecode backend
+    backend/js/*             — TS/TSX -> JS emitter (`--emit-js`)
+    backend/common/          — runtime.cyr, tokens.cyr, env.cyr (shared
+                               by every fork)
+    frontend/lex.cyr         — tokenizer
+    frontend/lex_pp.cyr      — preprocessor (include / ifdef / derive /
+                               macros)
+    frontend/parse.cyr + parse_{ctrl,decl,expr,fn,types}.cyr
+                             — parser + codegen
+    frontend/ts/*            — TypeScript-syntax lexer + parser
 
 COMPILATION FLOW:
     1. Read source (stdin or file) into input buffer
@@ -548,12 +555,17 @@ OPTIMIZATION PIPELINE (CYRIUS_IR=3):
     - DSE (dead-store elimination)
     - Fixed-point driver (re-runs passes until no further changes)
 
-HEAP REGIONS ARE FIXED — NOT MMAP'D ON DEMAND. cycc reserves a
-multi-MB heap at brk; every region (preprocess_out, codebuf,
-tok_*, fn_*, etc.) is at a hardcoded offset within it. There's
-no allocator at the compiler level. If a project crosses a cap
-(preprocessor output, codebuf, output_buf, fn table), the
-compile errors out with a clear message and a tip.
+MOST OF THE COMPILER'S MEMORY IS A FIXED brk/mmap MAP (102 regions,
+`sh tests/gates/memory/heapmap.sh`), BUT THE LARGE TABLES GROW. fn
+tables double to 131072, var tables to 1,048,576, the fixup table to
+64M entries; codebuf is an off-heap 8 MiB alloc growing +8 MiB to 64
+MiB (cx: a fixed 512 KiB region); the output image is a lazily-mapped
+off-heap 1 GiB alloc; fn side tables and the string-intern index are
+alloc'd on first use. A cap that is still fixed (preprocessed source
+24 MB, identifier pool 8 MiB, tokens 4,194,304, string data 2 MiB,
+struct definitions 1024) errors out with a message naming it.
+When an agent proposes "trim the fixture to fit", reject it: grow
+the compiler.
 
 [[entries]]
 name = "development_loop"
@@ -632,10 +644,13 @@ CURRENT LIMITATIONS (active — work around these):
    a closure capturing a local returns 42). See features.cyml
    `closures_v637_v638`.
 
-6. LARGE `var buf[N]` EXHAUSTS OUTPUT BUFFER: Anything over ~4 KB
-   in binary data should be alloc()'d at runtime, not declared as
-   `var buf[N]` (which writes N zeros into the ELF). Use
-   `var buf = 0; fn init() { buf = alloc(N); }`.
+6. LARGE `var buf[N]` BLOATS THE BINARY (it no longer exhausts the
+   output buffer, which is a 1 GiB off-heap alloc): a top-level `var
+   buf[N]` writes its zero bytes into the ELF — N×8, since at top level
+   it is N slots (item 8). Measured 6.6.20: `var buf[200000]` gives a
+   1,604,448 B binary that runs, and cycc warns `large static data
+   (1600000 bytes)` once total static data passes 128 KB. Prefer
+   alloc() for big buffers: `var buf = 0; fn init() { buf = alloc(N); }`.
 
 7. ENUM INIT ORDERING: Enum init runs BEFORE gvar init in
    main.cyr. If you modify the compiler, do NOT reorder these —
@@ -673,17 +688,19 @@ CURRENT LIMITATIONS (active — work around these):
     cycc warns (`in a kernel build the initializer of 'x' runs
     after the top-level program`).
 
-11. PREPROCESSOR OUTPUT CAP: Expanded source hard-capped (current
-    cap surfaces as a clear error message). The right fix is
-    almost always to grow the cap, not trim the program.
+11. PREPROCESSOR OUTPUT CAP: Expanded source is capped at 24 MB
+    (v6.5.40; the cap surfaces as a clear error message). The
+    right fix is almost always to grow the cap, not trim the
+    program.
 
-12. ELF / OBJECT OUTPUT CAP: Generated binary hard-capped via
-    `EMITELF_USER` / `EMITELF_SHARED` / `EMITELF_OBJ` filesz
-    checks. Same grow-the-cap rule applies.
+12. ELF / OBJECT OUTPUT CAP: the output image is a 1 GiB off-heap
+    alloc on all 7 drivers (v6.4.51/.52; was a 16 MB heap region),
+    still bounded by the `EMITELF_*` filesz checks. Same
+    grow-the-cap rule applies.
 
-13. CODEBUF CAP: Generated machine code hard-capped. If a future
-    consumer crosses this, it gets the standard heap-reshuffle
-    treatment.
+13. CODEBUF CAP: generated machine code is an off-heap 8 MiB alloc
+    that grows +8 MiB to a 64 MiB ceiling (v6.4.49); cx keeps a
+    fixed 512 KiB region.
 
 14. CYRIUS `/` AND `%` ARE SIGNED: The `/` operator lowers to
     `idiv`, not `div`. For u64 operations where the top bit is
