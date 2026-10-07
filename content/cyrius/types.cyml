@@ -991,12 +991,13 @@ sized entirely by their descriptor.
 
 [[entries]]
 name = "compiler_structural_facts"
-description = "Live structural facts at cycc 6.6.1: heap map, growable-table caps, identifier pool, fixup table, IR opcode set, backend modules, and the 7 per-target main forks — the numbers the design entries above are written against. NOTE: the entry NAME is deliberately version-less; it was `compiler_structural_facts_v6510` while describing 6.5.72, so the name itself had gone stale"
+description = "Live structural facts at cycc 6.6.19 (the last tag; re-derived at the 6.6.20 closeout): heap map, growable-table caps, identifier pool, fixup table, IR opcode set, backend modules, and the 7 per-target main forks — the numbers the design entries above are written against. NOTE: the entry NAME is deliberately version-less; it was `compiler_structural_facts_v6510` while describing 6.5.72, so the name itself had gone stale"
 category = "cyrius"
 ---
 The design entries in this file describe MECHANISM. This entry pins the
 NUMBERS, so a reader can tell which caps a pattern was written against.
-Refreshed at v6.6.1 (2026-09-08); re-verify against live code before
+Refreshed at the 6.6.20 closeout (2026-10-06) against cycc 6.6.19, the last
+tag (it sat at 6.6.1 for eighteen releases); re-verify against live code before
 relying on any of it (`sh tests/gates/memory/heapmap.sh`, `src/main.cyr`
 heap map, `src/common/util.cyr` accessors, `src/common/ir.cyr`).
 
@@ -1014,10 +1015,12 @@ not enough — derive it THE WAY THE GATE DOES, or run the gate.
 
 == TOOLCHAIN ==
 
-  cycc 6.6.1 — x86_64 self-host 1,247,608 B (.text 1,090,832),
-  byte-identical. Built with CYRIUS_DCE=1 on ELF it is 1,210,744 B —
-  dead code is genuinely REMOVED since v6.5.72, and that binary
-  reproduces the normal one byte-identically.
+  cycc 6.6.19 — x86_64 self-host 1,586,184 B (.text 1,405,464),
+  byte-identical (the 6.6.20 slot-open build is the same size and
+  differs only in its version string). Built with CYRIUS_DCE=1 on ELF
+  it is 1,549,320 B — dead code is genuinely REMOVED since v6.5.72, and
+  that binary reproduces the normal one byte-identically. Dead-code
+  floor: 73 unreachable fns / 36,937 B (cycc's own `note:` line).
   ⚠ On **PE and x86 Mach-O**, CYRIUS_DCE=1 NOP-fills but does NOT
   compact (v6.6.1): both reach a live import/stub table through a
   rip-relative disp32 the compaction pass cannot repair, and both
@@ -1025,12 +1028,17 @@ not enough — derive it THE WAY THE GATE DOES, or run the gate.
   v6.6.0 those targets emitted a binary that faulted 0xC0000005 before
   main (PE) / SIGSEGV'd on real Intel-Mac hardware.
   seed        — bootstrap/asm 29,024 B → cybs → cycc, byte-identical.
-  check.sh    — 240 passed / 0 failed.
-  self_compile 731-734 ms. ⚠ Still two-figures-worth of spread: the
-  run-to-run noise on this box is WIDER than the release-over-release
-  delta, so a single number from this series carries no signal.
-  Corpus: 301 tests/tcyr/**/*.tcyr (68 of them in crossos/), 102
-  lib/*.cyr, 144 shell gates under tests/gates/ in 8 buckets — DERIVE
+  check.sh    — 192 of 192 shell gates produced a result, 0 failed, 2
+               named agnos-parity SKIPs (the 6.6.19 release gate).
+  self_compile 923 ms at the 6.6.19 gate (B0b's string-intern index:
+  −6.5 % in a same-box A/B against 6.6.18). ⚠ Compare only same-box
+  interleaved A/B runs: the run-to-run noise on one box is WIDER than
+  a typical release-over-release delta.
+  Corpus: 482 tests/tcyr/**/*.tcyr (197 of them in crossos/), 106
+  lib/*.cyr, 85 programs/*.cyr, 372 shell gates under tests/gates/ in
+  8 buckets (codegen 47, concurrency 8, diagnostics 32, frontend 61,
+  ir-opt 7, memory 19, platform 62, toolchain 136); api-surface 5,827
+  (`grep -c . docs/api-surface.snapshot`) — DERIVE
   that count with `find tests/gates -name '*.sh' | wc -l`, never
   increment it by hand; the number has been wrong in three separate
   docs by exactly that mechanism.
@@ -1038,8 +1046,8 @@ not enough — derive it THE WAY THE GATE DOES, or run the gate.
   (Windows PE) · pi (aarch64), all SELFHOST_OK + crossos LIBTEST_OK on
   REAL hardware. ⚠ The `vr01_` filename prefix was retired at v6.5.11 —
   the selector is the `crossos/` DIRECTORY now.
-  Backlog: 0 open issues · 3 proposals · 387 archived. The open queue
-  hit ZERO at v6.6.1 for the first time in the cycle.
+  Backlog: 0 open issues · 2 proposals · 473 archived issues (+34
+  archived proposals). The open queue first hit ZERO at v6.6.1.
 
 == HEAP MAP: 102 REGIONS, 0 OVERLAPS ==
 
@@ -1058,7 +1066,8 @@ side tables moved to lazy alloc and their offsets became FREED markers)
 unit-suffixed entries it had been silently dropping). Same number by a
 DIFFERENT route — the pre-.75 100 and today's 100 are not the same set.
 
-It held at 100 across most of v6.5.x and is **102 at v6.6.1** — and the
+It held at 100 across most of v6.5.x and is **102 since v6.6.1**
+(unchanged at 6.6.19 / 6.6.20: `heapmap.sh` → 102 regions, 0 warnings) — and the
 stability is NOT an accident: v6.5.0's two visibility side tables
 deliberately lazy-alloc at their table's max cap instead of taking a heap
 band, so they add no map line, no layout change, and therefore no two-step
@@ -1070,7 +1079,9 @@ table (see the exhaustive_match entry's CURRENCY note).
 Four families are grow-on-demand; the heap-map offset is the INITIAL
 base, valid only under the first cap.
 
-  fn table       init 8192, `_fnt_grow` doubles, CEILING 131072
+  fn table       init 2048 (`_fnt_cap`, v6.5.51 — half the fixed
+                 4096-slot hash regions; was 8192), `_fnt_grow` doubles,
+                 CEILING 131072
                  (v6.5.40 raised it from 32768; the old "2-byte hash
                  slots store fi+1, so fi+1 <= 65535" rationale below is
                  HISTORY — the slots were widened, which is what let the
@@ -1089,8 +1100,9 @@ base, valid only under the first cap.
                  fn_regalloc, fn_ret_sid, fn_variadic, fn_flags,
                  fn_var_bytes) were left behind at fixed 8192-slot bands
                  by the v6.2.0 migration — index 8192 aliased index 0 of
-                 the neighbour. v6.4.75 gave each a lazy `alloc(32768*8)`
-                 on first write, so they can never desync the grow chain.
+                 the neighbour. v6.4.75 gave each a lazy alloc on first
+                 write, so they can never desync the grow chain; today
+                 they are `alloc(131072*8)`, sized to the ceiling.
 
   var family     7 vcnt-indexed parallel tables (var_noffs, var_sizes,
                  var_types, gvar_byte_off, enum_const_val, gvar_initval,
@@ -1098,11 +1110,18 @@ base, valid only under the first cap.
                  at 1,048,576 entries. v6.3.0.
 
   fixup table    0x107B000, 1,048,576 entries x 16 bytes = 16 MB init;
-                 `_fixup_base` / `_fixup_cap` relocate + double. v6.2.0.
+                 `_fixup_base` / `_fixup_cap` relocate + double (v6.2.0)
+                 to a runaway ceiling of 67,108,864 entries (64M = 1 GiB).
+                 ⚠ The 85 % capacity warning still divides by 1,048,576,
+                 the INITIAL cap, not the ceiling.
 
-  codebuf        0x41A000, 3 MB init; EB relocates off-heap 2x to a
-                 64 MiB ceiling. The cx backend is the exception — a
-                 FIXED 512 KiB region at 0x54A000 that never grows.
+  codebuf        off-heap `alloc(8388608)` (8 MiB) on the six native
+                 forks, growing in +8 MiB LINEAR steps (v6.4.49; was 2x)
+                 to a 64 MiB ceiling (`_codebuf_grow`). 0x41A000 [3 MB]
+                 in the heap map is the pre-.49 base and is only still
+                 used by the cx fork. The cx backend's OWN code region
+                 is the exception — a FIXED 512 KiB at 0x54A000 that
+                 never grows.
 
 == FIXED CAPS ==
 
@@ -1150,12 +1169,22 @@ base, valid only under the first cap.
                                type_id_encoding entry.
   enums                        1024 enum decls, 1024 per-enum variant
                                counts (v5.8.24; stdlib alone was at 299).
-  input_buf                    1 MB raw stdin.
-  output_buf                   16 MB ELF output.
+  input_buf                    24 MB at 0x7400000 (`_SRCB`, v6.5.39) —
+                               raw stdin + the preprocessor's working
+                               buffer; its cap must equal preprocess_out's.
+  output image                 NOT a heap region any more: an off-heap,
+                               lazily-mapped `alloc(1073741824)` (1 GiB,
+                               `_output_base` / `_output_cap`) on all 7
+                               drivers since v6.4.51/.52. The in-heap
+                               16 MB output_buf band is retired.
+  string data                  2 MiB (2,097,152 B; warns at 85 %).
+  string-intern index          6.6.19 (B0b): a lazily `alloc`'d FNV-1a
+                               index over the pool's segments — off the
+                               map, adds no region.
 
 == IR OPCODE SET (src/common/ir.cyr, `enum IROp`) ==
 
-63 opcodes, numbered 0..99 with deliberate gaps so a class can grow
+65 opcodes, numbered 0..101 with deliberate gaps so a class can grow
 without renumbering:
 
   0-9    values      NOP, LOAD_IMM, LOAD/STORE_LOCAL, LOAD/STORE_GLOBAL,
@@ -1174,6 +1203,8 @@ without renumbering:
   90-99  misc        RAW_BYTE, MOV_RDX_RAX, MOV_RAX_RDX, XOR_AA,
                      STORE_PARM, ADD_IMM_X1, RAX_CLOBBER, RAW_EMIT,
                      ELIMINATED (LASE-eliminated, NOP-filled)
+  100-101            MOV_R3_RAX / MOV_RAX_R3 (three-value returns,
+                     v6.5.21)
 
 == BACKEND MODULES (src/backend/) ==
 
@@ -1187,7 +1218,11 @@ without renumbering:
   js/        emit.cyr — TS/TSX -> JS (`cycc --emit-js`)
   macho/     emit.cyr — Mach-O container (arm64 + x86_64)
   pe/        emit.cyr — Windows PE container
-  common/    tokens.cyr, runtime.cyr — shared across every fork
+  common/    env.cyr (the env reader shared by every fork incl. cx,
+             6.6.10), runtime.cyr, tokens.cyr — shared across every fork
+  plus src/common/syscall_xlat.cyr — GENERATED by
+  programs/gen_syscall_xlat.cyr from the two Linux syscall tables,
+  gated by tests/gates/platform/syscall_xlat_generated.sh
 
 == PER-TARGET FORKS: 7 ==
 
