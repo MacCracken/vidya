@@ -2576,26 +2576,40 @@ WHY THIS MATTERS:
 
 [[entries]]
 name = "cap_raises_v51118_v51119"
-description = "Compiler capacity caps and their history. CURRENT (v6.4.76+): identifier pool 524288 B (512 KB), fn_table init 8192 growable to a 32768 hard ceiling. The v5.11.18/.19 raises this entry was written for (131072 → 262144 / 4096 → 8192) are HISTORY — see the two SUPERSEDED blocks."
+description = "Compiler capacity caps and their history. CURRENT (6.6.20): fn_table init 2048 growable to a 131072 hard ceiling, identifier pool 8 MiB at 0xEC00000, var_table to 1,048,576, fixup table to 64M entries, preprocessed source 24 MB. The v6.4.76 block and the v5.11.18/.19 raises this entry was written for (131072 → 262144 / 4096 → 8192) are HISTORY — see the SUPERSEDED blocks."
 category = "cyrius"
 ---
-CURRENT CAPS (v6.4.76 — READ THIS BLOCK, the rest is history):
+CURRENT CAPS (6.6.20 — verify against src/common/util.cyr
+`_capacity_warnings`, which tests/gates/memory/capacity_meter_denominators.sh
+derives; READ THIS BLOCK, the rest is history):
+
+    fn_table:           init 2048 (v6.5.51), doubles, hard ceiling 131072
+                        (v6.5.40; `error: too many functions (max 131072)`)
+    identifier pool:    8,388,608 B (8 MiB) at 0xEC00000 (v6.5.40)
+    var_table:          init 8192, doubles to a hard 1,048,576 (v6.3.0)
+    fixup_table:        init 1,048,576, doubles to a 67,108,864-entry
+                        runaway ceiling (the warning still divides by
+                        1,048,576)
+    string_data:        2,097,152
+    code buffer:        8 MiB base, +8 MiB steps, 64 MiB ceiling (v6.4.49)
+    preprocessed source: 24 MB (`_SRC_CAP` = 25,165,824, v6.5.40)
+
+WARNING THRESHOLDS (85% — integer `count * 100 / cap >= 85`):
+    fn_table warn at:           111,412 fns   (85% of the 131072 CEILING,
+                                               not of the live _fnt_cap)
+    identifier pool warn at:    7,130,317 B   (85% of 8,388,608)
+    LEX hard error at:          np + need >= 8,388,336 (lex.cyr; 272 B of
+                                slack for the inner write loop)
+
+SUPERSEDED v6.4.76 (this was the CURRENT block until 6.6.20, 4-16x
+stale by then):
 
     fn_table:           8192 INITIAL, doubles to a 32768 hard ceiling
     identifier pool:    524288 bytes (512 KB) at heap 0x60000-0xE0000
     var_table:          8192
     fixup_table:        1048576
-    string_data:        2097152
-    code buffer:        67108864 (64 MiB, growable off-heap since v6.4.49)
-
-  Verify against `src/common/util.cyr::_capacity_warnings` and the
-  `CYRIUS_STATS=1` meter in `src/main.cyr` — those are the live numbers.
-
-WARNING THRESHOLDS (85% — integer `count * 100 / cap >= 85`):
-    fn_table warn at:           27853 fns    (85% of the 32768 CEILING,
-                                              not of the live _fnt_cap)
-    identifier pool warn at:    445645 bytes (85% of 524288)
-    LEX hard error at:          np + need >= 524016 (the guard in lex.cyr)
+    fn_table warn at 27853 fns; identifier pool warn at 445645 bytes;
+    LEX hard error at np + need >= 524016.
 
 SUPERSEDED v6.4.75 / v6.4.76 — what actually changed, and why the old
 numbers here were dangerous:
@@ -2610,12 +2624,15 @@ numbers here were dangerous:
       corruption started. It now divides by the fixed 32768 ceiling.
     * v6.4.76: the identifier pool doubled 256 KB → 512 KB IN PLACE
       (0x60000-0xE0000, into the free 0xA0000-0x100000 band). The pool
-      END must stay <= 0x100000 — above that physical ceiling the
-      compiler HANGS rather than erroring. LEX thresholds moved
-      261872 → 524016.
-    * NOTE ON "8192": most surviving 8192 references in the tree are
-      CORRECT — it is still the fn_table INITIAL cap (and the var_table
-      cap outright). A blanket 8192 → 32768 sweep INTRODUCES errors.
+      END had to stay <= 0x100000 — above that physical ceiling the
+      compiler HUNG rather than erroring. LEX thresholds moved
+      261872 → 524016. (HISTORY since v6.5.40 moved the pool out of
+      that band entirely, to 8 MiB at 0xEC00000.)
+    * NOTE ON "8192" (v6.4.76): most 8192 references in the tree were
+      then CORRECT — it was the fn_table INITIAL cap (and the var_table
+      cap outright). A blanket 8192 → 32768 sweep would have INTRODUCED
+      errors. Today 8192 is the var_table INITIAL cap only; the
+      fn_table starts at 2048.
 
 SUPERSEDED v6.2.0 (Phase 0):
     The fn-tables (and both fn hashes) became GROWABLE — when the count
