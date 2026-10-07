@@ -5263,3 +5263,42 @@ run by their System32 path.
 
 GATES: see CHANGELOG [6.6.20] — each bullet names its test. Compiler side: the escape flag
 `_fn_local_addr` + `_fnt_bvcp` (RPF-03), `_cont_vec` (RPF-01), `PP_PUSH_LEVEL` / `PP_MACRO_SLOT`.
+
+[[entries]]
+name = "traits_checked_v670"
+description = "cyrius 6.7.0 traits: `trait` declarations with required and default methods, `impl X for T` checked against the trait, inherent `impl T {}`, the `T_Trait_m` qualified names and the collision rules, a typed `self` with arithmetic refused, and `var q: T = p` copying through a `*T`."
+category = "cyrius"
+tags = ["v6.7.0", "traits", "impl", "methods", "self", "dispatch", "ADR-007"]
+---
+DECLARE: `trait Show { fn show(self): i64; fn twice(self): i64 { return self.show() * 2; } }` — a
+member ending in `;` is REQUIRED, one with a body is a DEFAULT. Only `fn` members. A trait or a member
+declared twice is an error. Traits may be declared above or below their impls, in the declaration
+section (before the first top-level statement), like `struct`.
+
+IMPLEMENT: `impl Show for Point { fn show(self): i64 { .. } }` is CHECKED — an undeclared trait, a
+method the trait does not declare, a different parameter count and a missing required method are
+compile errors naming the trait. A default the impl does not define is instantiated for Point (parsed
+from the trait's tokens with Point as the type; `self.show()` inside it calls Point's show).
+Inherent methods with no trait: `impl Point { fn new(x, y): Point { .. } fn norm1(self) { .. } }`.
+
+NAMES (static dispatch, ADR-004/ADR-007): a method is `Point_m`; every trait method is ALSO
+`Point_Show_m`. Two traits giving Point an `m` make the plain `Point_m` / `p.m()` ambiguous — refused,
+naming a qualified spelling; call `Point_A_m(p)`. Inside an impl/default of A, `self.m()` means A's.
+An inherent `m` keeps `Point_m` (so `p.m()` picks it); the trait's is `Point_Trait_m`.
+
+SELF: an untyped `self` in an impl is a `*T` — `self.x` reads and WRITES the receiver, and
+`T_m(o)`, `T_m(&o)`, `o.m()` agree (before 6.7.0 `T_m(o)` on an 8-byte struct passed the value and
+the method faulted). ⛔ Arithmetic on an untyped `self` (`self + 8`, `self[i]`, `self += n`) is
+REFUSED: a `*T` steps sizeof(T), so the old `load64(self + 8)` idiom would have silently changed
+meaning. Write `self.field`, or declare `self: *T` to step whole elements, or copy `var a = self;`
+for a plain address.
+
+COPY: `var q: T = p;` with `p: *T` copies `*p` at every size (it stored the pointer at <= 8 B and
+aliased at > 8 B for a `*T` local); `var q: *T = p;` aliases.
+
+CHAINS: `b.v.sum()`, `p.v.sum()`, `mk(3).v.sum()`, `c.w.v.scale(2);` — a method on a nested inline
+field takes the field's address as `self`. `var u = s.clone();` types u from an 8-byte struct result.
+
+Trait objects stay the `lib/trait.cyr` library pattern (no compiler `dyn` — an open question).
+GATES: tests/gates/frontend/traits_checked.sh, impl_self_typed.sh; tests/tcyr/crossos/traits_checked,
+impl_self_typed, impl_inherent, struct_from_pointer_copies, method_on_nested_field. ADR-007.

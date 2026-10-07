@@ -6020,3 +6020,26 @@ its loop); a scaling gate with RATIO rows (N vs 2N < 3.0x; 1.9 MB before vs afte
 old scan fails (3.8x / 13.8x) and a mutant restoring it fails (3.7x / 11.6x). Measure scaling as a
 ratio on one box, never an absolute time. CHANGELOG [6.6.19] (Compiler — B0b);
 `tests/gates/frontend/string_intern_scale_linear.sh`.
+
+[[entries]]
+name = "trait_names_and_scratch_at_gnpos_v670"
+description = "Two compiler gotchas met building 6.7.0 traits: a lookup name may be BUILD_METHOD_NAME's uncommitted scratch AT GNPOS (interning there overwrites it), and a lookup can run with the cursor far from the call (pre-scans), so a FINDFN-side diagnostic has no site."
+category = "cyrius"
+tags = ["v6.7.0", "traits", "FINDFN", "name-pool", "diagnostics"]
+---
+1. SCRATCH AT GNPOS. BUILD_METHOD_NAME writes `T_m` at GNPOS WITHOUT committing (lookup only). Any
+helper that INTERNS at GNPOS (`_tr_join`, `_tl_use_alias`'s pattern) while that name is live
+overwrites it: the ambiguity diagnostic first printed `'P_A_A_A_'` for `P_size`. Rule: inside a
+FINDFN path, build temporary names in scratch FAR past GNPOS (6.7.0's `_tr_scratch(.., off)` at
++4096 / +8192) and intern only in pass 1, where nothing is pending.
+
+2. NO SITE IN FINDFN. A name is looked up from pre-scans and probes with the cursor elsewhere (a
+direct `P_size(p)` was first looked up with GTI in lib/syscalls_linux_common.cyr). An error raised
+inside FINDFN's miss path therefore reports the WRONG position, and a "cursor is right after the
+name" heuristic misses the direct call. 6.7.0 reports the method form at its call (the cursor IS
+past the method name there) and adds the explanation to the undefined-function report for the
+direct form (`_tr_undef_note`). CHANGELOG [6.7.0].
+
+3. ONE PRE-SCAN beats order-dependent registration: a trait declared below its impl, and a name
+collision with an impl further down, are only knowable before pass 1 registers the first method —
+`_tr_prepass` walks the token stream once (brace depth 0) and records every trait and impl.
