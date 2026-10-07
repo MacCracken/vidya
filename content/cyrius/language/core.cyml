@@ -620,9 +620,10 @@ CURRENT LIMITATIONS (active — work around these):
    (loads the fn ptr from the env + passes the env as a hidden
    first arg) whether or not the closure captured. Capture is
    BY VALUE (a later mutation of the captured local does not
-   change the closure's copy). CAVEAT: capturing closures are
-   NOT yet supported on Windows PE (hard error; non-capturing
-   ones are fine). See features.cyml `closures_v637_v638`.
+   change the closure's copy). Capturing closures work on
+   Windows PE too (since v6.4.26; re-verified 6.6.20 under wine:
+   a closure capturing a local returns 42). See features.cyml
+   `closures_v637_v638`.
 
 6. LARGE `var buf[N]` EXHAUSTS OUTPUT BUFFER: Anything over ~4 KB
    in binary data should be alloc()'d at runtime, not declared as
@@ -657,8 +658,13 @@ CURRENT LIMITATIONS (active — work around these):
    covers fn-local slices — see features.cyml's slice_type_v58x
    entry.
 
-10. INCLUDE IN KERNEL MODE: Not supported. `kernel;` mode blocks
-    require single-file source or external concatenation.
+10. ~~INCLUDE IN KERNEL MODE~~ works: a `kernel;` source may
+    `include` lib files (re-verified 6.6.20: `kernel;` +
+    `include "lib/string.cyr"` + `strlen` builds the ELF32
+    multiboot image). The live kernel-mode trap is different: a
+    global's initializer runs AFTER the top-level program, and
+    cycc warns (`in a kernel build the initializer of 'x' runs
+    after the top-level program`).
 
 11. PREPROCESSOR OUTPUT CAP: Expanded source hard-capped (current
     cap surfaces as a clear error message). The right fix is
@@ -683,19 +689,14 @@ CURRENT LIMITATIONS (active — work around these):
     See the PRECEDENCE block in the `syntax` entry for the full
     tier table and the C-programmer trap list.
 
-20. A FLOAT/BIT INTRINSIC CALL CANNOT FLANK A TERM OPERATOR:
-    `a * f64_from(2)` and `f64_from(2) * a` are both PARSE
-    ERRORS ("unexpected f64_from" / "expected ';', got '*'"),
-    and the same holds for `/ % << >> >>>`. The `f64_*`, `f32_*`,
-    `f64v_*`, `iv_*`, `bitget/bitset/bitclr`, `u128` and
-    `ret2/rethi` intrinsics are dispatched at the head of
-    PARSE_TERM and `return` before the term loop, so they neither
-    continue into `*` nor are recognised by the factor tier below.
-    `+ - & | ^` and the comparisons ARE fine, and `load*` /
-    `syscall` / `sizeof` are fine everywhere.
-    WORKAROUND: parenthesize — `a * (f64_from(2))` — or bind to a
-    var first. Confirmed live at v6.4.82 (this is a parser gap,
-    not a design choice).
+20. ~~A FLOAT/BIT INTRINSIC CALL CANNOT FLANK A TERM OPERATOR~~
+    — RESOLVED v6.4.83. `a * f64_from(2)` / `f64_from(2) * a`
+    parse and compute (re-verified 6.6.20: with `a: f64 = 3`,
+    `a * f64_from(2)`, `f64_from(2) * a` and `a / f64_from(3)`
+    give 6, 6 and 1). The remaining trap is typing: an UNTYPED
+    `var a = f64_from(3)` is an integer, so annotate `: f64`
+    (cycc warns `integer arithmetic with an f64 right operand`).
+    See features.cyml `f64_named_type_and_operators` (PARSER NOTE).
 
 21. STRING LITERAL → `Str` COERCES ONLY AT A `: Str` PARAM: passing
     a bare `"..."` to an UNTYPED param hands over a raw cstr
@@ -714,9 +715,11 @@ GOTCHAS (expected behavior, not bugs):
     a local first.
 
 16. OPERATOR OVERLOADING + ALLOC: `Type_add(a, b)` works for value
-    types. For pointer-based types (Str), the function receives
-    the pointer value. For stack-allocated structs (Point), it
-    receives the first field value.
+    types. A struct operand over 8 bytes arrives as its ADDRESS
+    (an untyped `fn Pt_sub(a, b)` sees `a == &p`, measured
+    6.6.20); one of 8 bytes or less arrives as its value.
+    Declaring the parameter `a: Pt` gives the callee its own copy
+    (6.6.16). A Str arrives as its pointer.
 
 17. SUB-µs BENCHMARKS: `bench_start`/`end` has ~120ns
     clock_gettime overhead + 6ns fncall dispatch. For operations
