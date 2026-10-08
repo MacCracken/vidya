@@ -5502,3 +5502,63 @@ LIMITS: a call in a branch is never a tail call (deep recursion through one grow
 explicit #inline fn holding one keeps the "control flow" warning.
 GATES: tests/gates/frontend/if_expr_checked.sh; tests/tcyr/crossos/if_expr_values.tcyr. CHANGELOG [6.7.4].
 
+
+[[entries]]
+name = "loop_and_do_while_v675"
+description = "cyrius 6.7.5 B5: `loop { … }` (contextual — a keyword only as `loop {` at a statement's start) and `do { … } while (c);` (`do` fully reserved); `continue` in a do goes to the condition, the do body is its own scope, both run in a const fn."
+category = "cyrius"
+tags = ["v6.7.5", "loop", "do while", "B5", "contextual keyword", "const fn"]
+---
+SYNTAX: `loop { … }` is `while (1) { … }` written plainly — NO condition is emitted or tested at its top
+(a `while (1)` tests its constant every pass); `break` / `return` are its only exits. `do { … } while (c);`
+runs the body once, then tests `c` after every pass; the trailing `;` is required. Both are statements:
+no value, and `break` takes none (`break 5;` is a syntax error).
+
+CONTINUE: in a `do` it goes to the CONDITION (as in C): `do { i += 1; if (i < 5) { continue; } } while (i < 3);`
+stops at 3. In a `loop` it goes to the top.
+
+SCOPE: the do body is its own scope (every braced body is, since 6.6.17) — the condition cannot see a `var`
+declared inside: `do { var t = next(); } while (t != 0);` is "undefined variable 't'". Declare it before.
+
+KEYWORDS: `do` is a full reserved word (`fn do()`, `var do`, a field `do` refused by name; 0 uses existed).
+`loop` is CONTEXTUAL, like `kernel` (v5.8.45): only `loop {` at the start of a statement is the loop;
+`var loop = 1; while (loop == 1) { … loop = 0; }`, a fn / field / struct named loop all compile (215 such
+sites in 6 repos at 6.7.5). An identifier at statement start is never followed by `{`, so they never meet.
+It is in neither reserved table; `[embed] loop` is a legal name.
+
+PLACES: anywhere a `while` goes — fns, closures, generic instances, top level (entry code). A switch / match
+inside is left by its own `break`. A tail call inside keeps its `jmp` unless the loop takes a frame address
+(a do's condition included). An if-expression branch refuses either by name (one expression, not a statement).
+CONST FN: both are in the pure subset, run under the 10,000,000-step budget (an endless `loop` in a const
+context is refused by name).
+GATES: tests/gates/frontend/loop_do_checked.sh (+ mutation ledger); tests/tcyr/crossos/loop_do_values.tcyr.
+CHANGELOG [6.7.5].
+
+[[entries]]
+name = "compound_assignment_every_lvalue_v675"
+description = "cyrius 6.7.5 B8: `x OP= e` with eleven operators (`>>>=` new) on every lvalue — fields at any depth, slices, *T, self, captures, `*p`, classic-for steps; the address is taken ONCE, BEFORE the right-hand side; OP= on a struct value, a bool, a const or a call result's field is refused by name."
+category = "cyrius"
+tags = ["v6.7.5", "compound assignment", "+=", ">>>=", "field", "B8", "evaluation order"]
+---
+OPERATORS: `+= -= *= /= %= &= |= ^= <<= >>= >>>=` — `>>>=` (arithmetic shift) since 6.7.5, everywhere incl.
+a const fn. LVALUES: a variable, `a[i]`, a field at any depth (`p.x`, `o.i.b`, `a.next.v` through a `*T`
+field, `h.name.len` through a Str, a slice's `s.len`), through a `*T` local / param / global, `self: *T`, a
+closure capture, and `*p`. Also a classic-`for` step (`for (h.n = 0; h.n < 5; h.n += 1)` — a field or `*p`
+step takes plain `=` too, and a struct-valued field step copies the whole struct). Before 6.7.5 each of these
+was `expected '=', got '+'`.
+
+WIDTH / KIND: as reading the place — i8 / i16 / i32 load sign-extended and store at their width (wrap there);
+u8 / u16 / u32 / f32 FIELDS are full words until B7; `+= -= *= /=` on f64 / f32 are float ops with
+`x = x + e`'s warnings; `p += n` on a `*T` steps sizeof(T); `*p OP= v` is a WORD op like `*p`.
+
+ORDER ⚠: a compound assignment computes the lvalue's address ONCE, BEFORE the right-hand side (as `a[i] OP= v`
+always did); a plain `x.f = e` evaluates `e` first. They differ only when the RHS moves the lvalue:
+`GP.n += repoint();` updates the OLD object; `GP.n = GP.n + repoint();` reads the old, writes the new.
+
+REFUSED BY NAME: OP= on a STRUCT value (variable of any size, by-value param, global, struct-typed field) —
+it used to integer-operate on the FIRST WORD and never call an overloaded `T_add` (13 vs `a = a + b`'s 33):
+write `a = a + b`; a bool (its result is not a bool); a const / enum constant; a field of a call's result
+(`mk(3).n += 1` — a temporary). Handles keep pointer arithmetic (`*T`, pointer-mode struct vars, Str).
+NOT YET: OP= on a u128 or a SIMD vector variable is still first-word / no-carry (filed for Break 1).
+GATES: tests/gates/frontend/field_compound_checked.sh (+ mutation ledger); tests/tcyr/crossos/field_compound_values.tcyr.
+CHANGELOG [6.7.5].

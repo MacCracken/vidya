@@ -6216,3 +6216,39 @@ atom-only #derive value walk dropped every member after `A = 1 + 1`. Mirror the 
 5. A forward const read in an UNTAKEN arm (skip mode) must not be forced (false cycle) and must not be
 guessed (false accept): kind 4 = unknown, recorded and re-checked when every const is known.
 
+
+[[entries]]
+name = "new_loop_forms_and_lvalue_ladders_v675"
+description = "Gotchas met adding 6.7.5's loop / do and field compound assignment: every loop form must DECLARE its continue mode, reset the store-elimination tracker and emit the IR landing pad; a do's continue is a forward jump and its tail-call verdict comes after the condition; a contextual keyword needs a name test in every scanner keyed on token types; an address ladder must mirror the base resolver; struct-copy sources key on the statement terminator."
+category = "cyrius"
+tags = ["v6.7.5", "loop", "do while", "continue mode", "_efl_store_cp", "IR_NOP", "contextual keyword", "compound assignment", "for step"]
+---
+1. A NEW LOOP FORM must set three things itself — none is inherited: the continue mode (0x18F898; 0 = jump
+to top, 1 = the forward `_cont_open` / `_cont_close` chain — `_fnst_save` does not save it, so a loop that
+forgets it inherits an enclosing for's mode and `continue` jumps to the for's step: the 6.6.3 class); the
+x86 store-elimination tracker `_efl_store_cp = 0 - 1` at the back-edge target (else a reload of a variable
+stored just before the loop is skipped — v6.3.30); the IR_NOP landing pad under CYRIUS_IR (v5.6.14).
+6.7.5 put all three in one `_loop_open` shared by `loop` and `do`.
+2. `do … while`: `continue` must reach the CONDITION, emitted after the body — a forward jump (the C-style
+for's mechanism), never `jmp top`. The in-loop tail-call verdict (`_tcp_loop_end`) must be taken AFTER the
+condition: an `&local` in a do condition counts, and stamping before it keeps a `jmp` whose callee reads a
+freed frame (the 6.7.3 class).
+3. A CONTEXTUAL keyword (`loop`, like `kernel`) is an IDENT token, so every scanner keyed on statement token
+TYPES misses it: the statement dispatch (before the identifier path), the const-fn `_ce_stmt`, the #inline
+eligibility scan, the if-expression branch check (both runtime and const), the closure capture prescan (else
+an enclosing local named `loop` is captured), error recovery. `_TOK_IS_LOOP` (name + `{` next) is enough
+only where a statement start is KNOWN (the dispatch, the evaluator, the if-expression branch); a scanner that
+meets tokens in ANY position needs the positional `_TOK_IS_LOOP_AT` (previous token `;` `{` `}` or a case `:`)
+— position-blind, `for i in 0..loop {` / `match loop {` in a closure skipped the capture and read a GLOBAL
+`loop` (100 where 5 is right; the 6.7.5 review). A lexer-level rule would misfire on `struct loop {` and
+`var p = loop { 3, 4 };`.
+4. A compound field assignment's address ladder (rax) must make EXACTLY the decisions of
+`_resolve_field_base_addr` (cx boxing, pointer-mode globals, closure captures) — a divergence loads one place
+and stores another — and must NOT set `_fn_local_addr` (the address never escapes; setting it diverts every
+in-loop tail call in the fn).
+5. Struct-copy source recognisers (`_fsc_name` / `_fsc_call` / `_fsc_expr`) key on the statement terminator.
+A for STEP ends at `)`, not `;`: without the terminator threaded as a parameter, a struct-valued field step
+silently copies ONE word (the 6.6.20 class, for variables).
+6. cybs's per-fn reference ceiling fails SILENTLY: each feature added exactly one helper call to
+`_PARSE_STMT_IMPL` and `_ce_stmt`, and moved inline blocks (the `*p` store, field-store tails, the for-step
+replay) OUT into helpers — each touched giant fn ended with fewer references than before.
