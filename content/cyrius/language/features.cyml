@@ -21,7 +21,7 @@
 # take enum constants, bare or `Enum.NAME`; sizeof is a whole word; no cascade error.
 # v6.6.11 (2026-09-29): +1 entry string_literal_escapes_and_line_accounting_v6611 —
 # an unknown escape is a lex error, `\`+newline keeps its bytes, a newline inside a
-# string counts as a line (diagnostics were one line high per newline; CVE-55).
+# string counts as a line (diagnostics were one line high per newline; the multi-line string attribution bug).
 # Updated: enum_namespacing (the qualifier must name the variant's own enum — it was
 # ignored), sizeof_operator (whole type names; mulh64 whole word; `return sizeof(..)`),
 # compile_time_assert_v6610 (no-`;` assert ends at its line; failing asserts report all).
@@ -45,7 +45,7 @@
 # at top level; the source must be declared ABOVE), unterminated_string_literal_is_an_error_v6612,
 # aarch64_xattr_statx_rlimit_fchown_wrappers_and_native_region_exemption_v6612 (the 1000+N
 # alias band again; no raw-literal warning inside an aarch64-only region; the 3-arg kill arity
-# warning is back on x86-Linux), cx_tail_calls_and_cxvm_guest_traps_v6612 (CVE-58).
+# warning is back on x86-Linux), cx_tail_calls_and_cxvm_guest_traps_v6612 (the cxvm host-memory bug).
 # Updated: multi_width_types (a narrow variable is written and read at its width on the `for`
 # step and compound-operator paths too; the zero-initialised narrow-global clobber is still
 # open), generics_monomorphization_v639_v6310 (the generic struct literal and the bare
@@ -514,7 +514,7 @@ on cx r0-r5. Before 6.6.7 only rax was kept, so a defer that called
 anything could zero an Ok payload. Since 6.6.15 the 64-byte area those
 registers are saved in is CLEARED before it is released (+74 B x86_64,
 +16 B aarch64 per fn with a defer or secret var): it used to outlive a
-`secret var` wipe, holding whatever the return registers held (CVE-69).
+`secret var` wipe, holding whatever the return registers held (the secret-var epilogue spill gap).
 
 EVERY RETURN PATH (cycc 6.6.7):
   A defer (and every `secret var` zeroise) runs on every return, a
@@ -525,7 +525,7 @@ EVERY RETURN PATH (cycc 6.6.7):
   a fn keeps a frame per level: loop instead, or move the defer into a
   wrapper around a defer-free helper. Before 6.6.7 the tail call jumped
   past every defer (a skipped unlock = a deadlock; a skipped secret
-  zeroise = CVE-47).
+  zeroise = the tail-call secret-var wipe gap).
 
 WHERE IT MAY APPEAR (cycc 6.6.7 — each used to compile silently wrong):
   - only inside a fn (closure and async fn included); top-level defer
@@ -535,11 +535,11 @@ WHERE IT MAY APPEAR (cycc 6.6.7 — each used to compile silently wrong):
     inside the body is fine); a break/continue with nothing to leave in
     the same fn is refused too (it used to jump into another fn)
   - a defer inside a closure belongs to the CLOSURE and runs when the
-    closure returns (it used to register on the enclosing fn — CVE-46
+    closure returns (it used to register on the enclosing fn — the closure secret-var wipe gap
     for a closure's `secret var`)
   - in a coroutine async fn it runs once, at completion; an `await`
     inside a defer body is refused
-  - not in a `#naked` fn (6.6.15, CVE-72): a naked fn has no epilogue,
+  - not in a `#naked` fn (6.6.15, the naked-fn secret-var gap): a naked fn has no epilogue,
     so the block never ran and a `secret var` was never zeroised —
     both now refused by name, as `return` always was. On cx `#naked` is
     inert and the defer runs.
@@ -978,7 +978,7 @@ PP_DERIVE handles both — same preprocessor codegen pattern.
 
 [[entries]]
 name = "secret_var_compound_ops"
-description = "Cyrius syntax extras — struct init, &local arch dispatch, #regalloc, secret var (an array zeroised on every return path — and what it does NOT cover: callee frames, vector registers, the heap, timing; the sigil 3.13.8 / CVE-68 and CVE-70 lessons, 6.6.15)"
+description = "Cyrius syntax extras — struct init, &local arch dispatch, #regalloc, secret var (an array zeroised on every return path — and what it does NOT cover: callee frames, vector registers, the heap, timing; the sigil 3.13.8 / CYRIUS-2026-0023 and the ECDHE key zeroisation gap lessons, 6.6.15)"
 category = "cyrius"
 ---
 A grab-bag of syntactic additions consolidated for agent reference.
@@ -1026,22 +1026,22 @@ also lives in:
   - a CALLEE's dead frame. The HMAC_DRBG context sigil's ECDSA signer
     used sat ~43 KB down holding the nonce k (HMAC never wiped its
     context, and its final state IS the MAC); k plus one signature is
-    the private key (CVE-68 part B). Wipe a context in the code that
+    the private key (CYRIUS-2026-0023 part B). Wipe a context in the code that
     owns it; to scrub a deep call tree, burn the stack from a PLAIN
     wrapper AFTER the secret callee has returned, so the burn also
     covers that callee's epilogue (sigil burns 128 / 160 KB).
   - vector registers. SHA-NI / AES-NI leave state in xmm0..; an asm
     block computing on secrets clears the registers it used (a later
-    `secret var` epilogue used to spill them to dead stack — CVE-69).
+    `secret var` epilogue used to spill them to dead stack — the secret-var epilogue spill gap).
   - the heap. Native TLS kept every connection's ephemeral key and
-    shared secret in ctx buffers until 6.6.15 (CVE-70): zero each at
+    shared secret in ctx buffers until 6.6.15 (the ECDHE key zeroisation gap): zero each at
     its last use AND on every exit of the driver.
   - TIMING. sigil's ECDSA signing (3.5.9 through 3.13.7) ran its
     ladder over field ops that branched on their operands — final
     subtracts, `if` carry fix-ups, early-exit compares, aarch64's
     software high-half multiply — a fixed-vs-random Welch t-test
     gave |t| = 6.3 at 400 samples, the Minerva / TPM-Fail lattice
-    class (CVE-68). Constant time is a property of EVERY primitive
+    class (CYRIUS-2026-0023). Constant time is a property of EVERY primitive
     under the secret, not of the top-level algorithm: two earlier
     fixes had removed only the coarse leaks and audits had filed the
     arithmetic as INFO. sigil 3.13.8's engine (src/ec_ct.cyr:
@@ -2780,7 +2780,7 @@ the sign bit; aarch64 emits FABS d0, d0).
 
 [[entries]]
 name = "cve_08_hardening_cld_v51141"
-description = "v5.11.41 — CVE-08 security hardening: emit cld (0xFC, 1 byte) before any rep movsb / rep stosb sequence. Closes the direction-flag-set-by-prior-callee class"
+description = "v5.11.41 — the missing-cld bug security hardening: emit cld (0xFC, 1 byte) before any rep movsb / rep stosb sequence. Closes the direction-flag-set-by-prior-callee class"
 category = "cyrius"
 ---
 Per the v5.0.x security audit, calling convention does
@@ -2796,7 +2796,7 @@ now emit `cld` (0xFC, 1 byte) immediately before any
 per call site; cc5 size delta +<10 B.
 
 Reference: docs/audit/2026-04-13-security-audit.md
-CVE-08.
+the missing-cld bug.
 
 [[entries]]
 name = "lsp_semantic_tokens_locals_params_v51142"
@@ -4369,7 +4369,7 @@ A wrong line number was the mild symptom. Line 1 of the NEXT `include` landed on
 include's own `#@file` marker line and printed a bare `error:4:12:` with no file name; and
 `private`, which decides a token's FILE from its line, attributed code to the wrong file,
 so a call to another file's private fn COMPILED and the privacy error (if any) landed on an
-innocent name (CVE-55). The "diagnostics in backend/x86/fixup.cyr are one line high" report
+innocent name (the multi-line string attribution bug). The "diagnostics in backend/x86/fixup.cyr are one line high" report
 was this defect, triggered by the single raw-newline literal in parse_expr.cyr. Since 6.6.11
 both paths count the line; the string token itself keeps its OPENING line, matching the
 column its diagnostic head prints.
@@ -4869,9 +4869,9 @@ eight native shapes silent, six anti-vacuous rows still warn, the kill rows).
 
 [[entries]]
 name = "cx_tail_calls_and_cxvm_guest_traps_v6612"
-description = "Since cycc 6.6.12 the cx backend compiles `return f(args);` as a real tail call (it was a call plus epilogue, so deep tail recursion overran cxvm's stacks and returned garbage), and cxvm TRAPS a guest fault instead of corrupting itself: every load/store, the syscall buffers, both VM stacks, the guest stack, a negative pc and an unknown opcode are checked (CVE-58). A trap prints `cxvm: <what> <value> at pc <N>` and exits 1. cxvm is still NOT a sandbox — the syscall opcode passes other numbers to the host raw"
+description = "Since cycc 6.6.12 the cx backend compiles `return f(args);` as a real tail call (it was a call plus epilogue, so deep tail recursion overran cxvm's stacks and returned garbage), and cxvm TRAPS a guest fault instead of corrupting itself: every load/store, the syscall buffers, both VM stacks, the guest stack, a negative pc and an unknown opcode are checked (the cxvm host-memory bug). A trap prints `cxvm: <what> <value> at pc <N>` and exits 1. cxvm is still NOT a sandbox — the syscall opcode passes other numbers to the host raw"
 category = "cyrius"
-tags = ["cx", "cxvm", "bytecode", "tail-call", "sandbox", "CVE-58", "v6.6.12"]
+tags = ["cx", "cxvm", "bytecode", "tail-call", "sandbox", "the cxvm host-memory bug", "v6.6.12"]
 ---
 TAIL CALLS. cx `ETAILJMP` emitted a normal call + epilogue, under a comment claiming a jump
 broke when the arguments contained nested calls. They do not — the shared tail path has
@@ -4883,7 +4883,7 @@ jmp f`, the x86 `mov rsp, rbp; pop rbp; jmp` shape. Measured:
     # 6.6.12 cycc_cx + cxvm: exit 128 (correct, 2.3 s interpreted)
     # 6.6.11 cycc_cx + cxvm: exit 1 — garbage from the 513th frame on
 
-GUEST FAULTS TRAP (CVE-58). Before 6.6.12 `programs/cxvm.cyr` checked nothing a guest
+GUEST FAULTS TRAP (the cxvm host-memory bug). Before 6.6.12 `programs/cxvm.cyr` checked nothing a guest
 controls: a guest address past the 1 MB data segment (or negative) read and wrote cxvm's own
 heap — the register file, the stacks, the loaded code; guest address 0 (the in-memory copy of
 the bytecode) stored silently; the 1024-entry call stack had no bound, so the 513th nested
@@ -5274,7 +5274,7 @@ arguments are at most 511 bytes and the argument count must match; TAB separates
 words; a stray `#else` / `#endif` or an unclosed block is an error; `#ifplat` is evaluated in
 included files. `use` aliases: at most 64.
 
-CLI / manifest (security, CVE-79…CVE-102): `[package] cyrius` must be a version's shape (a leading
+CLI / manifest (security, CYRIUS-2026-0029 … CYRIUS-2026-0035): `[package] cyrius` must be a version's shape (a leading
 digit, `[0-9A-Za-z._-]`, no `..`); a manifest `[build] output` and `${file:PATH}` are confined to
 the project by the `[embed]` path rules; `[deps.X] modules` entries may not leave the dep's tree;
 project files are written through a symlink only to a file inside the project (never `.git`);
@@ -5406,7 +5406,7 @@ tags = ["v6.7.3", "bool", "true", "false", "!", "B2", "type check"]
 VALUES: `true` = 1, `false` = 0, both reserved words; `bool` is an 8-byte word (sizeof 8, ADR-002).
 `!e` = 1 when e's word is 0; binds like unary minus (its operand is a factor: `!x + 1` is `(!x) + 1`);
 an f64 operand is tested by its raw bits (`!(-0.0)` is 0, as `if (-0.0)` is taken). ⚠ Until 6.7.3 the
-lexer DROPPED a lone `!` — `!x` compiled as `x`, silently (CVE-104).
+lexer DROPPED a lone `!` — `!x` compiled as `x`, silently (the dropped-bang lexer bug).
 
 WRITES ARE CHECKED (user decision 2026-10-07): a bool local / global / field / parameter / `fn g(): bool`
 return / multi-return element / const takes only a BOOLEAN value — true, false, a comparison (incl. the
