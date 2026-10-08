@@ -635,3 +635,20 @@ is the only way to learn that a row hangs instead of failing.
 **Why it matters:** a hung gate is not a red gate — CI times it out as infrastructure, a human
 re-runs it, and the regression it was written to catch reads as flakiness.
 """
+
+[[entries]]
+name = "in_place_rebuild_of_a_group_probed_table_v673"
+description = "lib/hashmap_fast.cyr 6.7.3: a same-capacity rebuild under the bump allocator must reuse its arrays (fresh ones leak ~17 B per slot per rebuild). The group-probed in-place walk is hashmap.cyr's anchor walk lifted to 16-slot groups, with two load-bearing differences."
+category = "cyrius"
+tags = ["v6.7.3", "hashmap_fast", "rebuild", "tombstones", "bump allocator", "probing"]
+---
+fhm probes in 16-slot groups and stops at the first group with an EMPTY slot.
+(1) Pick the anchor group BEFORE turning tombstones into EMPTY: a group whose only EMPTY slots are
+converted tombstones may lie on a live chain, so it is no anchor (mutant: a key reads back -7).
+(2) The walk includes the anchor group, as its LAST step: unlike a linear-probing EMPTY slot, an anchor
+GROUP can hold entries homed in earlier groups, and they must be re-placed too.
+Each entry moves to the first group with an EMPTY slot on its probe path, when that lies before its own
+group. Invariant kept: no group any live path crosses has an EMPTY slot (fhm_delete's EMPTY-vs-tombstone
+choice relies on it). Measured: 1,114,112 → 278,528 B at 7,000 live / 16,384 slots over 3M rounds.
+Test: tests/tcyr/stdlib/hashmap_fast_rebuild_in_place.tcyr (52 rows, four mutants killed).
+

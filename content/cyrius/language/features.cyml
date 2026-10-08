@@ -668,6 +668,25 @@ IMPLEMENTATION:
     A base that is a VARIABLE is a field access, not an enum
     access (`p.x` never consults the enum table).
 
+⚠ AN ENUM CONSTANT IS NOT AN LVALUE (cycc 6.7.3). With
+    `enum E { A = 5; }`, these are refused by name:
+    `A = 6;`, `A += 1;` (every OP=), `&A`, `E.A = 6;`, `E.A += 1;`,
+    `&E.A`, and a for step that writes one.
+
+        error: cannot assign to enum constant 'A' - an enum constant is
+               a fixed value, not a variable (declare a `var` to change it)
+
+    `&Ctor` of a payload variant is refused the same way (it was the
+    variant's slot, never the constructor's address). The check uses
+    the slot the name RESOLVES to, so a local `var A`, a closure's
+    capture of one, and a later top-level `var A` (last definition
+    wins) stay variables.
+    BEFORE 6.7.3 the bare forms compiled silently. Every read folds
+    to 5, but the write landed in the variant's 8-byte slot and `&A`
+    returned that slot: `A = 6; A * 10 + load64(&A)` was 56. The
+    qualified write was refused only as "undefined variable 'E'".
+    Gate: tests/gates/frontend/enum_const_not_lvalue.sh.
+
 [[entries]]
 name = "ref_directive"
 description = "#ref directive — compile-time TOML loading"
@@ -4692,7 +4711,8 @@ field into a variable) is struct_value_copies_and_result_type_checks_v6611.
    struct argument was never copied at all. Since 6.6.16 the callee copies every struct
    parameter on entry, so both hold everywhere (struct_parameter_is_a_copy_v6616). A field of a
    different struct type is refused ("cannot pass 'v' to a
-   by-value parameter of a different struct type in a call to 'take'").
+   parameter of a different struct type in a call to 'take'"). Since 6.7.3 every struct
+   argument is checked, not only a field: see struct_argument_type_checked_v673.
 
 2. TOP-LEVEL COPY-INIT.
 
@@ -5345,12 +5365,13 @@ generic_struct_field. ADR-007 decision 8. CHANGELOG [6.7.1].
 name = "const_and_const_fn_v672"
 description = "cyrius 6.7.2 `const` (int / f64 / string, no storage, top level and in fns, any order) and `const fn` (runs at compile time in const contexts only, pure subset checked at the definition, bit-exact f64) — and the const contexts: array sizes, #assert, case labels, enum values."
 category = "cyrius"
-tags = ["v6.7.2", "const", "const fn", "comptime", "B1", "C1"]
+tags = ["v6.7.2", "v6.7.3", "const", "const fn", "comptime", "B1", "C1"]
 ---
 CONST: `const LIMIT = 7;` `const PI = 3.14159;` `const NAME = "cyrius";` — NO STORAGE; each use is the
 value (an int folds like an enum constant, an f64 is its literal, a string is its literal — passed to a
 `Str` parameter it is wrapped like the literal). No type annotation (its type is its value's). `N = ..`,
-`N += ..`, `&N` refused by name. Top-level consts: any order, forward use fine (a cycle is refused); one
+`N += ..`, `&N` refused by name — and (6.7.3) a `for` step `for (..; ..; N = N + 1)`, which compiled in 6.7.2 and,
+a top-level const's slot having size 0, stored over a neighbouring global (g0 7 → 100). Top-level consts: any order, forward use fine (a cycle is refused); one
 top-level name is a const OR a global. Local consts: `const L = 3;` in a fn — visible to the rest of the
 block, shadowed / shadowing by depth, a closure reads it by name (no frame slot, nothing captured).
 
@@ -5407,3 +5428,48 @@ CYRIUS_TYPE_CHECK=0.
 
 GATES: tests/gates/frontend/bool_checked.sh; tests/tcyr/crossos/bool_values.tcyr;
 tests/tcyr/derive/derive_serialize_bool.tcyr. CHANGELOG [6.7.3].
+
+[[entries]]
+name = "struct_argument_type_checked_v673"
+description = "Since cycc 6.7.3 a struct ARGUMENT whose static struct type differs from its parameter's is refused by name: every argument form, a generic instance against its base both ways, a by-value struct of 8 B or less and a Str handle parameter, an operator's two operands and a method's self. A typed pointer (`u: *Pt`), `&p` and an untyped value convert freely. Before, only a struct-typed field into an address-passed parameter was checked; every other mismatch compiled clean and the callee read the argument with its own layout."
+category = "cyrius"
+tags = ["structs", "arguments", "type-check", "generics", "operators", "methods", "v6.7.3"]
+---
+The filing from the 6.7.1 open, fixed in the 6.7.3 repair lane. The user's rule: an argument
+whose static struct type differs from its parameter's is refused, as the receive path refuses
+`var q: Q = p;` (since 6.6.6).
+
+    struct Pt { x; y; }
+    struct Q  { a; b; c; }
+    fn bq(b: Q): i64 { return b.c; }
+    fn go(): i64 { var p: Pt; p.x = 3; p.y = 4; return bq(p); }
+    # error: cannot pass 'p' to a parameter of a different struct type in a call to 'bq'
+
+MEASURED on 6.7.3's slot-open cycc; every program compiled clean:
+  - bq(p) gave 0: it read past the 16-byte Pt.
+  - bs(mk1(p)), a Box<Pt> into `fn bs(b: Box)`, gave 4 (b.v.y) where n was 8.
+  - A global Pt into bq gave 97. `q + p` with `fn Q_add(a: Q, b: Q)` gave 1.
+  - `q + mkp()`, `q + p.dup()` and `sl(p)` into `s: Str` SIGSEGV'd.
+
+CHECKED — the argument has a static struct VALUE type: a named inline or pointer-mode local, a global
+(in a fn and at top level), a closure capture, a field, a free call (named by the fn), a method or
+operator result at every size (named by the method fn) — through a call, a method's arguments and a
+tail call, into a by-value parameter of any size, a `p: *T` or a `s: Str`; an operator's two operands
+(parameters 0 and 1 of the operator fn) and a method's self.
+
+A generic INSTANCE is its own struct: a Box<Pt> passed to `b: Box` is refused, and the reverse. So is
+`gx(b)` for `fn gx<T>(b: Box<T>)`: T is not inferred through Box<T> (filed); write `gx<Pt>(b)`.
+
+ACCEPTED: a TYPED POINTER of another struct (`u: *Pt` local, parameter, global, field or call result
+into `*Q` or `Q`) converts freely, like `&p` and the receive path's `var q: *Q = u;` (user decision,
+2026-10-08); an untyped variable; a literal; a call returning an integer or a pointer; a fn pointer.
+
+HOW (internals): SFPSID also records a by-value struct of 8 B or less and a Str handle parameter
+(`_psid_plain`) — neither has a struct-mask bit, so every ABI reader tests `_pm_struct` before GFPSID.
+Such an argument is consumed by `_sarg_byval_small` (the caller's own PCMPE + EPUSHR). A 9-16 B method
+or operator result nothing stores is recorded with `_sc_tmp` -4; a whole field by the passive `_fpk_*`
+record. Nothing emits: a 649-file differential corpus compiled byte-identical.
+
+GATES: tests/gates/frontend/struct_arg_type_refused.sh (41 refusal rows, 12 acceptances,
+mutation-proven) and tests/tcyr/crossos/struct_arg_type_accepted.tcyr (38 rows). CHANGELOG [6.7.3].
+

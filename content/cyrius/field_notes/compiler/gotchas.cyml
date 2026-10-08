@@ -6138,3 +6138,59 @@ the trampoline straight to the return landing; a `mov 0` emitted after the tramp
 
 5. CHECK ONCE PER TOKEN. A generic base and its instances parse the same tokens; key the refusal by
 the value's token (`_tn_once`) and skip it inside #inline replays (GIDEP > 0) and under --syntax-only.
+
+[[entries]]
+name = "set_so_far_flag_inside_a_loop_v673"
+description = "A flag set when the parser REACHES a construct cannot answer a whole-body question inside a loop: 6.7.3's tail call before `x = &s` kept its jmp and handed the callee a freed frame. Decide such sites behind a patchable selector at the end of the OUTERMOST loop statement."
+category = "cyrius"
+tags = ["v6.7.3", "tail call", "_fn_local_addr", "loop", "selector jmp", "TCO"]
+---
+1. THE TRAP. `_fn_local_addr` is set when the parser reaches the address, so a lexically earlier
+`return f(..);` in the same loop body read 0 and kept its `jmp`. At run time the address is taken
+BEFORE the next iteration's return. Only back-edges make "so far" differ from "whole"; outside loops
+the old answer was right. (`while (i < 2) { if (i == 1) { return rd(x, k); } x = &s; i = i + 1; }`
+gave 5 on x86 where 7 is right, since 6.5.14.)
+2. WHY NOT PRESCAN. A lexical prescan (6.6.7's defer fix) works only when the token says everything;
+since 6.6.20 most frame-address sources depend on types and callee signatures. A shadow parse would have
+to roll back code, fixups, instances and closures.
+3. THE PATTERN. Emit the site behind a patchable selector `jmp`, record what the alternative needs
+(callee, argc, the marshalling's `_xdepth` / `_xcall_pad` / `_xcall_d`), and decide when the answer is
+final: at the end of the OUTERMOST loop STATEMENT (a C-style `for` emits its step after the body).
+Kept: EPATCH the selector to the next instruction. Diverted: EPATCH it to an out-of-line call stub at
+the fn end. Nested bodies (closures, generic instances) carry their own range in `_fnst_save`.
+4. BACKSTOP. An unresolved selector is `jmp +0` on x86 (the old wrong value, silently) but a
+branch-to-self on aarch64 and cx — a missed hook must be an internal error (`_tcp_drop`).
+
+[[entries]]
+name = "toolchain_helpers_never_resolve_from_the_cwd_v673"
+description = "A helper the toolchain runs comes from the INSTALL, never from the current directory and never from beside the binary: CVE-103 (compiled `cyriusly cmdtools` ran a checkout's `scripts/cyriusly`) is the CVE-102 class. A verb that only works in the dev tree is resolving something from the CWD."
+category = "cyrius"
+tags = ["v6.7.3", "CVE-103", "cyriusly", "install store", "CWD", "untrusted search path"]
+---
+The compiled `cyriusly cmdtools` ran its shell twin as the literal `scripts/cyriusly`, a CWD-relative
+path: inside any cloned repository shipping one, a version-manager verb ran that repository's code
+("PWNED from the checkout: cmdtools list", rc 0). The tell: the verb only ever WORKED inside a cyrius
+checkout — nothing installed held the helper. The rule: resolve from `<home>/versions/<current>/...`
+with `<home>` absolute and `current` checked as a version's shape (`../evil` is a path); refuse by name
+when absent, never fall back; never beside the binary's own path (a binary run from a shared directory
+would find a planted helper). Then EVERY store writer ships it (install.sh refresh-only / tarball /
+source-bootstrap, the release builders) and scripts/verify-store.sh judges it. Gate:
+tests/gates/toolchain/cyriusly_version_operand_refused.sh axes 7 and 9.
+
+[[entries]]
+name = "tool_mirrors_of_the_lexical_state_machine_v673"
+description = "A tool that copies the preprocessor's lexical state machine must also copy PP_LEXST_AT's attribute rule: an attribute line is CODE, so a string opened on it spans lines; a copy that reads every `#` as a comment stays a quote out of step for the rest of the file."
+category = "cyrius"
+tags = ["v6.7.3", "cyaudit", "api-surface", "PP_LEXST_AT", "LEXATTRWORD", "mirror"]
+---
+1. THE RULE THE COPIES MISSED. Since 6.6.20 PP_LEXST_AT asks LEXATTRWORD before treating a `#` in code
+as a comment; the ten attribute words keep their line in code, string literals included.
+2. BOTH DIRECTIONS. After `#assert 1 == 1, "x<LF>y"` cyaudit missed the next include (vet `no
+dependencies`, deny `0 violations`, rc 0) on a file the compiler refuses; a VALID program whose attribute
+string holds a raw line beginning `include "` got a false MISSING (rc 1). Probe both, compiler as oracle.
+3. SIX HAND COPIES of the attribute list (cyrlint, cyrfmt, cyrdoc, cbt/srcscan, api-surface, cyaudit):
+each needs a gate that DERIVES the words and their `(` rule from LEXATTRWORD's rows
+(cyaudit_include_directives.sh axis 7 is the pattern) — the others are filed.
+4. THE OVER-CORRECTION GUARD: keep rows where a comment only STARTS like an attribute (`#ioctl "notes`)
+and where `(` ends only three of the ten words (`#io("notes` a comment, `#deprecated(` code).
+
