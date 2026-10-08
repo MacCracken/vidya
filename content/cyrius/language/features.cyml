@@ -5299,6 +5299,44 @@ aliased at > 8 B for a `*T` local); `var q: *T = p;` aliases.
 CHAINS: `b.v.sum()`, `p.v.sum()`, `mk(3).v.sum()`, `c.w.v.scale(2);` — a method on a nested inline
 field takes the field's address as `self`. `var u = s.clone();` types u from an 8-byte struct result.
 
-Trait objects stay the `lib/trait.cyr` library pattern (no compiler `dyn` — an open question).
+Trait objects stay the `lib/trait.cyr` library pattern for now; compiler-CHECKED `dyn` (a 16-byte
+{data, vtable} struct, the vtable built and verified from the impl) is decided for later in 6.7.x.
 GATES: tests/gates/frontend/traits_checked.sh, impl_self_typed.sh; tests/tcyr/crossos/traits_checked,
 impl_self_typed, impl_inherent, struct_from_pointer_copies, method_on_nested_field. ADR-007.
+
+[[entries]]
+name = "trait_bounds_v671"
+description = "cyrius 6.7.1 trait-bounded generics: `fn f<T: Show + Eq>` and `struct Box<T: Show>` — a bound is a contract checked at the definition, every instantiation (the i64 base included) needs the impl, any type (a scalar too) satisfies a bound through its impl; plus a struct type argument in either slot of a two-parameter generic and a `b: Box<i32>` struct field."
+category = "cyrius"
+tags = ["v6.7.1", "generics", "traits", "bounds", "C3", "ADR-007"]
+---
+BOUND: `fn describe<T: Show>(v: T): i64 { return v.show(); }`; several: `<T: Show + Eq>`; on a generic
+struct: `struct Shown<T: Show> { v: T; n; }`. A bound names a declared trait, takes no type arguments,
+sits on one of the first two type parameters (only two are recorded), max 8 per parameter.
+
+CONTRACT (user decision 2026-10-07): on a bounded `T`-typed parameter or local (`v: T`, `p: *T`,
+`var q: T`), `v.m()` must be a method of a bound's trait — refused at the DEFINITION otherwise (a
+method in no bound, or in two). The call is THAT trait's method for T's impl: with Pt giving `size`
+through Size AND Other, `<T: Size>` calls Size's. Fields (`v.x`) are not in a trait — per instance.
+An UNBOUNDED T keeps per-instance resolution (`fn f<T>(v: T) { return v.show(); }` works).
+
+CHECKED AT EVERY INSTANTIATION, naming the trait and the `impl` it needs: `describe(r)`,
+`describe<R>(r)`, and the i64 base — `describe(5)` needs `impl Show for i64`; without one the base is
+the dead stub and every scalar path (call, tail call, `&describe`, an unbounded generic forwarding
+its T) is refused. A struct's instances too: `Shown<R>`, a written `Shown<i64>`, a bare `Shown`.
+`fn mk<T>(x: T): Shown<T>` / `struct W<T> { s: Shown<T>; }` are fine; only their i64 base is refused,
+where used (`mk(5)`, a bare `W`).
+
+SCALARS: `impl Show for i64 { fn show(self): i64 { return self + 1; } }` — a bounded call on an i64
+T passes the value; `describe<i32>(7)` needs `impl Show for i32`. `self.m()` inside a scalar impl (a
+trait default included) calls that type's own m (before 6.7.1: "no struct type in scope for 'self'").
+
+ALSO 6.7.1: `g<Pt, i64>(p, 2)`, `g(5, p)`, `g(p, q)` — a struct in either slot of a two-parameter
+generic (refused 6.6.10..6.7.0); `struct H { a: i64; b: Box<i32>; c: i64; }` (packed: Box<i32> is
+4 + 8 = 12 B) and `w: Box<T>` inside `W<T>`; a field naming its own struct is refused. `#derive`
+reads nested type arguments (`xs: Vec<Box<i64>>`); an inline generic instance in a #derive'd struct
+hits its layout check, like any non-derived inline struct.
+
+GATES: tests/gates/frontend/trait_bounds_checked.sh, generic_struct_field.sh,
+generic_type_arg_unknown_refused.sh (K); tests/tcyr/crossos/trait_bounds, generic_two_param_struct,
+generic_struct_field. ADR-007 decision 8. CHANGELOG [6.7.1].

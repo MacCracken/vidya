@@ -6043,3 +6043,37 @@ direct form (`_tr_undef_note`). CHANGELOG [6.7.0].
 3. ONE PRE-SCAN beats order-dependent registration: a trait declared below its impl, and a name
 collision with an impl further down, are only knowable before pass 1 registers the first method —
 `_tr_prepass` walks the token stream once (brace depth 0) and records every trait and impl.
+
+[[entries]]
+name = "generic_bounds_tokens_and_base_v671"
+description = "Gotchas met building 6.7.1 trait bounds: key a per-call-site fact by its TOKEN index (the base, instances and inline replays re-parse the same tokens); an instance minted mid-definition corrupts the outer struct's field slice; the eager i64 base needs a 'not a valid instance' stub rule; and cybs's six-argument limit bites new helpers."
+category = "cyrius"
+tags = ["v6.7.1", "generics", "bounds", "field-pool", "cybs", "monomorphization"]
+---
+1. A CALL-SITE FACT KEYED BY TOKEN. A generic's body is parsed many times — the i64 base, every
+instance (`_instantiate_generic_fn` re-invokes PARSE_FN_DEF from the def-start token), every inline
+replay at a call site — always over the SAME tokens. A fact decided once in pass 1 about a call in
+the body (6.7.1: "this `v.show(` is bound to trait Show") is therefore keyed by its method-name token
+index (`_bs_find(ti)`), and every parse finds it; a per-parse context flag would have to be saved and
+restored around every nested instance.
+
+2. NEVER REGISTER A STRUCT INSIDE ANOTHER'S DEFINITION. REGSTRUCT sets `field_base[si] = pooltop`;
+ADDFIELD then fills field_base + fc. An instance (`Box<i32>`) instantiated while the outer struct's
+fields are being added appends ITS fields at pooltop — inside the outer's slice — and the outer's next
+fields overwrite the pool (the mutation SIGSEGVs cycc). Instantiate every field type in a pre-scan
+BEFORE REGSTRUCT (`_sdef_gen_prescan`); `_vec_field_elem` skips its nested args for the same reason.
+
+3. THE EAGER BASE. A generic's base (T -> i64) is emitted at its definition. Any check that refuses
+"T = i64" would then refuse the DEFINITION of a generic only ever called with good types. The rule
+that already existed for `p.field` on a T (`_gen_stub`: the base is a dead `rax = 0` stub and a scalar
+call is refused) extends: a base that is not a valid i64 instance (`_bnd_base_bad`) is a stub, and is
+refused where used. The same for a generic struct's base definition reading `Box<T>`: record it
+quietly (`_bnd_quiet`, `_sdef_bb`) and refuse W's base where W's base is used.
+
+4. CYBS TAKES SIX ARGUMENTS. A seven-parameter helper (`_bnd_check(S, blk, tp, gnoff, g, c0, c1)`)
+compiles with build/cycc and breaks seed-derive; the cybs_call_arity_named gate runs cybs over
+src/main.cyr in check.sh. Derive the extra values from a key instead (6.7.1: `_bnd_check(S, g, c0, c1)`).
+
+5. `>>` CLOSES TWO LISTS. `<T: Show<i64>>`: skipping the refused bound's `<i64>` consumed the `>>`,
+which also closed the type-parameter list; the capture loop then ran to EOF. A skip that can close
+the enclosing list has to say so (`_ctp_closed`).
