@@ -6108,3 +6108,33 @@ must be a const fn). A separate checker grammar would drift from the evaluator; 
 paths; enum values in pass 1 and pass 2. Evaluating each time reports a bad label twice — evaluate in
 the first reader and replay by TOKEN index (`_clm`), trimmed when the switch ends (nested ones stack).
 And seven-argument helpers still break seed-derive (cybs passes six) — check new fns' arity first.
+
+[[entries]]
+name = "boolean_stamp_and_bool_typing_v673"
+description = "Gotchas met adding 6.7.3's checked bool: a per-expression type flag would leak (GESTYPE is not cleared by integer ops); stamp the value by (code pointer, token index) instead; a lexer that silently drops a byte is a CVE; the rough return-type scan defaults unknown names to the retptr ABI; a fall-off value must precede the defer trampoline."
+category = "cyrius"
+tags = ["v6.7.3", "bool", "stamp", "_BX_MARK", "lexer", "retptr", "defer"]
+---
+1. DON'T RIDE THE ESTYPE. GESTYPE is reset at each factor start but the integer `+ - * /` arms never
+clear it, so after `a + ok` it holds the RIGHT operand's type — and EMIT_OP_DISPATCH reads any nonzero
+estype as a struct id (operator overloading). A "this is a bool" estype would mark `n + ok` boolean
+and send `ok + 1` to overload dispatch. Instead STAMP the value: every boolean producer records
+(GCP, GTI) at its last emission (`_BX_MARK`); a write site asks whether both still match (`_BX_IS`).
+Anything that ends in a boolean operand either emits after it or consumes a token (even `ok + 0`,
+which folds to nothing, consumes two), so the stamp dies by itself — nothing has to remember to clear
+it. Parens re-stamp the token across `)` (`_paren_post`). Same pattern as 6.6.10's `_FBR_MARK`.
+
+2. A LEXER THAT DROPS A BYTE IS A SECURITY BUG. `!` was silently skipped (`else { p = p + 1; }`) for
+years: `if (!ok)` meant `if (ok)`. CVE-52 was the same shape for `@`. Every unknown byte must be a
+token or an error, never nothing.
+
+3. THE ROUGH RETURN-TYPE SCAN. PARSE_FN_DEF peeks `: T` BEFORE the parameters to decide the retptr
+ABI, and an unrecognised name defaults to the retptr — which reserves arg-reg 0 and shifts every
+parameter by one (x read from rsi: `fn f(x): bool` returned the wrong value). Every new scalar return
+type must be added to that scan (`_rs_scalar_name`), not only to `_classify_return_type`.
+
+4. A FALL-OFF VALUE GOES BEFORE THE DEFER TRAMPOLINE. With defers, the body's fall-through jumps round
+the trampoline straight to the return landing; a `mov 0` emitted after the trampoline is skipped.
+
+5. CHECK ONCE PER TOKEN. A generic base and its instances parse the same tokens; key the refusal by
+the value's token (`_tn_once`) and skip it inside #inline replays (GIDEP > 0) and under --syntax-only.
