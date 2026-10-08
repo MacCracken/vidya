@@ -6077,3 +6077,34 @@ src/main.cyr in check.sh. Derive the extra values from a key instead (6.7.1: `_b
 5. `>>` CLOSES TWO LISTS. `<T: Show<i64>>`: skipping the refused bound's `<i64>` consumed the `>>`,
 which also closed the type-parameter list; the capture loop then ran to EOF. A skip that can close
 the enclosing list has to say so (`_ctp_closed`).
+
+[[entries]]
+name = "compile_time_evaluation_v672"
+description = "Gotchas met building 6.7.2's const evaluator: no host FPU under cybs (software IEEE, NaN refused), mirror the parser's STATIC typing not runtime values, one interpreter for check + run (skip mode), a lazy pending flag behind GVECP, and reading a const context twice means evaluate once and replay by token."
+category = "cyrius"
+tags = ["v6.7.2", "const fn", "evaluator", "softfloat", "cybs", "GVECP"]
+---
+1. NO FLOAT IN THE COMPILER. cybs (the seed's compiler) has no f64 builtin and no float literal, so the
+compiler cannot borrow the host FPU to fold f64: the evaluator uses an integer-only binary64 module
+(`_sf_*`, 64x64->128 from 32-bit halves, long division with a sticky bit). Prove such a module
+DIFFERENTIALLY against the hardware (millions of random pairs biased to halfway / subnormal / overflow,
+plus an edge matrix, on x86 AND aarch64) and with mutations (no ties-to-even: 81,577 add mismatches).
+NaN bits differ by target (x86 default NaN is negative, ARM positive) — refuse NaN rather than bake one.
+
+2. MIRROR STATIC TYPES, NOT VALUES. At run time `var x = 2.0; x + 1.0` is an INTEGER add of the bit
+patterns (an untyped var is an i64) and `f + 3` (f: f64) adds 3's BITS. A compile-time evaluator that
+tracks "this value is a float" dynamically gives a different answer. Track the parser's static type:
+the declared type of a local / param / return, the literal's type, the LEFT operand's type for an op.
+
+3. ONE INTERPRETER FOR CHECKING AND RUNNING. The definition check of a const fn is the evaluator in SKIP
+mode over the whole body (both arms of every if, loop bodies once, calls not executed but the callee
+must be a const fn). A separate checker grammar would drift from the evaluator; skip mode cannot.
+
+4. A LAZY CONSTANT BEHIND AN EXISTING FLAG. Top-level consts get a size-0 global slot with GVECP = 2
+(pending); GVECP() evaluates on first read and leaves 1 (int: an ordinary enum-constant fold) or 0
+(f64 / string, read through `_cst_vkind`). Every existing enum-constant reader took int consts for free.
+
+5. READ TWICE, EVALUATE ONCE. A switch's case labels are read by its pre-scan and again by its body
+paths; enum values in pass 1 and pass 2. Evaluating each time reports a bad label twice — evaluate in
+the first reader and replay by TOKEN index (`_clm`), trimmed when the switch ends (nested ones stack).
+And seven-argument helpers still break seed-derive (cybs passes six) — check new fns' arity first.

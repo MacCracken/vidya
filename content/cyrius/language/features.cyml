@@ -5340,3 +5340,38 @@ hits its layout check, like any non-derived inline struct.
 GATES: tests/gates/frontend/trait_bounds_checked.sh, generic_struct_field.sh,
 generic_type_arg_unknown_refused.sh (K); tests/tcyr/crossos/trait_bounds, generic_two_param_struct,
 generic_struct_field. ADR-007 decision 8. CHANGELOG [6.7.1].
+
+[[entries]]
+name = "const_and_const_fn_v672"
+description = "cyrius 6.7.2 `const` (int / f64 / string, no storage, top level and in fns, any order) and `const fn` (runs at compile time in const contexts only, pure subset checked at the definition, bit-exact f64) — and the const contexts: array sizes, #assert, case labels, enum values."
+category = "cyrius"
+tags = ["v6.7.2", "const", "const fn", "comptime", "B1", "C1"]
+---
+CONST: `const LIMIT = 7;` `const PI = 3.14159;` `const NAME = "cyrius";` — NO STORAGE; each use is the
+value (an int folds like an enum constant, an f64 is its literal, a string is its literal — passed to a
+`Str` parameter it is wrapped like the literal). No type annotation (its type is its value's). `N = ..`,
+`N += ..`, `&N` refused by name. Top-level consts: any order, forward use fine (a cycle is refused); one
+top-level name is a const OR a global. Local consts: `const L = 3;` in a fn — visible to the rest of the
+block, shadowed / shadowing by depth, a closure reads it by name (no frame slot, nothing captured).
+
+CONST FN: `const fn fib(n) { .. }` is an ordinary fn; a CONST CONTEXT runs it at compile time, anywhere
+else `fib(3)` is a plain runtime call (user decision: the disassembly shows the call you wrote). Body =
+the pure subset, CHECKED AT THE DEFINITION even if never called: int and f64 arithmetic, comparisons,
+&& / ||, shifts (`>>` logical, `>>>` arithmetic), `var x[: i64|i32|i16|i8|f64] = ..;` (narrow ones narrow
+as at run time), local consts, `=` / `OP=`, if / elif / else, while, `for (;;)`-style with all three
+clauses, `for i in a..b`, return / break / continue, const fn calls (recursion ok), exact f64 builtins
+(f64_add..div, from, to, eq/lt/gt/le/ge, neg, abs, floor, ceil, trunc). NOT: load/store, arrays, `&x`,
+fields, syscalls, globals, ordinary fn calls, transcendental builtins, generic const fns.
+
+CONST CONTEXTS (any INTEGER const expression): a const's value, `var a[f(4)]` / `var a: i64[N * 2]` (top
+level and in a fn), `#assert f(10) == 55 && N > 3` (any expression since 6.7.2), `case twice(N):`, enum
+values `enum E { A = N; B = f(2); }`. ⚠ enum values and top-level array sizes are read in pass 1 in source
+order: a const fn THEY call must be declared above them (a top-level const need not be).
+
+SAME ANSWER AS RUN TIME: typing is the runtime's (f64 op iff the LEFT operand is f64; an int right
+operand contributes its BITS). f64 is computed by an integer-only IEEE-754 module, bit-exact with x86-64
+and AArch64. Refused by name: NaN (target-dependent bits), division by zero, f64_to out of range, a string
+in arithmetic, > 10,000,000 steps, > 2,000 nested calls.
+
+GATES: tests/gates/frontend/const_checked.sh; tests/tcyr/crossos/const_values, const_contexts,
+const_fn_f64 (compile-time vs run-time BITS). CHANGELOG [6.7.2].
