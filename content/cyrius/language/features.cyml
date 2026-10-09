@@ -232,7 +232,7 @@ SYNTAX:
     var y: i16 = 30000;   # 2-byte variable
     var z: i32 = 100000;  # 4-byte variable
     var w: i64 = 0;       # explicit 8-byte (same as untyped)
-    var u: u128 = 0;      # 16-byte (storage only, arithmetic via lib/u128.cyr)
+    var u: u128 = 0;      # 16-byte; + - and comparisons since 6.7.6, the rest via lib/bayan.cyr
 
 SEMANTICS:
     Type annotations control BOTH storage size AND load/store width.
@@ -3306,7 +3306,9 @@ v6.4.56 onward):
     var out = f64_to(f32_to(s));   # extract back to an i64 you can print
   A f32 is BOXED as its IEEE-754 bit pattern in the low 32 bits of the
   GP accumulator. There is no f32 literal syntax — CONSTRUCT with
-  `f32_from(f64_from(int))`, EXTRACT with `f64_to(f32_to(x))`.
+  `f32_from(f64_from(int))`, EXTRACT with `f64_to(f32_to(x))`. Since
+  6.7.6 a WRITE of an f64 value rounds: `var x: f32 = 1.5;` holds 1.5f
+  (f32_writes_round_and_u128_arithmetic_v676; it stored the f64 bits).
   Complete on x86 / Win64 PE / Mach-O / aarch64 NEON (S-regs) / cx
   (widen-op-narrow). `f32_from` / `f32_to` (v6.2.18, cvtsd2ss /
   cvtss2sd / fcvt) remain the conversion pair.
@@ -5559,6 +5561,173 @@ REFUSED BY NAME: OP= on a STRUCT value (variable of any size, by-value param, gl
 it used to integer-operate on the FIRST WORD and never call an overloaded `T_add` (13 vs `a = a + b`'s 33):
 write `a = a + b`; a bool (its result is not a bool); a const / enum constant; a field of a call's result
 (`mk(3).n += 1` — a temporary). Handles keep pointer arithmetic (`*T`, pointer-mode struct vars, Str).
-NOT YET: OP= on a u128 or a SIMD vector variable is still first-word / no-carry (filed for Break 1).
+SINCE 6.7.6 (Break 1): `+=` / `-=` on a u128 carry across all 128 bits and every other u128 OP= is refused;
+OP= on a SIMD vector, a typed array, a slice or a bare `var b[N]` is refused by name
+(f32_writes_round_and_u128_arithmetic_v676, wide_value_writes_refused_v676).
 GATES: tests/gates/frontend/field_compound_checked.sh (+ mutation ledger); tests/tcyr/crossos/field_compound_values.tcyr.
 CHANGELOG [6.7.5].
+
+[[entries]]
+name = "f32_writes_round_and_u128_arithmetic_v676"
+description = "cyrius 6.7.6 (Break 1, user decisions 2026-10-08): every write of an f64 value into an `f32` ROUNDS to f32 (initializer, assignment, field, struct-literal field, `f32` argument); `u128` `+` / `-` carry and borrow across all 128 bits in both spellings, comparisons / truth tests / match / switch read all 128 bits (unsigned), a plain assignment takes the whole value, and every other u128 operator is refused by name."
+category = "cyrius"
+tags = ["v6.7.6", "f32", "u128", "rounding", "carry", "comparison", "match", "Break 1"]
+---
+F32 — EVERY WRITE ROUNDS. An f64 value written into an `f32` place is rounded to the nearest f32, ties
+to even — what `f32_from(1.5)` gives, and what a 6.7.4 `f32[N]` list element already took:
+
+    var x: f32 = 1.5;     # a local, a global (either side of the first statement), a for init
+    x = 2.5;              # an assignment: a statement or a classic-for step, local or global
+    p.a = 1.5;            # a field store (through a *T too); P { 1.5 } — a struct-literal field
+    g(1.5);               # an argument to `v: f32` — a method, a fn defined below the call, and an
+                          # operator overload's right operand (`r + 1.5` with fn R_add(self, b: f32))
+
+"An f64 value" is one the compiler sees as f64: a float literal, f64 const arithmetic, an `f64`
+variable / field / `: f64` fn, a float builtin's result. An f32 value is stored as it is; an integer
+CONSTANT keeps its bits (6.6.10's warning); an untyped word (`load32(p)`) is the boxed idiom and is not
+converted. Until 6.7.6 each of these stored the f64 BIT PATTERN — `x` read as 0.0, silently.
+NOT ROUNDED: `*p = v` through `p: *f32` stays a raw word store (the `*p` rule); and an f32 OPERATOR
+still reads its right operand's low 32 bits, so `x = x + 1.5` adds 1.5's bits and then stores an f32 —
+write `x + f32_from(1.5)` (6.6.11's warning fires).
+
+U128 `+` AND `-` CARRY, in both spellings — `b = b + x`, `b += x`, `b = b - x`, `b -= x` — with a u128
+or an integer on either side, chains and parentheses included; unary `-b` is `0 - b`. An integer
+operand is its 64-bit pattern ZERO-EXTENDED (the initializer / u128[N]-element rule): `b + (0 - 1)`
+adds 2^64 - 1 — write `b - 1`.
+
+    var b: u128 = 0 - 1;  # low 2^64 - 1, high 0
+    b += 1;               # low 0, high 1: load64(&b + 8) == 1
+
+COMPARISONS `== != < <= > >=` with a u128 on either side compare all 128 bits, UNSIGNED, against a
+u128 or a zero-extended integer, wherever a comparison is written (a condition, an `&&` / `||`
+operand, a value, an if-expression condition). A TRUTH TEST is a comparison with zero: `if (b)`,
+`elif`, `while`, `do .. while`, a for condition, an `&&` / `||` operand and `!b` are true / false on
+all 128 bits (`if (b)` is taken for b = 2^64, whose low word is 0). `match b` / `switch (b)` on a u128
+subject compares each arm / case on all 128 bits, an integer arm zero-extended (`case -1:` is
+2^64 - 1); the subject is read once. An INTEGER `match n` compares a u128 arm on 128 bits too.
+WHOLE VALUE: `var a: u128 = c;` and `a = c;` copy all 16 bytes; `var a: u128 = 5;` and `a = 5;`
+leave a high word of 0. Before 6.7.6 neither spelling carried, comparisons read the low words SIGNED,
+truth tests and match / switch read the low word, `b = c` / `b = 5` kept the old high word, and a
+LOCAL initializer stored its value into BOTH halves.
+
+REFUSED BY NAME until implemented — every other operator with a u128 operand: `* / % << >> >>> & | ^ ~`,
+`*% *| *? +| +? -| -?` and their `OP=`:
+
+    error: `*` on u128 'b' is refused - it is not implemented for u128 yet (only `+` and `-` are;
+    lib/bayan.cyr's bayan_u128_* helpers cover the rest)
+    error: compound assignment `<<=` to u128 'b' is refused - ...
+
+STILL THE LOW WORD: a u128 read where an integer is expected (`var n = b`, an argument, `return b`),
+and a `v: u128` parameter is an 8-byte slot. An if-expression branch that is a u128 `+` / `-` result
+is refused like a u128 name. Not yet (backlog): u128 parameters, returns, fields, closure captures.
+BACKENDS: x86 add/adc and sub/sbb (PE and Mach-O share it), aarch64 adds/adc and subs/sbc, cx with an
+unsigned compare.
+GATES: tests/gates/frontend/silent_values_checked.sh (rows F W U C T S, + mutation ledger);
+tests/tcyr/crossos/f32_scalar_init_rounds.tcyr, f32_writes_round.tcyr, u128_add_sub_carry.tcyr,
+u128_compare_all_bits.tcyr, u128_assign_whole_value.tcyr, u128_compound_matches_long_form.tcyr.
+CHANGELOG [6.7.6].
+
+[[entries]]
+name = "wide_value_writes_refused_v676"
+description = "cyrius 6.7.6 (Break 1, user decisions 2026-10-08): writes that kept only a FIRST WORD are refused by name — a top-level `var v = pair_fn();` (it kept the tag, dropped the payload), `OP=` on a SIMD vector, a typed array, a slice or a bare `var b[N]` / `stack var b[N]`, and a whole-array `a = v` on a typed array — as 6.7.5 refused `OP=` on a struct."
+category = "cyrius"
+tags = ["v6.7.6", "compound assignment", "pair bind", "stack enum", "typed array", "SIMD", "slice", "Break 1"]
+---
+TOP-LEVEL PAIR BIND. A `: stack` enum's fn returns two values; `var r = f();` in a fn body has been
+refused since v6.5.67. At TOP LEVEL — in the declaration zone or after the first statement — it
+compiled and kept the tag, dropping the payload silently (`Ok(42)` read as 0). Now the same words:
+
+    error: a `: stack` enum returns two values — bind both: `var tag, val = f();`
+
+`var t, v = f();` works at top level (since v6.6.0), and `var v = f()?;` consumes the pair.
+
+COMPOUND ASSIGNMENT on a value that is not one integer or float — each operated on its FIRST WORD:
+
+    var v: i64v2; v += w;     # added to lane 0 only        -> refused: use the packed-op builtins
+    var a: i64[4]; a += 8;    # added to a[0] (f64[N]: bits) -> refused: index it, `a[i] += b`
+    s += 1;                   # a slice: moved .ptr          -> refused: `s.ptr += 1` / `s.len -= 1`
+    var b[16]; b += 8;        # a bare array's first word    -> refused: `store64(&b, load64(&b) + 8)`
+
+    error: compound assignment to vector 'v' is refused - a vector value is not an integer or a
+    float (write the long form with the packed-op builtins)
+    error: compound assignment to array 'a' is refused - an array is not an integer or a float
+    (index an element: `a[i] += b`)
+
+Covered: a vector local or parameter; a typed array local, global or static (any element type); a
+slice; each as a statement and as a for step — and a bare array local, global, static or
+`stack var b[N]`. Every ELEMENT form and the slice fields keep working. On a u128 only `+=` / `-=` are legal, and they carry (see
+f32_writes_round_and_u128_arithmetic_v676).
+
+WHOLE-ARRAY ASSIGNMENT to a TYPED array is refused too: `var a: i64[4]; a = 8;` (or `a = b`) stored
+into `a[0]`, silently:
+
+    error: assignment to array 'a' is refused - an array is not an integer or a float (assign an
+    element: `a[i] = v`)
+
+A bare array's plain `b = v` still writes its first word (not decided; unchanged).
+GATES: tests/gates/frontend/silent_values_checked.sh rows P, O, B (+ mutation ledger). CHANGELOG [6.7.6].
+
+[[entries]]
+name = "struct_value_operands_and_parentheses_v676"
+description = "cyrius 6.7.6: a struct value is an operand on EITHER side — a call / method / operator result that returns a struct dispatches its own `T_op` as the left operand and is passed through a frame temporary as the right; parentheses around a whole struct source (argument, field, variable, declaration, for step, return value) are transparent; a `: Str` field into a struct value of another type is refused by name; a name intrinsic's result is untyped."
+category = "cyrius"
+tags = ["v6.7.6", "structs", "operator overloading", "parentheses", "Str", "fncall", "struct return", "Break 1"]
+---
+A STRUCT RESULT AS THE LEFT OPERAND dispatches from its own type, exactly as a struct variable there
+does: `p.dup() + p` calls `P_add` (it integer-added the two first words: 2 where 6 is right),
+`mk3(4) - s`, `(mk3(4)) - s`, `a + b + c` with a struct-returning `+` (it added an address to a first
+word and crashed), `mk3(4) - s + 10` (it dispatched `P3_add` from the type `s` left behind). An
+operand of 8 B or less is passed by value (to a `*T` parameter through a temporary), a larger one by
+its temporary's address. A missing `T_op` is refused (`refusing to emit binary with 1 reachable
+undefined function(s)`, naming `T_op` — `mkw(3) + 4` for an 8-byte W with no W_add too), and so is an
+operator fn whose first parameter is another struct. A `Str` result is a heap handle and never
+dispatches (`gs() + 8` is pointer arithmetic).
+
+A STRUCT RESULT OVER 8 B AS THE RIGHT OPERAND of an operator whose parameter takes it by address (a
+`*T`, or a by-value struct over 8 B) lands in a frame temporary whose address is passed: `s - mk3(4)`,
+`s - s.dbl()`, `p + p.dup()` for a 16-byte p. Its first word used to be passed as the address: SIGSEGV.
+At TOP LEVEL there is no frame, so an operand on either side that needs one (`G + G.dup()`,
+`G + mk2(3)`) is refused by name, as a `*T` operand of 8 B or less already was.
+The same expression works as an argument (`sz(mk3(1) + a)`), a declaration (`var r = mk3(4) - s;`,
+`var q: P3 = mk3(1) + a;`) and a struct fn's return (`return mk3(1) + a;`) — the last two were
+`expected ';', got '-'` (the receive took the call alone).
+
+PARENTHESES AROUND A WHOLE STRUCT SOURCE are transparent, at every depth, for every source shape (a
+name, a field, a call, a method or operator result), into every struct destination:
+
+    struct P3 { x; y; z; }
+    fn P3_sub(a: *P3, b: *P3): i64 { return a.z - b.z; }
+    fn mk3(v): P3 { var t: P3 = P3 { v, v, v }; return t; }
+    fn rd3(p: *P3): i64 { return p.z; }
+    fn demo(): i64 {
+        var s: P3 = P3 { 9, 9, 9 };
+        var q: P3 = (s);                          # a copy, as `var q: P3 = s;`
+        q.z = 4;
+        return (s - mk3(4)) + rd3((q)) + s.z;     # 5 + 4 + 9 = 18
+    }
+
+An argument (`rd3((a))` SIGSEGV'd: it pushed the VALUE), a struct-typed field (`o.i = (z.k)`), a
+variable (`w = (j)`), a declaration in a fn or at top level (`var q: P3 = (z.k);` SIGSEGV'd,
+`var G: P3 = (A);`) and a for step each copied ONE word before 6.7.6. A struct fn's return value too:
+`return (j);`, `return (mk3(v));`, `return ((j));`, `return (a + b);` and `return (a) + b;` work in
+both return classes (a retptr struct over 16 B, a 9-16 B one in two registers) — they were refused.
+Parentheses that are only PART of the source keep their meaning (`sz((a) + (b))` adds first); a
+refused shape inside parentheses is refused as it is without them.
+
+A `: Str` FIELD is a Str handle as a source: into a Str parameter / variable / field or an untyped one
+it is the handle, as ever; into a struct VALUE of another type it is refused like a Str variable —
+`bq(h.name)` for `fn bq(b: Q)`: `cannot pass 'name' to a parameter of a different struct type in a
+call to 'bq'`; `var q: Q = h.name;`, `q = h.name`, `o.q = h.name`, `q + h.name` alike. They compiled
+and read Q's fields out of the Str's 16-byte header and past it.
+
+A NAME INTRINSIC'S RESULT — `mulh64(..)`, `fncall0`..`fncall8(..)`, `callptr(..)` — is an untyped word
+whatever its last argument was: `fncall1(&f, n) + 1` with `n` a struct is 100, not `P_add`'s answer.
+Kept: with the callee written `&f`, `f` declared `: f64` and an f64 last argument, the result is an
+f64 (`fncall1(&dbl, d) + 1.0` is an f64 add). Through a variable or a closure write
+`f64_add(fncall1(fp, d), 1.0)` or bind it to a `var r: f64`.
+NOT YET (backlog): a struct-typed FIELD as the left operand passes the containing struct's address
+(`h.p - s`); a parenthesised argument to a by-value struct parameter of 8 B or less skips the 6.7.3
+type check (`bs1((t))`); `var r = mk3(4) - s` types `r` as `P3` even when `P3_sub` returns an
+integer (also `n - s + 10`, `-s + t`).
+GATES: tests/gates/codegen/struct_value_codegen.sh; tests/tcyr/crossos/struct_value_codegen.tcyr.
+CHANGELOG [6.7.6].
