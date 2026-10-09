@@ -6339,3 +6339,280 @@ surface (assign, compare, truth test, match / switch, OP=) before asking, not on
      before adding to cybs.cyr: every cybs feature spends a budget whose overrun fails silently.
 GATES: tests/gates/toolchain/cybs_call_arity_named.sh (rows A S B C E D + mutation ledger),
 cybs_lexer_drops_nothing.sh; tests/gates/codegen/struct_value_codegen.sh. CHANGELOG [6.7.6].
+
+[[entries]]
+name = "tuples_anonymous_structs_and_the_multi_value_bridge_v677"
+description = "Gotchas met adding 6.7.7's tuples (B4): `.N` is a selector by the PREVIOUS token, not the byte; a struct is registered only BETWEEN struct definitions; a tuple declaration is never pointer-mode; `_pwrap_k` counts a literal's own `(`; a literal argument's temporary is a frame address, so a tail call diverts; a multi-value call has no storage for an address-passed parameter; a capture pushes every return register before any store; `return t;` must not check the caller's signature inside an #inline replay; a refusal that peeks a callee can EMIT, so it sits right before its PCMPE; a refused type-parameter binding recovers through the base under the panic latch; aarch64 has two pair conventions; a check on every `return` must be linear."
+category = "cyrius"
+tags = ["v6.7.7", "tuples", "B4", "_lex_dot", "REGSTRUCT", "pointer-mode", "_pwrap_k", "tail call", "MULTIRET_SID", "_tup_drain_push", "#inline replay", "PCMPE", "_gen_infer_tp", "panic latch", "aarch64 x0:x2", "linear scan"]
+---
+1. `.N` IS A SELECTOR BY THE PREVIOUS TOKEN. LEXDEC builds a float from `digits.digits`, so before 6.7.7
+`t.0.1` lexed IDENT DOT FLOAT"0.1" — the parser cannot split a float, so the LEXER owns `.N`. `_lex_dot`
+(lex.cyr) emits the DOT, then, when the next byte is a digit AND the token before the DOT is an IDENT (2), `)`
+(11) or `]` (29) — the tokens a field selector follows — lexes the digit run with LEXID (`t.0.1` = two
+selectors). The guard is the previous TOKEN, not the byte before the `.`: a range's second `.` follows a DOT
+token, so `a..5` / `0..10` are untouched; `1.5` is one LEXNUM token and never reaches the DOT arm; `1.0.5`
+stays a float and a stray `.`. Drop the guard and `for i in 0..10` reads `10` as a name ("undefined variable
+'10'"). The selector is LEXID's whole alnum run (`p.0x1` is field '0x1'). `_tok_start` moves to the digit so the
+IDENT's column is right. And once `.N` is a name, `p.0()` resolves as the METHOD `P_0` — a user `fn P_0(self)`
+was called — so `x.0(..)` is refused on ANY receiver (`_tup_meth_chk`). Rows L1-L5, R13e-R13i; mutations M1,
+M1b, M13d.
+
+2. REGISTER A STRUCT ONLY BETWEEN STRUCT DEFINITIONS. REGSTRUCT sets the new struct's field_base to the packed
+field pool's top and ADDFIELD fills field_base + fc in order, so registering a struct while another is
+mid-definition lands the inner struct's fields inside the outer one's slice — both corrupt. A tuple type is
+interned (registered) on first use, so PARSE_STRUCT_DEF interns every `name: ( .. )` field type in a pre-scan
+BEFORE its REGSTRUCT (`_sdef_tup_prescan`, the twin of `_sdef_gen_prescan` for `Box<T>` fields) and the field
+arm only looks the type up (`_tup_type(S, 1)`): a miss there is an internal error, never a silent REGSTRUCT.
+Every other interning site (a var annotation, pass 1 or 2) is outside any definition. Row S2, mutation M2.
+
+3. A TUPLE DECLARATION IS NEVER POINTER-MODE. A struct over 8 B declared from an expression (`var p: P =
+mk();`) is POINTER-mode: its slot holds the struct's address. No expression yields a tuple's address, so
+`var t: (i64, i64) = 5;` reaching that path would store a scalar into a slot read as a pointer.
+`_tup_ptr_refuse` (at `_sl_ptr_type` and the two global SVTYPE sites, `_tup_svtype`) refuses it by name; every
+tuple source (a tuple, a tuple field, a literal, a capture) must claim its path BEFORE that backstop. Rows
+R12e-R12i, mutation M10b.
+
+4. `_pwrap_k` COUNTS A LITERAL'S OWN `(` AS A WRAP. 6.7.6 made parentheses around a whole struct source
+transparent: `_pwrap_k` counts the `(`s that close right before each other and the destination steps inside.
+For `((1, 2))` it counts TWO, the literal's own `(` included, so an unwrap that stepped inside parsed `1` and
+then "expected ')', got ','". Every accepting position tests `_tup_lit_at` (the innermost counted group has
+commas) BEFORE its unwrap — `_tup_asg` heads `_try_aggregate_copy_assign`, `_tup_sarg_lit` heads `_sarg_paren`,
+`_tup_fsc_lit` heads `_fsc_paren`, `_tup_var` runs before PARSE_VAR's peels — and the peelers that are not
+destinations (`_ret_peel`, `_scv_peel`) decline a literal so its factor refuses it by name. Rows S1, PW1-PW9;
+mutation M5.
+
+5. A LITERAL ARGUMENT'S TEMPORARY IS A FRAME ADDRESS. `return take((1, 2));` builds the literal in an
+`_agg_temp` and pushes its address; the tail call's jmp would free that frame before the callee's prologue
+copies the tuple (measured 52 where 60 is right). `_tup_sarg_lit` calls `_sarg_escapes(fi, argc, tail)`, which
+sets `_fn_local_addr` for a tail call's own argument, so `_tc_after_args_divert` makes it a real call (in a loop
+too). tuple_values.tcyr's tailcalls rows, mutation M6.
+
+6. A MULTI-VALUE CALL HAS NO STORAGE FOR AN ADDRESS-PASSED PARAMETER. A struct call gets a temp
+(`_struct_call_into_temp`, `_sc_pre`); a MULTI-VALUE call (`: (i64, i64)`, GFRS = MULTIRET_SID) has none —
+`_arg_call_class` answers 0 and the caller pushes rax, so a tuple parameter received the call's FIRST VALUE as
+its address (SIGSEGV). Refused by name: a free call before `_arg_call_class` (`_tup_arg_call`), a method or
+operator after its parse (`_sc_post_small` stamps the multi-value result's span, `_mrc_note`;
+`_push_struct_expr_arg` matches it against the whole argument). The same shape into a NAMED by-value struct
+parameter over 8 B is a pre-existing silent SIGSEGV, reported by the lane. Rows R17a-R17h; mutations M14, M14b.
+
+7. A CAPTURE PUSHES EVERY RETURN REGISTER BEFORE ANY STORE. `var t: (i64, i64, i64) = f();` / `t = f();` /
+`a, b, c = f();` drain the multi-value registers (x86 / PE rax:rdx:r8, aarch64 x0:x2:x3, cx r0:r4:r5) with
+`_tup_drain_push` — push rax; `EMOVRA_RDX`, push; `EMOVRA_R3`, push (`EMOVRA_RDX` leaves r3 intact) — then pop
+each value into its slot, the last first. Computing a slot's address between two register reads is what the
+destructure's own drain had to order by hand; pushing first makes the order irrelevant. A tuple's slots are
+stored through `_resolve_field_base_addr` + `EADDIMM_X1` + `ESTOC`, never EFLSTORE (the regalloc picker would
+rewrite an aggregate slot's store into a register, and a coroutine's heap frame orders an aggregate's words from
+its LOW slot, `_ECORO_AGG_OFF`); a re-assigned scalar takes `_asg_store_slot`. The local block is reserved with
+its span BEFORE the call is parsed and NAMED after the stores (an argument reads an outer `t`); a global after the
+first statement is registered AFTER the call (a registration inside the call takes its own index). `a, b = f();`
+keeps its resolved targets in its own locals across the call's parse (a multi-value assignment inside a closure
+among the arguments re-uses the module table, `_masg_ix`). Rows AS2, A; mutations M8a (stores in push order),
+M8b (no `EMOVRA_R3`), M23 (targets re-read after the call: 26 where 813 is right).
+
+8. `return t;` CHECKS THE CALLEE'S SIGNATURE — NOT INSIDE AN #inline REPLAY. The replay re-parses a callee's body
+in the CALLER's fn context (`_cur_fn_ix` is the caller's), so a check against "the current fn's declared return"
+reads the wrong fn there. `_ret_tup_ok` skips its signature check when `GIDEP != 0` (the definition already
+checked its own body, `_bx_live`'s rule) and only emits; an `async fn` body is told by its minted name (`f$impl`,
+`_fn_async_impl`), since `_cur_fn_coro` is set only for a body that suspends. A 9-16 B struct fn's `return t;`
+is refused by its own class first (`_ret_struct_pair`), so the tuple refusal stays quiet there.
+
+9. A REFUSAL THAT PEEKS THE CALLEE CAN EMIT — PUT IT RIGHT BEFORE THE STORE'S PCMPE. `_refuse_lossy_pair` (6.7.7
+T5b: a `: stack` pair into one slot) resolves the callee through `_pair_callee_at`, and for a generic call that
+is `_gen_resolve_call` — which INSTANTIATES the instance, emitting its body inline (a jump over it) at the current
+code position. `_PARSE_TERM_IMPL` does the same peek (`_tpair`) at the start of every term, so a refusal placed
+immediately before the store's PCMPE instantiates where the term would have: every accepted program compiles
+byte-identical. Placed before an emit (in `_asg_compound_op`, before its `EPUSHR`) the instance's bytes would move
+ahead of the push — correct, no longer identical; placed before `_W128_IS` (which compares GCP with the u128
+load's) an instantiation would make a u128 `b += g(..)` read as no u128 place. Hence the u128 compound's refusal
+lives in `_w128_binop`, right before its own PCMPE. stack_enum_lossy_context.sh axis 15; mutations M24a-M24i.
+
+10. A REFUSED TYPE-PARAMETER BINDING RECOVERS THROUGH THE BASE — SO LATCH THE STATEMENT. `first(t)` with a tuple
+`t` is refused in `_gen_infer_tp`, the one place every generic call path reaches (the call head,
+`_gen_resolve_call`'s own-call paths and lookaheads, the `: T` return peek, the tail-call divert). T binds i64 —
+the base, as a refused bound's call does — and the base is not written for that argument: a struct-reading body
+is a stub, a small one is inlined (`x.0` on an i64), a `T` return is one value that a tuple capture declines (and
+PARSE_VAR's generic-callee path then drops the annotation, so `u.0` on the NEXT statement cascades). So the
+refusal sets the panic latch — the statement's cascade is swallowed and `_sync_skip` resyncs — and
+`_tup_cap_check` treats a latched callee as refused. The latch is set on every parse of the call (an #inline
+replay re-parses it; `_tn_once` reports it once), never under --syntax-only (lint's pre-pass resolves as before:
+row X7). Recovering through the OLD instance instead is worse: minting it parses its body at once, a nested
+parse that resyncs and CLEARS the latch, so the capture's "returns struct" refusal follows as a second error.
+Rows R4e-R4r; mutations M17i, M17p, M17r, M17s.
+
+11. AARCH64 HAS TWO TWO-REGISTER RETURN CONVENTIONS. `E*_STRUCT_INT_PAIR` returns a 9-16 B struct in x0:x1
+(aarch64/emit.cyr); a multi-value `return (a, b)` puts its second value where EMOVRA_RDX reads it, x2. x86 / PE
+use rax:rdx for both, so the two never disagree there. Where they meet on aarch64 — `return (a, b)` in a
+struct-returning fn, or `var a, b = mk16();` of a struct-returning call — the second word was lost (55 / 50 where
+56 is right, on pi and ecb too): issues/2026-10-09-aarch64-struct-pair-and-multi-value-registers-disagree.md,
+whose fix the user placed in 6.7.7 itself (2026-10-09). A tuple uses ONLY the multi-value emitters (its return,
+its capture's drain), and the capture and `a, b = f();` refuse a struct-returning callee by name, so tuples never
+reach the seam (`a, b = f();` took one until the B4 review: 50 on aarch64 where 59 is right). GENERAL: a
+convention two features "share" on x86 because both happen to use rax:rdx is two conventions on a target where
+they differ — test the pair on aarch64, not only x86.
+
+12. A CHECK ON A PATH EVERY STATEMENT OF A KIND TAKES MUST BE LINEAR. `_ret_tuple_var` runs for EVERY `return` (it
+must recognise `return t;` before the scalar path); a `_pwrap_k` peel in its wrap scan made
+recursion_depth_bounded.sh's `return ((..((1))..));`, 65536 deep, take 99 s — a timeout, caught by that gate's
+`nested parens @ 65536` row. The scan is one linear pass over the tokens now.
+GATES: tests/gates/frontend/tuple_checked.sh (+ mutation ledger); tests/tcyr/crossos/tuple_values.tcyr;
+stack_enum_lossy_context.sh axis 15. CHANGELOG [6.7.7].
+
+[[entries]]
+name = "defaults_named_arguments_and_the_one_marshaller_v677"
+description = "Gotchas met adding 6.7.7's default and named arguments (B6): a parameter-list walker skips a default with ( [ { only (the const evaluator's two counts are the exception and must agree); a walker's end-of-input return must not be its own start; one marshaller keyed by parameter index; the tail arm never fills (a divert plus a loud backstop); a reordered named call spills to _HTEMP and records a vector at its parameter-order ordinal; a fill resets the expression type; the evaluator judges file scope at the PARSER cursor; a pass-1 refusal leaves the panic latch alone; the #inline replay binds by position; a plan's premise must be checked in code; the forward-arity gap was fn bodies; compiler-called helpers take no default; a named argument's label is not a capture read."
+category = "cyrius"
+tags = ["v6.7.7", "default arguments", "named arguments", "B6", "_pl_next", "_pl_dflt_end", "_arg_next", "_owncall_args_at", "_call_arg_one", "_tc_args_divert", "_CHECK_ARITY", "_HTEMP", "_simd_ord_at", "_cst_emit_val", "_pd_eval", "_panic", "_fnc_no_inline", "_cl_prescan_ident"]
+---
+1. A PARAMETER-LIST WALKER SKIPS A DEFAULT WITH ( [ { BALANCE ONLY. In a parameter's TYPE `<..>` nests
+(`m: Map<K, V>`; `>>` / `>>>` close two / three); in its DEFAULT only `( [ {` do (`b = A < B`). A walker that
+counted `<` as a bracket inside a default lost the list's end. One rule, written once: `_pl_next` / `_pl_tdepth`
+(a parameter), `_pl_dflt_end` (a default), used by `_bx_pname`, `_gs_params`, `_bnd_sites`, `_tr_arity`, both
+passes' parameter loops, and `_prescan_skip_fn` (which skips the whole `( .. )` before looking for the body, so
+nothing in a default is taken for it). EXCEPTION: the const evaluator's two counts (`_ce_nparams` at the
+definition check, `_ce_bind_params` at the bind) are paren-depth only and MUST agree, so `_ce_bind_params` steps
+with `_tok_item_end`, not `_pl_next` — a `<`-aware bind refused an uncalled `const fn f(p: Pair<i64, i64>, b)`
+that compiles (const_checked.sh C3). Rows S3, C1; mutations M10, M11, M17, M22.
+
+2. A WALKER'S END-OF-INPUT RETURN MUST NOT BE ITS OWN START. A walker written `i = _pl_dflt_end(S, i);
+continue;` loops forever on `fn f(a, b = 1` at EOF if the helper hands `i` back. The B6 walkers return the EOF
+token, so a caller that continues from the result always moves.
+
+3. ONE ARGUMENT MARSHALLER, KEYED BY PARAMETER INDEX. `_owncall_args_at(S, fi, noff, int0, p0, line)` ->
+`_call_arg_one(S, fi, pi, ..)` carries every callee-mask gate (the SIMD record, the cstring literal error and
+Str warning, the Str literal wrap, the struct address push, PCMPE + bool / f32). PARSE_FNCALL, the method form
+(p0 = 1: `self` is parameter 0) and the struct-valued / Win64 vector-retptr receives all call it, so a call-site
+obligation — B6's fills and names — is written once, and a named argument passed its PARAMETER's index inherits
+every gate. (Bite 1a, a refactor with identical output: 647 files byte-identical on every backend.)
+
+4. THE TAIL ARM NEVER SEES A CALL THAT FILLS OR NAMES — A DIVERT, PLUS A LOUD BACKSTOP. The tail arm
+(PARSE_RETURN) has missed a call-site obligation five times, so B6 gives it none: `_tc_args_divert` asks
+`_pd_call_fills` first (a named argument, or fewer written arguments than max, counted by `_arg_next`) and sends
+such a `return f(..)` to PARSE_FNCALL — the one marshaller, the only site that fills. `_CHECK_ARITY` mode 3 (the
+arm's literal `1` -> `3`: no new reference in a giant fn at cybs's ceiling) turns a predicate miss into
+"internal: tail call to 'f' reached the tail arm short of its defaults", never a jmp with a parameter unset.
+Mutations M1 / M2 show both halves; T1 pins the full-arity jmp.
+
+5. A REORDERED NAMED CALL SPILLS TO _HTEMP; A VECTOR'S REGISTER IS ITS PARAMETER-ORDER ORDINAL. Each argument is
+evaluated as written through its parameter's gates, its int-class word popped into `_HTEMP` (a frame slot in a
+fn; a dead hidden global at top level — never a frame slot there: mutation M14 SIGSEGVs), then every parameter
+pushed in parameter order. A value-form vector is RECORDED at `_simd_ord_at(fi, pi)` (the widths of the vector
+parameters before it), never pushed — the running ordinal hands `vtwo(b: y, a: x)` its registers swapped (M7). A
+named call is checked WHOLE before anything is emitted (`_pd_nscan`, cursor-free), so a refusal is one line and
+the rest is parsed without a push (`_pd_nskip`), never a cascade. Every scanner that reads an argument by
+POSITION before the call is parsed (`_gen_infer_tp`, `_gs_arg_named`, `_tok_gen_ret_sid`) goes through
+`_call_arg_for`, which falls back to `_call_arg_start` when nothing is named — so positional calls are
+byte-identical and `g(n: 2, x: p)` infers like `g(p, 2)`.
+
+6. A FILL RESETS THE EXPRESSION TYPE. `_cst_emit_val` (a const read, and a default's push) of an f64 sets ESTYPE
+to f64. The method form has no type reset of its own (issue
+2026-10-09-method-call-result-keeps-last-arg-f64-type), so `p.m() * 2` with `d: f64 = 1.5` read 0 until the fill
+ended with `SESTYPE(S, 0)`. Row L1, mutation M16.
+
+7. THE CONST EVALUATOR JUDGES FILE SCOPE AT THE PARSER CURSOR — EVALUATE A DEFAULT ON ITS OWN TOKEN. FINDFN's
+same-name file scoping and a private const's visibility are judged at the parser cursor, not the evaluator's. A
+default is evaluated with GTI put on its own token (`_pd_eval`), so it resolves in its definition's file whatever
+file the call is in (row E2: 149, not 199; mutation M19). A const context does not check a CALLED const fn's
+`private` at all, and defaults inherit that, as `const X = pk();` does. And evaluating every default at the END
+of pass 1 (`_pd_sweep`) is what keeps a caller's locals out: with a lazy evaluation at the call, row E1 read the
+caller's local const (99 where 29 is right — M20 with M18).
+
+8. A PASS-1 REFUSAL MUST LEAVE THE PANIC LATCH AS IT FOUND IT. ERR_* set `_panic` and pass 1 never resyncs it, so
+a second bad const in one file goes unreported. The default refusals print through `_pd_eo` / `_pd_ec` (one line
+per token, `_tn_once`; the latch untouched), and an evaluator refusal clears the latch it set — every bad default
+in a file is reported, each once.
+
+9. THE #inline REPLAY BINDS BY POSITION — A NAMED CALL MUST NEVER REACH IT. `_fnc_no_inline` sends a named call
+to the normal path; without it the replay read `b:` as a variable (M4). A defaulted fn is never inline-eligible
+(`_inl_why = 7`), so no per-call count is needed (M3, row W1).
+
+10. CHECK A PLAN'S PREMISE IN CODE. The B6 plan's D17 ("a fn defined inside a top-level block is not prescanned,
+so refuse its defaults") was false since 6.6.17: `_prescan_block_fn` records it, so such a fn takes defaults like
+any other and a call above the block reaches the record (row R17 is a PASS). `_pd_late`'s refusal stays as a
+backstop for a definition pass 1 did not record; the earlier definition of a REDEFINED fn also reaches that
+branch (pass 1 keeps only the last start) and is D15's. Its mutation (M21) has no killing row, by construction.
+
+11. THE FORWARD-ARITY GAP WAS A CALL FROM A FN BODY. A top-level STATEMENT's call to a fn defined below it was
+already checked before 6.7.7 (that fn's body is emitted first); the gap (fork F2, user 2026-10-09) was a call
+from inside a fn body, or to a fn inside a later top-level block. `_CHECK_ARITY` now checks whenever pass 1
+recorded the callee (GFDS). A gate row for a forward call must sit in a fn body (rows C1-fwd, R24 / R24b;
+M9 = M23).
+
+12. A HELPER THE COMPILER CALLS WITH A FIXED COUNT MUST NEVER DECLARE A DEFAULT. The synthesized calls (for-in
+vec_len / vec_get, closure and enum alloc, str_from, future_force / future_pending, `_slice_idx_get_N`, the
+`_chk_*` / `_sat_*` overflow modes, the aarch64 `_f64_*_polyfill`s, f64v2_make / f64v4_make) pass a FIXED number
+of words; a default there would never be filled. Row S-R5 derives the names from src (`_FINDFN_CSTR` /
+`EMIT_OVF_CALL` literals plus vec_len / vec_get / alloc / str_from) and fails on a lib/ definition with a default
+(MT9).
+
+13. THE CLOSURE CAPTURE PRE-SCAN READS NAMES BY TOKEN — A NAMED ARGUMENT'S LABEL IS NOT A READ.
+`_cl_prescan_ident` captures any free name it meets in a closure body. `|n| w3(1, c: n)`'s label `c` matched the
+enclosing fn's local `c` (a capture the body never uses: refused without lib/alloc.cyr), and at top level
+whatever the local table still held from the last fn compiled — the callee's own parameter, so the closure
+captured a dead frame slot (SIGSEGV on x86 / aarch64). `_cl_is_arg_label`: `IDENT :` just after `(` / `,` whose
+innermost unclosed bracket is a `(` — the bracket test keeps a struct literal's field (`Pt { x: n }`, in a `{`)
+and a `case A, B:` as they were. Rows N-cl, the tcyr's top-level A21; mutation MU4 (the B6 review).
+GATES: tests/gates/frontend/default_named_args_checked.sh (+ mutation ledger);
+tests/tcyr/crossos/default_named_args_values.tcyr; const_checked.sh C3 / M2. CHANGELOG [6.7.7].
+
+[[entries]]
+name = "one_reading_for_both_passes_and_for_every_list_walker_v677"
+description = "Three classes both 6.7.7 lanes met (tuples B4, default / named arguments B6): two passes that read one construct must read it by ONE rule (a tuple parameter type, a `u128` / `*fn` type token, a declaration-zone generic call) — a disagreement is a silent ABI split; a separator comma must be found by ONE walker that steps a closure's bars and a generic's type arguments; and every hand-written signature reader in the tools must count brackets and skip literals."
+category = "cyrius"
+tags = ["v6.7.7", "two passes", "_prescan_params_scan", "_pd_pc_check", "_gcall_syn", "_arg_next", "_tup_commas", "cyrius header", "cyrius-lsp", "api-surface", "cyrdoc", "type-audit"]
+---
+1. TWO PASSES, ONE RULE — A PARAMETER LIST STOPPED SHORT IN PASS 1 IS A SILENT ABI SPLIT.
+`_prescan_params_scan` (pass 1) records a fn's parameter count and per-parameter masks for every call parsed
+before its definition; pass 2 (PARSE_FN_DEF) reads the list again. Twice in 6.7.7 they disagreed:
+  a. B4: pass 1 stepped over `name: IDENT<..>` only; at a tuple type's `(` it stopped, so a forward call saw one
+     parameter and no struct-mask bit (an arity error — or, with the counts agreeing, the tuple's first word
+     pushed where the callee dereferences an address). A new parameter-type spelling needs its pass-1 arm
+     (`_tup_pscan`) in the same change as its PARSE_FN_DEF arm (`_tup_param`), and pass 1 must also predict the
+     prologue copy (`SFBVCP`, `_tup_bvcp`) or a tail call after an ordinary call to a callee declared below is
+     diverted for nothing. Rows S3, the tailcalls rows; mutations M3, Mbv.
+  b. B6 review: pass 1 took a parameter's TYPE only when it was a NAME; pass 2 takes any one token. At
+     `a: u128` / `a: *u128` / `a: *fn` (keywords) pass 1 stopped, so its count was short: a forward call lost the
+     fn's `: f64` / struct return (the return-type scan read the parameter — exit 0, SIGSEGV; pre-existing), F2
+     refused a RIGHT-count forward call, and a default after such a parameter was never recorded while pass 2's
+     count let the short call through (an unset register). `_pd_pc_check` now refuses a defaulted fn whose passes
+     disagree, so the fill and the range check never read two maxes. Rows R24c / R24d / U1-U5; mutations MU1, MU2.
+  c. B4 review: the declaration zone's PARSE_GVAR_REG sizes a global before the fns and structs after it exist;
+     EMIT_GVAR_INITS replays the initializer with everything declared. A tuple literal's comma detector skipped a
+     generic call's type arguments only through `_gcall_open` — a KNOWN generic — so with the generic declared
+     below, `pk<i64, i64>(1, 2)`'s comma was a tuple comma in pass 1 and none in the replay: the global was sized
+     as one shape and initialized as another. Pass 1 now reads `name<..>(` by its tokens (`_gcall_syn`), and where
+     the readings can still disagree (a `<` comparison spelled like a type list) the replay refuses by name
+     (`_gvi_tup_slot`, `_gvi_tup_odd`) — never a store into a slot of the other shape. Rows ZG1-ZG11; Mz1-Mz4.
+RULE: two counts of one list come from one rule; anything pass 1 decides from tokens that name things declared
+later must be decided by a reading the replay RE-CHECKS.
+
+2. ONE WALKER FINDS A SEPARATOR COMMA. A tuple literal is a `(` group with a comma at its own depth, and an
+argument ends at a comma — but `(|a, b| a + b)` and `(pk<i64, i64>(1, 2))` hold commas that separate nothing.
+PARSE_RETURN's paren-depth scan counted both, so `return (|a, b| a + b);` was taken for a two-value return
+("expected ','"). `_arg_next` (B6) steps a closure's bars — EVERY leading head, since a closure body that opens
+with `|` / `||` can only be another closure literal (no unary `|`): `|a| |b, d| ..` is one argument (stepping
+only the first head counted `|b, d|`'s comma; the B6 review, rows A24, MU3 / MU3b). `_tup_commas` (B4) walks a
+group element by element with `_arg_next` / `_tok_item_end` and, where an element's end falls INSIDE an explicit
+generic call's type arguments, resumes after that call (`_tup_gen_past`). ONE detector serves every tuple
+position (PARSE_RETURN, the five accepting positions, the PARSE_FACTOR stray refusal, the const evaluator), so
+they cannot disagree (rows C1-C4, M21). For B6 the count decides a tail call: counted as two arguments,
+`return ap(|a, b| a + b);` to `fn ap(c, n = 5)` would jump with `n` unset (M2). The three older scanners that did
+not step the bars (`_CALL_ARGC_PEEK`, `_call_arg_start`, `_tc_str_literal_arg` — a false generic refusal, and a
+`return f(|a, b| .., "lit")` tail call into a `: Str` parameter that passed the raw literal) are
+issues/2026-10-09-closure-literal-comma-counted-as-argument.md, whose fix the user placed in 6.7.7 itself
+(2026-10-09).
+
+3. A TOOL THAT READS A SIGNATURE BY HAND MUST COUNT BRACKETS AND SKIP LITERALS. Before 6.7.7 no parameter held a
+`,` or a `)`, so the tools read a list as "to the first `)`, split at every `,`". A tuple type (`t: (i64, i64)`)
+and a default (`b = f(1, 2)`, `s = ",)"`, `c = ')'`) broke them silently: `cyrius header` printed `cyr_val i64`
+as a parameter and dropped the ones after it (and `cyr_val b = 2`, not C); the LSP's semantic tokens coloured
+`i64` as a parameter all through the file and lost later parameters; api-surface counted a string's `,` and read
+`#` as a comment; type-audit's `)` in a string closed the list; cyrdoc ended a signature at a `{` in a string.
+All five now balance `( [ {` and skip string / char literals; none balances `<` / `>` (in a default it is an
+operator, as in `_pl_dflt_end`). A depth-aware end has a hazard the old one did not: an inner `)` the name scan
+stops at must still be STEPPED, or the walk never advances (the header steps every byte of a parameter to its
+depth-0 `,`). api-surface records `name/MIN-MAX` for a defaulted fn (`name/N` otherwise): a fn gaining a
+trailing default reads as a widening, still a changed signature (a `fncall1(&f, ..)` caller with the old count
+is refused). Rows tuple_checked.sh T1 / T1b / T2 (MT1a-c, MT2a-c) and default_named_args_checked.sh S-hdr /
+S-asf / S-doc / S-lsp / S-ta (MT1-MT8).
+GATES: tests/gates/frontend/tuple_checked.sh, default_named_args_checked.sh. CHANGELOG [6.7.7].

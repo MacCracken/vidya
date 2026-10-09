@@ -9,6 +9,9 @@
 # name — it compiled and crashed); the include entry gained the store fallback (CYRIUS_HOME).
 # 15 entries (DERIVED at 6.6.16 with `grep -c '^\[\[entries\]\]'` — this line read 13 while
 # the file held 14).
+# v6.7.7: +2 entries — tuple_syntax_selector_literal_and_elements_v677 (`t.0` vs `t. 0`, where a
+# literal goes, a float element needs the type), named_arguments_follow_the_positionals_v677 (and a
+# trait method takes no default). 17 entries (DERIVED at 6.7.7).
 
 [[entries]]
 name = "the_logical_shift_trap"
@@ -894,3 +897,78 @@ STILL LEGAL: a fn inside a TOP-LEVEL block, which is the relaxed-ordering featur
 Survey: an instrumented compiler found no nested fn in the compiler, the stdlib, cyrius's tests or 1,350
 ecosystem units across 125 repos, so no shipped code changes behaviour. Gate:
 tests/gates/diagnostics/nested_fn_refused.sh. See CHANGELOG [6.6.16].
+
+[[entries]]
+name = "tuple_syntax_selector_literal_and_elements_v677"
+description = "cycc 6.7.7 tuples (B4): `t.0` is a selector only when the digit touches the `.` (`t. 0` is a name, a dot and a number); a tuple literal goes only where a tuple goes — five positions, never into an expression, at top level only as a declaration; an un-annotated literal's elements are i64, so `var p = (1, 2.5);` is refused (declare the type); elements are i64, f64 or bool."
+category = "cyrius"
+---
+cycc 6.7.7 (user decisions 2026-10-08 / 2026-10-09; language/features.cyml `tuples_v677`).
+
+THE SELECTOR LEXES ONLY WHEN THE DIGIT TOUCHES THE DOT:
+
+    t.0               # element 0
+    t.0.1             # element 1 of element 0 — two selectors (before 6.7.7: a name and the float 0.1)
+    t. 0              # a name, a `.` and the number 0: "expected identifier, got number 0", as before
+    p.0               # on a named struct: "unknown field '0' on struct 'P'"
+    t.2  t.01  t.0x1  # past the arity, or not a plain index: "unknown field '2' on struct '(i64, i64)'"
+
+A digit-led name is never a method: `x.0()` on any receiver is "a method name cannot start with a digit", and
+a tuple has no methods at all (`t.m()`, `impl (i64, i64)`).
+
+A LITERAL GOES WHERE A TUPLE GOES — five positions: a `var` initializer, an assignment to a tuple variable, a
+store into a tuple field, a tuple argument, and `return (a, b);`. Not into an expression:
+
+    var s = (1, 2) + 3;   # error: a tuple `( .. )` is a value only as a `var` initializer, assigned to a
+                          #        tuple variable or field, as a tuple argument, or after `return` - ...
+    g((1, 2));            # the same, when g's parameter is not a tuple
+    (1, 2).0              # the same: bind it first, `var t = (1, 2);`, then `t.0`
+    return ((a, b));      # error: a multi-value return is written `return (a, b);` - drop the extra parentheses
+
+In the other four positions `((1, 2))` is the same literal. At TOP LEVEL only the declaration works
+(`var G = (1, 2);`): `G = (3, 4);` and `take((1, 2))` build the literal in a frame temporary first — which is
+also why `t = (t.1, t.0)` swaps — so they need a fn.
+
+A FLOAT ELEMENT NEEDS THE TYPE DECLARED. An un-annotated literal's elements are i64 (an untyped float is an
+integer, ADR-002):
+
+    var p = (1, 2.5);                 # error: a float element needs the tuple's type declared - ...
+    var p: (i64, f64) = (1, 2.5);     # ok: p.1 is an f64
+    var q = (1, 2);                   # (i64, i64), the same type as the spelled one
+    var b = (true, 1);                # (i64, i64) too, as `var b = true;` is an i64
+
+ELEMENTS ARE i64, f64 OR bool. `(i32, i64)`, `(u64, i64)`, `(*T, i64)`, `(P, i64)` and a nested tuple are
+refused by name in 6.7.7: store a narrow value in an i64 element. `sizeof(( .. ))` is refused too — take sizeof
+of a struct holding the tuple. `()`, `(T)` and a trailing comma are not tuple types. Gate:
+tests/gates/frontend/tuple_checked.sh (L, R rows). See CHANGELOG [6.7.7].
+
+[[entries]]
+name = "named_arguments_follow_the_positionals_v677"
+description = "cycc 6.7.7 named arguments (B6): `f(1, c: 3)` — positionals first, then names in any order, evaluated as written; a positional after a named one is refused; `self` is not namable in `o.m(..)`; builtins, fncallN and callptr take positional arguments only; a trait method takes no parameter default (a required-signature default compiled and was IGNORED before 6.7.7)."
+category = "cyrius"
+---
+cycc 6.7.7 (user decision 2026-10-08; language/features.cyml `default_and_named_arguments_v677`).
+
+    fn tag(a, b = 2, c = 6): i64 { return a * 100 + b * 10 + c; }
+    tag(1, c: 0)              # 120 — b from its default
+    tag(c: 9, a: 4, b: 5)     # 459 — any order; placed as tag(4, 5, 9)
+    tag(1, c: 3, 4)           # error: a positional argument cannot follow a named one (in a call to 'tag')
+    tag(1, a: 3)              # error: parameter 'a' of 'tag' is given by position and by name
+
+EVALUATED AS WRITTEN. `g(c: h(), a: k())` runs h() before k() and still passes `a` first: an out-of-order call
+evaluates each argument into a hidden temporary, then passes them in parameter order.
+
+SELF: in the dot form `o.m(k: 1)` `self` is the receiver and cannot be named; in `T_m(self: &p, k: 1)` it is an
+ordinary parameter.
+
+POSITIONAL-ONLY CALLS: a label through `fncallN` / `callptr` is refused ("named arguments need a direct call -
+fncallN / callptr pass arguments by position"). A builtin takes positional arguments: `syscall(n: 60, 3)` keeps
+its two errors (`undefined variable 'n'`, `expected ')', got ':'`) and a note says named arguments go only to a
+direct call of a declared fn. A variant constructor (`Ok(v: 1)`) has no declared parameter list, and a fn with a
+`_str` / `_int` / `_ptr` overload sibling is never routed for a named call — call the one you mean.
+
+TRAIT METHODS TAKE NO DEFAULTS. `trait Sh { fn sh(self, n = 1): i64; }` compiled and IGNORED the default before
+6.7.7; it is refused now (fork F1, user 2026-10-09), as is a default in a trait's default method (user,
+2026-10-09: "Error, as built") or on a method of `impl Trait for T` (the trait's signature is the contract).
+Inherent `impl T` methods may declare defaults. A closure's parameters take none (`|a, b = 1|` is refused).
+Gate: tests/gates/frontend/default_named_args_checked.sh. See CHANGELOG [6.7.7].

@@ -13,6 +13,9 @@
 # language/features.cyml typed_pointer_step_is_sizeof_t_v6617). Updated: the `_str` suffix entry (what "Str-typed" means — globals,
 # fields, call results; the dispatcher's capture rung), global_init_order_silent_zero (enum-naming
 # and all-constant struct / array initializers are baked; the x86 kernel late-replay warning).
+# v6.7.7: +3 entries — a_tuple_is_a_value_only_as_a_tuple_v677, stack_pair_store_refused_everywhere_v677,
+# a_default_belongs_to_the_definition_v677. Updated: pair_callee_any_spelling_6_6_16 (its "a top-level bind is
+# not refused" line, stale since 6.7.6). 36 entries (DERIVED at 6.7.7).
 # v6.6.5: `private` covers the whole file, and forward references are checked; a struct
 # declared inside a fn is per call and per thread, and an over-budget array local warns that
 # its storage is static.
@@ -1404,8 +1407,9 @@ unknown — no flag, and no mixed-return warning. The first cut took the lexical
 correct one-value bind; a wrong answer is worse than "unknown", so the pass returns "unknown" rather than
 guess.
 
-NOT COVERED (no call path types these receivers either): `a.b.m()`, `f().m()`, an untyped impl `self`. A
-top-level `var v = f();` of any pair callee is not refused (the refusal is a fn-body check).
+NOT COVERED (no call path types these receivers either): `a.b.m()`, `f().m()`, an untyped impl `self`. (This
+entry said a top-level `var v = f();` is not refused — it is since 6.7.6; and since 6.7.7 every one-slot store of
+a pair is: stack_pair_store_refused_everywhere_v677.)
 
 ECOSYSTEM: a new refusal in a consumer is a payload that was being dropped there. Fix it the way the message
 says — `var tag, val = p.m(..);` — or propagate with `?`. Tests: tests/tcyr/crossos/method_pair_result.tcyr,
@@ -1440,3 +1444,98 @@ declaration-block globals +8, ...) is history: see language/features.cyml
 ⛔ And `p - base` with an UNTYPED `base` holding an address is `p - n` (base is read as
 an element count: a garbage address, no diagnostic), while `p - &buf` is refused: for
 bytes bind both sides to plain vars, for elements subtract two `*T` (same entry).
+
+[[entries]]
+name = "a_tuple_is_a_value_only_as_a_tuple_v677"
+description = "cycc 6.7.7 tuples (B4): a whole tuple is not one value — `var u = t;`, `t == u`, `if (t)`, `print(t)` are refused (annotate the copy); `var x = f();` still keeps a multi-value call's FIRST value while `var t: (i64, i64) = f();` keeps them all; a multi-value call is bound before it is stored into a tuple field or passed as a tuple argument; generics and const fns take no tuple."
+category = "cyrius"
+---
+cycc 6.7.7 (language/features.cyml `tuples_v677`).
+
+A WHOLE TUPLE IS NOT A VALUE. Under the bare struct rule `t == u` would compare first words and `var x = t;`
+copy one; both are refused by name:
+
+    var t = (1, 2);
+    var x = t;              # error: tuple 't' used as a value - take an element (`t.0`) or copy it whole
+                            #        into a tuple
+    var u: (i64, i64) = t;  # ok: a copy, annotated
+    if (t.0 == u.0) { .. }  # compare elements
+
+The same for `t + 1`, `!t`, `if (t)`, `print(t)`, an argument to an untyped parameter, and a whole tuple FIELD
+(`h.p == 5`). Copy into a tuple place instead: a tuple-annotated var, `u = t;`, a tuple field, a tuple
+parameter.
+
+ONE NAME IS STILL THE FIRST VALUE. A multi-value call bound to one name is its first value (the documented ret2
+/ rethi() idiom, unchanged):
+
+    var x = divmod(20, 3);                 # 6 — the quotient only
+    var t: (i64, i64) = divmod(20, 3);     # (6, 2) — declare a tuple to keep every value
+    q, r = divmod(20, 3);                  # or re-assign two existing variables
+
+`t = (f());` is a value, not a capture (the destructure refuses `(f())` too). `h.p = f();` and `take(f())` into
+a tuple field / parameter are refused — bind it first, `var t: (i64, i64) = f();`, then store or pass `t`. A
+struct-returning callee is never captured or re-assigned: a struct return is not multiple values.
+
+GENERICS AND CONSTS TAKE NO TUPLE (yet). A tuple binds no type parameter — neither `first<(i64, i64)>(t)` nor
+`first(t)` — and a generic fn or struct holds no tuple type: pass an element (`first(t.0)`), or write the fn for
+the tuple type, `fn f(t: (i64, i64))`. A const fn takes no tuple parameter and a constant holds no tuple
+(`const C = (1, 2);` is refused): a compile-time value is one value. Gate: tests/gates/frontend/tuple_checked.sh
+(R11, R12, R16, R4, R5 rows). See CHANGELOG [6.7.7].
+
+[[entries]]
+name = "stack_pair_store_refused_everywhere_v677"
+description = "Since cycc 6.7.7 every one-slot store of a `: stack` pair is refused — a field (whatever its type), an element, `*p`, any `OP=`, a tuple-literal element — not only `var r = f();` / `r = f();` / `store64`: each kept the TAG and dropped the payload. Destructure, re-assign both, or `?` to store the payload."
+category = "cyrius"
+---
+A `: stack` Result / Option / Either is two values (tag, payload). Before 6.7.7 these compiled clean and kept the
+TAG — for an `Err`, the dropped half is the error code:
+
+    h.n = f(7);      # any field type — a struct-typed field took the tag as its first word; a slice's .len
+    a[0] = f(7);
+    *p = f(7);
+    x += f(7);       # every OP=, on a variable, a field, an element, *p, a u128
+
+Since 6.7.7 (user, 2026-10-09 — the guide had said so all along) each is
+
+    error: a `: stack` enum returns two values — bind both: `var tag, val = f();`
+
+at the callee, in a for step, at top level, for every call spelling (pair_callee_any_spelling_6_6_16), and
+under `--syntax-only` (`cyrius lint`) for a field the file cannot see; a tuple-literal element `(f(7), 3)`
+likewise. WRITE INSTEAD:
+
+    var t, v = f(7);  h.n = v;      # bind both, store what you need
+    t, v = f(7);                    # re-assign both existing variables (6.7.7)
+    h.n = f(7)?;                    # store the payload and propagate the Err
+
+A boxed enum, a nullary variant and a one-value call are untouched. STILL KEPT (pre-6.7.7, not refused yet): a
+struct-literal element `P { f(7), 3 }` and a plain argument `g(f(7))` keep the tag. Gate:
+stack_enum_lossy_context.sh axis 15. See CHANGELOG [6.7.7].
+
+[[entries]]
+name = "a_default_belongs_to_the_definition_v677"
+description = "cycc 6.7.7 default arguments (B6): a default is a compile-time constant of the DEFINING file, evaluated once — a caller's locals never change it and `b = a * 2` is refused; a float default needs a typed parameter and an integer default on an f64 is its bit pattern; fncallN / callptr pass every argument, by position; a `return f(..)` that fills or names is not a tail call; named arguments run in the order written."
+category = "cyrius"
+---
+cycc 6.7.7 (language/features.cyml `default_and_named_arguments_v677`).
+
+IT IS A CONSTANT OF THE DEFINITION, NOT THE CALL. A default is evaluated once, at compile time, in the
+top-level scope of the file that defines the fn: a caller's local `const K` never changes `b = K`, and a default
+naming a parameter of its own fn is refused —
+
+    fn g(a, b = a * 2): i64 { return b; }
+    # error: a default must be a compile-time constant: 'a' is a parameter of 'g'
+
+— compute it in the body from a sentinel instead. A float default needs a typed parameter (`x: f64 = 1.5`;
+untyped, a float is only its bits — ADR-002); on an f64 an integer default is its bit pattern, so write `1.0`
+("… an integer default is its bit pattern - write 1.0").
+
+FNCALLN / CALLPTR PASS EVERY ARGUMENT, BY POSITION. Defaults fill only direct calls: `fncall1(&f, 1)` to
+`fn f(a, b = 1, c = 2)` is refused ("a call through a fn pointer passes every argument: 'f' takes 3 (defaults
+fill only direct calls)"), and a `name:` there is refused. Through a pointer held in a variable nothing is
+checked (as for any fn): pass all of its parameters.
+
+A FILLED OR NAMED `return f(..)` IS NOT A TAIL CALL. It is an ordinary call (like any `return f(..)` in a fn
+with a defer). Write deep recursion with every argument by position: that form keeps its jmp.
+
+NAMED ARGUMENTS RUN IN THE ORDER WRITTEN. `g(c: h(), a: k())` runs h() before k() — side effects follow the
+text, not the parameter list. Gate: tests/gates/frontend/default_named_args_checked.sh. See CHANGELOG [6.7.7].
