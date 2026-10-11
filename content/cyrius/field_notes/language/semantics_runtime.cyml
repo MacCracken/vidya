@@ -16,6 +16,12 @@
 # v6.7.7: +3 entries — a_tuple_is_a_value_only_as_a_tuple_v677, stack_pair_store_refused_everywhere_v677,
 # a_default_belongs_to_the_definition_v677. Updated: pair_callee_any_spelling_6_6_16 (its "a top-level bind is
 # not refused" line, stale since 6.7.6). 36 entries (DERIVED at 6.7.7).
+# v6.7.8: +2 entries — a_dyn_holds_an_address_or_a_value_v678 (forming, the dangling `&local`, a scalar's
+# value, where a dyn result may go), a_slice_is_a_fn_local_and_reads_signed_elements_signed_v678 (stores
+# checked in every build, the sign-extended read, the positions). Updated: typed_pointer_local_slot_v6616
+# (`*p` at the element's width, `p[i]`), var_name_bracket_is_bytes_not_elements (a bare array takes no
+# subscript; N under the bounds-checked mode), generic_using_t_as_a_struct_has_no_i64_instance (the carrier
+# field `b.v.y`, filed). 38 entries (DERIVED at 6.7.8).
 # v6.6.5: `private` covers the whole file, and forward references are checked; a struct
 # declared inside a fn is per call and per thread, and an over-budget array local warns that
 # its storage is static.
@@ -160,6 +166,14 @@ caller's return-address region. SIGSEGV on the first absorb.
 RULE OF THUMB for the unannotated form: inside a fn, size it as
 `N * 8` (or `N * sizeof(thing)`) yourself; at top level, do NOT — the
 compiler already multiplied.
+
+A BARE ARRAY TAKES NO SUBSCRIPT. `b[i]` on a `var b[N]` is refused by
+name — since 6.7.8 "cannot subscript 'b': a bare `var a[N]` states no
+element width - declare `var a: T[N]` …" — because the element width
+is exactly what the bare form does not say. Annotate it to index it;
+`load*` / `store*` at a byte offset stay valid. Under the opt-in
+bounds-checked mode (6.7.8) an annotated `u8[5]` is FIVE elements, not
+its 8-byte slot: `a[5]` exits 134 even inside the rounded storage.
 
 [[entries]]
 name = "stack_var_keyword_for_struct_locals"
@@ -1312,6 +1326,11 @@ return with T a struct returns that struct (it returned its address).
 FINDFN the base — the first 6.6.10 cut missed the register-pair return check and the
 assignment paths, and each miss was silent or a regression.
 ⚠ The stub scan is lexical, so it errs toward MORE stubs — a loud refusal, never a silent 0.
+⚠ STILL OPEN (filed 6.7.8, issues/2026-10-10-generic-base-reads-carrier-field-as-struct.md): the
+scan sees only T-typed NAMES, so a generic that reads its struct PARAMETER's T field as a struct —
+`fn gy<T>(b: Box<T>): i64 { return b.v.y; }` — fails at its own definition ("expected ';', got
+'.'"), called or not. Bind the field first: `var t: T = b.v; return t.y;` (then `gy(b)` with `b:
+Box<Pt>` infers T = Pt, 6.7.8, and runs).
 
 [[entries]]
 name = "closure_returns_belong_to_the_closure_since_6_6_16"
@@ -1418,7 +1437,7 @@ stack_enum_mixed_return_warning.sh. See CHANGELOG [6.6.16].
 
 [[entries]]
 name = "typed_pointer_local_slot_v6616"
-description = "A local `*i8` / `*i16` / `*i32` truncated the address it held (fixed 6.6.16); the per-site `p + n` step it documented was replaced by `sizeof(T)` everywhere at 6.6.17"
+description = "A local `*i8` / `*i16` / `*i32` truncated the address it held (fixed 6.6.16); the per-site `p + n` step it documented was replaced by `sizeof(T)` everywhere at 6.6.17; since 6.7.8 `*p` through a narrow `*T` reads and writes the ELEMENT (it was always the 8-byte word), and `p[i]` works"
 category = "cyrius"
 ---
 ⛔ BEFORE 6.6.16: `var buf: i64[4]; var p: *i8 = &buf;` — the `*T` ladder gave
@@ -1440,10 +1459,33 @@ capture, global in either zone, `*T` field, `: *T` result), `q - p` of two `*T` 
 element count, and a `*T` param / capture loads as a pointer (the warning above is gone).
 The per-site table that stood here (local *i8/*i16/*i32 +1, other locals +8, params +1,
 declaration-block globals +8, ...) is history: see language/features.cyml
-`typed_pointer_step_is_sizeof_t_v6617`. `*p` still loads 8 bytes.
+`typed_pointer_step_is_sizeof_t_v6617`. (`*p` still loaded 8 bytes then — see 6.7.8 below.)
 ⛔ And `p - base` with an UNTYPED `base` holding an address is `p - n` (base is read as
 an element count: a garbage address, no diagnostic), while `p - &buf` is refused: for
 bytes bind both sides to plain vars, for elements subtract two `*T` (same entry).
+
+⟳ 6.7.8 — `*p` AND `p[i]` WORK ON THE ELEMENT (an approved change to what compiling code
+computes; language/features.cyml `pointer_subscripts_v678`). Before 6.7.8 every `*p` read
+8 bytes and every `*p = v` / `*p OP= v` wrote 8, whatever T was:
+
+    var a: i32[2]; a[0] = 7; a[1] = 9;
+    var q: *i32 = &a;
+    var x = *q;      # 6.7.7: 7 | 9 << 32 (both elements)      6.7.8: 7
+    *q = 5;          # 6.7.7: wrote 5 AND zeroed a[1]          6.7.8: a = {5, 9}
+    var p: *u8 = &a;
+    *p += 1;         # 6.7.8: one byte, wrapping at 255
+
+Through `*u8`..`*u32`, `*i8`..`*i32`, `*f32`, `*p` is `p[0]`: sign- / zero-extended, an
+f32 typed f32 and rounded on store, with `p[0] = v`'s warnings. The operand must be KNOWN to
+be that pointer: a name, a `*T` field, a `: *T` call, `p ± n`, `n + p` (`*(1 + p)` on a
+`*u8` is one byte too — but `1 + p` is still no typed pointer for anything else: `var q:
+*u8 = 1 + p;` warns, `(1 + p8) - q32` is a byte difference), parentheses, an if-expression
+of such. Everything else is still the 8-byte WORD: an untyped name (`var w = p; *w` is the
+explicit word access), `*i64` / `*u64` / `*f64` / `*bool` (`p[0]` is their TYPED spelling —
+`*p * 2.0` through a `*f64` still warns), `**pp`, `m & p`, `-p`, a call result's untyped
+field. To keep the old word through a typed pointer: `load64(p)` / `store64(p, v)`.
+`p[i]` on a name, a field (`h.p[i]`) or a call (`f()[i]`) declared `*T` works since 6.7.8;
+`var q = p; q[0]` is refused (q is an untyped word). CHANGELOG [6.7.8].
 
 [[entries]]
 name = "a_tuple_is_a_value_only_as_a_tuple_v677"
@@ -1539,3 +1581,82 @@ with a defer). Write deep recursion with every argument by position: that form k
 
 NAMED ARGUMENTS RUN IN THE ORDER WRITTEN. `g(c: h(), a: k())` runs h() before k() — side effects follow the
 text, not the parameter list. Gate: tests/gates/frontend/default_named_args_checked.sh. See CHANGELOG [6.7.7].
+
+[[entries]]
+name = "a_dyn_holds_an_address_or_a_value_v678"
+description = "cycc 6.7.8 checked `dyn`: a dyn formed from `&p` holds the ADDRESS (one formed from `&local` and returned dangles); a scalar impl's dyn holds the VALUE (`&n` and a `*i64` are refused — bind the value); an untyped name is refused (it may hide a pointer); a dyn result goes only into a dyn; `var o: dyn Tr;` with no value is refused; a call through a dyn returns its member's declared value class."
+category = "cyrius"
+---
+cycc 6.7.8 (language/features.cyml `dyn_v678`).
+
+A DYN HOLDS `&p`, NOT A COPY. Forming from a pointer stores the pointer:
+
+    fn mk(): dyn Area { var q = Sq { 3 }; return &q; }   # compiles — and dangles, as `return &q;` does
+    var o: dyn Area = &q;                                # o sees every later write to q
+
+Form from a record that outlives the dyn (a global, a caller's local, a heap record).
+
+A SCALAR'S DYN HOLDS THE VALUE. For `impl Area for i64` the data word IS the number:
+
+    var n: i64 = 5;
+    var b: dyn Area = n;       # ok — the value 5
+    var c: dyn Area = 5;       # ok — a literal (`5` / `'A'` an i64, `2.5` an f64, `true` a bool)
+    var d: dyn Area = &n;      # error: cannot form dyn Area from `&n` - a dyn of a scalar holds its value:
+                               #        write `n`
+    var e = 5;
+    var f: dyn Area = e;       # error: cannot form dyn Area from 'e' - an untyped name may hold a pointer
+                               #        (ADR-002): pass `&e` for a struct, or bind it to a declared type
+
+An untyped name is refused because under ADR-002 an i64 may hide a pointer; a declared scalar (`n: i64`, `u:
+u64`, `b: bool`, an enum, `cstring`, f64 / f32) says which. There is no implicit `&`: `var o: dyn Area = q;` with
+`q` a struct is refused ("… - no implicit `&`: write `&q` (the dyn holds its address)").
+
+A DYN RESULT GOES ONLY INTO A DYN. `x = mk();` into an i64 or untyped variable, `var y: u8 = mk();`, `mk() + 1`, a
+top-level `var G = mk();` after the first statement and a tail `return mk();` from a fn of another type are
+refused ("a dyn Area result used as a value - call one of its methods, or copy it whole into a dyn"): each kept
+the data word alone. `var o: dyn Area;` with no value is refused — struct locals are not zeroed and a vtable is
+formed, never left to the frame; a struct local HOLDING a dyn likewise (globals are zeroed).
+
+THE CALL'S VALUE CLASS IS THE MEMBER'S DECLARATION. A member declared `: Result` / `: Option` returns its pair —
+`o.div(d)?` propagates, `var t, v = o.div(d);` binds both, `var v = o.div(d);` is refused "bind both"; any other
+member returns one value and a destructure of it is refused. An impl method that returns a `: stack` pair under a
+member declaring one value is refused when the pair is first formed: declare the return as the enum, in the trait
+and the impl. Gate: tests/gates/frontend/dyn_checked.sh. See CHANGELOG [6.7.8].
+
+[[entries]]
+name = "a_slice_is_a_fn_local_and_reads_signed_elements_signed_v678"
+description = "cycc 6.7.8 slices: `s[i] = v` / `s[i] OP= v` work and are bounds-checked in EVERY build (exit 134); `s[i]` on an `[i8]` / `[i16]` / `[i32]` is the SIGNED value (it was 0..255 / 0..65535 / 0..2^32-1); a slice is a fn-local — a parameter, return, field or declaration-zone global is refused by name; `s[i] OP= v` on an f64 / f32 / bool element is refused."
+category = "cyrius"
+---
+cycc 6.7.8 (language/features.cyml `slice_type_v58x` § SINCE 6.7.8).
+
+A SIGNED ELEMENT READS SIGNED (an approved value change):
+
+    var buf: i8[4];
+    var s: [i8] = 0;
+    slice_set(&s, &buf, 4);
+    s[0] = 0 - 3;
+    if (s[0] < 0) { .. }      # 6.7.8: taken (-3)      6.7.7: never — s[0] read 253
+
+The same bytes in an `i8[N]` array, through a `*i8` and in an `i8` field always read -3; the slice getters
+zero-extended. `s[i] & 0xFF` is the unsigned read, or declare `[u8]`. `slice_unchecked_get_1/2/4` still
+zero-extend.
+
+A STORE IS CHECKED IN EVERY BUILD. `s[i] = v` (new in 6.7.8; it was "cannot subscript 's'") checks i against the
+length exactly as a read does — out of range or negative is "slice bounds violation", exit 134, with or without
+the bounds-checked mode. `store8(slice_ptr(&s) + i, v)` is the unchecked spelling. `s[i] += 0.5` on an `[f64]` is
+refused: the READ is an untyped word, so a float `OP=` would disagree with `s[i] = s[i] + 0.5` — store the
+element whole, `s[i] = v`. A closure that captured a slice cannot subscript it (pass `slice_ptr(&s)` /
+`slice_len(&s)` in).
+
+A SLICE IS A FN-LOCAL. Pass `&s` to a fn and read `slice_ptr` / `slice_len` there:
+
+    fn f(s: [u8]): i64 { .. }     # error: a slice cannot be a parameter (6.7.8: slices are fn-locals) - pass &s
+                                  #        and read slice_ptr / slice_len, or the pointer and the length
+    var GS: [u8] = 0;             # in the declaration zone: refused; AFTER the first top-level statement it is a
+                                  # 16-byte global used through slice_ptr(&GS) / slice_len(&GS) / slice_set
+
+A return type, a struct field, `*[T]`, a slice of slices and a type argument are refused the same way (each was a
+misleading parse error before). An UNTYPED parameter is never a slice: `y[0]` / `y.len` on one compiled only by
+accident (a stale width from an earlier fn's slice in the same slot) and are refused since 6.7.8. Gates:
+slice_position_refused.sh, slice_signed_read.sh. See CHANGELOG [6.7.8].

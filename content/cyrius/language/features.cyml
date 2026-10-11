@@ -108,6 +108,18 @@
 # struct-parameter entries (the copy is the callee's now).
 # 87 entries (DERIVED at 6.6.16 with `grep -c '^\[\[entries\]\]'` — this line read 66 while the
 # file held 83: nobody re-derived it from v6.5.10 to 6.6.15).
+# v6.7.8 (2026-10-10): +3 entries — dyn_v678 (checked trait objects: the type, forming, the
+# once-per-pair check, the vtable, the call, opacity, where a dyn may not go), bounds_checked_mode_v678
+# (the switch, what is checked, the violation line, the constant rule, @unsafe, the cost),
+# pointer_subscripts_v678 (`p[i]` on a name / field / call declared `*T`, f64 / f32 / bool arrays, `*p`
+# at the element's width). Updated: slice_type_v58x (stores, the sign-extended read, a slice is a
+# fn-local — its "every annotation position" line was never true of a parameter or a field),
+# typed_array_subscripts_v6612 (what 6.7.8 opened; the fn-local f64 / struct array sizing measured fixed),
+# typed_pointer_step_is_sizeof_t_v6617 (`*p`, `p[i]`, the one-byte `n + p`), traits_checked_v670
+# (signatures parsed at the trait; `dyn` shipped), generics_monomorphization_v639_v6310 (inference through
+# a generic struct parameter), reserved_word_class_toknames (the 6.7.x keywords and `dyn`),
+# struct_byval_int_pair_return_abi (cx r0:r4). 109 entries (DERIVED at 6.7.8; 106 before — this line
+# had not moved since 6.6.16).
 
 [[entries]]
 name = "byte_array_literal"
@@ -1156,8 +1168,11 @@ any other primitive — not just a 16-byte fat-pointer convention.
 
 == TYPE ANNOTATIONS ==
 
-Two equivalent forms accepted everywhere a type annotation goes
-(var, fn param, field):
+Two equivalent forms, on a fn-local `var` (and a top-level `var`
+after the first statement). ⟳ 6.7.8: this said "everywhere a type
+annotation goes (var, fn param, field)" — a parameter and a field
+never parsed; since 6.7.8 every other position is refused BY NAME
+(see SINCE 6.7.8 below):
 
     var s: [u8] = 0;        # bracket form
     var s: slice<u8> = 0;   # ident form
@@ -1199,6 +1214,9 @@ live in heap; fn-local slices are frame-scoped.
 `s[i]` lowers at parse time to `_slice_idx_get_W(&s, i)` where
 W is the element byte-width (1/2/4/8/16). Width-16 returns a
 POINTER to the u128 slot (cyrius's ABI can't return u128 by value).
+Since 6.7.8 a SIGNED element (`[i8]` / `[i16]` / `[i32]`) is read
+through `_slice_idx_addr(&s, i, w)` + a sign-extending load instead
+(see SINCE 6.7.8).
 
 For perf hot paths inside already-bounds-checked loops, the
 unchecked variants `slice_unchecked_get_W(&s, i)` skip the
@@ -1237,6 +1255,47 @@ the slot above the named slot for a sentinel name `-1`:
 
 Additive — the canonical (ptr, len) primitives in lib/string.cyr
 / lib/syscalls.cyr remain the building blocks.
+
+== SINCE 6.7.8 (C2; user decisions 2026-10-10) ==
+
+STORES. `s[i] = v`, `s[i] OP= v` (all eleven) and a for step store
+the element at T's width (1/2/4/8 B; an f64 into an f32 element
+rounds; a bool element takes a boolean; a pointer / enum / cstring
+element is a word). The address comes from lib/slice.cyr's private
+`_slice_idx_addr(&s, i, sizeof(T))`, checked as the getters are —
+out of range or negative is "slice bounds violation", exit 134, in
+EVERY build. Refused by name: a struct / u128 element store, `OP=`
+on an f64 / f32 / bool element (the read is an untyped word: write
+`s[i] = v`), and a slice subscripted inside a closure that captured
+it. `store8(slice_ptr(&s) + i, v)` stays the unchecked spelling.
+
+SIGNED READS (an approved value change). `s[i]` on an `[i8]` /
+`[i16]` / `[i32]` is SIGN-extended, as an `i8[N]` element, `p[i]`
+through a `*i8` and an `i8` field are: a stored -3 read 253 before
+6.7.8 (the getters zero-extend), so `s[0] < 0` was false. `OP=`
+loads the same way (`-7 /= 2` is -3, was 124). `[u8]` / `[u16]` /
+`[u32]` still zero-extend; `s[i] & 0xFF` is the unsigned read;
+`slice_unchecked_get_1/2/4` still zero-extend.
+
+A SLICE IS A FN-LOCAL. A parameter, a return type, a struct / union
+field, `*[T]`, a declaration-zone global, a slice of slices, a type
+argument and a tuple element are each refused by name ("a slice
+cannot be a parameter (6.7.8: slices are fn-locals) - pass &s and
+read slice_ptr / slice_len, or the pointer and the length", and
+siblings) — they were misleading parse errors. A top-level slice
+after the first statement is a 16-byte global used through
+`slice_ptr(&s)` / `slice_len(&s)` / `slice_set`. Pass `&s` to a fn.
+
+UNTYPED PARAMETERS ARE NOT SLICES. A slot used to inherit the width
+of whatever slice last sat in it, in ANY earlier fn, so an untyped
+parameter `y` compiled `y[0]` as a slice read and `y.len` as a frame
+read; refused by name since 6.7.8 (the slice width is trusted only
+behind a self-clearing bit in the slot's depth word).
+
+THE MODE. Under the bounds-checked mode a slice violation prints the
+mode's line, `bounds: index N out of [0, LEN) at <file>:<line>`,
+instead (same exit 134) — bounds_checked_mode_v678. A constant index
+`s[-1]` warns in every build. CHANGELOG [6.7.8].
 
 [[entries]]
 name = "relaxed_fn_ordering"
@@ -2248,6 +2307,15 @@ WHAT v5.10.45-.47 ADDED:
     - For ≤8B struct returns: scalar rax (unchanged).
     - For >16B struct returns: hidden retptr via RDI/X8/RCX
       (v5.5.36 / v5.9.26 / Win64 — unchanged).
+
+cx (6.7.8): the pair is r0:r4 — r4 is cx's rdx peer, the
+multi-value second slot, so a struct fn's `return (a, b);` received
+as the struct and a `return p;` read by `var a, b = f();` /
+`rethi()` agree with no sync. Before 6.7.8 cx's pair emitters were
+the v5.10.45 stubs: no program returning or receiving a 9-16 B
+struct built for cx ("cx: int-class 16B struct pair-return ABI not
+supported"). aarch64 returns the pair in x0:x1 with the multi-value
+second slot in x2 and syncs the two (6.7.7, ESTRUCT_PAIR_HI_SYNC).
 
 PRE-v5.10.45 (the bug):
     Pre-fix, ANY 9-16B struct return returned only the LOW
@@ -3551,6 +3619,23 @@ struct receive — exactly as `g<Pt>(p)` does. Only a WHOLE argument binds T:
 Before 6.6.10 only the inline replay inferred a struct (positionally, and it
 then re-typed the param i64), so every other path ran the i64 base.
 
+INFERENCE THROUGH A GENERIC STRUCT PARAMETER (6.7.8): `fn gx<T>(b: Box<T>)`
+with `b: Box<Pt>` — `gx(b)` calls `gx$Pt`, as `gx<Pt>(b)` does (refused
+before: the `Box` base ran). Slot-aware (`Pair<i64, T>` binds from slot 1;
+`Pr<T, U>` binds both from one parameter); a scalar argument instantiates
+(`Box<i32>` -> `gx$i32`); a `: T` return is received as the instance's
+struct. The whole argument must BE the instance (a local, a by-value
+parameter, a struct global, a call returning it). Through `*Box<T>` (the
+user's fork F1 = (a)) T comes from what the argument points at — `&b`, a
+`*Box<Pt>` name or call, a `Box<Pt>` value, a field chain whose leaf is
+declared `*Box<Pt>` (`gx(h.bp)`): ⚠ those compiled before and ran the i64
+base with `Box<i64>`'s layout (4 where 8 is right). An `x: T` parameter
+still binds first; `Box<Pair<T>>` and a generic call's own result are not
+inferred; a POINTER passed to a by-value `b: Box<T>` binds nothing (the
+base runs, as before); a plain `pp: *Pt` parameter keeps the rule above.
+Still open: a generic that reads its struct parameter's `T` field as a
+struct (`b.v.y`) does not compile — write `var t: T = b.v; t.y`.
+
 NO SCALAR INSTANCE (6.6.10): a generic that uses a T-typed value (param or
 `var q: T` local) as a struct (`p.y`) has only a dead-stub base. A scalar call
 (`g(5)`, `g<i64>(5)`, `g<i32>(5)`, tail included), `&g`, and a generic that
@@ -3716,6 +3801,15 @@ WRONG one). Every collision now names the exact word: `var f64_sqrt =
 1;` -> `reserved keyword 'f64_sqrt'` (re-verified 6.6.20, as are
 `object`, `callptr`, `stack`). The one double SPELLING left is `pub` /
 `public`, one token, printed `'pub'/'public'`.
+
+6.7.x — THE STATEMENT-KEYWORD HALF GREW (the 107 above is the 6.6.x
+count; derive it): `trait` (6.7.0), `const` (6.7.2), `true` / `false`
+(6.7.3), `do` (6.7.5, token 172) and `dyn` (6.7.8, token 173 — the
+checked trait-object type, dyn_v678); `loop`, like `kernel`, is
+CONTEXTUAL (a keyword only as `loop {` at a statement's start). A new
+reserved word is mirrored in the same change by `[embed]`'s reserved
+list (cbt/manifest.cyr — its gate derives the set), the LSP's keyword
+arms and the VS Code grammar.
 
 DON'T EXTEND A LIST HERE. Earlier docs named three or four of these
 ("`secret`, `pub`, `shared` are reserved") — a partial observation
@@ -4495,7 +4589,7 @@ tests/gates/frontend/generic_type_arg_unknown_refused.sh axis Q.
 
 [[entries]]
 name = "typed_array_subscripts_v6612"
-description = "Since cycc 6.6.12 an integer element-typed array `var a: T[N]` (T = i8..i64, u8..u64) takes a subscript: `a[i]`, `a[i] = v` and all ten `a[i] OP= v`, in a fn, at top level, in a `for` step and inside a closure. `a[i]` is exactly the element at `&a + i * sizeof(T)`, read sign- or zero-extended by T and stored truncated to T. There is NO bounds check and a fn-local array is NOT zero-initialised. A bare `var a[N]`, `stack var a[N]`, a scalar, a pointer, a u128 element and an f64 / f32 / bool / struct element are refused by name"
+description = "Since cycc 6.6.12 an integer element-typed array `var a: T[N]` (T = i8..i64, u8..u64) takes a subscript: `a[i]`, `a[i] = v` and all ten `a[i] OP= v`, in a fn, at top level, in a `for` step and inside a closure. `a[i]` is exactly the element at `&a + i * sizeof(T)`, read sign- or zero-extended by T and stored truncated to T. There is NO bounds check and a fn-local array is NOT zero-initialised. A bare `var a[N]`, `stack var a[N]`, a scalar, a pointer, a u128 element and an f64 / f32 / bool / struct element are refused by name. (6.7.8: f64 / f32 / bool elements and `*T` subscripts ship — pointer_subscripts_v678 — and an opt-in mode checks bounds — bounds_checked_mode_v678.)"
 category = "cyrius"
 tags = ["arrays", "subscript", "typed-array", "element-width", "sign-extension", "v6.6.12"]
 ---
@@ -4530,6 +4624,9 @@ slot draws the usual "narrowing assignment" warning.
 
 ⚠ NO BOUNDS CHECK. `a[N]` and `a[0 - 1]` compile and touch the neighbouring bytes, silently.
 A `slice<T>` local keeps its own bounds-checked `s[i]` (slice_type_v58x), unchanged.
+⟳ 6.7.8: a CONSTANT index out of range (`a[5]` on a `u8[5]`, `a[K]`, `a[0 - 1]`) warns in every build,
+and the opt-in bounds-checked mode checks `a[i]` against the exact declared N at run time
+(bounds_checked_mode_v678). Outside the mode a run-time index is still unchecked.
 
 ⚠ A FN-LOCAL ARRAY IS NOT ZERO-INITIALISED. Measured on 6.6.12: a fn fills its
 `var b: i64[8]` with 77 and returns; a second fn reads its own `var a: i64[8]` before any
@@ -4553,6 +4650,9 @@ REFUSED BY NAME — one message, `cannot subscript 'a': ...`, that lists the rea
 
 For a bare array keep `load*` / `store*` at an explicit byte offset, or declare the width:
 `var a: u8[N]` for bytes, `var a: i64[N]` for slots.
+⟳ 6.7.8: the f64 / f32 / bool rows and the `*i64` row above COMPILE now (pointer_subscripts_v678), and
+the one catch-all message is gone — each refusal names its own reason ("cannot subscript 'b': a bare
+`var a[N]` states no element width - …", "… it is not a typed array, a *T or a slice local - …").
 
 ⚠ STILL OPEN at 6.6.12 (backlog): INSIDE A FN, `var a: f64[N]` AND `var a: Pt[N]` RESERVE
 ONLY N BYTES. The fn-local path sizes a float or struct element array like a bare `var a[N]`
@@ -4560,7 +4660,8 @@ ONLY N BYTES. The fn-local path sizes a float or struct element array like a bar
 (or `Pt[4]`) sit 8 bytes apart, where two `i64[4]` sit 32 apart, so `store64(&a + 16, ..)`
 writes into whatever follows. Top level sizes them N*8. Until it is fixed, spell a fn-local
 float buffer `var a: i64[N]` (the same 8-byte slots) and move f64 bit patterns through
-`load64` / `store64`, or alloc() it.
+`load64` / `store64`, or alloc() it. ⟳ Measured fixed on 6.7.7 and 6.7.8: two adjacent fn-local
+`f64[4]` sit 32 bytes apart, two `Pt[2]` 32 apart.
 
 HOW IT IS BUILT. The declaration records a one-byte element descriptor (width 1/2/4/8/16,
 0x40 = signed): a stack array keeps it in its depth word (`SLAEW` / `GLAEW`), a global — and a
@@ -4577,7 +4678,8 @@ BEHAVIOUR CHANGE: a global array redeclared with a different element type (`var 
 then `var a: i8[8];`) is now the "redeclared with a different type or size" error —
 signedness is part of a global's shape, as it already was for scalars. 6.6.11 accepted it.
 
-NOT PART OF THIS: `*T` pointer subscripts, slice writes, an opt-in bounds-checked mode.
+NOT PART OF THIS: `*T` pointer subscripts, slice writes, an opt-in bounds-checked mode — all three
+shipped in 6.7.8 (pointer_subscripts_v678, slice_type_v58x, bounds_checked_mode_v678).
 
 GATES: tests/tcyr/crossos/typed_array_subscript.tcyr (69 rows: every width, local and
 global, canaries around every array, the ten compound operators, index expressions, `if` /
@@ -5180,7 +5282,8 @@ THE RULE (6.6.17, user decision):
 - a call's result is a plain value unless the callee declares `: *T`: with `p: *i64`,
   `f(p) + 1`, `load64(p) + 1`, `fncall1(&f, p) + 1` and `q.m(p) + 1` each used to add 8 (the
   expression scale was ambient state left by the last argument);
-- `*p` still loads 8 bytes; a `*T` slot is always an 8-byte word.
+- a `*T` slot is always an 8-byte word. (`*p` loaded 8 bytes whatever T was until 6.7.8; since
+  6.7.8 `*p` through a narrow `*T` is the element — pointer_subscripts_v678.)
 
 WHAT IT REPLACED (measured on the 6.6.17 slot-open compiler): a local `*i8` / `*i16` / `*i32`
 stepped 1 and every other local `*T` 8 (`*u8` and `*Pt` included); a parameter and a captured
@@ -5193,7 +5296,10 @@ MIGRATION: none measured — no `*T` declaration exists in the `src/` or `lib/` 
 every shape switched with no transition error (the user accepted that on 2026-10-05). The
 teaching examples here use `*i64` locals, whose step is 8 under both rules.
 
-`p[i]` on a `*T` is still refused (no element descriptor). GATES:
+`p[i]` on a `*T` was refused here (no element descriptor); it ships in 6.7.8, the step word now
+carrying T's element kind as `ps | ed << 40` (pointer_subscripts_v678). ⚠ `n + p` with a ONE-byte
+step still keeps no step (`_ptr_add` writes back the left operand's word): `var q: *u8 = 1 + p;`
+warns and `(1 + p8) - q32` is a byte difference — only a dereference sees its kind (6.7.8). GATES:
 tests/tcyr/crossos/typed_pointer_step.tcyr, tests/gates/frontend/typed_pointer_warn_sign.sh axes
 10-11. Supersedes the step table in field_notes/language/semantics_runtime.cyml
 `typed_pointer_local_slot_v6616`. CHANGELOG [6.6.17] (b7).
@@ -5342,8 +5448,15 @@ aliased at > 8 B for a `*T` local); `var q: *T = p;` aliases.
 CHAINS: `b.v.sum()`, `p.v.sum()`, `mk(3).v.sum()`, `c.w.v.scale(2);` — a method on a nested inline
 field takes the field's address as `self`. `var u = s.clone();` types u from an 8-byte struct result.
 
-Trait objects stay the `lib/trait.cyr` library pattern for now; compiler-CHECKED `dyn` (a 16-byte
-{data, vtable} struct, the vtable built and verified from the impl) is decided for later in 6.7.x.
+SIGNATURES (6.7.8): every member's signature is parsed AT THE TRAIT, with fn-definition grammar and
+words, whether or not an impl uses it — junk, an unknown type name or a stray token before the `;` is an
+error even in a default every impl overrides ("expected ')', got '+'", "unknown type 'X' for parameter
+'n'", "a trait method declaration ends with ';' (required) or a body (a default)"); a grammar error
+reports under --syntax-only too. The impl check stays the parameter count; the full signature check
+runs per dyn-formed pair (dyn_v678). Before 6.7.8 only the count was read.
+
+Trait objects: compiler-CHECKED `dyn` shipped in 6.7.8 (dyn_v678) — a 16-byte {data, vtable} struct, the
+vtable built and verified from the impl. `lib/trait.cyr` stays as the unchecked library pattern.
 GATES: tests/gates/frontend/traits_checked.sh, impl_self_typed.sh; tests/tcyr/crossos/traits_checked,
 impl_self_typed, impl_inherent, struct_from_pointer_copies, method_on_nested_field. ADR-007.
 
@@ -5984,3 +6097,240 @@ lint, async, the tools, the S-R5 helper census; + mutation ledger M1-M23, MT1-MT
 row and M20 is RED only with M18, both explained in the gate header);
 tests/tcyr/crossos/default_named_args_values.tcyr (105 assertions, cx 103) on x86 plain / IR=3 / DCE=1,
 qemu-aarch64, cx, wine, and on ecb / ach / cass / pi at the release gate. CHANGELOG [6.7.7].
+
+[[entries]]
+name = "dyn_v678"
+description = "cyrius 6.7.8 checked trait objects (user decisions 2026-10-07 / 2026-10-10; ADR-007 §7): `o: dyn Tr` is an ordinary 16-byte {data, vtable} struct, FORMED automatically at a destination typed `dyn Tr` from a pointer the compiler knows, a declared scalar or a literal; the vtable is built and checked from `impl Tr for T` (full signatures, once per formed pair); `o.m(args)` is an indirect call through it; the two words are opaque; `dyn` is a reserved word and not a type argument. Static dispatch stays the default."
+category = "cyrius"
+tags = ["v6.7.8", "dyn", "trait objects", "vtable", "dynamic dispatch", "ADR-007", "reserved word", "opaque"]
+---
+SYNTAX:
+    trait Area { fn area(self): i64; fn scaled(self, k): i64 { return self.area() * k; } }
+    struct Sq { s; }
+    impl Area for Sq { fn area(self): i64 { return self.s * self.s; } }
+    impl Area for i64 { fn area(self): i64 { return self; } }
+    fn total(o: dyn Area, k): i64 { return o.area() + o.scaled(k); }   # o.m(..): an indirect call
+    fn main(): i64 {
+        var q = Sq { 3 };
+        var a: dyn Area = &q;             # FORMED from a pointer: the data word is &q
+        var n: i64 = 5;
+        var b: dyn Area = n;              # from a DECLARED scalar: the data word is the value 5
+        return total(a, 2) + b.area();    # (9 + 18) + 5 = 32
+    }
+The decisions: the model (user, 2026-10-07): a dyn is an ordinary 16-byte struct, so ADR-002's one-word model
+holds; the compiler builds and VERIFIES the vtable; the call is visible in the declared type; static dispatch
+(ADR-004) stays the default. The eight questions (user, 2026-10-10): (1) forming is automatic from a known
+pointer, a declared scalar or a literal — an untyped name is refused, no implicit `&p`; (2) a `self: T` of 8 B or
+less is refused at forming, naming the method; (3) a generic member is allowed, CALLING it through a dyn is
+refused; (4) full signatures are checked per formed (trait, type) pair, never-formed impls keep the count-only
+check; (5) not a type argument; (6) a default's slot is T's own instance; (7) the words are opaque, `dyn A + B` is
+refused; (8) lib/trait.cyr stays as it is.
+
+TYPE: `dyn Tr` after a `:` — a local, a global in either zone, a parameter, a return, a struct field, a trait
+member's signature. A struct of two 8-byte words, data and vtable, copied whole and checked by type like any
+struct. `dyn` is reserved (token 173): `var dyn`, `fn dyn`, a field / method / `[embed]` name `dyn` is "expected
+identifier, got reserved keyword 'dyn'".
+
+FORMING (decision 1): at a destination typed `dyn Tr` — `var` (a local; a global after the first statement or in
+the declaration zone), an assignment, a classic-for step, a field store (local, global, `*H`), an argument, a
+`return` — the source is classified from its tokens before anything is emitted:
+  - another dyn — a COPY;
+  - a `*T` the compiler knows — the data word is the POINTER: `&p` of an inline local / by-value parameter /
+    inline global, a `*T` local / parameter / global / field, a call or method returning `*T`, an untyped impl
+    `self`, a pointer-mode handle;
+  - a DECLARED scalar (an integer type, f64 / f32, bool, an enum, cstring; local, global or parameter) or a
+    literal (`5`, `'A'`, `2.5`, `true`) — the data word is the VALUE, for a scalar impl.
+Parentheses around the whole source are transparent. Refused by name, once, at the source: an untyped name
+("cannot form dyn Show from 'x' - an untyped name may hold a pointer (ADR-002): …"), a bare inline struct ("… - no
+implicit `&`: write `&p` (the dyn holds its address)"), `&` of a pointer / handle / scalar / dyn, a captured
+name, any other expression, no impl ("no `impl Show for R` - a dyn Show is formed only from a type that
+implements Show"), a FORM at top level into an assignment / field / argument ("a dyn formed at top level has no
+frame to be built in - …"). A dyn holds `&p`, not a copy: one formed from `&local` and returned dangles.
+
+THE CHECK (decisions 2, 4): at a pair's FIRST forming, every member's signature against the trait's — each
+parameter after `self` and the return by resolved type (untyped = i64), generic-ness, `...` — and the `self` a dyn
+can feed (untyped, `self: *T`, or `self: T` over 8 B for a struct; untyped or `self: T` for a scalar). A `self: T`
+of 8 B or less is refused naming the method (it arrives in a register, not through the data word); a `#naked`
+slot method is refused; a slot returning a `: stack` pair under a member that declares one value is refused. One
+report per pair; each forming site also applies `&f`'s visibility / `#deprecated` check to every slot.
+
+THE VTABLE (decision 6): a hidden global, one word per trait member in declaration order — T's method, T's default
+instance, `T_Tr_m` when an inherent method holds the plain name, 0 for a member a dyn cannot call (generic, no
+untyped `self`, variadic). FILLED AT EVERY FORMING SITE (no target relocates a data word: PIE, Mach-O arm64, PE; a
+`kernel;` build never waits on the late replay). A slot method is address-taken as `&f` makes a fn, so
+CYRIUS_DCE=1 keeps it even when its only forming site is dead code.
+
+THE CALL (decisions 3, 7): `o.m(args)` loads slot k of the table, spills it to a frame slot BEFORE `self` and the
+arguments, passes the data word as `self`, and calls through it (`call [rbp+disp32]` / `blr`, PE included), on
+every receiver a method call takes (local, parameter, global, capture, `h.o.m()`, `hp.o.m()`, `self.o.m()`, a
+call's result, a chain) and at top level. The trait member's signature governs arguments and result exactly as a
+direct call's — by-value structs, a dyn formed in place, `: Str` literals, f64 / f32 / bool, vectors; a struct
+result of any size (aarch64 X8 over 16 B), a dyn, a `*T` (which forms a dyn), an f64 typed f64. The result's value
+class is the member's declaration: a `: Result` / `: Option` member returns its pair (`o.div(d)?`, a destructure
+binds both, one name is refused "bind both"), any other one value. Refused: an undeclared member ("trait Show
+declares no method 'nope' - …"), a generic member ("'pick' is generic - a call through a dyn Show has no instance
+of it to run: call it on the concrete type"), no untyped `self` first, variadic, a multi-value / vector return,
+named arguments ("named arguments need a direct call - a call through a dyn Show passes arguments by position"),
+the wrong count ("'dyn Show.add' expects 2 arguments, got 3").
+
+OPACITY (decision 7): no value use ("dyn Show 'o' used as a value - call one of its methods, or copy it whole into
+a dyn"), no `&o`, no `.data` / `.vtable`, no destructure, no `return (a, b)` / `ret2` in a dyn fn, no struct
+literal writing a dyn's words. A dyn RESULT goes only into a dyn: not into an untyped / integer / `*T` variable or
+global, not under a scalar annotation, not a top-level `var G = mk();` after the first statement, not a tail
+`return mk();` from a fn of another type. `load64(&w)` / `rethi()` still read raw words, as of any memory.
+
+WHERE A DYN MAY NOT GO (decision 5), each refused by name: a type argument (`Vec<dyn S>`, `Box<dyn S>`,
+`f<dyn S>`); a pointer (`*dyn S`); an array / slice / tuple / multi-value element; `dyn A + B`; `dyn S<..>`;
+`sizeof(dyn S)`; `impl .. for dyn S`; a name that is no trait; a bare `dyn`; a generic, `async`, `const` or
+`#naked` fn; a generic struct's field; a union member that is or holds one; `#derive`. RECORDS: a collection holds
+pointers to records the program allocates — `struct Rec { o: dyn Area; }`, a `Vec` of `*Rec`.
+
+INITIALISATION: struct locals are not zeroed, so `var o: dyn Tr;` and a struct local (or array) holding a dyn —
+directly, nested, through a generic instance — without a value are refused ("declare dyn Show 'o' with its value -
+struct locals are not zeroed, and a dyn's vtable is formed, never left to the frame"). Globals are zeroed.
+
+lib/trait.cyr (decision 8): kept as it is — the unchecked library pattern; the two layouts do not interconvert.
+lib/alloc.cyr's Allocator vtable cannot move to `dyn` while src/main.cyr includes it (cybs cannot parse `dyn`).
+TOOLS: `cyrius header` prints a dyn parameter as one `cyr_val`; cyrfmt, `cyrius lint`, cyrdoc, api-surface and
+type-audit read `dyn Tr` as text (no change). Field notes: field_notes/compiler/gotchas.cyml
+checked_dyn_trait_objects_v678; field_notes/language/semantics_runtime.cyml a_dyn_holds_an_address_or_a_value_v678.
+GATES: tests/gates/frontend/dyn_checked.sh (234 rows + mutation ledger); tests/tcyr/crossos/dyn_objects.tcyr (81
+assertions on x86 / IR=1 / IR=3 / DCE / qemu-aarch64 / cx / wine, and on ecb / ach / cass / pi at the release
+gate). The guide's *Trait objects: `dyn` (6.7.8)* is the reference. CHANGELOG [6.7.8].
+
+[[entries]]
+name = "bounds_checked_mode_v678"
+description = "cyrius 6.7.8 C2 (user decisions 2026-10-10): the opt-in bounds-checked mode — `--bounds` > `CYRIUS_BOUNDS=1|0` > `[build] bounds` > a `#bounds` line in the entry file's leading block; it checks a typed array against its exact N, a slice against its length (reads and writes) and a `*T` for a negative index; a violation prints `bounds: index N out of [0, LEN) at <file>:<line>` and exits 134; a constant index out of range warns in every build and is an error under the mode; `@unsafe { }` turns checks off lexically. Off by default — not a byte when off."
+category = "cyrius"
+tags = ["v6.7.8", "C2", "bounds check", "#bounds", "CYRIUS_BOUNDS", "--bounds", "@unsafe", "subscript", "exit 134"]
+---
+SYNTAX:
+    #bounds
+    var a: u8[5];
+
+    fn fill(v): i64 {
+        for (var i = 0; i <= 5; i += 1) { a[i] = v; }   # <= : one element too many
+        return 0;
+    }
+
+    fn main(): i64 {
+        fill(7);
+        return 0;
+    }
+stderr `bounds: index 5 out of [0, 5) at <source>:5`, exit 134. Without the mode the sixth store lands in the
+array's spare slot bytes and the program exits 0. (The guide's example; frontend/bounds_mode_checked.sh TL4 runs
+it for that exact line.)
+
+THE SWITCH, highest first: `--bounds` (cyrius build / run / test / tests / fuzz; bench and the rest refuse it),
+`CYRIUS_BOUNDS=1` / `=0` (unset or empty: no rung; any other value "CYRIUS_BOUNDS must be 0 or 1 (or unset): <v>"),
+`[build] bounds = true` / `false`, a `#bounds` line. `CYRIUS_BOUNDS=0` and `bounds = false` turn a `#bounds`
+program's mode off (cbt hands cycc `CYRIUS_BOUNDS=0` for a manifest false). Decided once per compile in the shared
+PREPROCESS, before the first `#ifdef` (all seven forks); the predefine `CYRIUS_BOUNDS` is visible in every file —
+`#ifdef CYRIUS_BOUNDS` — and a plain `#define CYRIUS_BOUNDS` switches nothing. `cyrius build --print-config` shows
+`build.bounds`.
+
+THE `#bounds` LINE belongs to the program, not a library: honoured only in the entry file's LEADING BLOCK (blank
+lines, `#` comment lines, `include "…"` lines; a declaration, statement, `#define`, `#if*`, attribute or `#derive`
+ends it). After code, inside an `#ifdef`, in an included file or a `[build] modules` file it is refused ("#bounds
+must sit in the entry file's leading block (before any declaration, statement, #define or #if) - it switches the
+whole program; or use --bounds / CYRIUS_BOUNDS=1 / [build] bounds"); `#bounds on` is "#bounds takes no argument";
+inside a string it is data; `#boundsx` / `# bounds` are comments.
+
+WHAT IS CHECKED, once the index is evaluated and before it is scaled — every subscript the language has:
+  - `a[i]` on a typed array against its EXACT declared N (a `u8[5]` is 5, not its 8-byte slot) — local, global,
+    static-storage local, capture, generic `T[N]`, f64 / f32 / bool elements; a redeclared global that folds keeps
+    the FIRST declaration's N;
+  - `s[i]` on a slice against its length — read, signed read, `=`, `OP=`;
+  - `p[i]` on a `*T` (name, field, call) for a NEGATIVE index only: no extent exists for a `*T`; `slice<T>` is the
+    checked spelling of a bounded pointer.
+In a fn, at top level, in a closure, a `defer` body, an `#inline` replay, an `async fn`, a for step. NOT checked:
+`load*` / `store*`, `*p`, `*(p - 1)`; vec and lib/bounds.cyr keep their exit 1.
+
+THE VIOLATION: one stderr line, `bounds: index N out of [0, LEN) at <file>:<line>` (`[0, ...)` for a `*T`), the
+file as every diagnostic names it (`<source>` the entry, an include by its path), the line the subscript is WRITTEN
+on (an `#inline` body's own); exit 134 — the always-on slice check's code. Under the mode the line replaces a
+slice's "slice bounds violation".
+
+THE CONSTANT RULE (every build): an index of integer literals, `+ - *`, parentheses and names resolving to an
+integer const / enum constant is judged at compile time — in range, no check is emitted; out of range, "warning:
+index 5 is out of range [0, 5) for 'a' (an error under the bounds-checked mode)" / "index -1 is negative for 'p'
+(…)", an ERROR under the mode outside `@unsafe`; once per token; silent under --syntax-only. A slice's constant
+index >= 0 stays a run-time check.
+
+`@unsafe { }` turns checks off LEXICALLY: a subscript whose `[` lies inside one is unchecked; a checked `#inline`
+fn replayed inside one keeps its check. `#naked`: a checked subscript is refused under the mode ("the bounds check
+is a call, which a #naked fn cannot make - wrap the access in @unsafe { }").
+
+TARGETS: refused under the mode — a kernel / EFI image ("… (a violation has no stderr and no exit)") and a
+`shared;` / `object;` build ("… (the checker would be defined in every object)"). Every hosted target lowers it.
+
+HOW, AND THE COST: the preprocessor appends plain cyrius checkers (`__cyrius_bounds_chk` / `_chks` / `_fail` and
+three helpers; the `__cyrius_` names are the compiler's) to the finished unit when the mode is on, and each site
+is ONE CALL (the slice read's call pattern) — no backend changed. An in-range constant index costs nothing; a
+program built without the mode carries not a byte of it. Measure a hot loop with the mode before shipping it on.
+GATES: tests/gates/frontend/bounds_mode_checked.sh (153 rows + mutation ledger); fork_flag_parity.sh,
+build_config_precedence.sh, build_print_config.sh, build_config_windows_arm.sh, manifest_key_inventory.sh;
+tests/tcyr/crossos/bounds_mode_in_range.tcyr (39) and bounds_mode_violation.tcyr (20 spawned children, each its
+exact line). The guide's *The bounds-checked mode (6.7.8)* is the reference. CHANGELOG [6.7.8].
+
+[[entries]]
+name = "pointer_subscripts_v678"
+description = "cyrius 6.7.8 C2 (user decisions 2026-10-10): `p[i]` on a NAME, FIELD or CALL declared `*T` and `a[i]` on f64 / f32 / bool arrays — read, `=`, every `OP=`, the for step — each element typed as a declared T; and `*p` / `*p = v` / `*p OP= v` through a narrow `*T` act on the ELEMENT at its width (an approved change: before 6.7.8 `*p` was always the 8-byte word)."
+category = "cyrius"
+tags = ["v6.7.8", "C2", "subscript", "typed pointer", "*p", "element width", "f64 array", "f32 array", "bool array", "behaviour-change"]
+---
+SYNTAX:
+    struct Buf { len; data: *u8; }
+    fn sum(p: *u8, n): i64 { var s = 0; for (var i = 0; i < n; i += 1) { s = s + p[i]; } return s; }
+    fn first(b: *Buf): i64 { return b.data[0]; }                      # a field declared *T
+    fn slen(s: *u8): i64 { var n = 0; while (*(s + n) != 0) { n = n + 1; } return n; }   # one byte
+    fn main(): i64 {
+        var raw: u8[8];
+        var p: *u8 = &raw;
+        p[0] = 200; p[1] = 50; p[2] = 0;
+        var b = Buf { 3, p };
+        *p += 60;                       # ONE byte: 200 + 60 wraps to 4 (6.7.7: a word add, 260)
+        var f: f64[2];
+        f[1] = 1.5;
+        var g: f64 = f[1] * 2.0;        # an f64 element is an f64: a float multiply
+        if (g == 3.0) { return sum(p, 2) + first(&b) + slen(p); }   # 54 + 4 + 2 = 60
+        return 0;
+    }
+
+THE BASE: a NAME declared `*T` (a local, a `p: *T` parameter, a global, a capture, a generic instance's `p: *T`), a
+FIELD declared `*T` (`h.p[i]`, `a.b.p[i]`, `self.p[i]`, `mk(4).p[i]`, through a `*H`), or a CALL declared `: *T`
+(`f()[i]`, `g<i32>()[i]`, `o.m()[i]`). `p[i]` is the element at `p + i * sizeof(T)`, the pointer's VALUE the base.
+The base is evaluated first (a call made once — `f()[i] += 1` calls f once), then the index; the element comes from
+the base's DECLARATION, never from a pointer scale an argument left behind. `return f()[i];` is no tail call.
+
+THE ELEMENT: an iN sign-extended, a uN zero-extended, an f64 an f64, an f32 its 4 bytes in single precision, a
+bool a boolean value (`if (p[i])`). A store is checked as a store into a field of T: an f64 into an f32 element
+rounds, a bool element takes only a boolean and refuses `OP=`, an integer constant into a float element warns, a
+wider integer into a narrow element warns "narrowing".
+
+REFUSED BY NAME, at the `[`, once: "cannot subscript 'x': it is not a typed array, a *T or a slice local - declare
+`var a: T[N]` or `p: *T` (T an integer, f64, f32 or bool), or load / store at an explicit byte offset" (an untyped
+name, a scalar, a pointer laundered through one: `var q = p; q[0]`); "… a bare `var a[N]` states no element width";
+"… a subscript takes an integer, f64, f32 or bool element - step with p + i to an element of struct 'Pt'" (struct,
+pointer, enum, string, vector elements); "cannot subscript field 'n': it is not a *T field"; "cannot subscript the
+result of 'g': it does not return a *T" (a builtin, callptr, fncallN, a generic returning T); "a subscript's result
+is an element, not an array - a second [..] is not supported"; "&a[i] is not supported - write &a + i * sizeof(T)
+(or p + i)"; "a subscript's base is a name, a *T field or a call returning *T - name the pointer first (var q: *T
+= ..; q[i])" (`(p + 1)[1]`, a literal). u128 elements as before.
+
+`*p` AT THE ELEMENT'S WIDTH (approved; closes issues/2026-10-08-deref-store-through-narrow-typed-pointer-is-word-store.md):
+through `*u8`..`*u32`, `*i8`..`*i32`, `*f32`, `*p` is `p[0]`: read at T's width (sign- / zero-extended, an f32 typed
+f32), `*p = v` / `*p OP= v` store T's width with `p[0] = v`'s checks (f32 rounding, the narrowing / int-into-float
+warnings), statement, expression and for step alike. The operand must be KNOWN to be that pointer: a name, a `*T`
+field, a `: *T` call, `p ± n`, `n + p` (a one-byte one too), parentheses, an if-expression of such. Anything else
+is the 8-byte word: an untyped address (`var w = p; *w` is the explicit word access), an 8-byte pointee (`*i64`,
+`*u64`, `*f64`, `*bool` — `p[0]` is their typed spelling), `**pp`, a bitwise / comparison / negation result, a call
+result's untyped field. Before 6.7.8: `*q = 5` through a `*i32` zeroed the next element; `*p = 1.5` through a
+`*f32` stored the f64 bits as a word; `*s` on a `*u8` read eight characters.
+
+NO BOUNDS CHECK outside the bounds-checked mode (bounds_checked_mode_v678); under it `p[i]` is checked for a
+negative index, `a[i]` against its exact N. `load*` / `store*` stay valid and unchecked.
+GATES: tests/tcyr/crossos/pointer_subscript_values.tcyr (219), pointer_subscript_bases.tcyr (88),
+deref_element_width.tcyr (145) — x86 / IR=1 / IR=3 / DCE, qemu-aarch64, cx, wine; tests/gates/frontend/
+pointer_subscript_checked.sh (+ mutation ledger). Field note: field_notes/language/semantics_runtime.cyml
+typed_pointer_local_slot_v6616 (the typed-pointer history). CHANGELOG [6.7.8].

@@ -12,6 +12,10 @@
 # v6.7.7: +2 entries — tuple_syntax_selector_literal_and_elements_v677 (`t.0` vs `t. 0`, where a
 # literal goes, a float element needs the type), named_arguments_follow_the_positionals_v677 (and a
 # trait method takes no default). 17 entries (DERIVED at 6.7.7).
+# v6.7.8: +3 entries — dyn_is_reserved_and_spells_a_type_after_a_colon_v678 (where `dyn Tr` goes and where
+# it does not), a_subscript_base_is_a_name_field_or_call_declared_star_t_v678 (`p[i]`, `h.p[i]`, `f()[i]`, and
+# the for step's single assignment), the_bounds_line_belongs_to_the_entry_file_v678 (`#bounds`, the
+# precedence, `@unsafe`, the constant warning). 20 entries (DERIVED at 6.7.8).
 
 [[entries]]
 name = "the_logical_shift_trap"
@@ -972,3 +976,92 @@ TRAIT METHODS TAKE NO DEFAULTS. `trait Sh { fn sh(self, n = 1): i64; }` compiled
 2026-10-09: "Error, as built") or on a method of `impl Trait for T` (the trait's signature is the contract).
 Inherent `impl T` methods may declare defaults. A closure's parameters take none (`|a, b = 1|` is refused).
 Gate: tests/gates/frontend/default_named_args_checked.sh. See CHANGELOG [6.7.7].
+
+[[entries]]
+name = "dyn_is_reserved_and_spells_a_type_after_a_colon_v678"
+description = "cycc 6.7.8: `dyn` is a reserved word (a fn / var / field / method / [embed] name `dyn` is refused); `dyn Tr` is a type only after a `:` — a var, a parameter, a return, a struct field, a trait member's signature — and never a type argument, a pointer target, an array / slice / tuple element, `sizeof` operand or `impl` target; `dyn A + B` is refused."
+category = "cyrius"
+---
+cycc 6.7.8 (language/features.cyml `dyn_v678`).
+
+    var dyn = 1;                  # error: expected identifier, got reserved keyword 'dyn' (… rename …)
+    fn f(o: dyn Show): i64        # ok — a parameter; also a var, a return, a field, a trait member's signature
+    var v: Vec<dyn Show>;         # error: dyn Show cannot be a type argument - a collection holds pointers to
+                                  #        records that hold a dyn
+    fn g(o: *dyn Show)            # error: a pointer to dyn Show is refused - a dyn is a two-word value; point at
+                                  #        a record that holds one (`struct R { o: dyn ..; }`, `*R`)
+    var a: dyn Show[3];           # error: dyn Show cannot be an array element - hold it in a record …
+    fn h(o: dyn Show + Debug)     # error: `dyn A + B` is refused - a dyn holds one vtable, of one trait
+    fn k(o: dyn): i64             # error: `dyn` takes a trait's name - `dyn Show` for `trait Show`
+
+COLLECTIONS HOLD RECORDS: `struct Rec { o: dyn Show; }`, allocate the records, keep `*Rec` in a `Vec`. A dyn is
+also refused inside a generic, `async`, `const` or `#naked` fn, as a generic struct's field, in a union, under
+`#derive`, and as `sizeof(dyn S)` ("… no layout of them is promised") — each by name, once. `o.data` / `o.vtable`
+are not fields. The word was an ordinary identifier before 6.7.8 (no use in cyrius, its folds or its tools).
+Gate: tests/gates/frontend/dyn_checked.sh (K, T rows). See CHANGELOG [6.7.8].
+
+[[entries]]
+name = "a_subscript_base_is_a_name_field_or_call_declared_star_t_v678"
+description = "cycc 6.7.8: `p[i]` subscripts a NAME, a FIELD or a CALL declared `*T` (`p[i]`, `h.p[i]`, `f()[i]`, `o.m()[i]`); the base is evaluated first and a call is made once; `(p + 1)[i]`, `a[i][j]`, `&a[i]` and a laundered `var q = p; q[0]` are refused — name the pointer first. And a classic-for step is ONE assignment ending at its `)`: anything after the value is an error since 6.7.8."
+category = "cyrius"
+---
+cycc 6.7.8 (language/features.cyml `pointer_subscripts_v678`).
+
+    struct Buf { len; data: *u8; }
+    fn first(b: *Buf): i64 { return b.data[0]; }      # a field declared *T
+    fn row(k): *i32 { .. }
+    var x = row(2)[1];                                # a call declared : *T — row() is called once
+    row(2)[1] += 5;                                   # still once: `f()[i] += 1` calls f once
+    return row(2)[0];                                 # a call and a load — never a tail call
+
+REFUSED, BY NAME (each was a parse error or compiled differently):
+
+    (p + 1)[1]       # a subscript's base is a name, a *T field or a call returning *T - name the pointer first
+    var q = p; q[0]  # cannot subscript 'q': it is not a typed array, a *T or a slice local - …  (q is a word)
+    h.n[0]           # cannot subscript field 'n': it is not a *T field
+    load64(a)[0]     # cannot subscript the result of 'load64': it does not return a *T
+    a[1][2]          # a subscript's result is an element, not an array - a second [..] is not supported
+    &a[2]            # &a[i] is not supported - write &a + i * sizeof(T) (or p + i)
+
+Name the pointer first: `var q: *i32 = p + 1; q[i]`.
+
+THE FOR STEP IS ONE ASSIGNMENT. `for (init; cond; step)` takes `=` or any compound operator on a variable, an
+element, a field or `*p`, ending at the `)`:
+
+    for (var i = 0; i < 3; i += 1 2) { .. }    # 6.7.7: built, the `2` ignored   6.7.8: expected ')', got number 2
+    for (i = 0; i < n; i += 1, j += 1) { .. }  # expected ')', got ','  — put the second update in the body
+    for (i = 0; i < n; i++) { .. }             # expected '=', got '+'
+
+On a struct step, `a = b 2` used to store ONE word of b; it is refused now. Gates: pointer_subscript_checked.sh
+(R rows), for_step_terminator_checked.sh. See CHANGELOG [6.7.8].
+
+[[entries]]
+name = "the_bounds_line_belongs_to_the_entry_file_v678"
+description = "cycc 6.7.8 bounds-checked mode: `#bounds` switches the WHOLE program and counts only in the entry file's leading block (refused after code, in an include, in an #ifdef); `--bounds` > `CYRIUS_BOUNDS` > `[build] bounds` > the line, so `CYRIUS_BOUNDS=0` turns a `#bounds` program off; `#define CYRIUS_BOUNDS` switches nothing; `@unsafe { }` is lexical and an #inline fn keeps its own check; `p[-1]` is checked, `*(p - 1)` is not; a `u8[5]` is 5 elements; a constant index out of range warns in every build."
+category = "cyrius"
+---
+cycc 6.7.8 (language/features.cyml `bounds_checked_mode_v678`).
+
+    # tool.cyr — the entry file
+    include "lib/io.cyr"
+    #bounds                        # ok: the leading block (blank lines, # comments, include lines)
+    fn main(): i64 { .. }
+
+A `#bounds` after the first declaration or statement, inside an `#ifdef`, in an INCLUDED file or a `[build]
+modules` file is refused by name ("#bounds must sit in the entry file's leading block … - it switches the whole
+program; or use --bounds / CYRIUS_BOUNDS=1 / [build] bounds"): a library cannot switch the mode for its includer.
+`#bounds on` is "#bounds takes no argument". `#define CYRIUS_BOUNDS` defines a name and switches nothing; the
+real predefine (`#ifdef CYRIUS_BOUNDS`) is set in every file when the mode is on. `CYRIUS_BOUNDS=0` or `[build]
+bounds = false` turns a `#bounds` program's checks off (argument > environment > manifest > the line).
+
+WHAT IS AND IS NOT CHECKED: `p[-1]` on a `*T` is (a negative index — no length exists for a pointer), `*(p - 1)`
+is not; `slice<T>` is the checked spelling of a bounded pointer. A `u8[5]` is FIVE elements under the mode, not
+its 8-byte slot. `@unsafe { }` turns checks off LEXICALLY — an `#inline` fn replayed inside one keeps its own.
+`return f(x);` is a tail call, never an inline replay. A checked subscript in a `#naked` fn is refused under the
+mode (wrap it in `@unsafe { }`).
+
+A CONSTANT INDEX OUT OF RANGE WARNS IN EVERY BUILD (`a[5]` on a `u8[5]`, `a[K]` with a const K, `p[0 - 1]`):
+
+    warning: index 5 is out of range [0, 5) for 'a' (an error under the bounds-checked mode)
+
+Gate: tests/gates/frontend/bounds_mode_checked.sh. See CHANGELOG [6.7.8].
