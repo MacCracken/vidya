@@ -120,6 +120,16 @@
 # a generic struct parameter), reserved_word_class_toknames (the 6.7.x keywords and `dyn`),
 # struct_byval_int_pair_return_abi (cx r0:r4). 109 entries (DERIVED at 6.7.8; 106 before — this line
 # had not moved since 6.6.16).
+# v6.7.10 (2026-10-13): +1 entry — struct_handle_line_and_struct_values_at_every_size_v6710 (the handle
+# line for locals and globals at every size, `*p` a struct value, size-independent copies through a `*T`,
+# a pointer into a by-value struct parameter, a field / dereference left operand dispatches, the untyped
+# binding of a struct-returning operator). Updated: struct_field_widths (u8 / u16 / u32 / f32 are packed
+# at their widths — an ABI change), struct_storage_class_v665 (`var c: P = mk();`, `var p: P = 1` no
+# longer dispatches), struct_assignment_handle_and_value_v6616 (every size; `*T` global / call / field /
+# arithmetic sources), struct_argument_type_checked_v673 (a `*T` / `&s` into a by-value parameter is the
+# struct), derive_str_fields (u8 / u16 / u32 / f32 / cstring, the fixed Str decode),
+# struct_value_operands_and_parentheses_v676 (its NOT YET list), pointer_fields_returns_and_linked_lists_v6617
+# (`Struct = *Struct` settled). 110 entries (DERIVED at 6.7.10).
 
 [[entries]]
 name = "byte_array_literal"
@@ -412,7 +422,7 @@ emit equivalent unrolled loops.
 
 [[entries]]
 name = "struct_field_widths"
-description = "Per-field type annotations on structs — size and alignment correctness"
+description = "Per-field type annotations on structs — size and alignment correctness. Fields are PACKED (no padding): i8 / u8 1 B, i16 / u16 2 B, i32 / u32 / f32 4 B, the rest 8; u8..u32 zero-extend, i8..i32 sign-extend. Since cyrius 6.7.10 u8 / u16 / u32 / f32 are their widths (8 B each through 6.7.9) — a layout / ABI change"
 category = "cyrius"
 ---
 SYNTAX:
@@ -423,6 +433,18 @@ SYNTAX:
         _pad:    i8;        # 1 byte (manual padding)
         size:    i64;       # 8 bytes
     }
+    struct C4 { r: u8; g: u8; b: u8; a: u8; }   # 4 bytes (32 through 6.7.9)
+    struct UB { a: u8; b: i64; }                # 9 bytes, b at offset 1 (16, b at 8)
+    struct F2 { x: f32; y: f32; }               # 8 bytes (16)
+    union  UU { a: u8; b: u32; c: f32; }        # 4 bytes (8)
+
+    T                       bytes   read as
+    i8 / i16 / i32          1/2/4   sign-extended
+    u8 / u16 / u32          1/2/4   zero-extended (6.7.10); a write or an OP= stores only the
+                                    field's bytes, so it wraps there (`c.r = 250; c.r += 10;` is 4)
+    f32                     4       its binary32 bits, typed single-precision arithmetic (6.7.10)
+    i64 / u64 / f64 / bool / cstring / Result / Option / Tagged / an enum / Vec / *T   8
+    a struct or union       its size, inline (declared ABOVE the struct using it)
 
 SEMANTICS:
     Field types control individual field widths. STRUCTSZ sums them.
@@ -437,11 +459,33 @@ SEMANTICS:
     compiler does NOT auto-pad — write padding fields explicitly
     if a downstream consumer needs C ABI compatibility.
 
-⚠ 6.6.16: `bool` is a field type — 8 bytes, a plain word like u8..u64 (it was
+⚠ 6.6.16: `bool` is a field type — 8 bytes, a plain word like u64 (it was
     refused here while an array element took it). The field vocabulary is the
     one type-name resolver's (`_tn_resolve`, language/core.cyml
     `type_names_v6616`); the refusal note lists bool, Result, Option and
     Tagged, and a misspelt prefix gets the `'i8x' is not 'i8'` hint.
+
+⚠ 6.7.10 — PACKED NARROW UNSIGNED AND f32 FIELDS (the user's layout decision, 2026-10-08).
+    Through 6.7.9 u8 / u16 / u32 and f32 each took 8 bytes (an f32 in the low half), so
+    a struct declaring one CHANGED SIZE AND OFFSETS. Everything keyed on the size follows
+    the new one: `sizeof`, a `*C4` steps 4, `C4[2]` is 8 bytes, and the by-value class (a
+    struct of 8 B or less travels in one register, 9-16 B in two) — so `dyn`'s `self: T`
+    refusal now meets a struct that shrank to 8 B or less, and the refusals keyed on "over
+    8 B" stop applying to it (an if-expression branch, an `async fn` by-value parameter, a
+    top-level call result `var G: C4 = mk4(9);`). The fields, `sizeof` and the
+    `#derive(accessors)` fns (u8..u32 getters zero-extend, an f32 getter returns the
+    binary32 bits) follow the layout; code that reached such a struct BY HAND does not —
+    re-check `load64(p + 8)` for a second field, a literal size, a wire / file format
+    written with `sizeof`, and `load64(&s.f)` on a narrow field (it now reads the next
+    fields too). PACKED MEANS UNALIGNED: a `u32` / `f32` after a `u8` sits at offset 1. A
+    plain field read or write is fine on every target; an atomic or a futex word needs its
+    natural alignment — declare it first or pad explicitly (`_pad: u8; _pad2: u16;`). A
+    struct redefined with another narrow KIND of the same width (`i8` vs `u8`, `i32` vs
+    `f32`) warns, as one with another layout does. A declaration-zone literal with an f32
+    field bakes the binary32 bits (only an x86 `kernel;` image could read the difference).
+    An f32 SCALAR (`var x: f32`) keeps its 8-byte slot. Gates:
+    tests/gates/frontend/narrow_fields_checked.sh, tests/tcyr/crossos/narrow_unsigned_f32_fields.tcyr.
+    The guide: § Field types. CHANGELOG [6.7.10] (B7-2).
 
 [[entries]]
 name = "struct_storage_class_v665"
@@ -452,7 +496,8 @@ SYNTAX AND MEANING:
     fn f(n) {
         var a = P { n, n * 2 };   # per call, per thread
         var b: P;                 # per call, per thread
-        var c: P = mk();          # a POINTER to what mk() returned — not a copy
+        var c: P = mk();          # mk(): *P or untyped — a HANDLE (pointer) to what it
+                                  # returned; mk(): P (a struct value) — a COPY (6.6.6)
         var d: P = a;             # a COPY of a (all STRUCTSZ bytes)
         d = c;                    # since 6.6.16: a COPY of what c points at (c is a pointer)
         return a.x + c.y;
@@ -474,9 +519,12 @@ WHAT CHANGED AT v6.6.5:
 
 WHAT FOLLOWS FROM IT:
   - Operator overloading (`P_add`, `P_mul`, …) dispatches for a struct VALUE
-    wherever it lives — literal local, `var p: P;`, `var p: P = 1`, global —
-    and does NOT dispatch for a pointer-mode local, where `+` is pointer
+    wherever it lives — literal local, `var p: P;`, global — and does NOT
+    dispatch for a pointer-mode local (a handle), where `+` is pointer
     arithmetic. Before v6.6.5 a struct LOCAL silently did an integer add.
+    ⚠ 6.7.10: `var p: P = 1` is a HANDLE to address 1 at every size (the handle
+    line — struct_handle_line_and_struct_values_at_every_size_v6710), so it no
+    longer dispatches; declare it from a struct value (`P { 1 }`, `mk(1)`).
   - A closure capturing an enclosing struct or array copies it BY VALUE,
     including a stack array referenced as `&buf`.
   - `fn mk(): P { var p = P { 7, 8 }; return p; }` returns both fields.
@@ -834,7 +882,7 @@ IMPLEMENTATION:
 
 [[entries]]
 name = "derive_str_fields"
-description = "#derive(Serialize) — auto-generate JSON serializer/deserializer for structs (i8/i16/i32/i64/f64/Str/nested; f64 v6.3.40)"
+description = "#derive(Serialize) — auto-generate JSON serializer/deserializer for structs (i8..i64, u8/u16/u32, f64, f32, bool, Str, cstring, Vec<T>, nested; f64 v6.3.40; u8..u32 / f32 / cstring fields and a Str decode that unescapes everything into a fresh copy since 6.7.10; u64 unsupported)"
 category = "cyrius"
 ---
 `#derive(Serialize)` before a struct auto-generates
@@ -850,6 +898,8 @@ REQUIRED INCLUDES (cyrius doesn't auto-pull these):
     include "lib/vec.cyr"
     include "lib/hashmap.cyr"
     include "lib/bayan.cyr"   # 6.1.x: json/toml/base64 bundled in bayan
+    # 6.7.10: the guide's example (§ Derive Serialize on a struct) builds with
+    # `include "lib/bayan.cyr"` alone; an f64 / f32 field needs bayan in scope.
 
 USAGE:
     #derive(Serialize)
@@ -895,6 +945,49 @@ SEMANTICS:
     `: Str` fields                        → quoted JSON strings: "alice"
     Nested struct fields (typed by another
     `#derive(Serialize)` struct name)     → recursive _to_json call
+    `: u8` / `: u16` / `: u32` (6.7.10)   → bare JSON numbers, read ZERO-extended
+                                            (4000000000, never negative);
+                                            decoding stores at the field's width,
+                                            so 300 into a u8 is 44 (no range
+                                            check, as i8..i32)
+    `: f32` (6.7.10)                      → written WIDENED to f64 through
+                                            bayan's printer: 0.1f is
+                                            0.10000000149011612, 1.5f is 1.5;
+                                            decoded as f64 and rounded to the
+                                            nearest f32 — an exact round trip
+    `: cstring` (6.7.10)                  → `null` for NULL, else an escaped
+                                            JSON string (the Str escaper:
+                                            `"`, `\` and U+0000..U+001F
+                                            escaped); see below
+    `: bool`, `Vec<T>` of integers / f64 /
+    a #derive'd struct                    → true / false; a JSON array
+    `: u64`                               → NOT supported (the build fails
+                                            naming `u64_to_json`); nor Vec<Str>
+
+6.7.10 — cstring WIRE SHAPE (the user's decision 2, sigil's hand-rolled shape) AND THE
+Str DECODE FIX (decision 9):
+    #derive(Serialize)
+    struct Px { r: u8; n: u32; w: f32; host: cstring; note: cstring; s: Str; }
+    # p.r = 255; p.n = 4000000000; p.w = 0.1; p.host = "a\"b"; p.note = 0; p.s = str_from("x\ty");
+    # Px_to_json(&p, sb) ->
+    # {"r":255,"n":4000000000,"w":0.10000000149011612,"host":"a\"b","note":null,"s":"x\ty"}
+  - a cstring decodes `null` to NULL and anything else to a FRESH `alloc`'d NUL-terminated
+    copy (the field never points into the document): a JSON string unescaped per RFC 8259
+    (`\uHHHH` written as UTF-8, a surrogate pair joined, a lone surrogate U+FFFD), any other
+    value its text (`42` gives "42"). A quoted "null" is the 4-byte string `null` in both
+    decoders, never NULL. A decoded `\u0000` ENDS the C string there.
+  - a Str decodes EVERY escape the same way in both decoders, into a fresh Str whose length
+    counts a decoded U+0000. Through 6.7.9 the scanner decoded only \n \t \r (`"\u0001\b"`
+    read `u0001b`) and the pairs form kept every escape raw AND returned a BORROW into the
+    parsed document — code that relied on either changes.
+  - public in lib/str.cyr: str_builder_add_json_str(sb, s), str_builder_add_json_cstr(sb, p)
+    (`null` for NULL), str_json_unescape(p, n) (a fresh Str), str_json_unescape_cstr(p, n)
+    (a fresh C string), over the n bytes between a JSON string's quotes.
+  ⚠ Known defect (6.7.10 and 6.7.9): the scanner T_from_json_str does not decode a NESTED
+    #derive'd struct field and loses every field after it (left 0) — its skip is not
+    depth-aware; the pairs form decodes all of it: use T_from_json(bayan_json_parse(..)).
+  Gates: tests/gates/frontend/derive_cstring_field.sh, tests/tcyr/derive/derive_serialize_narrow.tcyr,
+  tests/tcyr/derive/derive_serialize_cstring.tcyr. CHANGELOG [6.7.10] (B7-3, B7-4, B7-4b).
 
     Detection: preprocessor checks the type cstring's first
     bytes. `Str\0` → string path. `i8\0` / `i16\0` / `i32\0`
@@ -5110,11 +5203,12 @@ Compiler side: field_notes/compiler/gotchas.cyml
 
 [[entries]]
 name = "struct_assignment_handle_and_value_v6616"
-description = "Since cycc 6.6.16 a struct ASSIGNMENT between a handle (a variable whose slot holds a plain struct's address: a pointer-mode local or global, a `*T` parameter) and a struct VALUE copies the struct — out of the pointee, or into it (`*a = q`). handle <- handle stays a pointer rebind at any pair of types; the DECLARATION `var q: T = a;` stays an alias from a pointer-mode local or global (from a parameter, a `*T` one included, it copies, as since 6.6.11)."
+description = "Since cycc 6.6.16 a struct ASSIGNMENT between a handle (a variable whose slot holds a plain struct's address: a pointer-mode local or global, a `*T` parameter) and a struct VALUE copies the struct — out of the pointee, or into it (`*a = q`). handle <- handle stays a pointer rebind at any pair of types; the DECLARATION `var q: T = a;` stays an alias from a pointer-mode local or global (from a parameter, a `*T` one included, it copies, as since 6.6.11). Since 6.7.10 the rule holds at EVERY size (through 6.7.9 only over 8 bytes), and a `*T` global, a `: *T` call / method, a `*T` field and pointer arithmetic on a `*T` are copy sources too."
 category = "cyrius"
-tags = ["structs", "assignment", "copy", "pointer-mode", "handle", "v6.6.16"]
+tags = ["structs", "assignment", "copy", "pointer-mode", "handle", "v6.6.16", "v6.7.10"]
 ---
-TERMS (plain structs over 8 bytes; Str / Result / Option / Tagged and <= 8 B structs are unchanged):
+TERMS (plain structs of ANY size since 6.7.10 — over 8 bytes only through 6.7.9; Str / Result / Option /
+Tagged are unchanged):
     HANDLE  one slot holding the struct's ADDRESS:
               var a: P3 = alloc(24);        # a pointer-mode local
               var G: P3 = 0; G = alloc(24); # a pointer-mode global
@@ -5152,6 +5246,27 @@ ONE SHAPE CHANGED MEANING: smuggling a handle through an inline struct variable 
     var w: P3; w = a; f(w);     # f(v) untyped, reads load64(v + 8)
 now passes w's first FIELD (w is a real copy). Pass `a`, or `&w`. Nothing in the ecosystem did it.
 Also: two `*T` parameters, `a = b;` — a rebind now (it copied `*b` into `*a`).
+
+6.7.10 — EVERY SIZE, AND MORE `*T` SOURCES (the user's decision 6: struct copies are size-independent):
+    `l = p`, `G = p`, `l = q` copy `*p` / `*q`; `q = r`, `p = l`, `p = G`, `self = o` and `p = <a call /
+    method / operator / if-expression / field struct result>` copy INTO the pointee — for a struct of 8 B
+    or less too. Through 6.7.9 no struct variable of that size was a handle (see the handle line,
+    struct_handle_line_and_struct_values_at_every_size_v6710) and a `*T` of one was no struct operand:
+    `l = p` / `G = p` stored the POINTER into the first field and `q = r` through a `q: *S8` parameter
+    REBOUND q (the caller's struct never changed) — each silently.
+    Also copy sources since 6.7.10, at every size (they stored the pointer word into the first field, over
+    8 B too): a `*T` GLOBAL (`l = GP`, `G = GP`), a call or method declared `: *T` (`l = gp()`), a `*T`
+    field (`l = w.p`), and pointer arithmetic on a `*T` (`l = p + 1`, `l = (p + 1)`, `l = 1 + GP`,
+    `G = q - 1`: the struct the result points at). Into a `*T` or a handle they REBIND (`q = GP` repoints
+    q; `p = p + 1` still steps). A `*U` of another struct is refused by name (`l = pu`, `l = GU`,
+    `l = pu + 1` compiled and stored a word); a `*i64` / an untyped address into a struct stores its word.
+    ⚠ Known defects (6.7.10): a GENERIC call declared `: *T` is no struct source (`l = gp<S>()` stores the
+    word — bind it to a `*S` first); into a struct-typed FIELD these sources store the pointer word
+    (`o.s = GP`, `o.s = gp()`, `o.s = w.p`); an ASSIGNMENT from a dereference stores one word (`l = *p`,
+    `G = *p`, `o.s = *p` — the declaration `var l2: S = *p;` copies). Workaround: copy through a `*T`
+    local (`var p2: *S = GP; o.s = p2;`). ⚠ Not settled: `GP = l` (a `*T` GLOBAL destination) stores l's
+    first word into GP. Gate: tests/tcyr/crossos/struct_pointer_source_copy.tcyr,
+    small_struct_pointer_copy.tcyr. CHANGELOG [6.7.10] (B7-1c, OPS-3, OPS-6).
 
 [[entries]]
 name = "struct_parameter_is_a_copy_v6616"
@@ -5242,8 +5357,9 @@ RULES:
   `*T` — `p + n` steps `sizeof(T)` (see `typed_pointer_step_is_sizeof_t_v6617`).
 
 ⚠ NOT the same as a struct-typed local: `var p: Node = h;` with `h: *Node` COPIES the struct (a
-walk written that way overwrites nodes), and for a struct of 8 B or less it stores the POINTER.
-Bind vs copy for `Struct = *Struct` is an open v6.7.x question — write `var p: *Node`.
+walk written that way overwrites nodes) — at every size since 6.6.20 (it stored the POINTER at 8 B or
+less), and 6.7.10 settled every `Struct = *Struct` ASSIGNMENT as a copy too, at every size (the user's
+decision 6; `l = p` stored the pointer word at 8 B or less). To walk, write `var p: *Node`.
 
 GATES: tests/tcyr/lang/pointer_field_return_types.tcyr (linked / chains / ptr_locals / call_ptr
 groups, a linked-list walk), tests/gates/frontend/typed_pointer_warn_sign.sh axis 9. CHANGELOG
@@ -5600,6 +5716,19 @@ ACCEPTED: a TYPED POINTER of another struct (`u: *Pt` local, parameter, global, 
 into `*Q` or `Q`) converts freely, like `&p` and the receive path's `var q: *Q = u;` (user decision,
 2026-10-08); an untyped variable; a literal; a call returning an integer or a pointer; a fn pointer.
 
+6.7.10 (the user's decision 7): A POINTER INTO A BY-VALUE STRUCT PARAMETER PASSES THE STRUCT IT POINTS AT,
+at every size. `bs1(&s)`, `bs1(sp)` with `sp: *S1`, `bs1(gp())` with `fn gp(): *S1`, `bs1(h.p)` with a `*S1`
+field, `bs1(sp + i)`, and an operator's right operand (`o + sp`, `o + &s`) give `fn bs1(b: S1)` a COPY — a
+`*T` local, parameter, global or capture, in a fn and at top level; the callee's writes never reach the
+pointee. Over 8 B that is what the address-passed parameter always did; through 6.7.9 a struct of 8 B or
+less got the POINTER as its one word and read the address as its fields, silently. A `*U` of another struct
+still converts (read with the parameter's layout). An UNTYPED value is still the struct's word: an untyped
+local holding an address (`var u = &s; bs1(u)`), an integer, an i8 / i16 / i32 value. Two edges stay the
+word, by the compiler's own typing: an if-expression whose branches are pointers of DIFFERENT steps, and
+`n + pb` with an i8..i32 `n` on the LEFT. A whole dereference (`take(*p)`, `a - *p`) is the struct too,
+and a `*U` dereference into such a parameter is refused by name (`takeh(*pu)` crashed). Gate:
+tests/tcyr/crossos/small_struct_pointer_arg.tcyr, struct_deref_whole_operand.tcyr. CHANGELOG [6.7.10].
+
 HOW (internals): SFPSID also records a by-value struct of 8 B or less and a Str handle parameter
 (`_psid_plain`) — neither has a struct-mask bit, so every ABI reader tests `_pm_struct` before GFPSID.
 Such an argument is consumed by `_sarg_byval_small` (the caller's own PCMPE + EPUSHR). A 9-16 B method
@@ -5859,10 +5988,12 @@ whatever its last argument was: `fncall1(&f, n) + 1` with `n` a struct is 100, n
 Kept: with the callee written `&f`, `f` declared `: f64` and an f64 last argument, the result is an
 f64 (`fncall1(&dbl, d) + 1.0` is an f64 add). Through a variable or a closure write
 `f64_add(fncall1(fp, d), 1.0)` or bind it to a `var r: f64`.
-NOT YET (backlog): a struct-typed FIELD as the left operand passes the containing struct's address
-(`h.p - s`); a parenthesised argument to a by-value struct parameter of 8 B or less skips the 6.7.3
-type check (`bs1((t))`); `var r = mk3(4) - s` types `r` as `P3` even when `P3_sub` returns an
-integer (also `n - s + 10`, `-s + t`).
+NOT YET (backlog): a parenthesised argument to a by-value struct parameter of 8 B or less skips the
+6.7.3 type check (`bs1((t))`); `var r = mk3(4) - s` types `r` as `P3` even when `P3_sub` returns an
+integer (also `n - s + 10`, `-s + t`). FIXED in 6.7.10 (decision 11): a struct-typed FIELD or a `*T`
+dereference as the LEFT operand dispatches (`h.p - s` subtracted the first words) — and an untyped
+`var c = a + b;` of a struct-returning operator takes its struct type at every size (decision 12): see
+struct_handle_line_and_struct_values_at_every_size_v6710.
 GATES: tests/gates/codegen/struct_value_codegen.sh; tests/tcyr/crossos/struct_value_codegen.tcyr.
 CHANGELOG [6.7.6].
 
@@ -6334,3 +6465,103 @@ GATES: tests/tcyr/crossos/pointer_subscript_values.tcyr (219), pointer_subscript
 deref_element_width.tcyr (145) — x86 / IR=1 / IR=3 / DCE, qemu-aarch64, cx, wine; tests/gates/frontend/
 pointer_subscript_checked.sh (+ mutation ledger). Field note: field_notes/language/semantics_runtime.cyml
 typed_pointer_local_slot_v6616 (the typed-pointer history). CHANGELOG [6.7.8].
+
+[[entries]]
+name = "struct_handle_line_and_struct_values_at_every_size_v6710"
+description = "cyrius 6.7.10 (the user's decisions 1, 5, 6, 7, 11, 12): ONE storage rule at every size, for struct locals AND globals — declared from a struct VALUE of its type the variable is inline, from anything else (an address, `alloc`, `&x`, a `*T` or untyped call, an integer) it is a HANDLE, and from another handle it binds; a dereference of a `*T` in any spelling is a struct value; copies through a `*T` are size-independent; a pointer into a by-value struct parameter passes the struct; a struct-typed field or a `*T` dereference as an operator's LEFT operand dispatches `S_op`, and a whole dereference is a struct as an argument and a right operand; an untyped `var c = a + b;` of a struct-returning operator takes its struct type. Through 6.7.9 each held only over 8 bytes, or not at all."
+category = "cyrius"
+tags = ["v6.7.10", "structs", "handle", "inline", "copy", "dereference", "operator overloading", "by-value parameter", "B7", "decision 6"]
+---
+THE HANDLE LINE (decisions 1 and 5 — locals and globals, every size):
+
+    struct S8 { v; }
+    fn demo(): i64 {
+        var h = alloc(8);
+        store64(h, 7);
+        var q: S8 = h;           # a handle: q.v reads h's word
+        q.v = q.v + 30;          # writes the heap object
+        var c: S8 = q;           # binds: c is a second handle to it
+        var l: S8 = S8 { 1 };    # inline (a literal)
+        l = q;                   # copies the struct q points at
+        return load64(h) + c.v + l.v;   # 37 + 37 + 37 = 111
+    }
+
+  A STRUCT VALUE (the variable is inline; a copy): a literal; another inline struct of the type — a
+  local, a by-value parameter, a global, a closure's captured copy, parenthesised or not; a struct-typed
+  field (`b.v`); a `*T` name, or a dereference of a `*T` in ANY spelling — `*p`, `(*p)`, `*(p + 1)`,
+  `*h.p`, `*gp()`, `*w.mp()` (copied through the pointer); a call, method, operator or if-expression
+  returning the struct (generic, wrapped, parenthesised). For a global the same list, and a fn declared
+  BELOW the global counts.
+  ANYTHING ELSE (a handle): `alloc(..)`, `&x`, an untyped value (`*x` of an untyped x included), a call
+  returning a `*T` or an untyped value, an integer — `var q: S8 = 0;` is a NULL handle, and
+  `var a: Num = 1;` a handle to ADDRESS 1, so `a + b` is pointer arithmetic with no `Num_add` (declare it
+  `Num { 1 }` or `mkn(1)` for the operator). From another handle (a captured one too) it BINDS: a second
+  name for the same object. A struct value of ANOTHER type, a `*U` dereference included, is refused by
+  name (`cannot copy 'pu' into a variable of a different struct/vector type: 'q'`).
+  A HANDLE USED AS A VALUE is the struct it points at — a by-value argument, a `: S8` return, an
+  operator's right operand, an if-expression branch, either side of a copy, in a fn and at top level; a
+  closure captures the handle and reads through it. As an operator's LEFT operand it is pointer
+  arithmetic (no dispatch), and `&q` is its slot.
+  WAS (through 6.7.9) — the line held only over 8 B: a struct local or global of 8 B or less was inline
+  whatever its initialiser, so `var q: S8 = h;` (or `= alloc(8)`, `= &s`, `= gp()`, `= 1`) held the
+  ADDRESS as `q.v` and `q.v = 5` never reached the object, silently (`demo` read the address back). Over
+  8 B `var q: P3 = *p;` was a handle holding the word `*p` read — its first field write crashed.
+  ⚠ Not settled: a global declared from a `*T` GLOBAL's name (`var G: S8 = P;`) keeps its 6.7.9 layout
+  (inline holding the pointer word at 8 B or less; a handle bound to P's object over 8).
+
+COPIES ARE SIZE-INDEPENDENT (decision 6): `l = p`, `G = p` and `q = r`-style copies through a `*T`, and
+since 6.7.10 a `*T` global, a `: *T` call / method, a `*T` field and pointer arithmetic on a `*T` as
+sources — the full table, the rebinds and the known defects are in
+struct_assignment_handle_and_value_v6616.
+
+A POINTER INTO A BY-VALUE STRUCT PARAMETER (decision 7) passes the struct it points at, at every size:
+`bs1(&s)`, `bs1(sp)`, `bs1(gp())`, `bs1(h.p)`, `bs1(sp + i)`, `o + sp` give `fn bs1(b: S1)` a copy; an
+untyped value is still the struct's word — struct_argument_type_checked_v673.
+
+A STRUCT-TYPED FIELD OR A `*T` DEREFERENCE AS AN OPERATOR'S LEFT OPERAND (decision 11) dispatches `S_add`
+(`S_sub`, `S_mul`, `S_div`) as a struct variable there does, at every size:
+
+    w.s + a     p.s + a (p: *W)     mk(1).s + a     self.s * a     o.w.s - a     (w.s) + a
+    *p + a      (*p) + a            *gp() + a       *w.ps / a
+
+  Into a `*S` parameter or over 8 B the field's own address (or the pointer) is passed — a write through
+  it reaches the field — else its value. The result is a struct value: declared, assigned, passed,
+  returned (`return w.s + a;`) and chained (`w.s + a + a`). A missing `S_op` is refused by name, as for a
+  variable (`w.s + 1` with no `S_add`), as is an operator fn whose first parameter is another struct and,
+  at top level, a 9-16 B result (`var G: H = GW.s + A;`). Through 6.7.9 the first WORDS were combined:
+  `h.p - s` gave 250 where `P2_sub` gives 139, silently, at every size. Unchanged: a `*T` field is a
+  pointer (`w.p + 1` steps it), a `Str` field a handle, and `-w.s + a` negates a word first.
+
+A WHOLE DEREFERENCE IS A STRUCT VALUE AS AN ARGUMENT AND A RIGHT OPERAND: `take(*p)`, `take((*p))`,
+`take(*gp())`, `take(*w.ps)`, `take(*(p + 1))`, `a - *p`, `a + (*p)` — to a by-value parameter over 8 B
+(or an operator's) the pointer, which the callee copies; to a `*S` parameter of any size the pointee
+itself, so a write reaches it. `take(*p + a)` passes the operator's result (at top level a 9-16 B one is
+refused by name). A `*U` of another struct is refused (`cannot pass 'pu' to a parameter of a different
+struct type`); an untyped `*x` is still the word it reads. Through 6.7.9: the word the dereference read
+was passed as the struct's address — a crash on every target.
+  ⚠ Known defect (6.7.10): a dereference of a `*S` of 1-7 B, and a whole field of 3 / 5 / 6 / 7 B, is
+  still loaded as an 8-byte word on the way (in every value use — an argument, a right operand): an
+  object ending exactly at the end of a mapping faults.
+
+AN UNTYPED BINDING OF A STRUCT-RETURNING OPERATOR TAKES ITS STRUCT TYPE (decision 12): `var c = a + b;`
+with `fn S_add(..): T` declares `c` an inline `T` at every size (as over 8 B, where the result's temporary
+becomes `c`) — `c.f` reads and writes it, `c + c` dispatches again, `take(c)` passes it — whatever the
+left operand (a variable, a field, a dereference, a call, wrapped, chained). The OPERATOR's return type
+wins over a leading call's (`var c = mk(4) * b;` is `S_mul`'s type). An operator returning an integer
+leaves the binding untyped; an untyped GLOBAL keeps the result's word at every size. Only `+ - * /` (and
+`+% -% *%`) on `c` dispatch — `c & 0xFF`, `c | m`, `c ^ 1`, `c << 1`, `c % n` act on its word. Through
+6.7.9 a result of 8 B or less was an untyped word (`c.f`: *no struct type in scope for 'c'*), and
+6.7.10's packed fields shrank `struct C4 { r: u8; g: u8; b: u8; a: u8; }` from 32 B to 4, so
+`var c = A + B; c.g = 1;` needed this to compile again. ⚠ A 9-16 B result in parentheses
+(`var c = (a + b);`) is still an untyped word: write `var c: T = (a + b);` or drop the parentheses.
+⚠ Still open: `var r = mk3(4) - s;` with an INTEGER-returning `P3_sub` is typed `P3` from the leading
+call (issues/2026-10-08-struct-operator-results.md, item 1).
+
+GATES: tests/gates/codegen/small_struct_handle_line.sh, tests/gates/codegen/struct_value_codegen.sh;
+tests/tcyr/crossos/{small_struct_handle_line, small_struct_global_handle_line, small_struct_pointer_arg,
+small_struct_pointer_copy, struct_pointer_source_copy, struct_field_left_operand,
+struct_deref_whole_operand, struct_operator_result_binding}.tcyr. The guide: § Where a struct lives,
+§ Parentheses, struct operands and `Str` fields, the struct-argument check. Field notes:
+field_notes/language/semantics_runtime.cyml struct_handles_and_values_since_6_7_10;
+field_notes/compiler/gotchas.cyml struct_values_at_every_size_and_packed_fields_v6710.
+CHANGELOG [6.7.10] (B7-1, B7-1g, B7-1b, B7-1c, B7-1d, OPS-1 .. OPS-6).

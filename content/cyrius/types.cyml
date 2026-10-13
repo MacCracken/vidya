@@ -377,17 +377,27 @@ WHY MOVZX vs MOVSX (UPDATED v6.3.35): extension is now signedness-
 dependent, not a blanket zero-extend. SIGNED sub-i64 loads (i8/i16/i32 —
 locals, struct fields, call-args) SIGN-extend (x86 movsx/movsxd, aarch64
 ldurs*/ldrs*); only UNSIGNED uN loads zero-extend (movzx). A sub-i64
-struct FIELD is always signed (struct-def only recognizes i8/i16/i32).
+struct FIELD was always signed until 6.7.10 (struct-def recognized only
+i8/i16/i32 as narrow; u8..u32 took 8 bytes) — since 6.7.10 u8/u16/u32
+fields are narrow and zero-extend (see STRUCT FIELDS below).
 Signedness is read off the type-name low byte ('i' 0x69 vs 'u' 0x75);
 implemented as a negative-width sentinel in the slice-width table so no
 new heap region was needed. (Historical: this entry originally proposed
 zero-extend-always with 'add a signed flag later' — that signed path
 shipped at v6.3.35. See src/backend/x86/emit.cyr:464-501,563-566.)
 
-STRUCT FIELDS: Field width comes from struct_ftypes[]. When a field
-is typed as i8, its size is still 8 in the struct layout (alignment).
-The width only affects the load/store instruction, not the offset.
-For packed structs, field size = field width (add later).
+STRUCT FIELDS (6.7.10): structs are PACKED — a field's size IS its width
+and the next field starts right after it, no padding (`{ a: i8; b: i64; }`
+is 9 bytes; i8/i16/i32 have been laid out that way since v5.9.36, u8/u16/
+u32 and f32 since 6.7.10 — they took 8 bytes before, a layout / ABI
+change). The ftype cell carries only a WIDTH (`0 - w` for a narrow field),
+so the signedness of u8/u16/u32 lives in an unsigned side map
+(`_fld_uns`, SFUNS / GFUNS — one byte per field-pool entry, alloc()'d on
+first use, no heap region) and f32 is `0 - 4` plus float kind 2 in SFFK.
+`_fld_lw` is the one load-width helper; the `#derive` offset table reads
+the same classification (`PP_DFIELD_EK`). Packed means UNALIGNED: an
+atomic / futex word needs its natural alignment (declare it first or pad
+explicitly).
 
 [[entries]]
 name = "tagged_union_layout"
@@ -993,7 +1003,7 @@ sized entirely by their descriptor.
 
 [[entries]]
 name = "compiler_structural_facts"
-description = "Live structural facts at cycc 6.6.19 (the last tag; re-derived at the 6.6.20 closeout): heap map, growable-table caps, identifier pool, fixup table, IR opcode set, backend modules, and the 7 per-target main forks — the numbers the design entries above are written against. NOTE: the entry NAME is deliberately version-less; it was `compiler_structural_facts_v6510` while describing 6.5.72, so the name itself had gone stale"
+description = "Structural facts: the full snapshot at cycc 6.6.19 (re-derived at the 6.6.20 closeout) plus the 6.7.10 deltas (size, heap-map count, packed field widths, the handle line's records, the hidden-temp census): heap map, growable-table caps, identifier pool, fixup table, IR opcode set, backend modules, and the 7 per-target main forks — the numbers the design entries above are written against. NOTE: the entry NAME is deliberately version-less; it was `compiler_structural_facts_v6510` while describing 6.5.72, so the name itself had gone stale"
 category = "cyrius"
 ---
 The design entries in this file describe MECHANISM. This entry pins the
@@ -1014,6 +1024,33 @@ written into two other docs before the gate was run: the real number is
 **102**, because that regex also matches 18 `(FREED …)` markers and the
 multi-scalar band lines carrying no `[BYTES]` field. Deriving a number is
 not enough — derive it THE WAY THE GATE DOES, or run the gate.
+
+== 6.7.10 DELTAS (2026-10-13; the sections below stay the 6.6.19 snapshot) ==
+
+  cycc 6.7.10 — x86_64 self-host 2,114,376 B (.text 1,900,296),
+  +56,640 B over 6.7.9's 2,057,736; build/cycc-native-aarch64 1,950,240 B.
+  Heap map: 123 regions, 0 overlaps (`sh tests/gates/memory/heapmap.sh`
+  on the 6.7.10 tree; 102 at 6.6.19 — the growth is the 6.7.x minor's,
+  6.7.10 itself adds NO region, fixup type, IR opcode or backend module).
+  Field widths (B7-2): u8 / u16 / u32 are `0 - w` in the ftype cell plus
+  the unsigned side map `_fld_uns` (SFUNS / GFUNS: one byte per
+  field-pool entry, alloc()'d on first use — off the map); f32 is
+  `0 - 4` plus SFFK kind 2; `_fld_lw` is the one load-width helper; the
+  #derive offset table reads `PP_DFIELD_EK`.
+  The handle line (B7-1 / B7-1g): a struct LOCAL of 8 B or less is
+  inline (GLAGG set, `_mark_small_init`) only when its initialiser is a
+  struct value, else GLAGG 0 (a handle); a struct GLOBAL of 8 B or less
+  is GVPM 1 (a handle) unless its initialiser is a struct value — judged
+  by the declaration zone's end-of-pass-1 sweep (`_gz_sweep`, repeated
+  to a fixpoint) and re-checked by PARSE_VAR's replay (`_gz_late`),
+  which refuses a disagreement.
+  Hidden temps (`tests/gates/codegen/hidden_temp_census.sh`): 26 `_HTEMP`
+  users across 18 fns — 6.7.10 added `_hl_gtemp`, `_hl_pval_ra`,
+  `_hl_dx_src` (the handle line), `_dlo_park` (a dereference parked
+  before its load, decision 11) and `_hl_psrc_copy` (a `*T` global /
+  call / field copy source, decision 6). Program-wide hidden globals:
+  `_tup_greg` (6.7.7), `_dyn_vt_reg` (6.7.8 vtables) and `_cov_greg`
+  (6.7.10: the execution-coverage counter band and the fn map).
 
 == TOOLCHAIN ==
 

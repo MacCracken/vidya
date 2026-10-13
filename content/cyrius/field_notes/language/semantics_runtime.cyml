@@ -25,6 +25,11 @@
 # v6.6.5: `private` covers the whole file, and forward references are checked; a struct
 # declared inside a fn is per call and per thread, and an over-budget array local warns that
 # its storage is static.
+# v6.7.10: +1 entry — struct_handles_and_values_since_6_7_10 (the handle line at every size: an integer or an
+# untyped carrier of a small struct's word now makes a HANDLE; packed u8..u32 / f32 fields; a field / dereference
+# left operand dispatches; an untyped `var c = a + b;` is the struct). Updated:
+# struct_field_types_checked_and_f64_fields_typed_since_6_6_10 (its "widths are unchanged" note). 39 entries
+# (DERIVED at 6.7.10).
 
 [[entries]]
 name = "heap_allocation_patterns"
@@ -1227,7 +1232,7 @@ accessors would address the first layout's bytes.
 
 [[entries]]
 name = "struct_field_types_checked_and_f64_fields_typed_since_6_6_10"
-description = "Since cycc 6.6.10 an f64/f32 struct field loads typed, a struct value assigned into a struct-typed field copies the whole struct, and an unknown / forward / self field type is a compile error; u8..u64 and f32 fields are 8 bytes"
+description = "Since cycc 6.6.10 an f64/f32 struct field loads typed, a struct value assigned into a struct-typed field copies the whole struct, and an unknown / forward / self field type is a compile error; u8..u64 and f32 fields were 8 bytes until 6.7.10 (u8 / u16 / u32 / f32 are packed at their widths since)"
 category = "cyrius"
 ---
 cycc < 6.6.10, all silent: (1) `x: f64` was not in the field-type ladder, so it registered as
@@ -1251,8 +1256,11 @@ name.
 integer — and silently overwrote the fields AFTER it (on every backend and real host). Since
 6.6.10 such a store writes exactly the field's bytes (4/2/1-byte chunks, shifted into place).
 Width ladders that fall to "else: 8 bytes" are the recurring shape: an odd size is not 8.
-⚠ WIDTHS ARE UNCHANGED: u8/u16/u32/u64 and f32 fields are 8 bytes each (only i8/i16/i32 are
-narrow) — `struct { a: u8; b: u8; }` is 16 bytes. For a binary layout use i8/i16/i32 + mask.
+⚠ WIDTHS CHANGED IN 6.7.10: through 6.7.9 u8/u16/u32/u64 and f32 fields were 8 bytes each (only
+i8/i16/i32 were narrow — `struct { a: u8; b: u8; }` was 16 bytes). Since 6.7.10 u8/u16/u32 are 1/2/4
+bytes, ZERO-extended, and f32 is 4 (its binary32 bits), all PACKED (that struct is 2 bytes) — a layout
+and ABI change; u64 / bool stay 8. See struct_handles_and_values_since_6_7_10 and language/features.cyml
+struct_field_widths.
 ⚠ `#derive(accessors)` getters are `load64` and stay UNTYPED on purpose (bit-exact getter
 compares in svara/samay): `p.x + p.y` is a float add, `P_x(&p) + P_y(&p)` an integer one.
 
@@ -1660,3 +1668,62 @@ A return type, a struct field, `*[T]`, a slice of slices and a type argument are
 misleading parse error before). An UNTYPED parameter is never a slice: `y[0]` / `y.len` on one compiled only by
 accident (a stale width from an earlier fn's slice in the same slot) and are refused since 6.7.8. Gates:
 slice_position_refused.sh, slice_signed_read.sh. See CHANGELOG [6.7.8].
+
+[[entries]]
+name = "struct_handles_and_values_since_6_7_10"
+description = "cycc 6.7.10: a struct local or global of ANY size declared from something that is not a struct value of its type is a HANDLE — so `var q: S8 = 0;` is a NULL handle, `var a: Num = 1;` no longer dispatches, and a struct declared from an UNTYPED carrier of a small struct's word (`vec_get`, `load64`, `map_get`, `fncall1`, a `?` payload, `*x`) is a handle to the address that word spells; u8 / u16 / u32 / f32 fields are packed at their widths; `w.s + 1` without `S_add` no longer compiles; an untyped `var c = a + b;` of a small struct is that struct."
+category = "cyrius"
+---
+cycc 6.7.10 (language/features.cyml struct_handle_line_and_struct_values_at_every_size_v6710). Each of these
+compiled through 6.7.9 and means something else now — most of them silently.
+
+AN INTEGER INITIALISER IS A HANDLE. `var q: S8 = 0;` is a NULL handle — `q.v = 5` FAULTS (it was a zeroed inline
+S8). `var a: Num = 1;` is a handle to address 1, so `a + b` is pointer arithmetic with no `Num_add`. For a zeroed
+inline struct write `var q: S8;` or `S8 { 0 }`; for an operator operand declare it from a struct value
+(`Num { 1 }`, `mkn(1)`). The same for globals (`var G = S8 { 0 };`).
+
+⚠ AN UNTYPED CARRIER OF A SMALL STRUCT'S WORD IS NOW A HANDLE. A struct of 8 B or less IS one word, so code
+carried it in untyped values — and a struct declared from an untyped value is a handle to the address that word
+spells:
+
+    vec_push(v, s);                    # s: S8 — pushes s's one word
+    var q: S8 = vec_get(v, 0);         # 6.7.9: an inline S8 holding the word (q.v read 4, q.v + 5 gave 9)
+                                       # 6.7.10: a handle to ADDRESS 4 — q.v faults (measured SIGSEGV)
+
+The same for `= load64(p)`, `= map_get(m, k)`, `= fncall1(f, x)` / a closure's result, a `?` / pair / `Result` /
+`Option` payload (`var q: S8 = mk()?;`) and `= *x` with `x` untyped. Keep such a word untyped; or store the
+struct's ADDRESS in the container (`vec_push(v, &s)`) and declare `var q: *S8 = vec_get(v, 0);`; or type the
+carrier as a pointer and dereference it (`var p: *S8 = vec_get(v, 0); var q: S8 = *p;` — a dereference of a
+`*T`, in any spelling, is a struct value and copies; one of an UNTYPED value is not).
+
+A HANDLE'S WRITES REACH THE OBJECT. `var q: S8 = alloc(8);` (or `= &s`, `= gp()` with `fn gp(): *S8`) holds the
+address and `q.v = 5` writes the object; through 6.7.9 q was an inline S8 whose field HELD the address and its
+writes stayed in the frame. Code that read `q.v` to get the address back: `load64(&q)`, or keep it untyped. A
+declaration from another handle BINDS (`var c: S8 = h;` aliases h's object).
+
+COPIES THROUGH A `*T` AT EVERY SIZE. `l = p` with `p: *S8` copies the struct (it stored the POINTER into `l`'s
+first field), and so do `l = GP`, `l = gp()`, `l = w.p` and `l = p + 1` (over 8 B too). Code that used a struct's
+first word to carry an address: keep it in a `*S` (`var p: *S = GP;`) or `store64(&l, GP)`. A pointer into a
+small BY-VALUE parameter (`bs1(&s)`, `bs1(sp)`) passes the struct now — the callee read the address as its fields.
+
+PACKED NARROW FIELDS. `struct C4 { r: u8; g: u8; b: u8; a: u8; }` is 4 bytes (32 through 6.7.9); u8..u32 read
+ZERO-extended and wrap at their width (`c.r = 250; c.r += 10;` is 4). `load64(&s.f)` on a narrow field reads the
+NEIGHBOURS too; a hand-written offset (`load64(p + 8)` for the second field), a literal size or a wire / file
+format written with `sizeof` must be re-checked. Packed is UNALIGNED: a u32 after a u8 sits at offset 1 — an
+atomic or futex word needs its natural alignment (declare it first or pad). A struct that shrinks to 8 B or less
+joins the one-register by-value class: refusals keyed on "over 8 B" stop applying, and `dyn` from one whose
+method takes `self: T` is newly refused.
+
+A FIELD OR DEREFERENCE LEFT OPERAND DISPATCHES. `w.s + a`, `*p + a` call `S_add` (they added first words), so
+`w.s + 1` on a struct-typed field with no `S_add` no longer compiles (*refusing to emit binary with 1 reachable
+undefined function(s)*): read the word explicitly — `w.s.v + 1` (`&w.s` is no expression); for a dereference
+`p.v + 1` or `load64(p) + 1`. A `*T` field (`w.p + 1` steps it), a `Str` field and `-w.s + a` are unchanged.
+`takeh(*pu)` with a `*U` of another struct no longer compiles (it crashed).
+
+AN UNTYPED BINDING OF A SMALL STRUCT'S OPERATOR RESULT IS THAT STRUCT. `var c = a + b;` with `S_add` returning a
+struct of 8 B or less declares `c` that struct (it was an untyped word): `c + 1`, `c * 2` now DISPATCH `S_add` /
+`S_mul` (or are refused when there is none) — read the field (`c.v + 1`) or `load64(&c)`; `c & 0xFF`, `c | m`,
+`c ^ 1`, `c << 1`, `c % n` still act on the word. `var c = mk8(4) * b;` takes `S8_mul`'s return type, not mk8's.
+An integer-returning operator and an untyped GLOBAL are unchanged.
+
+See CHANGELOG [6.7.10] and docs/development/ecosystem-migration.md § 6.7.10.

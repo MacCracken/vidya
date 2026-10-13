@@ -19,6 +19,12 @@
 #   the prefix used to mean. Live paths were repaired at the v6.6.1 audit; remaining
 #   mentions are inside narratives about bugs found when the file was called that.
 #
+# 157 entries at 6.7.10 (DERIVED, the same grep). 6.7.10 added THREE — struct_values_at_every_size_and_packed_fields_v6710
+# (B7 + the ops lane), derive_codecs_share_one_classifier_v6710, instrumentation_belongs_at_the_body_start_not_in_the_prologue_v6710
+# (P5-B); the rest went INTO class entries: name-based copy resolvers (the third instance, `_agc_operand`), the
+# emitted-bytes class (its eighth: `_sc_pre`'s unrecorded lea), `_cfo` (the defensive zeroing), cybs (three 1-for-1
+# swaps at the ceiling), the seven forks (`_cov_tail`; the Windows spawn arm's environment), counter-model (H7), the
+# environment reader (the shared scratch; `_pp_env_rung`), the exit-code runner (no record = a named failure).
 # 154 entries at 6.7.8 (DERIVED with `grep -c '^\[\[entries\]\]'`; this line read 134 against a live 152 — the
 # 6.7.0–6.7.7 entries never moved it). 6.7.8 added TWO (checked_dyn_trait_objects_v678,
 # typed_subscripts_element_kinds_and_the_bounds_mode_v678); the rest of 6.7.8 went INTO class entries per the
@@ -1063,13 +1069,13 @@ tags = ["shift", "logical-shift", "arithmetic-shift", "operator", "crypto", "rot
 
 [[entries]]
 name = "cfo_const_fold_rewind_class_four_occurrences_grep_the_shape_not_the_operator_and_every_tier_that_reenters_the_fold"
-description = "THE most-repeated codegen defect of the v6.x line — four occurrences (a fifth, 6.6.12: a factor arm that parses its own call and cleared the flag BEFORE it), each fix scoped to the tier its repro landed in and each declared complete. MECHANISM: the constant folder keeps `_cfo` (fold armed), `_cfv` (folded value) and `_cfp` (the code pointer captured at the START of the foldable region). A parse path clears `_cfo = 0` BEFORE calling a lower tier that RE-ARMS it — `PARSE_FACTOR` sets `_cfp = GCP(S)` then `_cfv = val; _cfo = 1` for a bare NUM — so the flag comes back on with `_cfp` pointing PAST code that was already emitted. The next operator then takes the const-fold branch with a live-but-stale fold and `SCP(S, _cfp)` rewinds the code pointer over that already-emitted code, replacing it with a constant. The symptom is always a silently wrong constant: no error, no warning, valid binary. OCCURRENCES: (1) 2026-06-11, cyrius-doom, `A * B * 4` -> 800 (the EIMUL path). (2) v6.4.74 — 17 sites in the `PARSE_TERM` tier (`/ % << >> >>>`): `100 >>> 1 + 1` == 2 (want 51), `100 >> 0 + 1` == 1 (want 101). `>>` and `<<` mostly escaped because their own fold path handles a literal RHS, so it bit exactly where that fold could not apply (shift count 0, or a value outside the 0x10000 window); a parenthesised RHS also masked it, since the paren path never re-arms. (3) v6.4.80 — 16 sites one tier UP in `PEXPR` (`+ - & | ^`): `1 - 2 + 3` == **5**, `2 - 5 + 10` == 15, `3 + 1 - 5 + 2` == 7. The emitted code is the expression with the leading `a -` deleted. Trigger is the `cfr >= 0` test in the subtract fold — a NEGATIVE intermediate fails it and takes the runtime fallback, and the fallback was the buggy one, which is exactly why non-negative intermediates were always right (`5 - 3 + 1` == 3) and it hid. Measured blast radius: 40 of 400 (10 %) systematic 3-term constant expressions wrong. (4) v6.4.81 — one tier DOWN in `EMIT_OP_DISPATCH`, struct operator overloading: it parses its RHS with `PARSE_TERM` (re-arms) and ends with `SESTYPE(S, 0)`, so the following `+`/`-` rewound over the emitted operator CALL — the overload silently deleted and replaced by a constant. `p * 3 + 1` == 4 (want 1004). The tell was a 2-of-4 asymmetry in four structurally identical lines: `add` (parse_expr.cyr:2809) and `sub` (:2837) already cleared `_cfo`; `mul` (:2550) and `div` (:2610) never did. THE LESSON: **grep the SHAPE, not the operator — and grep EVERY TIER that calls back into the fold, not just the tier the repro landed in.** A single `grep -c \"_cfo = 0; E.*PARSE_TERM\"` at .74 would have found the .80 sites eight releases earlier; at .80 the sweep recorded 'zero occurrences of the shape remain in parse_expr.cyr' and that was true only of PEXPR — the dispatch helper one level down was untouched. THE OTHER LESSON: **251/251 tcyr were byte-identical across the .80 fix, and that is the finding, not reassurance** — the corpus contained zero expressions of the failing shape, so 10 % of constant arithmetic was wrong with every gate green (self-host fixpoint, seed-derive, check.sh, cross-OS on four hosts). A byte-identical corpus proves a change did not perturb what the corpus covers; it says nothing about what it does not. COVERAGE TRAPS recorded while building the regression (`tests/tcyr/const_chained_multiply_fold.tcyr`, now 39 assertions and the single home of this one mechanism): an operator-overload helper whose body ALIASES the folded answer (`OpV_mul` returning `a * b`) passes while broken — make helpers return values plain integer arithmetic cannot produce; and getting a mutation to fail took three rounds, because `1 - 2 & 3` fires the SUB fallback not the AND one, AND needs a left operand folding to 0 (`0 & 1 & 1`), OR/XOR need a ZERO right-hand operand (`1 | 0 ^ 1`), and ADD is reachable only via i64 overflow (`9223372036854775807 + 1 + 1`) since a literal `crv` is never negative. Before that work 8 of the 16 .80 sites had no coverage at all. When a mutation PASSES, fuzz good-vs-mutant to find a discriminator rather than concluding the site is dead. Found at .80 by an adversarial doc-sweep verifier RUNNING the compiler to re-check an unrelated vidya claim about precedence — not by reading code. (5) 6.6.12 — a NEW factor arm that parses its OWN call, `_call_field` (a `.field` on a call result, src/frontend/parse_expr.cyr), is the same mechanism entered from the other side: the arm has to clear `_cfo` AFTER the call, not before it. A LITERAL ARGUMENT is parsed by PARSE_FACTOR, which arms the fold (`_cfo = 1`, `_cfp` at that literal); clearing before the call does nothing, the call and the field load are emitted, and the following operator folds by rewinding to the literal — deleting the call and the load. `mkp(3).y + 1` became 4 and `mk8(4).a * 10` folded from the argument literal. The arm now ends with `_cfo = 0;` after the load. RULE, stated for the next arm: any parse path that CONSUMES a sub-expression the fold may have armed — a call's arguments, a subscript's index, a parenthesised operand — clears `_cfo` once that sub-expression is fully emitted, i.e. as its LAST act; test it with a literal inside the sub-expression and an operator after it. (The name still says four; five is the count.) See CHANGELOG [6.4.74], [6.4.80], [6.4.81], [6.6.12] B04. (6) 6.7.4 — the if-expression's value join let a following `+ 3` rewind to the last branch's literal (value_join_resets_and_unparsed_scanners_v674, point 2). (7) 6.7.8 — the SLICE READ `_slice_sub_read` (v5.8.15 to 6.7.7): it parsed its index (a literal arms the fold), emitted the `_slice_idx_get_W` call, and returned with the flag still armed, so `return s[0] + 10;` folded `0 + 10` and rewound over the call — whose recorded fixup then patched the return's jump into a jump to the getter (exit 134 'slice bounds violation'; `var y = s[0] + 10;` SIGSEGV; CYRIUS_DCE=1 refused the build, 'corrupted 2 live function bodies'), on every target since 6.7.5. The index's OTHER last-value words leaked the same way: its pointer step (`s[ix()] + 1` with `ix(): *i32` added 4) and its struct type (`s[n] + 10` dispatched `Idx_add`). THE RULE, stated for the class: a factor's result state is set by the LAST thing it emits — every arm that emits after a sub-parse ends with the factor-entry resets (`_cfo = 0`, the step, the estype), as `_arr_sub_read` already did. The CP/TI-STAMPED marks (`_FBR_MARK`, `_BX_MARK`, `_W128_MARK`, `_PK_MARK`) cannot go stale this way; `_cfo` is not stamped, which is why it keeps recurring. Seven is the count. CHANGELOG [6.7.8]."
+description = "THE most-repeated codegen defect of the v6.x line — four occurrences (a fifth, 6.6.12: a factor arm that parses its own call and cleared the flag BEFORE it), each fix scoped to the tier its repro landed in and each declared complete. MECHANISM: the constant folder keeps `_cfo` (fold armed), `_cfv` (folded value) and `_cfp` (the code pointer captured at the START of the foldable region). A parse path clears `_cfo = 0` BEFORE calling a lower tier that RE-ARMS it — `PARSE_FACTOR` sets `_cfp = GCP(S)` then `_cfv = val; _cfo = 1` for a bare NUM — so the flag comes back on with `_cfp` pointing PAST code that was already emitted. The next operator then takes the const-fold branch with a live-but-stale fold and `SCP(S, _cfp)` rewinds the code pointer over that already-emitted code, replacing it with a constant. The symptom is always a silently wrong constant: no error, no warning, valid binary. OCCURRENCES: (1) 2026-06-11, cyrius-doom, `A * B * 4` -> 800 (the EIMUL path). (2) v6.4.74 — 17 sites in the `PARSE_TERM` tier (`/ % << >> >>>`): `100 >>> 1 + 1` == 2 (want 51), `100 >> 0 + 1` == 1 (want 101). `>>` and `<<` mostly escaped because their own fold path handles a literal RHS, so it bit exactly where that fold could not apply (shift count 0, or a value outside the 0x10000 window); a parenthesised RHS also masked it, since the paren path never re-arms. (3) v6.4.80 — 16 sites one tier UP in `PEXPR` (`+ - & | ^`): `1 - 2 + 3` == **5**, `2 - 5 + 10` == 15, `3 + 1 - 5 + 2` == 7. The emitted code is the expression with the leading `a -` deleted. Trigger is the `cfr >= 0` test in the subtract fold — a NEGATIVE intermediate fails it and takes the runtime fallback, and the fallback was the buggy one, which is exactly why non-negative intermediates were always right (`5 - 3 + 1` == 3) and it hid. Measured blast radius: 40 of 400 (10 %) systematic 3-term constant expressions wrong. (4) v6.4.81 — one tier DOWN in `EMIT_OP_DISPATCH`, struct operator overloading: it parses its RHS with `PARSE_TERM` (re-arms) and ends with `SESTYPE(S, 0)`, so the following `+`/`-` rewound over the emitted operator CALL — the overload silently deleted and replaced by a constant. `p * 3 + 1` == 4 (want 1004). The tell was a 2-of-4 asymmetry in four structurally identical lines: `add` (parse_expr.cyr:2809) and `sub` (:2837) already cleared `_cfo`; `mul` (:2550) and `div` (:2610) never did. THE LESSON: **grep the SHAPE, not the operator — and grep EVERY TIER that calls back into the fold, not just the tier the repro landed in.** A single `grep -c \"_cfo = 0; E.*PARSE_TERM\"` at .74 would have found the .80 sites eight releases earlier; at .80 the sweep recorded 'zero occurrences of the shape remain in parse_expr.cyr' and that was true only of PEXPR — the dispatch helper one level down was untouched. THE OTHER LESSON: **251/251 tcyr were byte-identical across the .80 fix, and that is the finding, not reassurance** — the corpus contained zero expressions of the failing shape, so 10 % of constant arithmetic was wrong with every gate green (self-host fixpoint, seed-derive, check.sh, cross-OS on four hosts). A byte-identical corpus proves a change did not perturb what the corpus covers; it says nothing about what it does not. COVERAGE TRAPS recorded while building the regression (`tests/tcyr/const_chained_multiply_fold.tcyr`, now 39 assertions and the single home of this one mechanism): an operator-overload helper whose body ALIASES the folded answer (`OpV_mul` returning `a * b`) passes while broken — make helpers return values plain integer arithmetic cannot produce; and getting a mutation to fail took three rounds, because `1 - 2 & 3` fires the SUB fallback not the AND one, AND needs a left operand folding to 0 (`0 & 1 & 1`), OR/XOR need a ZERO right-hand operand (`1 | 0 ^ 1`), and ADD is reachable only via i64 overflow (`9223372036854775807 + 1 + 1`) since a literal `crv` is never negative. Before that work 8 of the 16 .80 sites had no coverage at all. When a mutation PASSES, fuzz good-vs-mutant to find a discriminator rather than concluding the site is dead. Found at .80 by an adversarial doc-sweep verifier RUNNING the compiler to re-check an unrelated vidya claim about precedence — not by reading code. (5) 6.6.12 — a NEW factor arm that parses its OWN call, `_call_field` (a `.field` on a call result, src/frontend/parse_expr.cyr), is the same mechanism entered from the other side: the arm has to clear `_cfo` AFTER the call, not before it. A LITERAL ARGUMENT is parsed by PARSE_FACTOR, which arms the fold (`_cfo = 1`, `_cfp` at that literal); clearing before the call does nothing, the call and the field load are emitted, and the following operator folds by rewinding to the literal — deleting the call and the load. `mkp(3).y + 1` became 4 and `mk8(4).a * 10` folded from the argument literal. The arm now ends with `_cfo = 0;` after the load. RULE, stated for the next arm: any parse path that CONSUMES a sub-expression the fold may have armed — a call's arguments, a subscript's index, a parenthesised operand — clears `_cfo` once that sub-expression is fully emitted, i.e. as its LAST act; test it with a literal inside the sub-expression and an operator after it. (The name still says four; five is the count.) See CHANGELOG [6.4.74], [6.4.80], [6.4.81], [6.6.12] B04. (6) 6.7.4 — the if-expression's value join let a following `+ 3` rewind to the last branch's literal (value_join_resets_and_unparsed_scanners_v674, point 2). (7) 6.7.8 — the SLICE READ `_slice_sub_read` (v5.8.15 to 6.7.7): it parsed its index (a literal arms the fold), emitted the `_slice_idx_get_W` call, and returned with the flag still armed, so `return s[0] + 10;` folded `0 + 10` and rewound over the call — whose recorded fixup then patched the return's jump into a jump to the getter (exit 134 'slice bounds violation'; `var y = s[0] + 10;` SIGSEGV; CYRIUS_DCE=1 refused the build, 'corrupted 2 live function bodies'), on every target since 6.7.5. The index's OTHER last-value words leaked the same way: its pointer step (`s[ix()] + 1` with `ix(): *i32` added 4) and its struct type (`s[n] + 10` dispatched `Idx_add`). THE RULE, stated for the class: a factor's result state is set by the LAST thing it emits — every arm that emits after a sub-parse ends with the factor-entry resets (`_cfo = 0`, the step, the estype), as `_arr_sub_read` already did. The CP/TI-STAMPED marks (`_FBR_MARK`, `_BX_MARK`, `_W128_MARK`, `_PK_MARK`) cannot go stale this way; `_cfo` is not stamped, which is why it keeps recurring. Seven is the count. CHANGELOG [6.7.8]. 6.7.10: the execution-coverage hit and dump call each zero `_cfo` (the replay's hit follows an argument evaluation that may have armed a fold) — DEFENSIVE, not mutation-provable: every factor that can precede a fold clears or re-arms `_cfo` itself, so removing either line changes no emitted byte on any shape found (MY2 / MY3 green); say so in the ledger rather than claim a pin."
 category = "cyrius"
 tags = ["_cfo", "_cfp", "const-fold", "code-pointer-rewind", "SCP", "PARSE_TERM", "PEXPR", "PARSE_FACTOR", "EMIT_OP_DISPATCH", "operator-overload", "grep-the-shape-not-the-operator", "byte-identical-is-not-coverage", "mutation-proof", "aliasing-helper", "_call_field", "clear-after-the-call", "v6.4.74", "v6.4.80", "v6.4.81", "v6.6.12", "_slice_sub_read", "v6.7.8"]
 
 [[entries]]
 name = "cybs_cannot_lex_gtgtgt_the_cycc_fixpoint_does_not_substitute_for_seed_derive"
-description = "v6.4.74's constant folder first spelled its arithmetic shift `v >>> _CF_FACTOR(S)`. It compiled, self-hosted, and FIXPOINTED byte-identical on `build/cycc` — then `scripts/seed-derive-cycc.sh` failed at step [3/5] with a bare `syntax error` and nothing else. Cause: **cybs, the hand-assembly bootstrap compiler the 29 KB seed assembles, cannot lex `>>>`** — `bootstrap/cybs.cyr`'s `lexer_shr` knows only `>`, `>=`, `>>`, so it tokenised `>>` `>`. The `>>>` operator has existed since v6.4.46; cybs never learned it. Fixed by writing `_CF_ASR`, which sign-extends using only `>>`/`<<` and masks the count to 6 bits to match the backend's `sar`. This is the cleanest available demonstration of Release Gate item 2: **the cycc self-host fixpoint does NOT cover the seed chain.** `build/cycc` is a full v6.x compiler; cybs is far more limited and fails SILENTLY, or with an unattributed one-line error, on constructs `build/cycc` compiles fine — too many global/string-literal references in one function (the ceiling that forced `_var_grow` into its `_grow_g1..g7` tail-call chain, that made v6.4.77 split the 67-entry `TOKNAME_BUILTIN` out of `TOKNAME`, and that made v6.4.81 split `PP_FNAME_TOO_LONG` out of an already-heavy `PREPROCESS`), tail calls, and now newer operators. ⭐ **6.6.12 — cybs refused a CALL WITH MORE THAN SIX ARGUMENTS** (measured then: `f(1,2,3,4,5,6,7)` was a bare `syntax error`, rc 1; the same program with six arguments compiled — RETIRED at 6.7.6, see the end of this entry). ⛔ **6.6.16 — AND A 7-PARAMETER DEFINITION WAS WORSE, NOT FINE:** cybs accepted it, but `emit_store_param` (bootstrap/cybs.cyr) handled param indices 0..5 only and jumped past the store for any other, so the seventh parameter was NEVER STORED and read garbage (`fn f(a,b,c,d,e,g,h) { return h; }` called with six arguments read 0). This entry used to say a 7-param definition was accepted, as if that were harmless; measured at 6.6.16 when a hunk added a seventh parameter to PARSE_GVAR_ARR: `build/cycc` self-hosted byte-identically and seed-derive died at [3/5] with the bare `syntax error` (the call site), and the definition alone would have miscompiled silently. It surfaced as the same bare `syntax error` at seed-derive step [3/5] while the preprocessor's aarch64-region helper was being written; the fix packed two of its arguments into one (`_pp_a64_open`'s kind and state); 6.6.16's derived the extra value from what was already passed (the annotation is the token after `var NAME :`, so `_gai_ann(S, sti)` reads it back) — derive it or pass it through a small helper; a global set before the call is safe only if nothing re-enters between. `build/cycc` takes any arity (the retired ≤6-args rule was a Win64 codegen bug, fixed v6.4.64); cybs did not until 6.7.6 (6.7.0 refused a 7+ argument call BY NAME), so compiler SOURCE kept every call at six arguments or fewer until then. PRACTICAL RULES: run `seed-derive-cycc.sh` for ANY `src/` change on EVERY release, not only at closeouts (a doc/lib-only bump is the sole exception); when writing compiler source prefer the OLDEST spelling that works; when a new helper carries a large literal table, expect the ceiling and split the fn before the gate tells you to; and note that gen1 (cybs's output) differing in size from `build/cycc` is NORMAL — only `gen2 == build/cycc` matters, do not chase it in either direction (this entry said '~72 KB smaller'; the sign has flipped since: at 6.6.12 gen1 is 1,545,384 B against `build/cycc`'s 1,470,944 B, ~74 KB LARGER, and gen2 == build/cycc). RECOGNITION: a bare `syntax error` from step [3/5] with no file, no line and no token is the signature — read it as cybs hitting a ceiling, not as a defect in your source. See CHANGELOG [6.4.74]. ⭐ **6.6.17 — cybs DROPPED A LEADING `_` from every name** (its lexer dispatch had no `_` arm; `lexer_skip` discards the byte), so in gen1 `_x` and `x` were ONE name: a local `_fi` was the local `fi`, a local `_x` captured reads of a global `x`, and `fn _aq` / `fn aq` were one fn (measured `aq()*10 + _aq()` = 22, not 21). `_PARSE_FN_DEF_IMPL` declares the fn index `fi` and a compaction counter `_fi`, so gen1 wrote every fn's code-end record (`SFNE`) at a wrong index — invisible in the bytes for many releases (gen2 == build/cycc held; only gen1's DCE note differed, 57 unreachable fns against cycc's 73) because the fn tables sat in fixed 8192-slot regions and the stray writes landed in slack. The compiler's 2049th fn made the tables grow into packed buffers, the write landed in `_fnt_structmask`, a tail call lost its TCO, and seed-derive went RED on changes that FIXPOINTED byte-identically — three 6.6.17 lanes hit it independently. RECOGNITION: seed-derive red right after a change that only ADDED fns, cycc fixpoint green; bisect with `CYRIUS_SYMS` on gen1 vs build/cycc compiling src/main.cyr (the first fn whose address moves is where gen1 diverges). FIXED AT THE ROOT in bootstrap/cybs.cyr (a two-instruction `_` arm; the seed closure holds because asm.cyr has no leading-underscore identifier) and gated by tests/gates/toolchain/cybs_leading_underscore.sh; seed-derive gained step 6/6 (gen1's diagnostics must equal gen2's) because byte-identical output proves gen1 emitted the right bytes, not that it computed everything right. A lane's gate that instead FORBADE names differing by a leading `_` was dropped at the merge — a bootstrap limit written down as a rule is the same mistake as the retired six-argument rule. A fn-count threshold (2048, `_fnt_cap`; `CYRIUS_STATS=1` prints `fn_table`) is a seed-chain event. CHANGELOG [6.6.17] (c1a, b3-seed, a5-seed). ⭐ **6.7.6 — cybs PASSES 7+ ARGUMENTS AND REFUSES WHAT IT DOES NOT LEX.** The caller leaves the arguments past the sixth on the stack in cycc's order (the last at `[rsp]`, so one convention holds and lib/fnptr.cyr's fncall8 matches both compilers) and the callee, having counted its parameters first (`count_params`), copies parameter i >= 6 of n from `[rbp + 16 + (n - 1 - i) * 8]`; the 6.7.0 by-name refusal is retired, so `src/` may use 7+ argument helpers and fncall6..8 compile faithfully under cybs. The lexer's fall-through no longer discards a byte it has no arm for (the path that ate the leading `_` above): a lone `!` and every byte cybs does not lex outside a string or a comment are refused by name — they compiled as if absent (`return !x;` as `return x;`, `@a = 5;` as `a = 5;`). A call through a global fn-pointer variable no longer clobbers argument 4 (rcx). Still cybs limits: a bare `syntax error` with no location for syntax it does not support (`const`, `loop`, `do`, if-expressions, unary minus, `>>>`, `>>=`), the per-fn reference ceiling, and the seed's SILENT caps (131,072 input bytes, 512 labels, 64 KB of code — row S of cybs_call_arity_named.sh guards the first two). Gates: tests/gates/toolchain/cybs_call_arity_named.sh, cybs_lexer_drops_nothing.sh; field note flag_skip_by_position_nested_parse_state_and_the_bootstrap_rung_v676. CHANGELOG [6.7.6]. ⭐ **6.7.8 — EXTRACT BEFORE YOU GROW A GIANT.** A fn at the per-fn reference ceiling is shrunk by moving WHOLE ARMS out — each becomes one call in the giant — BEFORE a feature adds to them; prove it with the byte-identical corpus differential plus seed-derive, and record the reference count before and after: C2-1 moved the slice read, the `*expr` dereference and a typed-pointer global's step out of `_PARSE_FACTOR_IMPL` (773 -> 748 references), and C2's subscript / `*p` / step work then grew the small fns, the giant untouched. A side effect worth knowing: the per-fn NOP compactor (parse_fn.cyr) skips any fn with >= 1024 NOP runs or >= 1024 jump sources, so a giant keeps its regalloc NOPs — `_PARSE_FACTOR_IMPL` carried cycc's last 499 until the extraction (.text -1,680 B), and ir_nop_harvest.sh then read the IR=3 build's 0 NOPs as 'llvm-objdump missing?' (it now proves the tool by the instruction count). Same release: cybs cannot parse `dyn`, so lib/alloc.cyr — which src/main.cyr includes — cannot move its Allocator vtable to a dyn. CHANGELOG [6.7.8]."
+description = "v6.4.74's constant folder first spelled its arithmetic shift `v >>> _CF_FACTOR(S)`. It compiled, self-hosted, and FIXPOINTED byte-identical on `build/cycc` — then `scripts/seed-derive-cycc.sh` failed at step [3/5] with a bare `syntax error` and nothing else. Cause: **cybs, the hand-assembly bootstrap compiler the 29 KB seed assembles, cannot lex `>>>`** — `bootstrap/cybs.cyr`'s `lexer_shr` knows only `>`, `>=`, `>>`, so it tokenised `>>` `>`. The `>>>` operator has existed since v6.4.46; cybs never learned it. Fixed by writing `_CF_ASR`, which sign-extends using only `>>`/`<<` and masks the count to 6 bits to match the backend's `sar`. This is the cleanest available demonstration of Release Gate item 2: **the cycc self-host fixpoint does NOT cover the seed chain.** `build/cycc` is a full v6.x compiler; cybs is far more limited and fails SILENTLY, or with an unattributed one-line error, on constructs `build/cycc` compiles fine — too many global/string-literal references in one function (the ceiling that forced `_var_grow` into its `_grow_g1..g7` tail-call chain, that made v6.4.77 split the 67-entry `TOKNAME_BUILTIN` out of `TOKNAME`, and that made v6.4.81 split `PP_FNAME_TOO_LONG` out of an already-heavy `PREPROCESS`), tail calls, and now newer operators. ⭐ **6.6.12 — cybs refused a CALL WITH MORE THAN SIX ARGUMENTS** (measured then: `f(1,2,3,4,5,6,7)` was a bare `syntax error`, rc 1; the same program with six arguments compiled — RETIRED at 6.7.6, see the end of this entry). ⛔ **6.6.16 — AND A 7-PARAMETER DEFINITION WAS WORSE, NOT FINE:** cybs accepted it, but `emit_store_param` (bootstrap/cybs.cyr) handled param indices 0..5 only and jumped past the store for any other, so the seventh parameter was NEVER STORED and read garbage (`fn f(a,b,c,d,e,g,h) { return h; }` called with six arguments read 0). This entry used to say a 7-param definition was accepted, as if that were harmless; measured at 6.6.16 when a hunk added a seventh parameter to PARSE_GVAR_ARR: `build/cycc` self-hosted byte-identically and seed-derive died at [3/5] with the bare `syntax error` (the call site), and the definition alone would have miscompiled silently. It surfaced as the same bare `syntax error` at seed-derive step [3/5] while the preprocessor's aarch64-region helper was being written; the fix packed two of its arguments into one (`_pp_a64_open`'s kind and state); 6.6.16's derived the extra value from what was already passed (the annotation is the token after `var NAME :`, so `_gai_ann(S, sti)` reads it back) — derive it or pass it through a small helper; a global set before the call is safe only if nothing re-enters between. `build/cycc` takes any arity (the retired ≤6-args rule was a Win64 codegen bug, fixed v6.4.64); cybs did not until 6.7.6 (6.7.0 refused a 7+ argument call BY NAME), so compiler SOURCE kept every call at six arguments or fewer until then. PRACTICAL RULES: run `seed-derive-cycc.sh` for ANY `src/` change on EVERY release, not only at closeouts (a doc/lib-only bump is the sole exception); when writing compiler source prefer the OLDEST spelling that works; when a new helper carries a large literal table, expect the ceiling and split the fn before the gate tells you to; and note that gen1 (cybs's output) differing in size from `build/cycc` is NORMAL — only `gen2 == build/cycc` matters, do not chase it in either direction (this entry said '~72 KB smaller'; the sign has flipped since: at 6.6.12 gen1 is 1,545,384 B against `build/cycc`'s 1,470,944 B, ~74 KB LARGER, and gen2 == build/cycc). RECOGNITION: a bare `syntax error` from step [3/5] with no file, no line and no token is the signature — read it as cybs hitting a ceiling, not as a defect in your source. See CHANGELOG [6.4.74]. ⭐ **6.6.17 — cybs DROPPED A LEADING `_` from every name** (its lexer dispatch had no `_` arm; `lexer_skip` discards the byte), so in gen1 `_x` and `x` were ONE name: a local `_fi` was the local `fi`, a local `_x` captured reads of a global `x`, and `fn _aq` / `fn aq` were one fn (measured `aq()*10 + _aq()` = 22, not 21). `_PARSE_FN_DEF_IMPL` declares the fn index `fi` and a compaction counter `_fi`, so gen1 wrote every fn's code-end record (`SFNE`) at a wrong index — invisible in the bytes for many releases (gen2 == build/cycc held; only gen1's DCE note differed, 57 unreachable fns against cycc's 73) because the fn tables sat in fixed 8192-slot regions and the stray writes landed in slack. The compiler's 2049th fn made the tables grow into packed buffers, the write landed in `_fnt_structmask`, a tail call lost its TCO, and seed-derive went RED on changes that FIXPOINTED byte-identically — three 6.6.17 lanes hit it independently. RECOGNITION: seed-derive red right after a change that only ADDED fns, cycc fixpoint green; bisect with `CYRIUS_SYMS` on gen1 vs build/cycc compiling src/main.cyr (the first fn whose address moves is where gen1 diverges). FIXED AT THE ROOT in bootstrap/cybs.cyr (a two-instruction `_` arm; the seed closure holds because asm.cyr has no leading-underscore identifier) and gated by tests/gates/toolchain/cybs_leading_underscore.sh; seed-derive gained step 6/6 (gen1's diagnostics must equal gen2's) because byte-identical output proves gen1 emitted the right bytes, not that it computed everything right. A lane's gate that instead FORBADE names differing by a leading `_` was dropped at the merge — a bootstrap limit written down as a rule is the same mistake as the retired six-argument rule. A fn-count threshold (2048, `_fnt_cap`; `CYRIUS_STATS=1` prints `fn_table`) is a seed-chain event. CHANGELOG [6.6.17] (c1a, b3-seed, a5-seed). ⭐ **6.7.6 — cybs PASSES 7+ ARGUMENTS AND REFUSES WHAT IT DOES NOT LEX.** The caller leaves the arguments past the sixth on the stack in cycc's order (the last at `[rsp]`, so one convention holds and lib/fnptr.cyr's fncall8 matches both compilers) and the callee, having counted its parameters first (`count_params`), copies parameter i >= 6 of n from `[rbp + 16 + (n - 1 - i) * 8]`; the 6.7.0 by-name refusal is retired, so `src/` may use 7+ argument helpers and fncall6..8 compile faithfully under cybs. The lexer's fall-through no longer discards a byte it has no arm for (the path that ate the leading `_` above): a lone `!` and every byte cybs does not lex outside a string or a comment are refused by name — they compiled as if absent (`return !x;` as `return x;`, `@a = 5;` as `a = 5;`). A call through a global fn-pointer variable no longer clobbers argument 4 (rcx). Still cybs limits: a bare `syntax error` with no location for syntax it does not support (`const`, `loop`, `do`, if-expressions, unary minus, `>>>`, `>>=`), the per-fn reference ceiling, and the seed's SILENT caps (131,072 input bytes, 512 labels, 64 KB of code — row S of cybs_call_arity_named.sh guards the first two). Gates: tests/gates/toolchain/cybs_call_arity_named.sh, cybs_lexer_drops_nothing.sh; field note flag_skip_by_position_nested_parse_state_and_the_bootstrap_rung_v676. CHANGELOG [6.7.6]. ⭐ **6.7.8 — EXTRACT BEFORE YOU GROW A GIANT.** A fn at the per-fn reference ceiling is shrunk by moving WHOLE ARMS out — each becomes one call in the giant — BEFORE a feature adds to them; prove it with the byte-identical corpus differential plus seed-derive, and record the reference count before and after: C2-1 moved the slice read, the `*expr` dereference and a typed-pointer global's step out of `_PARSE_FACTOR_IMPL` (773 -> 748 references), and C2's subscript / `*p` / step work then grew the small fns, the giant untouched. A side effect worth knowing: the per-fn NOP compactor (parse_fn.cyr) skips any fn with >= 1024 NOP runs or >= 1024 jump sources, so a giant keeps its regalloc NOPs — `_PARSE_FACTOR_IMPL` carried cycc's last 499 until the extraction (.text -1,680 B), and ir_nop_harvest.sh then read the IR=3 build's 0 NOPs as 'llvm-objdump missing?' (it now proves the tool by the instruction count). Same release: cybs cannot parse `dyn`, so lib/alloc.cyr — which src/main.cyr includes — cannot move its Allocator vtable to a dyn. CHANGELOG [6.7.8]. 6.7.10: three fns AT cybs's per-fn reference ceiling took new behaviour through 1-for-1 call swaps (PARSE_PROG -> `_cov_body` x2, ESUBRSP -> `_cl_frame_open`, `_macho_warn_unrouted` -> `_sc_args_done`), the counts measured before and after."
 category = "cyrius"
 tags = ["cybs", "seed-derive", "bootstrap-chain", "gtgtgt", "arithmetic-shift", "_CF_ASR", "release-gate-item-2", "silent-failure", "global-reference-ceiling", "fixpoint-is-not-enough", "call-arity-six", "seventh-param-never-stored", "v6.4.74", "v6.6.12", "v6.6.16", "leading-underscore", "lexer-skip", "fn-table-2048", "seed-derive-step-6", "v6.6.17", "stack-arguments", "count_params", "unknown-byte-refused", "v6.7.6"]
 
@@ -1802,6 +1808,13 @@ One list both arms read (`_cc_flag_inject`), plus a gate that reads the arm FROM
 fails on any hand-set name, is what stops a fourth (compile_flag_list.sh axes 4-6) — the env twin
 of 6.6.20's argv `_cc_flags`.
 
+**6.7.10 — a per-fork tail line is a load-bearing line.** `_cov_tail` (the execution-coverage mode) is ONE
+line in all seven forks, and it does more than its name: it sizes the counter band and bakes the fn map too.
+A fork without it loses even the exit hook's dump, and on x86 Mach-O its hits overran the 8-byte band
+(SIGSEGV; P5B-7's hardware mutants). The two Mach-O forks run ONLY on macOS, so ecb / ach are the gate. The
+spawn-arm lesson again: the Windows arm sets the compiler's environment on the CLI's OWN process, so the NEXT
+program inherits it — delete what only the compiler should see (`_covx_win_unset`).
+
 ⭐ **THE HABIT.** After any emitter, predefine, or driver change: `ls src/main*.cyr` and
 account for every one. The gate is byte-identical self-host **on all four hosts** plus
 seed-derive — a green x86 build proves nothing about the other six.
@@ -2065,7 +2078,7 @@ through the compiler is the only sound enumeration method.
 
 [[entries]]
 name = "any_pass_that_walks_or_moves_emitted_bytes_must_know_every_site_in_the_stream"
-description = "CLASS — 4 recurrences merged v6.6.1, a 5th at 6.6.5 (a byte classifier whose stages disagreed), a 6th at 6.6.12 (a raw emit the IR was not told about, for one width only), a 7th at 6.7.8 (a raw frame base the IR was not told about, before a parsed index). The code buffer is not pure instructions: inline switch tables, hand-emitted jumps outside any registry, and fn-boundary offsets all live in or beside it. A scanner that assumes 'instructions only' desynchronises; a mover that repairs only the tables it knows about corrupts the rest — and a length decoder that is ONE BYTE SHORT is worse than one that admits it does not know"
+description = "CLASS — 4 recurrences merged v6.6.1, a 5th at 6.6.5 (a byte classifier whose stages disagreed), a 6th at 6.6.12 (a raw emit the IR was not told about, for one width only), a 7th at 6.7.8 (a raw frame base the IR was not told about, before a parsed index). The code buffer is not pure instructions: inline switch tables, hand-emitted jumps outside any registry, and fn-boundary offsets all live in or beside it. A scanner that assumes 'instructions only' desynchronises; a mover that repairs only the tables it knows about corrupts the rest — and a length decoder that is ONE BYTE SHORT is worse than one that admits it does not know 6.7.10 (an 8th, OPS-1): an operand emitter that returned rax (-1) parked it across `_sc_pre`'s `lea`, which records no IR node, so CYRIUS_IR=3's LASE dropped the reload and the 24 B rows read garbage — the operand is emitted through `_OP_OPERAND_ADDR` (`_OPD_SV`) after the retptr push; a by-value struct-VARIABLE operand still meets it (issues/2026-10-08-ir3-drops-unrecorded-field-emits.md)."
 category = "cyrius"
 ---
 ⟳ **Replaces four entries.** One subject: **the emitted byte stream contains more than
@@ -2489,6 +2502,11 @@ issuance bound is 126). The two agreed, the row was green, and the first
 cut exported the three Entrust roots as full TLS anchors. A different way
 means a different SOURCE for the fact (wincrypt.h's names, a dump of the
 host's real properties), not a second copy of the same belief.
+
+**6.7.10 — a mode-off check that compares only mode-off spellings shares the defect.** The
+execution-coverage switch's S10 compared unset / `=0` / empty with ONE compiler, so "the hit is
+emitted with the mode off" (M17) made all three identical and S10 green. The absolute anchor is
+H7: the mode-off binary holds none of the dump's bytes (`cyrius-coverage`, `__cyrius_cov`).
 """
 
 [[entries]]
@@ -5239,6 +5257,11 @@ is for the degenerate case — no input, no output, no work. If "did nothing" an
 map to the same value, the harness is reporting on a set that includes the failure it exists
 to find. Exit code 0, an empty summary line `__LIBTEST_SUMMARY__ 0 0`, and `0 warnings` from a
 linter that never parsed the file are all the same bug.
+
+**6.7.10, the same rule for coverage.** An instrumented run that exits 0 with NO coverage record
+fails by name (`exited 0 but left no coverage record`): a silent zero would read as unexecuted code
+(an `asm` exit, a run-time exit number, an exec). A hardware leg grades each remote run as its own
+ssh, keeps every exit code, pulls the output back and names every miss.
 """
 
 [[entries]]
@@ -5612,6 +5635,14 @@ tells them apart, else `a = b` between two `*T` params COPIES; `_agc_copy_bytes`
 (cybs's cap), so the band rides in the index, not a flag. And cx already answered every row right —
 a passing cx run is not evidence the image targets agree. User-facing rule:
 language/features.cyml `struct_assignment_handle_and_value_v6616`.
+⟳ 6.7.10, the third instance: the copy-assign operand classifier (`_agc_operand`) answered only NAMES —
+locals, globals by their GVPM, captures — so any `*T` that was not a local or parameter (a `*T` global,
+GVPM 0; a `: *T` call; a `*T` field) fell to the one-word store at every size. The fix did NOT grow the name
+classifier: it reads the source AFTER it is parsed (rax = the pointer) from the compiler's own typing
+(`_hl_pchain`), as the 6.7.10 declaration arm does. And a size-keyed predicate is the same family:
+`_agc_plain_big` made a `*T` over 8 B a copy handle only because of the struct's SIZE; one predicate
+(`_small_sptr`, beside `_small_hdl` in `_agc_handle_local`) switched every `_agc_*` consumer at once. See
+struct_values_at_every_size_and_packed_fields_v6710.
 
 [[entries]]
 name = "tls_the_obvious_reading_of_a_protocol_field_was_wrong_seven_times"
@@ -5926,6 +5957,10 @@ derived their root from `$0` and never `cd`'d there (G1); 14 of them were invisi
 because their only cwd-relative include was `lib/...`, which the store fallback resolved — against
 the STORE's lib, not the tree's — whenever the slot existed. Probe cwd-dependence under a HOME with
 no `.cyrius`; the check driver now runs every gate from `/`.
+6.7.10: `_read_env` hands back ONE shared 256 B scratch, so a value kept past the next read must be COPIED
+out (`_cov_path` keeps CYRIUS_COVERAGE_FILE); and the 0 / 1 rung is one fn now, `_pp_env_rung(S, name)`
+(lex_pp.cyr), shared by CYRIUS_BOUNDS and CYRIUS_COVERAGE — a third copy of the rung is how two flags came
+to read `0` / empty differently.
 User-facing: language/core.cyml `syntax` INCLUDES. CHANGELOG [6.6.16].
 
 [[entries]]
@@ -6909,3 +6944,179 @@ diagnostic is a second copy; 0 NOPs), cybs_cannot_lex_gtgtgt… (extract before 
 GATES: tests/gates/frontend/{pointer_subscript_checked, bounds_mode_checked, slice_position_refused,
 slice_signed_read, slice_read_left_operand, for_step_terminator_checked}.sh, toolchain/selfbuild_poison_scrubbed.sh,
 toolchain/compile_flag_list.sh (each + mutation ledger). CHANGELOG [6.7.8].
+
+[[entries]]
+name = "struct_values_at_every_size_and_packed_fields_v6710"
+description = "Gotchas met building 6.7.10's B7 (the handle line at every size, packed u8 / u16 / u32 / f32 fields) and its ops lane (a field / dereference as an operator operand, `*T` copy sources): size-keyed classifiers are a family; a new storage class needs the whole consumer-arm inventory; a one-shot flag is reset at entry and cleared on read; the declaration zone cannot judge a global's initialiser when it is registered; type an operand from the parser's own records AFTER it is parsed, never from its token shape; an argument arm keyed on the first token skips what it does not list; pointer step 1 is ambiguous; the ftype cell carries only a width; an operand parked in rax across an unrecorded `lea` loses its reload under IR=3."
+category = "cyrius"
+tags = ["v6.7.10", "B7", "handle line", "packed fields", "u8", "f32", "_CL_CAP_BASE_RA", "_agc_plain_big", "_small_sptr", "_sci_sval", "_gz_sweep", "_hl_psid", "_flo_note", "_dlo_park", "_var_rhs_post", "_hl_p1", "_fld_uns", "_struct_same_layout", "_OP_OPERAND_ADDR", "LASE"]
+---
+1. SIZE-KEYED CLASSIFIERS ARE A FAMILY — when a class boundary moves, grep every `STRUCTSZ > 8` / `< 8`.
+The handle line moved "a handle" from "a struct over 8 B" to "a struct not declared from a struct value", and
+three classifiers still keyed on the size: `_CL_CAP_BASE_RA` (a closure capture's base) keyed on
+`STRUCTSZ > 8`, so registering the small handle alone gave the issue's repro 5, not 237 — the env word was
+copied as the value; `_agc_plain_big` made a `*T` over 8 B a copy-assign handle only because of its SIZE — the
+fix is one predicate (`_small_sptr`, beside `_small_hdl` in `_agc_handle_local`), so every `_agc_*` consumer
+(copy, call / result into, field into, dyn / tuple destination checks) switched at once (one knock-on: dyn_checked
+V4m, `sp = pass(o)` into a `*S1`, is now refused by the copy's type check, the 16 B twin's message); and a
+global's read keyed on its SLOT size (`var_sizes < 8` = an i8 / i16 / i32 scalar) silently stopped a VALUE
+global under 8 B from dispatching its operator (B7-2r).
+
+2. A NEW STORAGE CLASS NEEDS THE CONSUMER-ARM INVENTORY. Every by-value consumer — an argument, a `: S` return,
+a right operand, an if-expression branch, both sides of a copy, in a fn and at top level — had to learn the
+small handle; one missed arm is a silent wrong value, not an error. The odd sizes (3 / 5 / 6 / 7 B) copy through
+a temp so no byte past the object is read; the last arm found reading past it was an odd-sized by-value `self`
+loaded rounded up to 4 / 8 bytes (`_self_value_ra`, B7-1r). Still open (the guide's known defect): a
+dereference of a 1-7 B `*S`, and a whole 3 / 5 / 6 / 7 B field, used as an operand is loaded as 8 bytes.
+
+3. A ONE-SHOT FLAG IS RESET AT ENTRY AND CLEARED ON READ. `_sci_sval` ("this initialiser was a struct value")
+left at 1 by a declaration that never read it marked the NEXT handle inline.
+
+4. THE DECLARATION ZONE CANNOT JUDGE A GLOBAL'S INITIALISER WHEN THE GLOBAL IS REGISTERED: the right-hand side is
+parsed by the replay, after every fn body, and a call in it may name a fn declared below. The end-of-pass-1
+sweep (`_gz_sweep`) judges it from the TOKENS — an expression typer for calls, generics, method chains,
+overloaded operators dispatched on the left operand's struct, if-expressions — and repeats until nothing
+changes; the replay (`_gz_late`) re-checks against what the parse recorded and REFUSES a disagreement. A token
+answer must be the parser's answer or a loud refusal, never a silent wrong layout. At top level a struct temp is
+a hidden global (`_HTEMP`'s top arm, `_hl_gtemp`).
+
+5. TYPE AN OPERAND FROM THE PARSER'S OWN RECORDS AFTER IT IS PARSED, NEVER FROM ITS TOKEN SHAPE.
+  (a) B7-1d: a struct-value test written against `* IDENT ;` missed every other spelling of the same value —
+  `(*p)`, `*h.p`, `*gp()`. `_hl_psid` types the dereference's operand instead: one pointer-aware chain reader
+  shared by locals, the declaration zone and the late arm.
+  (b) OPS-1, the 6.7.6 call-result stamp generalised: a whole struct-typed field read stamps its span, base and
+  offset with the code pointer after its load (`_flo_note`), and `_op_lst` takes it as the left operand only when
+  it spans the whole operand with nothing emitted since. A dereference needs its POINTER after the load, so it is
+  parked in a hidden temp BEFORE the load whenever an overloadable operator follows (`_dlo_park` — a superset;
+  harmless when the dereference turns out not to be the left operand). OPS-5 reuses it: a `*` at the start of an
+  address-passed argument or a right operand is "wanted" (`_dro_want`) and its consumer takes the parked pointer
+  under the same span test — one mechanism for the left operand, the right operand and the argument.
+  (c) OPS-2: an untyped binding's type is inferred AFTER the initialiser (`_sc_post_op` notes the record as an
+  operator's; `_var_rhs_post`). The peek-before-parse inference (`_var_rhs_call`) can see only the leading call —
+  which is why `var r = mk3(4) - s;` with an integer-returning `P3_sub` is still typed `P3` (open item 1 of
+  issues/2026-10-08-struct-operator-results.md); the post-parse inference overrides it whenever the whole
+  initialiser is a struct-returning operator.
+  (d) OPS-3: the copy-assign operand classifier answered only NAMES (`_agc_operand`), so a `*T` global, call or
+  field fell to a one-word store at every size — the fix reads the source after it is parsed (rax = the pointer)
+  from `_hl_pchain` rather than growing the name classifier (name_based_copy_resolvers_need_the_capture_rung).
+  (e) OPS-6: TWO TYPERS OF ONE TOKEN SHAPE DRIFT. `_hl_psid` already read `p ± n` / `n + p`; OPS-3's source reader
+  stopped at `_hl_pchain`, so one typed `*(p + 1)` and the other did not type `l = p + 1`. Route the source
+  through the one that reads arithmetic.
+
+6. AN ARGUMENT ARM KEYED ON THE FIRST TOKEN SILENTLY SKIPS EVERY SHAPE IT DOES NOT LIST (OPS-4).
+`_try_push_struct_addr_arg` took a name, a call and a `(`, so `take(*p + a)` — an argument starting with `*` —
+fell to the value push (the result's first word as an address: a crash) even after the operator path learned to
+dispatch on it. The expression arm (`_push_struct_expr_arg`) is the safe default for any other first token.
+
+7. POINTER STEP 1 IS AMBIGUOUS. An i8 / i16 / i32 local reads with pointer step 1 (v6.3.34, so `n + 2` adds 2)
+exactly as `&x` does, so an "is this argument a pointer?" test on GPSC alone dereferenced narrow integers.
+`_hl_p1` decides step 1 by the LEFTMOST term of the top-level `+` / `-` chain (`+` keeps its left operand's step)
+and treats a primary that reads a narrow local as a value. Two edges stay the word by the compiler's own typing:
+an if-expression of pointers of DIFFERENT steps (`_ps_merge` gives no step) and `n + pb` with a narrow `n` left.
+
+8. THE ftype CELL CARRIES ONLY A WIDTH. Every reader decoded `ft < 0` as "narrow and signed", so u8 / u16 / u32
+needed a side map (`_fld_uns`, one byte per field-pool entry, alloc()'d — no heap region); the two places that
+negate a width by hand (`_field_load_on`, `_fld_compound`) are the only readers of the sign.
+`_struct_same_layout` compared ftype alone, so `i8` / `u8` and `i32` / `f32` would have compared EQUAL once they
+shared a width — it compares the kind too (the redefinition warning). And dyn decision 2 meets the packed layout:
+`C4 { u8 x4 }` shrinks from 32 B into the `self: T` refusal.
+
+9. AN OPERAND PARKED IN rax ACROSS AN UNRECORDED `lea` LOSES ITS RELOAD UNDER CYRIUS_IR=3. OPS-1's first cut
+returned "rax" (-1) for the left operand; `_sc_pre`'s `lea` records no IR node, so LASE dropped the reload and
+the 24 B rows read garbage. The operand is emitted by `_OP_OPERAND_ADDR` (`_OPD_SV`) after a >16 B result's
+retptr push. A by-value struct-VARIABLE operand still meets the class (any_pass_that_walks_or_moves_emitted_bytes…;
+issues/2026-10-08-ir3-drops-unrecorded-field-emits.md, with the 24 B method-on-a-field-through-`*W` shape).
+
+GATES: tests/gates/codegen/small_struct_handle_line.sh, tests/gates/codegen/struct_value_codegen.sh,
+tests/gates/frontend/narrow_fields_checked.sh, tests/gates/codegen/hidden_temp_census.sh (26 `_HTEMP` users);
+the crossos rows of language/features.cyml struct_handle_line_and_struct_values_at_every_size_v6710.
+CHANGELOG [6.7.10] (B7-1 .. B7-2, OPS-1 .. OPS-6).
+
+[[entries]]
+name = "derive_codecs_share_one_classifier_v6710"
+description = "Gotchas met adding u8 / u16 / u32 / f32 / cstring fields to #derive(Serialize) and fixing its Str decode in 6.7.10: three codecs each kept their own byte ladder (now one classifier over the parser's type vocabulary); bayan's pairs form cannot tell `\"null\"` from `null` by the value bytes; a 16-byte stack Str passed by name to a `s: Str` parameter is its data word; two decoders of one field type disagreed; the scanner's skip of a nested struct is not depth-aware."
+category = "cyrius"
+tags = ["v6.7.10", "derive", "Serialize", "JSON", "cstring", "Str", "PP_DFIELD_EK", "_tn_class", "bayan", "_cy_json_skipval", "PP_DQSTR_SCAN", "str_json_unescape"]
+---
+1. ONE CLASSIFIER OVER THE PARSER'S TYPE VOCABULARY. The three codecs (`_to_json`, `_from_json`,
+`_from_json_str`) each carried their own byte ladder for i8..i64 and f64, and the offset table its own (B7-2) —
+so a type the parser learned could be missed by one codec. They share `PP_DFIELD_INT` / `PP_DFIELD_FLT` over
+`PP_DFIELD_EK` = `_ek_of_code(_tn_scalar(..))` now. i64 and u64 share an element descriptor (ek 8), so u64 is
+excluded by its CLASS (`_tn_class == 2`), not by its width.
+
+2. THE PAIRS FORM CANNOT TELL "null" FROM null BY THE VALUE. bayan's pairs keep a quoted value WITHOUT its
+quotes, so the string `"null"` and the literal `null` are the same 4 bytes there. The cstring decoder reads the
+byte BEFORE the value (a quoted value's is its opening `"`), and only for a 4-byte `null` text — coupled to
+bayan's borrow representation: a refold that copies values turns derive_cstring_field.sh's T rows RED, not
+silent.
+
+3. A 16-BYTE STACK Str PASSED BY NAME IS ITS DATA WORD. The encoder passes its stack Str by ADDRESS (`&t`): by
+name an `s: Str` parameter received the cell's first word (mutation M29 SIGSEGVs) — the B7-F by-name trap
+meeting lib code.
+
+4. TWO DECODERS OF ONE FIELD TYPE DISAGREED. The scanner decoded only `\n \t \r` and the pairs form kept every
+escape raw (and returned a borrow into the parsed document) — row S6. Both call one lib helper now
+(`str_json_unescape`, a fresh Str; `str_json_unescape_cstr` for a cstring), and the scanner's Str arm is the
+same escape-aware quoted walk as its cstring arm (`PP_DQSTR_SCAN`), which removed ~35 emitter lines
+(cycc −568 B).
+
+5. A SKIP THAT IS NOT DEPTH-AWARE STOPS INSIDE THE VALUE. The scanner walks a non-string cstring value with the
+shared depth-aware `_cy_json_skipval`, so an object value does not end at its first inner `,`. Its NESTED
+`#derive`d struct arm still scans to the next `,` / `}` without depth, so it stops inside the nested object and
+every field after it is lost (left 0) — the open known defect; the pairs form decodes all of it.
+
+GATES: tests/gates/frontend/derive_cstring_field.sh, tests/tcyr/derive/derive_serialize_narrow.tcyr,
+tests/tcyr/derive/derive_serialize_cstring.tcyr. User-facing: language/features.cyml derive_str_fields.
+CHANGELOG [6.7.10] (B7-3, B7-4, B7-4b).
+
+[[entries]]
+name = "instrumentation_belongs_at_the_body_start_not_in_the_prologue_v6710"
+description = "Gotchas met building 6.7.10's execution-coverage mode (P5-B): a per-fn hit belongs at the BODY start, not in EFNPRO (live argument registers, no fn index, non-fns open frames there); a closure's hit after ESUBRSP; an #inline replay is a body with no call; cx's EADDRA_IMM clobbers r1; compiler-made program data goes in an SVGAI image blob; the exit hook runs after the arguments and before every target lowering; exit predicates are per target; only a builtin / EEXIT exit is visible; and the CLI side — the preflight chain, a quiet manifest probe, a capture file its user must remove."
+category = "cyrius"
+tags = ["v6.7.10", "P5-B", "execution coverage", "CYRIUS_COVERAGE", "EFNPRO", "ESUBRSP", "#inline", "EADDRA_IMM", "SVGAI", "exit hook", "_cov_body", "_cov_tail", "_cli_preflight", "_mf_probe"]
+---
+1. NOT IN THE PROLOGUE. At EFNPRO the arguments are still live — Win64 coroutine SELF in rcx, the aarch64 x8
+retptr, a closure's env register — EFNPRO does not know the fn index, and it also opens NON-fns (the aarch64 /
+cx top-level micro-frame, `_cyrius_init`, the async / enum constructors). At the BODY start (`_cov_body`: after
+the frame, the parameters and the by-value struct copies) every register is dead, so the hit is the ordinary
+accumulator emitters, with no backend change.
+
+2. A CLOSURE'S HIT BELONGS AFTER ESUBRSP. A push before the frame exists clobbers parameter slot 0 (the v6.2.41
+shape; P5B-5's mutant MC3 crashed 46 files). The swap is `_cl_frame_open`: ESUBRSP, then the hit.
+
+3. AN #inline REPLAY IS A BODY WITH NO CALL, so a counter at the definition alone never sees it: the hit belongs
+at each replay's start too (`_cov_body` with ti = -1, PARSE_FNCALL's one PARSE_PROG swapped).
+
+4. cx's EADDRA_IMM CLOBBERS r1, so the hit keeps the counter's address on the stack.
+
+5. COMPILER-MADE PROGRAM DATA GOES IN AN SVGAI IMAGE BLOB, which every writer bakes — no string-pool or fixup
+surgery for the counter band and the fn map (`_cov_greg`).
+
+6. THE EXIT HOOK RUNS AFTER THE ARGUMENTS ARE EVALUATED and before every target lowering: a hook before them
+loses `syscall(60, f())`'s `f` (mutant M12). Its call (`_cov_call_dump`) clobbers only the accumulator, and its
+pushes are balanced by ECALLPOPS / ECALLCLEAN from `_xdepth`, so the syscall's pushed arguments survive.
+
+7. EXIT PREDICATES ARE PER TARGET. Raw 231 is an exit on x86 / cx only — `munlockall` on ELF-aarch64, -38
+(unrouted) on PE; a wrong predicate dumps TWICE (M9 / M16). Only an exit lowered through the syscall builtin or
+EEXIT, with a compile-time-constant number, is visible: an `asm` exit, a run-time number, a `#naked` exit, exec,
+a signal are the documented residual (the CLI names such a run).
+
+8. HOOKING INSIDE A GIANT FN: three fns sit at cybs's per-fn reference ceiling, so new behaviour went in through
+1-for-1 call swaps (cybs_cannot_lex_gtgtgt…) — the counts measured before and after.
+
+9. THE CLI SIDE. (a) A verb that joins the AUTO_DEPS chain conditionally (`coverage --exec`) must also join
+`_cli_preflight`, or every refusal it names lands AFTER lib/ and cyrius.lock are written. (b) Asking the
+manifest a question that HAS an answer without it ("is the mode on?") must not report its read failure:
+`_mf_probe` reads quietly and forgets the failure, so the reader that needs the manifest names it once. (c) A
+per-process capture file in a temp dir that is rmdir'd (never swept) must be removed by its user — keeping it
+"for later" leaked the whole dir (`_dep_wt_err` → `_dep_wt_why`). (d) The reader takes a record's NAME field
+only, whole (`_src_ids_add` per line): tokenising would split `sh_gen$i` at the `$` and make the `$` cut a no-op.
+
+Class entries holding the rest of P5-B: cfo_const_fold_rewind_class… (`_cfo = 0` after the hit — defensive,
+not provable), there_are_seven_forks… (`_cov_tail` in all seven; the Windows spawn arm's environment),
+counter_model_gate_shares_the_defect (H7, the absolute mode-off anchor), an_environment_reader… (the shared
+256 B scratch; `_pp_env_rung`), a_runner_that_grades_by_exit_code… (no record = a named failure),
+methodology.cyml a_gate_whose_fixture_cannot_express_the_bug… (M7b's two-line probe).
+GATES: tests/gates/codegen/coverage_exec_hits.sh, tests/gates/toolchain/coverage_exec_cli.sh,
+tests/gates/memory/coverage_mode_corpus.sh (`# check: serial`). User-facing: language/tooling.cyml
+execution_coverage_mode_v6710. CHANGELOG [6.7.10] (P5-B).

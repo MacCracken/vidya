@@ -3,7 +3,8 @@
 # cyrius shell gates: subshell scoping clobbering stateful helpers,
 # `(( i++ ))` returning the old value under set -e, `bc` not being
 # POSIX-mandatory, and `grep -c` exiting 1 on a legitimate count of 0.
-# 4 entries.
+# 6.7.10: +1 entry — the_shell_reports_its_own_process_not_your_command_v6710 (a subshell's crash
+# message, `| head &&`, per-worker binary names). 5 entries.
 
 [[entries]]
 name = "bash_subshell_clobbers_stateful_helpers"
@@ -306,3 +307,28 @@ For arbitrary-precision floating-point: there's no portable
 answer. If the algorithm needs > 53-bit floats, port to a
 language other than shell.
 
+[[entries]]
+name = "the_shell_reports_its_own_process_not_your_command_v6710"
+description = "Met in 6.7.10's coverage gates: `(cmd) 2>/dev/null` does not silence a crashing child's \"Segmentation fault\" (bash execs a subshell's last command; `(cmd; exit $?) 2>/dev/null` does); `cmp … | head && cp` grades HEAD's status, so the copy runs regardless; parallel corpus workers need a unique binary name per file and per leg (a lingering forked child holds the binary: \"Text file busy\")."
+category = "cyrius"
+---
+THE CRASH MESSAGE COMES FROM THE SHELL THAT WAITED. A shell-run test that crashes prints the
+job message ("Segmentation fault") into the gate log, and the redirect on a subshell does not
+reach it: bash execs the LAST command of `( … )` directly, so the shell that waits — and
+prints — is the outer one.
+
+    (./crasher) 2>/dev/null            # still prints "Segmentation fault"
+    (./crasher; exit $?) 2>/dev/null   # a real shell in between: exit status 139, nothing printed
+
+A PIPELINE'S STATUS IS ITS LAST COMMAND'S. `cmp a b | head && cp a b` grades `head`, which
+succeeds, so the copy runs whether the files matched or not (it emptied a file in the P5-B lane;
+restored from a scratch copy). Test the command itself (`cmp -s a b && …`), or set `pipefail`
+and know that it then reports the pipeline's LAST nonzero status.
+
+PARALLEL WORKERS NEED A UNIQUE BINARY NAME PER FILE AND PER LEG. A test's lingering forked child
+keeps its binary open, so a worker that reuses the name reads "Text file busy" — a failure that
+moves between runs. Name each output after the file AND the leg (and the worker), never a fixed
+scratch name.
+
+Related: bash_pre_increment_set_e_zero_exit (a status you meant to INSPECT under `set -e`),
+grep_dash_c_prints_zero_and_exits_one. CHANGELOG [6.7.10] (P5-B).

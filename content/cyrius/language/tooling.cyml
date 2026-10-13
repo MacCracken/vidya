@@ -60,6 +60,11 @@
 # ([test], scope = "test", test.cyml, `cyrius test <file|dir>` absorbing `cyrius tests`); cyrius_cli,
 # tcyr_test_format, cyrius_cyml_manifest, manifest_key_vocabulary and compiler_env_vars corrected
 # to match. 23 entries (DERIVED 2026-10-08, the same grep).
+# 6.7.10 (2026-10-13): +1 entry — execution_coverage_mode_v6710 (`cyrius coverage --exec` /
+# `[coverage] exec`, CYRIUS_COVERAGE + CYRIUS_COVERAGE_FILE, the dump format, what is and is not seen).
+# Updated: coverage_run_programs_v6617 (P5-B shipped), the `cyrius coverage` FLAGS block (--exec),
+# compiler_env_vars (EXECUTION COVERAGE), manifest_key_vocabulary_and_precedence_v6617 ([coverage] exec).
+# 24 entries (DERIVED 2026-10-13, the same grep).
 
 [[entries]]
 name = "compiler_binaries"
@@ -1095,6 +1100,19 @@ slots — see field_notes/compiler/v5_8.
   the DCE pass + filter same slot. See `field_notes/compiler/
   retros/` for the cross-arch parity arc.
 
+== EXECUTION COVERAGE (6.7.10) ==
+
+  CYRIUS_COVERAGE=1       Per-fn hit counters, dumped when the program
+                          exits (`0`, unset or empty = off; anything
+                          else refused by name). Predefines
+                          CYRIUS_COVERAGE for #ifdef. Refused for
+                          kernel / EFI / `shared;` / `object;`.
+  CYRIUS_COVERAGE_FILE=P  REQUIRED with the mode (no default; over
+                          255 B warned of and refused): the file the
+                          program APPENDS to at exit, fixed at compile
+                          time — give an absolute path.
+  See execution_coverage_mode_v6710.
+
 [[entries]]
 name = "compiler_flags"
 description = "cycc + cyrius command-line flags — --strict, --pie, --version, the TS modes (--lex-ts/--parse-ts/--emit-js), --aarch64, etc. (binary renamed cc5 → cycc at v6.0.0)."
@@ -1265,7 +1283,14 @@ category = "cyrius"
 
   --full             Scan the vendored stdlib in lib/ instead of
                      the project's own src/
-  --min <pct>        Exit non-zero below the floor (CI gate)
+  --min <pct>        Exit non-zero below the floor (CI gate); under
+                     --exec it gates the EXECUTED percentage
+  --exec[=<glob>]    (6.7.10) EXECUTION coverage: every .tcyr and
+                     every program the globs name (`[coverage] exec`,
+                     replaced by --exec=<glob>, repeatable) built with
+                     CYRIUS_COVERAGE=1 and RUN; adds `E/T executed`
+                     and `Functions executed: E/T (p%)`; -v lists the
+                     unexecuted fns. See execution_coverage_mode_v6710.
   <dir>              Positional subfolder callout (v6.5.8) — scan
                      that directory. Previously dropped silently.
 
@@ -1757,7 +1782,8 @@ A key with no argument or environment channel just lacks that rung.
     features      DROPPED  warned by name; nothing ever read it
 
 An unknown `[build]` key (a typo) is warned by name; `[coverage] programs` is read by
-`cyrius coverage`. `cyrius help manifest` prints the whole vocabulary (every section, each key's
+`cyrius coverage` (TEXT coverage, in both modes), `[coverage] exec` (6.7.10) by `cyrius coverage`
+too — a list of program globs built instrumented and run; it alone turns `--exec` on. `cyrius help manifest` prints the whole vocabulary (every section, each key's
 status, synonyms, channels and reader), and the guide's "Manifest keys" table is gated equal to it.
 
 == THE READER ==
@@ -1799,7 +1825,9 @@ tags = ["coverage", "cyrius.cyml", "run-programs", "per-entry", "P5", "v6.6.17"]
   "reference" it by declaring it).
 
 ⚠ TEXT coverage, the reference count `.tcyr` corpora get since 6.6.8 — not execution coverage.
-Instrumented-build-and-run coverage (P5-B) is v6.7.x, with the bounds-checked mode.
+Instrumented-build-and-run coverage (P5-B) shipped in 6.7.10: `cyrius coverage --exec` /
+`[coverage] exec` — see execution_coverage_mode_v6710. `[coverage] programs` stays TEXT coverage
+even under --exec.
 CHANGELOG [6.6.17] (Coverage — P5-A).
 
 [[entries]]
@@ -2161,3 +2189,59 @@ the signal is read from the wait status, so a test that EXITS 232 says `(exit 23
 GATES: tests/gates/toolchain/test_section.sh, deps_test_scope.sh, test_cyml_per_directory.sh,
 test_absorbs_tests.sh, test_exit_code_contract.sh. CHANGELOG [6.7.6]; the cyrius guide's "Tests:
 [test], scope = test, test.cyml".
+
+[[entries]]
+name = "execution_coverage_mode_v6710"
+description = "Since cyrius 6.7.10 `cyrius coverage --exec[=<glob>]` / `[coverage] exec = [\"programs/*_test.cyr\"]` measures what RUNS: every tests/**/*.tcyr and every named program is built with CYRIUS_COVERAGE=1 (one hit counter per fn, appended to CYRIUS_COVERAGE_FILE when the program exits), run, and its entered fns merged into the report (`Functions executed: E/T`); a nonzero exit, a signal, a timeout or a run with no coverage record fails the run by name. [coverage] programs stays TEXT coverage"
+category = "cyrius"
+tags = ["coverage", "execution-coverage", "CYRIUS_COVERAGE", "cyrius.cyml", "P5", "v6.7.10"]
+---
+    [coverage]
+    exec = ["programs/*_test.cyr"]            # alone turns the mode on
+
+    cyrius coverage --exec                     # .tcyr + [coverage] exec, built instrumented and run
+    cyrius coverage --exec='bench/*.cyr' -v    # replaces the list; -v lists the unexecuted fns
+    cyrius coverage --exec --min 80            # --min gates the EXECUTED %
+
+    # the compiler switch itself (any compile):
+    CYRIUS_COVERAGE=1 CYRIUS_COVERAGE_FILE=$PWD/build/x.cov cyrius build x.cyr build/x
+    # build/x.cov after a run:
+    #   # cyrius-coverage 1
+    #   3 <source>:1 sq                      <- <count> <file>:<line> <name>
+    #   - <source>:4 nk                      <- a #naked fn: listed, not counted
+    #   3 <source>:6 __cl00008               <- a closure (its number is an index; it moves)
+
+- per fn, not per line or branch: the counter is bumped at the first byte of the body (after the
+  frame, the parameters and the by-value struct copies). A fn never entered has no line. Counted:
+  fns, methods, generic instances (`gen$i32`; an i64 instance is `gen`), `#derive`d fns (named at the
+  struct's closing `}`), closures, an `async fn`'s body (`f$impl`, once per future), each `#inline`
+  replay, every self tail call. Not counted: the async / enum-variant constructors, `__cyrius_*`,
+  `#naked` fns (listed with `-`);
+- the CLI counts by NAME (a record's name field, whole, cut at the first `$`; `<source>` = the entry's
+  own fns, `__cyrius_*` and closures skipped) — the path holds identifiers (`src/shapes.cyr` →
+  `shapes`), and so does a mangled suffix (`gen$f64`);
+- dumps at the top level's end / `main`'s return and before every exit syscall whose NUMBER is a
+  compile-time constant (a literal, a `const`, an enum value — `sys_exit`, `panic`, the stdlib's aborts,
+  a bounds violation's 134), after the syscall's arguments are evaluated (`syscall(60, f())` counts f).
+  Exit numbers per target: x86 / x86 macOS / cx 60 + 231, aarch64 / arm64 macOS 60 + 93 + 94, Windows
+  60, agnos 0;
+- NOT seen: an `asm` exit, a run-time exit number, an exit inside `#naked`, `execve`, a signal / crash /
+  kill — the CLI names such a run ("exited 0 but left no coverage record") instead of reading 0;
+- CYRIUS_COVERAGE_FILE is required, no default (a predictable name in a shared dir is
+  symlink-plantable); the path is fixed at compile time and opened at exit, relative to the cwd THEN —
+  give an absolute one; created 0644, opened O_APPEND (one block per process and run); a dump that
+  cannot open it writes nothing and says nothing;
+- one block per process: a forked child's block repeats the pre-fork counts; threads share the counters
+  (non-atomic: a count can be lost, an entered fn never reads 0); only hit-ness is stable, and that is all
+  the CLI reads;
+- refused for kernel / EFI / `shared;` / `object;`; combines with the bounds-checked mode; every hosted
+  target (x86-64 / aarch64 Linux, arm64 / x86-64 macOS, Windows, agnos, cx). cx has no `main` auto-call
+  (a header-only block — call it from the top level) and the CLI never runs cx;
+- reserved: `__cyrius_cov_cp`, `__cyrius_cov_num`, `__cyrius_cov_w`, `__cyrius_cov_dump` (a user fn
+  reusing a `__cyrius_cov_` name is replaced, with the `duplicate fn` warning);
+- a program built without the mode carries not a byte of it. Cost: ~30 B of code per fn body on x86-64
+  + 8 B counter + a map line; an instrumented cycc +13 % size, +12 % self-compile (measured at 6.7.10).
+
+GATES: tests/gates/codegen/coverage_exec_hits.sh, tests/gates/toolchain/coverage_exec_cli.sh,
+tests/gates/memory/coverage_mode_corpus.sh. The guide: *The execution-coverage mode (6.7.10)*.
+CHANGELOG [6.7.10] (P5-B; proposal P5 archived).
