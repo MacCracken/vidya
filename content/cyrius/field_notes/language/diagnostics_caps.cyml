@@ -18,6 +18,9 @@
 # error, fork F2). 8 entries (DERIVED at 6.7.7).
 # v6.7.8: updated type_name_refusals_v6616 (a trait member's signature is parsed and its type names
 # checked; a slice outside a fn-local var names its position). 8 entries (DERIVED at 6.7.8).
+# v6.7.11: +2 entries — a_kept_dead_fn_is_ud2_and_the_syms_map_predates_compaction_v6711 (DCE's kept dead bodies,
+# the pre-compaction symbol map), a_compile_mode_switch_is_0_or_1_since_6_7_11 (`CYRIUS_POISON=0` was ON).
+# 10 entries (DERIVED at 6.7.11).
 
 [[entries]]
 name = "the_gvar_wall"
@@ -496,3 +499,33 @@ registers still ends in the undefined-function diagnostic. Over cyrius's own 853
 self-compile, only the filed issue's two repros changed: a consumer meets it as a new error at a call that was
 already wrong. Gate: tests/gates/frontend/default_named_args_checked.sh rows R24 / R24b, C1-fwd. See CHANGELOG
 [6.7.7].
+
+[[entries]]
+name = "a_kept_dead_fn_is_ud2_and_the_syms_map_predates_compaction_v6711"
+description = "Under CYRIUS_DCE=1 a dead fn holding an instruction the compiler cannot size (an `in` / `out` in `asm`) stays in the image with `ud2; ud2; nop` where it called a removed fn — dead, not a miscompile; and CYRIUS_SYMS lists PRE-compaction addresses (a known defect, filed): use the plain build's map."
+category = "cyrius"
+---
+A KEPT DEAD FN DISASSEMBLES AS `ud2; ud2; nop` (6.7.11). Compaction removes a dead fn only when its length decoder can
+size every instruction in it; one holding an `in` / `out` in an `asm` block is KEPT, and its calls / tail calls into
+removed fns become `ud2; ud2; nop` (its `&fn` of a removed fn reads 0). It is dead — nothing calls it — so this is not a
+miscompile; any other rel32 from it into removed code refuses the build by name. Known (filed for 6.7.12): W^X
+compaction leaves stale old bytes in `.text`'s alignment pad — never executed, but they read like a miscompile in a
+disassembly.
+
+`CYRIUS_SYMS` UNDER `CYRIUS_DCE=1` LISTS PRE-COMPACTION ADDRESSES (a known defect, filed for 6.7.12): the map is written
+before compaction, so a removed fn appears at a live fn's address and the rest sit high by the removed bytes. Take
+addresses from the PLAIN build's map. CHANGELOG [6.7.11] (INF-5).
+
+[[entries]]
+name = "a_compile_mode_switch_is_0_or_1_since_6_7_11"
+description = "`CYRIUS_POISON=0` meant ON until 6.7.11 (any set value — `0`, empty, a word — turned the poisoned allocator on). Since 6.7.11 the three compile-mode switches agree: CYRIUS_POISON, CYRIUS_BOUNDS and CYRIUS_COVERAGE take `1` for on; `0`, empty or unset for off; a word (`yes`, `true`, `no`) stops the build by name. On Windows (cmd.exe, wine) an empty variable is unset."
+category = "cyrius"
+---
+    CYRIUS_POISON=0 cyrius build x.cyr build/x       # 6.7.10: POISON ON. 6.7.11: off
+    CYRIUS_POISON=yes cyrius build x.cyr build/x     # 6.7.11: error: CYRIUS_POISON must be 0 or 1 (or unset): yes
+
+The rule is decided once, in the shared preprocessor (before the first `#ifdef`), for all three switches — every fork
+reads the same answer. `cyrius fuzz --poison` hands the compiler `CYRIUS_POISON=1` itself. `cyrius pulsar` and the
+on-demand cx builds strip the three switches (and `CYRIUS_COVERAGE_FILE`) so a tracked compiler is never built in a
+mode; your own compiles keep them. To scrub any OTHER variable read raw, `unset` it (`V=` keeps it set and empty).
+CHANGELOG [6.7.11] (TL-8, TL-9).

@@ -65,6 +65,13 @@
 # Updated: coverage_run_programs_v6617 (P5-B shipped), the `cyrius coverage` FLAGS block (--exec),
 # compiler_env_vars (EXECUTION COVERAGE), manifest_key_vocabulary_and_precedence_v6617 ([coverage] exec).
 # 24 entries (DERIVED 2026-10-13, the same grep).
+# 6.7.11 (2026-10-14): no new entry. Updated: compiler_env_vars (DCE compaction on kernels and CYRIUS_WX=0 —
+# the block had said "NOP-fill, size unchanged" since v6.5.72; the one 0 / 1 rung for CYRIUS_POISON / BOUNDS /
+# COVERAGE; the agnos / bare-metal selectors read by src/main.cyr only), fuzz_poison_allocator_seam_exit_86_and_ab_v6618,
+# compiler_flags (the two cyrlint rules; the distlib owner rule), distlib_sidecar_is_what_the_compile_verify_proves_v6618,
+# cyrius_cli (`cyrius header` return types), the bench paragraph (bytes, size/cycc_bytes, --report),
+# audit_test_check_pipeline (cybs names what it refuses; row S guards all three seed caps),
+# execution_coverage_mode_v6710 (cx auto-calls `main`; `gen$f64` / `gen$.f64`). 24 entries (DERIVED 2026-10-14, the same grep).
 
 [[entries]]
 name = "compiler_binaries"
@@ -493,7 +500,25 @@ auto-call), never by a test — so no project with an entry point could
 reach 100 % (ganita sat at 139/141 and bayan at 501/503 with `main` the
 only misses; now 139/139 and 501/501). It is excluded by the same rule
 `cyrius header` uses (`_src_is_entry_fn`, cbt/srcscan.cyr), by exact
-name only — `mainx` and `domain` still count. A `src/` whose only public
+name only — `mainx` and `domain` still count.
+
+`cyrius header` WRITES RETURN TYPES (6.7.11, TL-11): `cyr_val` (8 B or
+less, a pointer, a scalar, `Str`), `cyr_val2` for a 9–16 B struct or a
+`dyn` under `#ifndef _WIN64` (on Win64 a named comment, no prototype —
+Win64 C returns anything over 8 B through a hidden pointer), `cyr_valN`
+by value over 16 B (the callee writes whole words, so the buffer is the
+rounded size), `cyr_val2` for a two-value return under `#if
+defined(__x86_64__) && !defined(_WIN64)` (aarch64 returns it in x0:x2,
+not AAPCS64's x0:x1). A return it cannot size from the one file
+(another file's struct, a generic instance, a struct holding one, a
+struct with `#ifdef`'d fields, three values) is refused by name, rc 1,
+the rest of the header still written. A variadic tail is `...`, a fully
+variadic fn `f(void)` with a comment. Still `cyr_val` (filed): a SIMD
+vector return and a `: stack` enum return. Every source scanner
+(header, coverage, the LSP index, distlib, `[embed]`, api-surface,
+cyrdoc, type-audit) sees a `const fn` and balances a generic type's
+`<..>` in a parameter (TL-2) — `>>` / `>>>` close two / three levels,
+and after a parameter's depth-0 `=` (a default) `<` is the operator. A `src/` whose only public
 fn is `main` has nothing to measure and gets the "no public functions
 found … not a pass" error.
 
@@ -642,7 +667,11 @@ For sub-microsecond ops where `clock_gettime` overhead dominates:
     bench_batch_stop();
 
 `scripts/bench-history.sh` runs the 3-tier suite → `BENCHMARKS.md`
-+ appends `bench-history.csv`. Per CLAUDE.md it is a RELEASE GATE,
++ appends `bench-history.csv`. Since 6.7.11 (TL-7) BENCHMARKS.md prints
+the size rows in BYTES (`2,114,376 B`), the CSV's file-size row is
+`size/cycc_bytes` (was `size/cc5_bytes`, every row renamed), and
+`sh scripts/bench-history.sh --report` regenerates BENCHMARKS.md from
+the CSV without a run. Per CLAUDE.md it is a RELEASE GATE,
 not a closeout-only step: EVERY `.NN` cut runs it on a quiet box
 before `version-bump.sh`, and the headline delta (self_compile ms +
 cycc size) goes in the CHANGELOG entry.
@@ -989,6 +1018,17 @@ needed.
 Cross-compile dispatch hooks. `cyrius build --aarch64` sets
 target via the appropriate cross-compiler binary; the env vars
 are mostly used by the cross-compiler binaries themselves.
+⚠ 6.7.11 (TL-10): `CYRIUS_TARGET_AGNOS` / `CYRIUS_ELF64_KERNEL` are
+read by `src/main.cyr` ONLY (the aarch64 forks read `CYRIUS_KERNEL`;
+the PE and both Mach-O forks read none of the three) — agnos and
+x86_64 bare-metal images build from an x86_64 Linux host. The
+Windows and macOS CLIs refuse `--agnos`,
+`--target=x86_64-bare-metal-elf` and `--target=aarch64-bare-metal-elf`
+by name, rc 1, before compiling (`error: --agnos is not available
+from the Windows CLI: cycc.exe emits PE only (build agnos /
+bare-metal images on Linux)`; macOS: `… cycc emits Mach-O only …`).
+The aarch64 Linux CLI still DROPS `--agnos` and writes an aarch64
+Linux binary at rc 0 (filed, High).
 
 == GENERICS (monomorphization) ==
 
@@ -1085,16 +1125,44 @@ slots — see field_notes/compiler/v5_8.
                           relative, free of `..`, and at most 480 bytes.
                           See cyrius_cyml_git_first_local_switch_v676.
 
-== DCE (v5.11.x) ==
+== DCE (v5.11.x; compaction v6.5.72; kernels / WX=0 6.7.11) ==
 
-  CYRIUS_DCE=1            NOP-fill detected-dead fn bodies (in-
-                          place; binary size unchanged, just
-                          replaced bytes). Off by default; the
+  CYRIUS_DCE=1            REMOVE the dead fns (whole-program
+                          compaction) on three x86_64 Linux ELF
+                          layouts: a plain W^X executable (since
+                          v6.5.72), a `kernel;` image — ELF32
+                          multiboot1 and CYRIUS_ELF64_KERNEL=1 —
+                          and a CYRIUS_WX=0 executable (both since
+                          6.7.11; 6.6.20 – 6.7.10 declined them and
+                          only NOP-filled). Everywhere else it
+                          NOP-fills in place (size unchanged):
+                          `--pie` (a `--pie` kernel included),
+                          `shared;`, aarch64, Mach-O, PE — the note
+                          names the decline. Off by default; the
                           dead-fn DETECTION runs always and
                           produces `note: N unreachable fns (M
-                          bytes — set CYRIUS_DCE=1 to
-                          eliminate, ...)`.
+                          bytes — set CYRIUS_DCE=1 to eliminate)`;
+                          under the flag `dead code eliminated`, or
+                          `compaction declined on x86_64 ELF
+                          (<reason>)` on a declining layout.
   CYRIUS_DCE_VERBOSE=1    Per-fn `  dead: <name>` list.
+
+  ⛔ This block said "NOP-fill … binary size unchanged" from v5.11.x
+  to 6.7.11 — stale since v6.5.72.
+  On a kernel image and CYRIUS_WX=0 the data FOLLOWS the code, so
+  `.bss` / `.rodata` move down with it, by a multiple of 16 (an array
+  keeps its 16-byte alignment; up to 8 zero bytes pad the end of
+  `.text`), and every data address in the code moves with them. Under
+  W^X the data segment stays where it was. A dead fn KEPT because the
+  length decoder cannot size one of its instructions (an `in` / `out`
+  in an `asm` block) keeps its body; its calls / tail calls into
+  removed fns become `ud2; ud2; nop` and its `&fn` of a removed fn 0.
+  Any other rel32 from it into removed code refuses the build by name
+  (`error: dead-code elimination: the rel32 at code offset N …
+  refusing to emit`). Known (filed): `CYRIUS_SYMS` is written before
+  compaction (take addresses from the plain build's map); a generic
+  instance nested inside a dead forwarder instance is removed with it
+  (`lang/generic_instance_inline_binding.tcyr`).
 
   Both arches (x86 + aarch64) since v5.11.59 — aarch64 gained
   the DCE pass + filter same slot. See `field_notes/compiler/
@@ -1111,7 +1179,20 @@ slots — see field_notes/compiler/v5_8.
                           255 B warned of and refused): the file the
                           program APPENDS to at exit, fixed at compile
                           time — give an absolute path.
+  CYRIUS_POISON=1         The poisoned allocator (lib/'s `#ifdef
+                          CYRIUS_POISON` arms; predefines CYRIUS_POISON).
   See execution_coverage_mode_v6710.
+  ONE RULE FOR THE THREE COMPILE-MODE SWITCHES (6.7.11, TL-8):
+  CYRIUS_POISON, CYRIUS_BOUNDS and CYRIUS_COVERAGE — `1` on; `0`, empty
+  or unset off; any other value refused by name (`<NAME> must be 0 or 1
+  (or unset): <v>`, rc 1, nothing written), decided ONCE in the shared
+  PREPROCESS (`_pp_env_rung`, before the first `#ifdef`). Until 6.7.11
+  any set CYRIUS_POISON — `0`, empty, a word — turned poison ON (each
+  fork read "is it set"). On Windows (cmd.exe, wine) an empty variable
+  is unset. `cyrius pulsar` and the on-demand `cycc_cx` / `cxvm` builds
+  run WITHOUT CYRIUS_POISON / CYRIUS_BOUNDS / CYRIUS_COVERAGE /
+  CYRIUS_COVERAGE_FILE (a filtered envp; on Windows saved, cleared and
+  restored around the spawn); the user's own compiles keep them (TL-9).
 
 [[entries]]
 name = "compiler_flags"
@@ -1210,6 +1291,17 @@ category = "cyrius"
                      is cross-referenced. Stops deferred work
                      rotting untracked in comments. `#skip-lint` on
                      a line exempts it from all rules.
+  TWO RULES (6.7.11, TL-3), warnings like the rest:
+    - a constant-offset `load8/16/32/64(&a + K)` / `store*(&a + K, ..)`
+      past a bare fn-local `var a[N]` (N BYTES rounded up to 8, a
+      literal N only; typed / scalar / const-sized locals shadow and
+      are not checked; a top-level bare array is not checked yet);
+    - a `syscall(SYS_WRITE|1, …)` / `sys_write` / `_aw_write` whose
+      literal length argument is not the literal's byte count, counted
+      as the lexer STORES it (a raw byte 1 — an em dash 3 —, a
+      two-character escape 1, `\xHH` 1, `\u` its UTF-8 length).
+    Trailers: `# lint: offset-ok` (the overrun rule only, on the
+    call's name line) and `#skip-lint` (both).
 
 == `cyrius doc` ADDITIONAL ==
 
@@ -1278,6 +1370,16 @@ category = "cyrius"
   --modular          Modular bundle layout
   Naming a profile alongside --all/--check is an error, as is any
   unknown option (both used to fall through and "succeed").
+  THE OWNER RULE (6.7.11, TL-4) — one rule for a name undefined on
+  every target or on some: skip an in-unit declarer; a fold counts
+  only when nothing else declares it; the one dispatcher whose peer
+  declares it; else the one non-peer declarer; else REFUSED naming
+  every candidate, no sidecar written (`'X' is undefined on every
+  target, and more than one stdlib leaf could own it (a, b) — include
+  the right leaf from a bundled module. Sidecar NOT written`). lib/'s
+  live tie: the `WS_*` constants (ws / ws_server, filed). A sidecar may
+  record `syscalls` before an agnos-arm leaf (`O_*` -> io, `PROT_*` /
+  `MAP_*` -> mmap, `CLOCK_MONOTONIC` -> chrono).
 
 == `cyrius coverage` FLAGS ==
 
@@ -1620,8 +1722,21 @@ skipped.
 
 ⚠ Step 2 is NOT covered by step 1. `cybs` — the hand-assembly
 bootstrap compiler the 29 KB seed assembles — is far more limited than
-`build/cycc` and fails SILENTLY on things `build/cycc` compiles fine.
-Mandatory for ANY `src/` change, on EVERY release.
+`build/cycc` and used to fail SILENTLY on things `build/cycc` compiles
+fine. Since 6.7.11 it says so: a construct it does not support or any
+syntax error prints `cybs: syntax error, or a construct the bootstrap
+compiler does not support (const, loop, do/while, an if-expression,
+unary minus, >>>, >>=), at: <the line of the expanded stream>` (grep
+the line to find the `src/` file), an unknown name `cybs: undefined
+variable or function (cybs has no const): <name>, at: <line>`, and a
+statement call to a never-defined fn `cybs: undefined function:
+<name>` (it compiled to a crashing binary). cybs compiles fn bodies
+BEFORE top-level statements, so a const a fn reads is reported at the
+READER's line. Still silent: the per-fn reference ceiling and the
+seed's caps — all three (input, labels, code) guarded for
+`bootstrap/cybs.cyr` by gate row S of `cybs_call_arity_named.sh` since
+6.7.11 (input 115,974 / 131,072 B, labels 506 / 512, code 22,200 /
+65,536 B). Mandatory for ANY `src/` change, on EVERY release.
 
 Step 4 runs FOUR hosts sequentially — ecb (macOS-arm64) · ach
 (Intel-Mac x86-macho) · cass (Windows PE) · pi (aarch64) — all
@@ -1897,6 +2012,13 @@ Why: the v6.5.10 union published every producer's test leaves to every consumer 
 `assert`, 68 of those bundles used none of it) and hid real gaps behind a declaration. cyrius
 `docs/development/ecosystem-migration-6.6.18.md`; CHANGELOG [6.6.18] (Distlib — P4 option 2).
 
+6.7.11 (TL-4): the owner of an undefined name is chosen by ONE rule on every target or some (the every-target path
+used to be the partial rule minus its in-unit skip and its tie refusal); a tie between two non-peer stdlib leaves is
+REFUSED by name with no sidecar written — include the right leaf from the module that uses it. The census beside the
+rule (`distlib_owner_rule_shared.sh` row C) allowlists the filed ties (`WS_*`) and goes RED on a new one AND on a stale
+row; at the 6.7.11 merge it caught `_bre_err` (niyama / sankoch, fixed upstream in sankoch 2.8.7). See compiler_flags
+§ `cyrius distlib` FLAGS.
+
 [[entries]]
 name = "fuzz_poison_allocator_seam_exit_86_and_ab_v6618"
 description = "Since cyrius 6.6.18 (P6) `cyrius fuzz --poison` poisons `alloc()` (Linux / macOS / Windows), arenas, `fl_alloc` and anything routed through `poison_allocator()`: leading + trailing redzones, a live-block sweep, quarantine on free. The first overwrite prints one `poison: redzone overwrite — …` line and exits 86. Overreads are silent under plain `--poison`; `--poison=ab` runs every harness at fill 0xA5 and 0x5A and fails when the outputs differ"
@@ -1907,6 +2029,10 @@ tags = ["fuzz", "poison", "redzone", "allocator-seam", "poison_allocator", "exit
 
     cyrius fuzz --poison            # writes trap (exit 86); assert_summary() sweeps too
     cyrius fuzz --poison=ab         # + overreads: two legs, byte-identical stdout required
+
+`cyrius fuzz --poison` hands the compiler `CYRIUS_POISON=1` ahead of the shell's value; setting the
+variable by hand takes `0` / `1` only since 6.7.11 (`0` and an empty value were ON before; a word is
+refused by name — compiler_env_vars).
 
 Route your own allocation through it:
 
@@ -2213,7 +2339,8 @@ tags = ["coverage", "execution-coverage", "CYRIUS_COVERAGE", "cyrius.cyml", "P5"
 
 - per fn, not per line or branch: the counter is bumped at the first byte of the body (after the
   frame, the parameters and the by-value struct copies). A fn never entered has no line. Counted:
-  fns, methods, generic instances (`gen$i32`; an i64 instance is `gen`), `#derive`d fns (named at the
+  fns, methods, generic instances (`gen$i32`, `gen$f64` — a bare `gen$i` through 6.7.10 —, `gen$.f64` for a
+  struct named like a scalar; an i64 instance is `gen`), `#derive`d fns (named at the
   struct's closing `}`), closures, an `async fn`'s body (`f$impl`, once per future), each `#inline`
   replay, every self tail call. Not counted: the async / enum-variant constructors, `__cyrius_*`,
   `#naked` fns (listed with `-`);
@@ -2235,8 +2362,8 @@ tags = ["coverage", "execution-coverage", "CYRIUS_COVERAGE", "cyrius.cyml", "P5"
   (non-atomic: a count can be lost, an entered fn never reads 0); only hit-ness is stable, and that is all
   the CLI reads;
 - refused for kernel / EFI / `shared;` / `object;`; combines with the bounds-checked mode; every hosted
-  target (x86-64 / aarch64 Linux, arm64 / x86-64 macOS, Windows, agnos, cx). cx has no `main` auto-call
-  (a header-only block — call it from the top level) and the CLI never runs cx;
+  target (x86-64 / aarch64 Linux, arm64 / x86-64 macOS, Windows, agnos, cx). cx auto-calls `main` since 6.7.11
+  (as every image target does) and its dump counts it; the CLI never runs cx;
 - reserved: `__cyrius_cov_cp`, `__cyrius_cov_num`, `__cyrius_cov_w`, `__cyrius_cov_dump` (a user fn
   reusing a `__cyrius_cov_` name is replaced, with the `duplicate fn` warning);
 - a program built without the mode carries not a byte of it. Cost: ~30 B of code per fn body on x86-64

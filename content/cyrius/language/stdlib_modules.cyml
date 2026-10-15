@@ -33,6 +33,8 @@
 # literal arrives as a raw cstr and every `str_*` call on it silently
 # returns nothing — see field_notes/language/semantics_runtime.cyml
 # `string_literal_to_str_coercion_is_annotation_only`.
+# 6.7.11 (2026-10-14): +1 entry dir_list_contract_v6711 (O_DIRECTORY; a FIFO no longer blocks; -ENOTDIR);
+# tls_module_contract_v6614's agnos DEADLINE note (sock_send_dl #109 on agnos 1.57.13+).
 # Vendored dep pins at v6.6.1 (2026-09-08): sandhi 1.9.16 · sankoch 2.7.14 ·
 # sigil 3.12.16 · patra 1.14.1 · yukti 2.3.10 · mabda 4.1.1 ·
 # bayan 1.5.5 · ganita 1.2.4 · niyama 1.0.10 · vani 1.2.4 ·
@@ -1077,6 +1079,37 @@ tests/gates/toolchain/manifest_read_whole_file.sh axes 5 and 6 (a directory, and
 under `ulimit -v`); restoring the overwrite reddens all three.
 
 [[entries]]
+name = "dir_list_contract_v6711"
+description = "lib/fs.cyr's directory listers — `dir_list` (a vec of Str), `dir_list_checked` (0 or a negative error), `dir_list_into` (caller-owned buffers). Since cyrius 6.7.11 Linux and macOS open the path with O_RDONLY | O_DIRECTORY | O_CLOEXEC: a FIFO no longer blocks the call, and a FIFO or a regular file is -ENOTDIR (-20) from dir_list_checked, -1 from dir_list_into, an empty vec from dir_list"
+category = "cyrius"
+tags = ["stdlib", "fs", "dir_list", "dir_list_checked", "dir_list_into", "O_DIRECTORY", "FIFO", "ENOTDIR", "v6.7.11"]
+---
+THE CONTRACT (lib/fs.cyr), one lister behind all three forms:
+
+    var v = dir_list(path);                         # a vec of Str; `.` / `..` skipped; ANY failure is empty
+    var rc = dir_list_checked(path, entries);       # 0, or a NEGATIVE error (Linux / macOS: the errno;
+                                                    #   agnos / Windows: -1); entries keeps what was read
+    var n = dir_list_into(path, scratch, slen, names, ncap, offs, max);   # allocates nothing:
+                                                    #   the count, or -1 open / read failed, -2 scratch
+                                                    #   too small, -3 names full, -4 offs full
+
+SINCE 6.7.11 (the stdlib lane; agora 1.9.1's filing):
+  - Linux and macOS open the path with `O_RDONLY | O_DIRECTORY | O_CLOEXEC`, so the kernel refuses a
+    non-directory at path resolution. On a FIFO or a regular file `dir_list_checked` returns -20
+    (-ENOTDIR), `dir_list_into` -1 and `dir_list` an empty vec; a dangling link is -2 (-ENOENT).
+  - A FIFO NO LONGER BLOCKS the call. `open(path, O_RDONLY)` on a FIFO waits for a writer before any
+    `ENOTDIR` could be reported, so one FIFO planted where a server lists a directory froze it. Darwin
+    checks `O_DIRECTORY` before the FIFO open too (measured on ecb and ach).
+  - On macOS a regular file is -20, not -22.
+  - Windows (`FindFirstFileW`) and agnos (`AO_DIRECTORY`, which the agnos open REQUIRES) are unchanged.
+⚠ `dir_list` cannot say "I could not look" — an unreadable directory lists as EMPTY. Anything that walks a
+tree to reach a verdict (a test runner, an auditor, a coverage count) uses `dir_list_checked` /
+`dir_walk_checked` (6.6.10). `lib/audit_walk.cyr`'s Linux lister does not use `O_DIRECTORY` yet (filed).
+Field note: field_notes/language/platform_abi.cyml
+open_a_directory_you_will_list_with_o_directory_v6711. CHANGELOG [6.7.11] (the
+stdlib lane).
+
+[[entries]]
 name = "tls_module_contract_v6614"
 description = "lib/tls.cyr — the `tls_*` verbs over two backends: the native stack (TLS 1.2/1.3, client AND server, over sigil; the default) and libssl through fdlopen (opt-out). As of cyrius 6.6.14: libssl is MAIN-THREAD ONLY and refuses off it (`TLS_ERR_WRONG_THREAD`, -23); a native mTLS server verifies the client's chain to its OWN roots in TLS 1.2 and 1.3; a TLS write never raises SIGPIPE; native TLS runs over Winsock with a real deadline; Windows roots come from the CurrentUser ROOT store; no SNI for an IP literal; a failed connection stays failed on both backends. As of 6.6.15: native ECDHE on x25519 / P-256 / P-384 in both versions and both roles (`tls_native_set_groups`, HelloRetryRequest both ways, the 1.2 server's group and certificate-curve choice), every ephemeral key and shared secret zeroed at its last use (the ECDHE key zeroisation gap), and sigil 3.13.9's constant-time `ecdh_p256_*` / `ecdh_p384_*` and constant-time ECDSA signing (CYRIUS-2026-0023). As of 6.6.16: a CA's extendedKeyUsage binds the whole chain (CYRIUS-2026-0026); a TLS 1.3 Ed25519 signature must be exactly 64 bytes; libssl's session-cache mode really sets (SSL_CTX_ctrl); a failed libssl handshake stays failed; libssl-only verbs never touch a native ctx; an accepted socket is blocking on every target; a PEM private key (a server's, or a native client's own) is decoded once per process per distinct key text, not on every accept; plain-socket writes never raise SIGPIPE (CYRIUS-2026-0025). The authority is cyrius docs/development/lib-tls-contract.md"
 category = "cyrius"
@@ -1123,9 +1156,12 @@ DEADLINE. `tls_set_deadline(ctx, clock_now_ns() + ns)` (6.6.13), set between `*_
 `*_complete`, bounds the handshake and every later read and write (`TLS_ERR_TIMEOUT`, ctx
 failed). A real per-call bound on Linux, macOS and — since 6.6.14, native TLS over Winsock —
 Windows, where a bounded write leaves the socket BLOCKING (FIONBIO cannot be read back). Checked
-only between calls: a custom transport, a Windows HANDLE that is not a socket. ⚠ agnos: a write
-can overshoot by one ~8 s `sock_send` (gotchas
-`agnos_is_an_x86_host_that_is_not_linux_and_the_predefines_do_not_say_so`, item 4).
+only between calls: a custom transport, a Windows HANDLE that is not a socket. agnos (6.7.11): on an
+agnos 1.57.13+ kernel each send call is handed the time LEFT as its `sock_send_dl`#109 ceiling, so a
+write under a deadline ends at the deadline; the first socket send in a process issues one zero-length
+#109 probe (cached). Only a kernel before 1.57.13 still overshoots, by one ~8 s `#48` stall (gotchas
+`agnos_is_an_x86_host_that_is_not_linux_and_the_predefines_do_not_say_so`, item 4). Verified on the
+fake kernel only.
 
 SERVER IDENTITY (the client side). The host is classified once, for both backends
 (`lib/tls_hostid.cyr`). An IP literal matches iPAddress SANs only. A DNS name matches dNSName

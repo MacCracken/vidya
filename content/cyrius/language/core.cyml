@@ -1,6 +1,13 @@
 # Cyrius — Core Reference
 # Overview, syntax, compiler architecture, dev loop, current limitations,
 # porting guide, stdlib catalog.
+# 2026-10-14 at v6.7.11: overview version/size line re-stamped (cycc 2,223,320 B, .text
+# 2,003,672 from readelf; cycc-native-aarch64 2,083,752 B; dead-code floor 52 fns / 10,597 B;
+# modules 32 — +frontend/lex_attr.cyr; .tcyr / crossos / lib / programs / shell-gate counts,
+# api-surface and heapmap.sh's 123 regions DERIVED on the 6.7.11 tree; check.sh / self_compile /
+# cross-OS from the 6.7.11 release gate, GREEN 2026-10-14); type_names_v6616 (a parameter's type grammar, the checked
+# Vec<T> element, the return-type set); known_limitations (22: the trait-default pair method;
+# 20: one int + f64 mix warns once).
 # 2026-10-13 at v6.7.10: overview version/size line re-stamped (cycc 2,114,376 B, .text
 # 1,900,296 from readelf; modules 31, .tcyr / crossos / lib / programs / shell-gate counts
 # and heapmap.sh's 123 regions DERIVED on the 6.7.10 tree; check.sh / self_compile /
@@ -71,28 +78,36 @@ THE COMPILER BINARY:
 - Windows PE32+ self-hosts natively byte-identical (`cycc_win.exe`
   on Windows 11 produces output matching Linux cross-build
   byte-for-byte).
-- 31 compiler modules (frontend lex/lex_pp/parse +
+- 32 compiler modules (frontend lex/lex_attr/lex_pp/parse +
   parse_{cov,ctrl,decl,expr,fn,types}, frontend/ts/{lex,parse},
   backend/{x86,aarch64,macho,pe,cx,js,common},
   common/{heap_regions,util,ir,syscall_xlat}) + 7 per-target main
   forks (derive: `find src -name '*.cyr' | grep -v /main | grep -v
-  version_str | wc -l`; it read 28 at 6.6.19).
-- As of 6.7.10 (2026-10-13, the release in flight; 6.7.9 is the
-  last tag): `cycc` (the binary name, forever; the version is
-  `cycc --version` = 6.7.10) self-hosts byte-identical at
-  2,114,376 B (.text 1,900,296), +56,640 B over 6.7.9's
-  2,057,736; 573 .tcyr (276 in crossos/); 106 lib/*.cyr; 85
-  programs/*.cyr; 474 shell gate scripts under
-  `tests/gates/<bucket>/*.sh` in 8 buckets (some registered by
-  exact path in `programs/checks/main.cyr`, the rest driven from
-  `scripts/check.sh` — all of them run; a gate that CANNOT run
-  exits 77 and is a SKIP, never a pass, since 6.6.11); heap map
-  123 regions / 0 overlaps (`heapmap.sh`, 102 at 6.6.19). At the
-  6.7.9 release gate (2026-10-11): check.sh 471 of 471 shell gates,
-  0 failed, the 2 named agnos-parity SKIPs; api-surface 5,835;
-  self_compile 1,437 ms. (6.6.19: 1,586,184 B, 482 .tcyr, 372
-  gates, self_compile 923 ms — the v6.7.x language minor is where
-  the growth went.)
+  version_str | wc -l`; it read 31 at 6.7.10 — 6.7.11 added the pure
+  `frontend/lex_attr.cyr` the lexer and six tools include — and 28
+  at 6.6.19).
+- As of 6.7.11 (2026-10-14, release gate GREEN — the user tags;
+  6.7.10 is the last tag): `cycc` (the binary name, forever; the version is
+  `cycc --version` = 6.7.11) self-hosts byte-identical at
+  2,223,320 B (.text 2,003,672), +108,944 B over 6.7.10's
+  2,114,376; `build/cycc-native-aarch64` 2,083,752 B (0.94x — the
+  pre-commit hook's ARM bound is 1.10x `build/cycc` since 6.7.11);
+  dead-code floor 52 fns / 10,597 B (x86, unchanged); 589 .tcyr
+  (291 in crossos/); 106 lib/*.cyr; 85 programs/*.cyr; 499 shell
+  gate scripts under `tests/gates/<bucket>/*.sh` in 8 buckets (some
+  registered by exact path in `programs/checks/main.cyr`, the rest
+  driven from `scripts/check.sh` — all of them run; a gate that
+  CANNOT run exits 77 and is a SKIP, never a pass, since 6.6.11);
+  heap map 123 regions / 0 overlaps (`heapmap.sh` on the 6.7.11
+  tree — 6.7.11 adds no region; 102 at 6.6.19); api-surface 5,850.
+  At the 6.7.11 release gate (2026-10-14, on 0601aff4): check.sh 503
+  of 503 shell gates, the driver 131 of 131, the 2 named agnos-parity
+  SKIPs; ecb · ach · cass · pi SELFHOST_OK + LIBTEST_OK; seed →
+  cybs → cycc byte-identical; self_compile 1,526 ms (same-box A/B
+  6.7.10 1,437 → 6.7.11 1,514 ms). (6.7.10: 478 gates, 1,529 ms;
+  6.7.9: 2,057,736 B, self_compile 1,437 ms; 6.6.19:
+  1,586,184 B, 482 .tcyr, 372 gates, self_compile 923 ms — the v6.7.x
+  language minor is where the growth went.)
   ⚠ DERIVE the gate count with
   `find tests/gates -name '*.sh' | wc -l`; it has been wrong in
   three separate docs from being incremented by hand. Same for
@@ -487,8 +502,10 @@ RULES:
     names BY NAME — `s: Str` in a unit without lib/str.cyr is the by-name
     handle the param ABI always took.
   - A return type keeps its set: a struct, i8..i64, f64, a vector,
-    Result / Option / Tagged / cstring. `fn f(): u8` (or f32, bool, Vec,
-    an enum) is `type 'u8' cannot be a fn return type` — return an i64.
+    Result / Option / Tagged / cstring (6.7.x added bool, a tuple, `dyn`
+    and a generic's type parameter — see 6.7.11 below). `fn f(): u8` (or
+    f32, Vec, an enum) is `type 'u8' cannot be a fn return type` — return
+    an i64.
     Its `<..>` is skipped with it: `fn f(): Vec<i64>` is ONE error.
   - sizeof and a multi-value return element take no type arguments
     (`sizeof(Vec<i64>)`, `(Box<i64>, i64)` are `expected ')'`, as they
@@ -508,6 +525,24 @@ reach SLTYPE / SVTYPE / GFRS / GFRT / GLTYPE / pscale.
 If a downstream build newly fails with `unknown type`, the annotation names
 nothing: a typo, a missing include, or a C type (`ptr`, `usize`). Fix the
 annotation — or drop it (an unannotated var is an i64).
+
+6.7.11 — THREE POSITIONS READ WHOLE:
+  - A fn PARAMETER's type (ARG-3, D34) is read by the trait-signature grammar plus a bare `*fn`: any number of `*`,
+    then `u128`, a tuple, `*fn( .. )` with an optional `: T`, a bare `*fn`, or a name with its `<..>`. `**T` /
+    `***T` (step 8) and `cb: *fn(i64): i64` parameters compile; a non-type token (`a: 5`, `a: +`, `a: "s"`, `a:`,
+    `cb: fn(..)` without `*`) is refused "expected a type for parameter 'a', got …", once, no cascade (they were
+    silently ignored); names inside `*fn(..)` are checked. Still open (filed): `*pp` of a `**T` is an untyped word.
+  - A `Vec<T>` ANNOTATION's element (GF-7, D9) is read as the field form reads it in every annotation position
+    (local, both global zones, parameter, `*Vec<T>` / `**Vec<T>`, `*fn(Vec<T>)`, `Vec<Vec<T>>`, `sizeof(Vec<T>)`): a
+    struct / union, an integer or float, bool, cstring, Result / Option / Tagged, an enum, Vec, or a type parameter
+    in scope. Refused by name: a tuple, an unknown name (`Vec<nosuchtype>` compiled through 6.7.10 — the brackets
+    were unread text), a vector, a slice, u128, a POINTER element (`Vec<*Pt>` — write `Vec<i64>`, the handle holds
+    words either way), a non-type token, a second argument, a zone global's element declared below it. Still unread
+    (filed): a `Vec<..>` as a type argument, a multi-value element, a trait member's parameter, a field's nested
+    `Vec<Vec<..>>`. (`sizeof(Vec<i64>)` is a handle's 8 — sizeof has taken `T<..>` since 6.6.17, so the RULES
+    line above saying `expected ')'` is stale for every generic type.)
+  - THE RETURN-TYPE SET (GF-10) as accepted today: a struct, i8..i64, f64, a vector, Result / Option / Tagged /
+    cstring, `bool`, `(T1, T2[, T3])`, `dyn Trait`, and a generic fn's first or second type parameter.
 
 [[entries]]
 name = "compiler_architecture"
@@ -732,6 +767,10 @@ CURRENT LIMITATIONS (active — work around these):
     `var a = f64_from(3)` is an integer, so annotate `: f64`
     (cycc warns `integer arithmetic with an f64 right operand`).
     See features.cyml `f64_named_type_and_operators` (PARSER NOTE).
+    Since 6.7.11 ONE integer + f64 mix warns ONCE, however far its
+    result is carried (`a + d + d` reports the first link only), and
+    an integer constant passed to an `f64` / `f32` PARAMETER warns
+    too (`f(3)` keeps 3's bits — a subnormal; write `3.0`).
 
 21. STRING LITERAL → `Str` COERCES ONLY AT A `: Str` PARAM: passing
     a bare `"..."` to an UNTYPED param hands over a raw cstr
@@ -741,6 +780,14 @@ CURRENT LIMITATIONS (active — work around these):
     Shipped undetected for ~a year across 11 `lib/fs.cyr` fns
     (fixed v6.4.72). See field_notes/language/semantics_runtime.cyml
     `string_literal_to_str_coercion_is_annotation_only`.
+
+22. A `: stack` PAIR METHOD INHERITED FROM A TRAIT'S DEFAULT BODY
+    must have its trait and impl ABOVE every caller (filed, High;
+    6.7.11). Below a caller, `x.m()?` crashes and a single bind
+    keeps the TAG. A pair method an impl writes itself may sit above
+    or below its caller since 6.7.11. Related, also filed High: a
+    PARENTHESISED pair call (`var v = (f(7));`, `P { (f(7)), 3 }`)
+    escapes every pair check and `(f(7))?` crashes — never wrap one.
 
 GOTCHAS (expected behavior, not bugs):
 
@@ -901,7 +948,7 @@ patra    — SQL database (B-tree, WAL, transactions; bundle via `cyrius distlib
 sigil    — Ed25519, SHA-256/512, HMAC, HKDF, SHAKE-128/256, ECDSA + ECDH P-256 / P-384, X25519, AES-NI
 yukti    — Device abstraction (USB, optical, block, GPU via /sys/class/drm, network, udev)
 mabda    — GPU foundation via wgpu-native C shim
-sankoch  — Lossless compression (LZ4, DEFLATE, zlib, gzip)
+sankoch  — Lossless compression (LZ4 / LZ4F, DEFLATE, zlib, gzip, zstd, xz, zip, Brotli — its encoder since 2.8.4)
 sandhi   — Service-boundary stdlib (HTTP client + server / TLS policy / routing / discovery)
 bayan    — Data formats + big-int (json/toml/cyml/csv/base64/bigint/u128)
 ganita   — Linear algebra + advanced math
