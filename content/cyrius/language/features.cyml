@@ -159,6 +159,22 @@
 # native_region_exemption_v6612 (the renumber warning, DW-1), darwin_concurrency_syscall_wrappers_v6543 (1329),
 # windows_directory_listing (`win_handle_under`), cx_tail_calls_and_cxvm_guest_traps_v6612 (4 MiB / 8 MiB, the guest
 # contract, D12 / D13). 112 entries (DERIVED at 6.7.12).
+# v6.7.13 (2026-10-16, Break 2 repair 3 — struct values): no new entry. Updated: struct_handle_line_and_struct_values_
+# at_every_size_v6710 (exact field bytes, zero-size structs, `*(&p)`, a struct never a word pointer — D5),
+# struct_copies_returns_and_operator_results_v6711 (`return &s;` is `return s;` — D4, `gp().n = 5;` — D8, `var q = G;`
+# — D6, `*p = mk(..)` refused — D26, f64 right operands cleared — D12, the leading f64 call),
+# struct_byval_int_pair_return_abi (ret2 refused, D25, ESTRUCT_PAIR_HI_SYNC gone), ret2_rethi (ret2 is the literal —
+# D20 – D22, `while (true)` — D27, the fall-off — D28 C, one declared type — D23 B, `callptr` destructures),
+# bare_return_in_fn, async_await_futures_v6311 (the async forward — 6.7.13's D24; `v: f32v8`), stack_enum_unboxed_payload_
+# variants_v6555 (parentheses transparent — D19; the inherited default below), tuples_v677, const_and_const_fn_v672 +
+# default_and_named_arguments_v677 (one error), field_chains_any_depth_and_call_result_fields_v6612 (D8, D16),
+# struct_field_widths (`&x.f` refused — D3), if_expression_v674 (D1), pointer_subscripts_v678 +
+# typed_pointer_step_is_sizeof_t_v6617 (`*pp` is a `*T` — D9; the typed-pointer warning — D18), derive_str_fields,
+# struct_value_operands_and_parentheses_v676 (6.7.11's D24 at every path — D13, D14, D17), struct_parameter_is_a_copy_v6616 (an
+# inline `Str` is its header's address — D7), typed_simd_value_type_abi (vector receives, arguments and dereferences —
+# D29 – D34, D40), f32v8_avx2_256bit_simd (32 bytes), generics_monomorphization_v639_v6310, closures_v637_v638 (D35 A,
+# narrow captures, captured vectors), struct_argument_type_checked_v673 (D5, D33), dyn_v678 (D15, D17). 112 entries
+# (DERIVED at 6.7.13).
 
 [[entries]]
 name = "byte_array_literal"
@@ -505,8 +521,10 @@ SEMANTICS:
     `#derive(accessors)` fns (u8..u32 getters zero-extend, an f32 getter returns the
     binary32 bits) follow the layout; code that reached such a struct BY HAND does not —
     re-check `load64(p + 8)` for a second field, a literal size, a wire / file format
-    written with `sizeof`, and `load64(&s.f)` on a narrow field (it now reads the next
-    fields too). PACKED MEANS UNALIGNED: a `u32` / `f32` after a `u8` sits at offset 1. A
+    written with `sizeof`, and an 8-byte load at a narrow field's offset (`load64(&s + off)`
+    now reads the next fields too). `&x.f` itself is NOT an expression: it is refused by name
+    since 6.7.13 (D3 (b), ST-8) — write `load64(&s + off)` at the field's offset, or reach the
+    field through a `*T` (`var p: *S = &s; p.f`). PACKED MEANS UNALIGNED: a `u32` / `f32` after a `u8` sits at offset 1. A
     plain field read or write is fine on every target; an atomic or a futex word needs its
     natural alignment — declare it first or pad explicitly (`_pad: u8; _pad2: u16;`). A
     struct redefined with another narrow KIND of the same width (`i8` vs `u8`, `i32` vs
@@ -820,7 +838,7 @@ IMPLEMENTATION:
 
 [[entries]]
 name = "ret2_rethi"
-description = "Return two values via rax:rdx register pair"
+description = "Return two values via rax:rdx register pair; since 6.7.13 `ret2(a, b)` is `return (a, b);` spelled as a builtin, judged by every rule the literal is"
 category = "cyrius"
 ---
 SYNTAX:
@@ -892,7 +910,8 @@ SINCE 6.7.11 (RET-1 .. RET-4) — the value counts are judged on the PRODUCER si
   - THE ONE-VALUE PROOF (6.6.17) also covers a body ending in `loop { }`, `while (1) { }` or
     `do { } while (1);` whose block holds a `return` and has no `break` that leaves it:
     `var a, b = one(1);` from such a fn is "binds 2 names, but 'one' returns 1 value". A loop a
-    `break` can leave, and `while (true)`, are not judged.
+    `break` can leave is not judged. (`while (true)` / `do { } while (true);` were not judged either
+    through 6.7.12; since 6.7.13 they count as the `1` spellings — see below.)
   - AN UNDECLARED fn whose every `return` is `(..)` of ONE arity, and whose body is left only
     through them, HAS that count: a destructure, a tuple capture or `a, b[, c] = f();` binding
     another count is refused — "binds 3 names, but 'dm' returns 2 values", "cannot capture 'dm'
@@ -904,13 +923,47 @@ SINCE 6.7.11 (RET-1 .. RET-4) — the value counts are judged on the PRODUCER si
     `return p;` of a struct, `return;`, `return (5);`, another arity, a one-value / struct / vector /
     dyn callee, the tail call too — is "'f' returns 2 values - return (a, b)": it filled only the
     first register and the caller's `b` read whatever an earlier call left. The rule is 6.7.7 B4's
-    "a struct return is not multiple values", on the producer side.
+    "a struct return is not multiple values", on the producer side. Since 6.7.13 it also covers an
+    ASYNC forward: in an async fn not declared multi-value, `return h(..);` of a multi-value call is
+    refused (6.7.13's D24, async_await_futures_v6311).
   - A STRUCT'S WORDS ARE ITS RETURN REGISTERS: `var a, b = f();` from a 9-16 B struct fn binds its two
     words; three names from 9-16 B ("whose 2 words are its return registers - bind 2 names"), a
     struct over 16 B ("which is not in registers - bind it to one name") and two names from 8 B or
     less or a `Str` ("returns 1 value") are refused, judged by the DECLARED return.
   - An `async fn` returning several values is refused (async_await_futures_v6311).
   Gates and the full table: the guide § Multi-value returns. CHANGELOG [6.7.11] (RET-1 .. RET-4).
+
+SINCE 6.7.13 (MV-9 .. MV-18; the user's D20 – D23, D27, D28) — `ret2` is the literal, and the edges are defined:
+  - `while (true) { }` and `do { } while (true);` count as the `1` spellings (`true` is the bool literal 1, D27): a
+    one-value fn ending in one is refused "binds 2 names, but 'one' returns 1 value" against `var a, b = one(1);`, and
+    an undeclared `(a, b)` fn ending in one is counted. A loop a `break` leaves is still not judged.
+  - `ret2(a, b)` IS `return (a, b);` SPELLED AS A BUILTIN, and every rule for the literal applies to it:
+      outside a fn body (top level, a top-level block, a global's initializer)  "ret2 outside a fn body" (D20)
+      in a fn declared `: (T1, T2, T3)`                                          "'f' returns 3 values - return (a, b, c)" (D21)
+      in a fn declared `: S` (a named struct, any size)                          "a fn returning the struct `S` returns that
+                                                                                  struct — `ret2` writes two values" (D22)
+      in an async fn                                                             refused since 6.7.11
+    Each was a silent wrong value or a hang (outside a fn x86_64 / PE ran on past it, aarch64 / cx hung; the third
+    value was stale; a struct fn got 0s over 16 B). A closure's own `ret2` and an `#inline` fn's are THAT fn's (an
+    `#inline` fn's `return ret2(..);` replayed inside a 9-16 B struct fn compiles — the callee returns, not the
+    struct fn; listed for the user's confirmation, 6.7.14). ⚠ Not judged yet: a fn declared to return a VECTOR —
+    `ret2` there compiles and returns no vector (filed, 6.7.14).
+  - THE FALL-OFF RULE (D28 C): a fn declared `: (T1, T2[, T3])` whose body reaches its `}` returns 0 for EVERY value,
+    the pair to a bool fn's `false` (6.7.3). 6.7.11's D17 refuses a bare `return;`; D28 defines the fall-off. Before,
+    the caller read stale registers. No diagnostic: a forgotten final `return` gives 0s. An `#inline` replay of such a
+    fn falls off to 0s too.
+  - A SYNC FN DECLARED ONE TYPE THAT RETURNS SEVERAL VALUES IS KEPT (D23 B): `fn g2(): i64 { return (1, 2); }` (or
+    `ret2(1, 2);`) compiles — the declared type types EACH value (the v6.5.21 `: f64` tuple box, 6.7.3's bool element
+    0, 6.7.7 R16i); pass 1 counts a `return (a, b)` body, so three names and a 3-tuple capture are refused; a one-name
+    bind keeps the first value. `: (T1, T2)` is the recommended spelling. ⚠ A `ret2` body is NOT counted (ret2 is an
+    expression builtin, not a return statement), so `var a, b, c = g2();` reads a stale third register (filed,
+    6.7.14).
+  - DESTRUCTURE: the "needs a call" list includes `callptr(fp, ..)` since 6.7.13 (MV-6; the count is not checked, as
+    for `fncallN`). ⚠ `var t: (i64, i64) = callptr(..)` is still refused "not a tuple" (filed, 6.7.14) — use
+    `fncall1(fp, ..)` (lib/fnptr.cyr), which takes both forms.
+  Field notes: field_notes/language/semantics_runtime.cyml multi_value_returns_since_6_7_13;
+  field_notes/compiler/gotchas.cyml multi_value_fall_off_lands_at_the_fn_end_and_the_replay_end_v6713. CHANGELOG [6.7.13]
+  (MV-1 .. MV-19).
 
 [[entries]]
 name = "continue_in_for_loops"
@@ -943,7 +996,7 @@ IMPLEMENTATION:
 
 [[entries]]
 name = "derive_str_fields"
-description = "#derive(Serialize) — auto-generate JSON serializer/deserializer for structs (i8..i64, u8/u16/u32, f64, f32, bool, Str, cstring, Vec<T>, nested; f64 v6.3.40; u8..u32 / f32 / cstring fields and a Str decode that unescapes everything into a fresh copy since 6.7.10; u64 unsupported) A nested derived struct field decodes in the scanner too since 6.7.11."
+description = "#derive(Serialize) — auto-generate JSON serializer/deserializer for structs (i8..i64, u8/u16/u32, f64, f32, bool, Str, cstring, Vec<T>, nested; f64 v6.3.40; u8..u32 / f32 / cstring fields and a Str decode that unescapes everything into a fresh copy since 6.7.10; u64 unsupported) A nested derived struct field decodes in the scanner too since 6.7.11; a scalar field holding an object / array is walked whole since 6.7.13."
 category = "cyrius"
 ---
 `#derive(Serialize)` before a struct auto-generates
@@ -1048,8 +1101,12 @@ Str DECODE FIX (decision 9):
     struct is decoded through `<T>_from_json_str` (an OBJECT value only; `null` or a number leaves 0);
     unknown keys and nested values are walked whole (the shared depth- and string-aware skip); an
     accessors-only, plain or later-derived struct and a derived ENUM field are skipped. Through 6.7.10 the
-    scanner did not decode a nested #derive'd struct field and lost every field after it (left 0). Still
-    open: a SCALAR field holding an object derails the scan — use T_from_json(bayan_json_parse(..)) there.
+    scanner did not decode a nested #derive'd struct field and lost every field after it (left 0).
+  6.7.13 (ST-4) — A SCALAR FIELD'S VALUE IS WALKED WHOLE: in `T_from_json_str` a scalar field (integer, f64 /
+    f32, bool, Str, cstring) holding an object, an array or a mismatched string gets what its type can take
+    (0 for an object; a cstring its text) and the scan resumes AFTER the value — the scanner and the pairs
+    form agree. Through 6.7.12 the scalar arms stopped at the object's `{` and the scan then read its inner
+    keys as the outer struct's (the 6.7.11 advice "use the pairs form there" is withdrawn).
   Gates: tests/gates/frontend/derive_cstring_field.sh, tests/tcyr/derive/derive_serialize_narrow.tcyr,
   tests/tcyr/derive/derive_serialize_cstring.tcyr. CHANGELOG [6.7.10] (B7-3, B7-4, B7-4b).
 
@@ -2188,11 +2245,61 @@ ON WIN64 EVERY VECTOR-RETURNING CALL GETS ITS HIDDEN POINTER (FX-2): a discarded
 `var x = callptr(&f, ..)`, an argument to an untyped parameter, a method, an operator fn — at top level too
 (storage: a frame temporary, or a hidden global at top level; the value, where one is read, is lane 0). WAS:
 exit 5, or `s.mv(..)` overwriting `s`.
-Still open (filed, 6.7.13): a vector call result or `*pv` into `*Pt` / `*i64`; a vector local into a by-value
-struct; a METHOD or explicit-instance call result into `*V` (lane 0 still — bind it to a local first);
-`rd(*&b)` / `rd(**ppb)`; a captured vector into another pointer kind (runs, unrefused); `lanes(mkv(..))` into
-a value-form `x: f64v2` (PE exit 5). Field notes: field_notes/compiler/gotchas.cyml vector_addresses_typed_copies_and_zero_as_none_v6712
-(the step word's vector field; the Win64 hidden pointer at every call site). CHANGELOG [6.7.12] FX-1, FX-2.
+6.7.12's open list (a vector call result or `*pv` into `*Pt` / `*i64`; a vector local into a by-value struct; a
+METHOD or explicit-instance result into `*V`; `rd(*&b)` / `rd(**ppb)`; a captured vector into another pointer kind;
+`lanes(mkv(..))` into a value-form `x: f64v2`) closed in 6.7.13 — below. Field notes:
+field_notes/compiler/gotchas.cyml vector_addresses_typed_copies_and_zero_as_none_v6712 (the step word's vector field;
+the Win64 hidden pointer at every call site). CHANGELOG [6.7.12] FX-1, FX-2.
+
+6.7.13 — VECTOR VALUES: RECEIVES, ARGUMENTS AND DEREFERENCES (the user's D29 – D34, D40; CHANGELOG [6.7.13] VC-1 ..
+VC-12, INT-1):
+  - A VALUE-FORM VECTOR LOCAL takes, besides a local of its type and a call declared to return it (by name, wrapped,
+    `fncallN(&f, ..)`, `callptr(&f, ..)`): an EXPLICIT INSTANCE `mkg<i64>(..)` (a call by name, VC-3); a METHOD
+    `s.mv(..)` on a single name declared `: V` (D29; Win64: the local's address is the method's hidden result pointer,
+    before `self`); and a DEREFERENCE `*p` of a `*V` — `var v: f64v2 = *p;` / `v = *p;` copy the 16 / 32 bytes (D34;
+    `p` a local, parameter, capture, field, global, `: *V` call, `p + n`, `(*p)`, `**pp`, `*&w`). A `*q` of another
+    vector type is refused "cannot copy 'q' into a variable of a different struct/vector type: 'v'" (same-size ones
+    too).
+  - An UNANNOTATED `var v = callptr(&f, ..)` / `fncallN(&f, ..)` (the whole initialiser, `f` declared `: V`) is a V
+    local (D29) — it was one word; through a callee in a variable it stays a word. `var v = mkg<i64>(..)` is the V
+    local too (VC-3). `return callptr(&f, ..)` / `return fncallN(&f, ..)` from a `: V` fn is accepted (D29; Win64
+    through a temporary copied into the result pointer).
+  - A VECTOR ANNOTATION IS NEVER DROPPED (VC-3): a mismatched or scalar destination of a vector call — an explicit
+    instance included — is refused "vector return type does not match the declared type" / "… the assigned
+    variable". Through 6.7.12 `var v: f64v2 = mkg<i64>(..)` silently became a one-word local.
+  - The value-form local's refusal names its sources: "a value-form vector local is initialised only from a local of
+    its type, a call declared to return it (by name, a method, or fncallN / callptr with the callee written `&f`) or
+    a dereference of a pointer to its type (`*p`) - got `X`"; the out-pointer tail only for a callee held in a
+    variable; a call to a MISSING fn is the undefined-function diagnostic's (`undefined function 'f64v2_splat'` — add
+    `include "lib/simd.cyr"`) (VC-12).
+  - A VALUE-FORM PARAMETER TAKES A VECTOR CALL RESULT (D30, VC-6): `lanes(mkv(4, 2))`, `f64v2_add(a, mkv(3, 4))`, a
+    method, an explicit instance, `callptr(&f, ..)` — SysV / AAPCS64 / cx through a frame temporary loaded after the
+    integer arguments, Win64 the temporary's address. A call of a vector the local rule refuses is refused by name;
+    at top level there is no frame (D40). Anything else that is no local is refused once: "a value-form vector
+    argument to 'lanes' is a local of its type or a call declared to return it (..) - got `X`". On Win64 a WORD is
+    refused there too — a scalar, a pointer word holding a vector's address (`lanes(pv)`), a captured vector — where
+    the by-address ABI ran two of those shapes through 6.7.12 (listed for the user's confirmation, 6.7.14); `&w` is
+    still accepted on Win64 only (filed). An inline-replayed callee given `callptr(&f, ..)` / `fncallN(&f, ..)`
+    (`la(callptr(&mkv, 4, 2))` with a small `fn la(x: f64v2)`) read 2 where 42 is right on x86_64 until the
+    integration fixed the frame high-water (INT-1; field_notes/compiler/gotchas.cyml
+    inline_replay_indirect_call_spill_below_the_frame_v6713).
+  - A VECTOR VALUE INTO ANOTHER POINTER KIND OR A BY-VALUE STRUCT (D31, VC-7): a call result (any source) and `*pv`
+    into `*S` / `*i64` / `*u8` / `**T` are refused with 6.7.12's D27 words naming the callee or `*pb`; any vector
+    into a by-value struct parameter (any size) is "cannot pass 'b' to a by-value struct parameter in a call to 'bv'
+    - a vector is not a struct". A METHOD result into `*V` passes a temporary's address (VC-5). A CAPTURED vector
+    meets the same rules (D32, VC-8; into its own `*V` it passes the closure's copy). A STRUCT into a `*V` parameter
+    is refused "cannot pass 's' to a parameter that is a pointer to a vector type …" (D33, VC-9); `&s` converts.
+  - `rd(*&b)` / `rd(*(&b))` pass `&b` (VC-11; `b` a local, parameter, capture or global) while `&b` itself stays a
+    byte pointer (`&b + 8` is lane 1); `rd(**ppb)` passes `*ppb` (D9 (a)).
+  - Still open (filed, 6.7.14): Win64's 16-byte value-form argument unchecked; on Win64 `&w`, a parenthesised
+    argument, a struct local and an identifier-led expression into a value-form parameter compile (the last reads
+    garbage), and `lanes(*pb)` faults; `ri(**ppb)` / `ri(*GPV)` / `ri(*&b)` into a word pointer fault; an
+    unannotated `var v = s.mv();` and `var v = *p;` bind ONE word (annotate them); `return s.mv();` / `return *p;`
+    are refused; a struct FIELD into `*V` is accepted; a captured vector into a value-form parameter is refused on
+    every target (a question); a struct named like a vector type (`struct f32v8 { .. }`) is the vector as a
+    parameter type and a struct as a local. Field notes: field_notes/compiler/gotchas.cyml
+    vector_values_receives_arguments_and_dereferences_v6713; field_notes/language/semantics_runtime.cyml
+    vector_pointers_step_vectors_and_windows_value_form_v6713.
 
 [[entries]]
 name = "f32v4_packed_single_simd"
@@ -2425,10 +2532,17 @@ lib/simd.cyr WRAPPERS (pointer-form first; value-form deferred):
 
 PARAMETERS (6.7.12): `p: *f32v8` is a `*V` — `r8(e)` with a vector local
   passes `&e` (it passed lane 0 and faulted through 6.7.11; see
-  typed_simd_value_type_abi). The value-form `v: f32v8` PARAMETER still
-  receives only its first word on every target (filed, 6.7.13:
-  2026-10-15-value-form-f32v8-parameter-receives-one-word.md) — pass
-  `*f32v8` until then. CHANGELOG [6.7.12] FX-1.
+  typed_simd_value_type_abi). CHANGELOG [6.7.12] FX-1.
+  6.7.13 (VC-2): a value-form `v: f32v8` PARAMETER is its 32 bytes — two
+  XMM (SysV), two V (aarch64), four cx slots, a 32-byte copy-in on Win64.
+  Through 6.7.12 it was ONE integer word (lane 0's bits; every read past
+  it 0, no diagnostic, on every target — `f32v8` had no parameter class).
+  Its argument is an f32v8 local or a call declared to return one; an
+  f64v4 local is refused ("value-form SIMD arg type mismatch (callee
+  expects f32v8)") and vice versa. ⚠ An ABI change for a C / `fncallN`
+  caller: it now meets f64v4's convention (two vector registers, by
+  pointer on Win64). `async fn f(v: f32v8)` is refused, as every
+  value-form vector parameter is. CHANGELOG [6.7.13] VC-2.
 
 [[entries]]
 name = "overload_dispatch_pointer_vs_value"
@@ -2532,7 +2646,13 @@ multi-value second slot, so a `return p;` read by `var a, b = f();` /
 the v5.10.45 stubs: no program returning or receiving a 9-16 B
 struct built for cx ("cx: int-class 16B struct pair-return ABI not
 supported"). aarch64 returns the pair in x0:x1 with the multi-value
-second slot in x2 and syncs the two (6.7.7, ESTRUCT_PAIR_HI_SYNC).
+second slot in x2. 6.7.7 synced x1 from x2 (ESTRUCT_PAIR_HI_SYNC) for a
+multi-value landing read as the struct pair; 6.7.13 REMOVED that sync
+from all three backends (MV-12) — nothing that compiles lands a
+multi-value return in a 9-16 B struct fn any more (the tuple literal
+is refused since 6.7.11, `ret2` since 6.7.13). The one crossing left
+runs the other way: a `return p;` read as two values, where
+EFLLOAD_STRUCT_INT_PAIR writes x2 as well as x1.
 
 PRE-v5.10.45 (the bug):
     Pre-fix, ANY 9-16B struct return returned only the LOW
@@ -2570,10 +2690,17 @@ CONSUMER POV:
       returned u's bytes.
     - `return E;` with E a `*S` (local, parameter, global, `: *S` call / method, field, arithmetic,
       `*E`) returns a COPY of the pointee in all three classes (from an 8 B fn it returned the address).
-      `return &s;` is untyped (filed as a decision).
+      `return &s;` was untyped through 6.7.12 (refused in other words by the pair and retptr classes);
+      since 6.7.13 it is `return s;` in every class (D4 (a), ST-10) — `&u` of another struct refused by
+      name, `return &h;` of a handle still its slot (filed).
     - `return (a, b[, c]);` in a fn declared `: S` (a named struct, any size) is refused — "a fn returning
-      the struct `P` returns that struct — `(a, b)` is a tuple, another type"; `ret2(a, b)` there still
-      compiles (filed).
+      the struct `P` returns that struct — `(a, b)` is a tuple, another type"; since 6.7.13 `ret2(a, b)`
+      there is refused in every class too, "a fn returning the struct `P` returns that struct — `ret2`
+      writes two values" (D22, MV-11). (It returned 0s over 16 B, dropped the second value at 8 B, and was
+      right at 9-16 B only by coincidence.)
+    - Since 6.7.13 `return mk(..);` of a MULTI-VALUE call from a struct fn of 8 B or less is refused, "is
+      not returned as struct 'P1' - bind it first" (D25, MV-14); the 9-16 B and over-16 B classes already
+      refused it.
     - In a 9-16 B struct fn a returned call must END the value: `return mk2(1) == p;` is refused by name;
       `return mk2(1) + p;` (a dispatch) and `return mk2(1);` are unchanged.
     See struct_copies_returns_and_operator_results_v6711. CHANGELOG [6.7.11].
@@ -2611,8 +2738,9 @@ CONSUMER POV:
 level and in a top-level block (an `if`, a loop, a `switch` case), as `break` / `continue` / `defer` / `?` have been
 since 6.6.7. A program exits with `syscall(60, v)`, by running off its end, or through `fn main`'s auto-call. Through
 6.7.10 it compiled and did not return: its jump was recorded into a fn's patch list from outside every fn and never
-patched — x86_64 / PE fell through (`e9 00000000`), aarch64 / cx branched to itself and hung. `ret2` outside a fn is
-still open (filed).
+patched — x86_64 / PE fell through (`e9 00000000`), aarch64 / cx branched to itself and hung. Since 6.7.13 `ret2(..)`
+outside a fn body (top level, a top-level block, a global's initializer) is refused by name too, "ret2 outside a fn
+body", once (D20, MV-9) — it compiled and never returned through 6.7.12, with the same fall-through / hang.
 
 [[entries]]
 name = "enum_ident_array_size"
@@ -3810,12 +3938,26 @@ CROSS-REF: field_notes/compiler/gotchas.cyml
 
 6.7.11: a captured name is not assignable in a closure — `x = v` / `x OP= v` on one is "'x' is captured by value; a
 captured name is not assignable in a closure", one error at `x` (it was "undefined variable"); copy it into a local
-(`var y = x;`). A captured struct's FIELD (`h.n += d`) writes the closure's own copy (ST-17, RET-10). Names the body
+(since 6.7.13 the fix-it reads `var x_l = x;`, RC-15). A captured struct's FIELD (`h.n += d`) writes the closure's own copy (ST-17, RET-10). Names the body
 declares are its own (GF-14): a `for … in` variable (after its start bound or collection, for the loop only — a
 range's END bound reads it), a local `const`, a destructure's second and third names (after the right-hand side).
 A captured SLICE is a copy (GF-15): `s.len` / `s.ptr` read the captured copy, any other field is refused as on a
-local, a store into the copy (`s.len = n`) is refused by name, `s[i]` stays refused. ⚠ Still open (filed, High):
-`var a = a + n` inside a closure shadows `a` too early — silently when a global has the name.
+local, a store into the copy (`s.len = n`) is refused by name, `s[i]` stays refused.
+
+6.7.13 (the user's D35 A; CHANGELOG [6.7.13] RC-12, RC-13, RC-14, VC-8):
+  - A DECLARATION'S OWN NAME BINDS AFTER ITS TAIL: `var a = a + n;`, `var a: i64 = a + n;`, a classic
+    `for (var a = a; ..)` header and a destructure's FIRST name read — and capture — the ENCLOSING `a` (a capture needs
+    lib/alloc.cyr, as any capture does); after the declaration `a` is the closure's own. Through 6.7.12 `a` was
+    shadowed too early: it read the new, uninitialised local — silently when a global had the name.
+  - A NESTED closure literal's parameters are its own: `|n| { var g = |m| m + 1; .. }` captures no enclosing `m`.
+  - A NARROW scalar local (`i8` .. `u32`) is captured as its VALUE, sign-extended for a signed type: a captured `i8`
+    -3 reads -3 (it read 253 — the env copy took the slot's whole 8 bytes, stale upper bytes included).
+  - A CAPTURED VECTOR follows the vector local's argument rules (D32): refused into another pointer kind, another
+    vector's `*V` or a by-value struct; into its own `*V` it passes the CAPTURED COPY's address (a write reaches the
+    copy, not the enclosing local). Into a VALUE-form parameter it is refused on every target (since 6.7.13 on Windows
+    too, where it ran; filed as a question) — copy it first: `var w: f64v2 = b; lanes(w)`.
+  - ⚠ Still open (filed, High): with a same-named GLOBAL, a write to a captured name (`y += d;`) compiles and writes
+    the GLOBAL while the closure's read sees the capture — never name a captured local like a global you also write.
 
 [[entries]]
 name = "generics_monomorphization_v639_v6310"
@@ -3965,6 +4107,11 @@ parameter binds T = S from a `*S` LOCAL only (`&G` infers i64 — filed as a dec
     `((b, 3))` binds nothing.
   The coverage map names the instances (`gen$f64`, `gen$.f64`). Field notes:
   field_notes/compiler/gotchas.cyml generic_instances_inference_and_the_frontend_remainder_v6711. CHANGELOG [6.7.11].
+6.7.13 (VC-3, VC-6): an EXPLICIT INSTANCE returning a vector (`mkg<i64>(..)`) is a call by name for every vector
+destination — a declaration, an assignment, an unannotated `var v = mkg<i64>(..)`, wrapped, `return`, a `*V` parameter,
+a value-form parameter. Through 6.7.12 the declaration silently dropped its vector annotation (a one-word local reading
+0 / 154 / 195). ⚠ Still open (filed, 6.7.14): a generic instance's `pp: **T` PARAMETER reads its pin without the
+binding — `*pp + 1` steps 8 and `take(**pp)` faults there (typed_pointer_step_is_sizeof_t_v6617).
 
 [[entries]]
 name = "async_await_futures_v6311"
@@ -4051,7 +4198,11 @@ tests/gates/frontend/coroutine_fnptr_and_completion.sh.
 declaration and at `return (a, b);` / `ret2(a, b)` in an undeclared async body, plain or coroutine:
 "`async fn g` returns 2 values, and a Future carries one i64 - return a pointer to a struct holding them"
 (or split the fn). `ret2(a, b);` as an expression statement is still a multi-value return (it returns from
-the fn it is written in). Still open (filed): an undeclared async fn FORWARDING a multi-value call.
+the fn it is written in). An async fn FORWARDING a multi-value call (`return h(..);`, h declared, counted, a method or a
+generic; wrapped too) was the open case through 6.7.12; since 6.7.13 it is refused at the call with the same text, in
+any async fn not declared multi-value — a `: i64`-declared one included (6.7.13's D24, MV-13; the declared case is listed for
+the user's confirmation, 6.7.14). And the value-form vector parameter refusal covers `v: f32v8` too since 6.7.13 (VC-2:
+`f32v8` had no parameter class before).
 
 [[entries]]
 name = "reserved_word_class_toknames"
@@ -4599,9 +4750,13 @@ RULES, all enforced or diagnosed:
   STRUCT-LITERAL ELEMENT is refused too ("bind both"): `P { f(7), 3 }`, `P { a: f(7) }`, a global's
   initialiser in either zone, a nested field's leaves; `P { f(7)?, 3 }` stores the payload. By the user's
   choice (D22, 2026-10-13) a PLAIN ARGUMENT receives the TAG — `is_ok(f())`, `g(f())` — and an operand
-  reads the tag (`f(7) == 0`, `f(7) + 1`): documented behaviour, not refused. ⚠ A PARENTHESISED pair call
-  (`var v = (f(7));`, `P { (f(7)), 3 }`) still escapes every pair check and `(f(7))?` crashes (filed,
-  High) — do not wrap a pair call.
+  reads the tag (`f(7) == 0`, `f(7) + 1`): documented behaviour, not refused. Since 6.7.13 (D19, MV-8)
+  PARENTHESES AROUND A WHOLE PAIR CALL ARE TRANSPARENT to every pair check: a wrapped one-slot store
+  (`var v = (f(7));`, `P { (f(7)), 3 }`) is refused "bind both", `(f(7))?` propagates and `return (f(x));`
+  forwards the pair — through 6.7.12 the wrap escaped every check and `(f(7))?` crashed. `g((f(7)))` still
+  receives the tag (6.7.11's D22). ⚠ Still open (filed, 6.7.14): an operand that starts with the call inside the
+  wrap, `var v = (f(7) + 1);`, keeps the tag silently, and `var a, b = (f(7));` is refused "needs a call" —
+  do not wrap a pair call: write `f(7)?`, `var t, v = f(7);`, or bind first.
 - **`?` propagates the pair** (v6.6.0), in expression position and as a statement; the Err path re-emits
   both halves. (v6.5.67 to 6.6.0 it was a diagnostic; before that it read the tag as a pointer.)
 - **`f` is any call spelling** (v6.6.16): `f(..)`, an explicit generic `g<T>(..)` and a method `p.m(..)`
@@ -4609,9 +4764,11 @@ RULES, all enforced or diagnosed:
   recognised: `?` crashed (rc 139), the single binds dropped the payload silently, and their destructure was
   "multi-value destructure needs a call" (field_notes/language/semantics_runtime.cyml
   `pair_callee_any_spelling_6_6_16`).
-- **A pair METHOD's `impl` may sit above or below its caller** (6.7.11, RET-6) — ⚠ except a method the
-  impl inherits from its trait's DEFAULT body (filed, High): keep that trait and impl above every caller
-  (below, `?` crashes and a single bind keeps the tag).
+- **A pair METHOD's `impl` may sit above or below its caller** (6.7.11, RET-6) — and since 6.7.13 (MV-2) a
+  method the impl inherits from its trait's DEFAULT body may sit below too (through 6.7.12 `?` crashed and a
+  single bind kept the tag there).
+- **A fn that calls a one-statement pair generic** (replayed inline) is not a pair fn itself (6.7.13, MV-3 /
+  MV-4: a `return` or `?` inside an inline replay belongs to the replayed callee, never to its caller).
 - **A `return f(..)` inside a closure body is the closure's** (v6.6.16): it no longer marks the enclosing
   fn as a pair fn (`closure_returns_belong_to_the_closure_since_6_6_16`).
 
@@ -5122,13 +5279,27 @@ REFUSED BY NAME:
 - at TOP LEVEL, for every return class — `var G = mk(3).n;` and the bare `mk(3).n;` get
   "'mk' returns a struct by value, and a struct result needs storage in a fn's frame — call
   it inside a fn";
-- an assignment to a result's field, `mk(3).n = 5;` — "cannot assign to a field of a call
-  result: the result is a temporary";
+- an assignment to a BY-VALUE result's field, `mk(3).n = 5;` — "cannot assign to a field of a
+  call result: the result is a temporary" (a `: *T` result's field is an lvalue since 6.7.13 —
+  below);
 - a field of a call that returns no struct — "cannot take a field of the result of 'sc': it
   does not return a struct".
 
 STILL NOT SUPPORTED (unchanged, as for a named struct): a method on a NESTED field —
 `mk(3).v.sum()`, like `b.v.sum()`, is `expected ';', got '.'`. Bind the field first.
+
+6.7.13 — A `: *T` CALL'S FIELD IS AN LVALUE, AND A KNOWN `&f` CALL TAKES THE CHAIN (D8 (a) ST-15; D16 RC-9):
+- `gp().n = 5;`, `gp().m += 5;` (the call runs once), `gpg<H>().n = 5;`, `o.gp().n = 5;` and
+  `h.get().b = 5;` store through the pointer a `: *T` call returns. A by-value result's field is
+  still "the result is a temporary". Still refused / open (filed): a `for` step `gp().n += 1`;
+  top-level `mk().n = 5;` reports two errors.
+- A call through `fncallN` / `callptr` whose callee is written `&f` (wrapped too) takes the chain a
+  free call's result takes: `fncall1(&mk3, 5).b`, `callptr(&mk3, 1).dbl().c`, a `*T` callee's
+  field, `fncall1(&gp, 5).b = 40;` (a store through, D8 (a)) and the statement
+  `fncall1(&mk3, 5).tot();`. At top level it is refused once, by name. A callee held in a
+  VARIABLE followed by `.name` is refused by name — "its callee is a value, not `&f`, so the result
+  is a word". Not yet (filed): `callptr(&gp, 5).b = 40;` (the statement-form store through
+  `callptr`) is "expected ';', got '='" — use `fncall1`.
 
 COMPILER NOTE: the new factor arm parses its own call and must clear the literal-fold flag
 AFTER the call, not before — see field_notes/compiler/gotchas.cyml
@@ -5579,6 +5750,21 @@ THE RULE (decided by the user, 2026-10-02):
   untyped `self`, `p: *T`, `Str` / `Result` / `Option` / `Tagged` (heap handles) and structs of
   8 bytes or less (values in a register) are unchanged.
 
+  6.7.13 — AN INLINE `Str` IS ITS HEADER'S ADDRESS (the user's D7 (1); CHANGELOG [6.7.13] ST-14, ST-14r):
+  an INLINE `Str` — `var t: Str = Str { .. }`, or an inline `Str` global — is its header's ADDRESS
+  wherever a `Str` value is taken: `f(t)` into `s: Str` (the stdlib's included), `fp(t)` into `p:
+  *Str`, `h = t`, and `var h: Str = t;` / `var h = t;`, which BIND h to t's header (no copy, no
+  allocation — a write through h changes t; to copy, `Str { t.data, t.len }` or `str_new(t.data,
+  t.len)`). `return t;` from a `: Str` fn, and a frame's `t` stored into a `Str` global / field /
+  literal element / through a `*Str`, are refused by name ("… would dangle (return a handle:
+  str_new(data, len))"); a global's and a capture's never are. Through 6.7.12 an inline `Str` passed
+  as a `Str` was its first word (the data pointer), so the callee read the string's bytes as its
+  header. NOT covered (filed, 6.7.14): `var t: Str;` with NO initialiser (its bare name, and a copy
+  of it, is still its first word — 6.6.16's pun, kept to D7's wording), untyped positions (an untyped
+  parameter, `fncallN`, `vec_push`, a tuple element, an if-expression branch: the data word — pass
+  `&t` there), and an escape through a bound handle (not refused yet: never return or store a handle
+  bound to a frame's inline `Str`).
+
 WHAT IT WAS (every release before 6.6.16): the parameter was the CALLER's struct. `bump(q)` twice
 gave 4 then 5 and left q.x at 5, for every argument form above; only a field argument inside a fn
 was copied (6.6.12, caller-side — top level had no frame for it). The guide documented the alias.
@@ -5715,6 +5901,32 @@ SCALAR (`u8` .. `i32`, local, global or parameter) is an INTEGER, never a pointe
 tests/tcyr/crossos/typed_pointer_step.tcyr, tests/gates/frontend/typed_pointer_warn_sign.sh axes
 10-11. Supersedes the step table in field_notes/language/semantics_runtime.cyml
 `typed_pointer_local_slot_v6616`. CHANGELOG [6.6.17] (b7).
+
+6.7.13 — `*pp` OF A `**T` IS A `*T` (the user's D9 (a), ST-19; VC-11): through a `**T` local, parameter, global,
+closure capture, field, `: **T` call, generic instance or `pp + n`, `*pp` is a known-`*T` producer like a name, a
+field or a `: *T` call — `*pp + n` and `*pp += n` step `n` elements of `T`, `*pp - *qq` is an element count, `var q:
+*T = *pp;` and `q = *pp;` are silent, and `**pp` through a narrow `T` (`**u8`, `**i32`, `**f32`) reads and writes the
+element at its width. A `***T`'s `*ppp` is a `**T` and its `**ppp` a `*T`. `*pp - q` with `q` of another element size
+(a `*u8`, or `&a`, a byte pointer) is refused "pointer difference of pointers with different element sizes; for a
+byte count subtract plain addresses (`var a = p;`)" — copy untyped (`var a = *pp;`) for byte arithmetic. Through
+6.7.12 `*pp` was an untyped word: `*(*pp + 1)` read 8 bytes one BYTE past the pointee, `**pp` read and wrote 8 bytes
+whatever T, `*pp += 1` added 1, and `var q: *i64 = *pp;` warned. AS AN ARGUMENT (VC-11), `**pps` of a `**S` is the
+struct: `take(**pps)` into a `*S` parameter (or a by-value S over 8 B) passes `*pps`; a `**Q` of another struct is
+refused by name; a vector's `rd(**ppv)` into a `*V` passes the pointer. A program names at most 126 distinct pointee
+types of a pointer to a pointer ("too many pointer-to-pointer pointee types (max 126)", an error, never a silent
+word); the pins are interned per STRUCT, so each struct counts (127 two-word structs through `**S` are refused —
+they compiled on 6.7.12; filed, Low). ⚠ Still open (filed, 6.7.14): a GENERIC instance's `pp: **T` parameter — `*pp
++ 1` steps 8 there and `take(**pp)` faults (the pin is read without the binding; a `**T` local of the instance is
+right).
+
+6.7.13 — THE TYPED-POINTER WARNING AT EVERY `*T` SITE, QUIET ON `0` (the user's D18 (a), RC-11; a diagnostic only —
+no binary changes): "assigning non-pointer to typed pointer" fires at every `*T` site — a declaration in a fn, after
+the first top-level statement and in the declaration zone (replayed and baked, `var p: *i64 = 3;` reported at its
+`;`), an assignment to a `*T` local or a `p: *T` parameter of a scalar `T` (`p = x;`, `p = load64(..);`), a
+`*Struct` local, a `*T` global. The literal `0` ALONE never warns (the null idiom, as the kind-0 compare-mix warning
+exempts 0): `var p: *T = 0;`, `p = 0;`, `G = 0;` are quiet at every site; `0 - 0` and `(0)` warn. Through 6.7.12 the
+zone and the local / parameter assignments were silent and `= 0` warned in a fn. ⚠ Known false positive (filed,
+6.7.14): a string literal into a `*u8` (`var s: *u8 = "abc";`, `t = "xyz";`) warns — the code is right.
 
 [[entries]]
 name = "method_chains_v6617"
@@ -5955,6 +6167,10 @@ const_fn_f64 (compile-time vs run-time BITS). CHANGELOG [6.7.2].
 per call site. A const fn's arity in a const context is its RUN-TIME arity (the parser's own parameter walker): a
 `Pair<i64, i64>` parameter is one parameter. A refused enum value moves past its expression (no cascade into the
 member loop).
+6.7.13 (MV-7): a refused const ANNOTATION — `const k: i64 = 3;`, "a const takes no type annotation: its type is its
+value's" — is ONE error at the `:`, locally, in a closure or const fn body and at top level; the const is still bound
+to its value. Through 6.7.12 the name was left unbound, so every read (and every const context it sized — an array
+size, `#assert`, an enum value, a case label) added "undefined variable 'k'".
 
 [[entries]]
 name = "bool_true_false_not_v673"
@@ -6058,6 +6274,13 @@ its DEREFERENCE does not — `*pu` and `(t)` are values of their own struct.
 A GENERIC STRUCT CARRIER binds T through a whole-argument wrap and a whole dereference as through the
 plain spelling (`gw((w))` / `gw(*wp)` call `gw$i32`; a tuple literal binds nothing) —
 generics_monomorphization_v639_v6310. CHANGELOG [6.7.11] (ARG-5, ARG-6, ARG-8).
+6.7.13 — A STRUCT VALUE IS NEVER A WORD POINTER, NOR A VECTOR POINTER (the user's D5 (a), D33; ST-12, VC-9): a
+struct VALUE (a local, a by-value parameter, a global, a capture, wrapped) passed to a `*i64` / `*u8` / `*f64` / `**T`
+parameter is refused "cannot pass 's' to a parameter that is not a pointer to its struct type in a call to 'ri' -
+pass &s for its address"; into a `*V` parameter (a local, a call, a method result, `*ps`, a global, a capture,
+wrapped) "cannot pass 's' to a parameter that is a pointer to a vector type …". `&s` / a typed `*S` convert freely;
+a handle and a `Str` already hold the address. Not yet checked (filed): a struct FIELD, call or dereference argument
+into a word pointer, and a struct field into `*V` — pass its address.
 
 [[entries]]
 name = "if_expression_v674"
@@ -6087,6 +6310,13 @@ arithmetic are legal; a bool[N] list takes `{1 < 2, !false}`).
 LIMITS: a call in a branch is never a tail call (deep recursion through one grows the stack); an
 explicit #inline fn holding one keeps the "control flow" warning.
 GATES: tests/gates/frontend/if_expr_checked.sh; tests/tcyr/crossos/if_expr_values.tcyr. CHANGELOG [6.7.4].
+
+6.7.13 (D1 (a), ST-6): a WHOLE DEREFERENCE of a `*S` as a branch — `{ *p }`, `{ (*p) }`, `{ *gp() }`,
+`{ *(&t) }` — is a struct value. Of 8 B or less it joins `{ s }`, `{ *q }` and a call returning S and
+COPIES (an untyped binding of it is the struct); over 8 B it is refused "an if expression branch cannot
+be a struct value over 8 bytes … branch on a pointer" — write `if (c) { p } else { q }` into a pointer
+and copy from it. Two different small structs are refused. Through 6.7.12 `{ *p }` was the struct's
+first word. ⚠ A `*f64v2` pair is still an integer branch (filed, 6.7.14).
 
 
 [[entries]]
@@ -6335,14 +6565,13 @@ CHANGELOG [6.7.6].
 `var x = mk();` does (over 8 B, a free or generic call). An annotation that names no struct and is no
 pointer, receiving a struct over 8 B from a free or generic call, is refused — "cannot initialise 'x: i64'
 from 'mkp', which returns the struct 'P2' - declare 'x: P2' or bind a field" — and keeps its annotation.
-Not judged yet (filed): a METHOD or OPERATOR call into a scalar annotation (it takes the first word,
-narrowed — bind a field: `mkp().a`, `b.mk().a`), a `*T` annotation, and a wrapped 8 B call
-(`var x = (mk1());` is still an untyped word: drop the parentheses). The 6.7.6 "NOT YET" items above are
+Through 6.7.12 a METHOD or OPERATOR call into a scalar annotation, a `*T` annotation and a wrapped 8 B call were
+not judged; since 6.7.13 all three are (below). The 6.7.6 "NOT YET" items above are
 fixed in 6.7.11: `bs1((t))` is checked (struct_argument_type_checked_v673), `var r = mk3(4) - s` with an
 integer `P3_sub` is untyped, and `n - s + 10` / `-s + t` are integer arithmetic
 (struct_copies_returns_and_operator_results_v6711). § Parentheses gains the literal element:
-`H { 7, (mkq(4, 9)), 8 }` at every size (⚠ a wrapped 9-16 B METHOD / operator element is still *unexpected
-'}'*, filed).
+`H { 7, (mkq(4, 9)), 8 }` at every size (a wrapped 9-16 B METHOD / operator element was *unexpected '}'*
+through 6.7.12; taken since 6.7.13 — below).
 A CALL THROUGH A FN POINTER (6.7.11, ARG-1 / ARG-2, D31) knows its callee only when written `&f`:
 `fncallN(&f, ..)` / `callptr(&f, ..)` with a struct-returning `f` carries the struct result as `f(..)` does
 (the hidden pointer over 16 B, the pair at 9-16 B) and is a struct value in every destination — a
@@ -6352,13 +6581,39 @@ operator (it dispatches `S_add`), an 8 B global in the declaration zone; a vecto
 held in a VARIABLE (`var fp = &mk; callptr(fp, ..)`) is unknown: its result is one word, and a struct-typed
 receive is a HANDLE (the user's D31, 2026-10-13) — right for a `: *S` callee, unsupported for a struct
 returned by value (use the two-word receive at 9-16 B, or an out-pointer). A parenthesised callee
-`callptr((&mk), ..)` counts as a variable (filed). The NAME INTRINSIC paragraph above holds for every
-other callee shape.
+`callptr((&mk), ..)` counted as a variable through 6.7.12; since 6.7.13 it is the known callee (below). The
+NAME INTRINSIC paragraph above holds for every other callee shape.
 6.7.12 (D28) — THE SAME REFUSAL THROUGH A FN POINTER WRITTEN `&f`: `var x: i64 = fncall1(&mk3, 5);` /
 `callptr(&mk3, 5)` with a struct over 8 B is "cannot initialise 'x: i64' from 'mk3', which returns the struct
 'P3' - declare 'x: P3' or bind a field" (through 6.7.11 it read the first field). A callee in a variable stays
-a word; a parenthesised callee `(&mk3)` is refused when the parenthesised-callee fix lands (6.7.13); top level
-is not judged (filed). CHANGELOG [6.7.12] FX-3.
+a word. CHANGELOG [6.7.12] FX-3.
+
+6.7.13 — 6.7.11's D24 IS ONE RULE AT EVERY PATH (the user's D13, D14, D17; CHANGELOG [6.7.13] RC-1, RC-2, RC-3, RC-6, RC-7,
+RC-10, ST-11): free call, generic, `&f` (wrapped too), method, operator, top level, and a pointer annotation (in a fn).
+  - A METHOD or OPERATOR result over 8 B into an annotation that names no struct is refused with D24's words naming
+    the fn, in a fn and at top level (D13; `var x: i64 = b.mk();`, `= a + c;` — through 6.7.12 it took the first word,
+    narrowed). A refused declaration takes no struct behind its annotation.
+  - A BY-VALUE STRUCT over 8 B into ANY `*T` annotation is refused in a fn — "… declare 'x: P2' and take `&x`" — at
+    every path (direct, wrapped, generic, known `&f`, method, operator; D14); 8 B or less keeps the word and the
+    typed-pointer warning. ⚠ Top level is not judged yet (filed): after the first statement `var p: *T = f();` still
+    compiles under "assigning non-pointer to typed pointer" and faults at `p.b`.
+  - AT TOP LEVEL (ST-11): `var G: i64 = mk2(5);`, `fncall1(&mk2, ..)` and `callptr(&mk2, ..)` with a 9-16 B struct —
+    in the declaration zone or after the first statement, a redeclared global too — are refused with D24's words
+    (once: a `: bool` gets no second "not a bool"); over 16 B keeps the no-frame refusal; 8 B or less and `Str` keep
+    the word. 6.7.12's D28 is judged there too, `var x: i64 = fncall1((&mk3), 5);` included.
+  - A WRAPPED 8 B RECEIVE (RC-2): `var x = (mk1());` binds the 8 B struct as `var x = mk1();` does (it was an untyped
+    word — so `x + 1` now dispatches `P1_add`, and is refused "undefined function 'P1_add'" without one; annotate
+    `: i64` for the word — listed for the user's confirmation, 6.7.14); `var x = (f());` with `f: f64` is an f64.
+  - A PARENTHESISED `&f` CALLEE IS THE KNOWN CALLEE (RC-1): `callptr((&mk3), 5)` / `fncall1((&mk3), 5)` carry the
+    struct / vector result to every fn destination, and at top level it is judged as `&f` unwrapped. `callptr((fp),
+    ..)` is still a variable callee.
+  - NESTED-LITERAL ELEMENTS (RC-3, RC-10): a wrapped 9-16 B method / operator element is taken, and a wrapped
+    struct-typed FIELD `(h.q)` with it; a wrapped struct NAME `(q0)` as an element is still refused (filed). A wrapped
+    dyn-returning call is a `dyn` element as the unwrapped call is (D17: `H { 7, (pass(o)), 8 }`); `var x =
+    (pass(o));` stays refused (6.7.8 V4d).
+  - Still open (filed): the ASSIGNMENT `x = b.mk();` into a scalar stores the struct's first word silently (the rule holds
+    for the declaration; the assignment is the user's call) — write the field, `x = b.mk().a;`. `var s = (mks());`
+    with `: Str` is a word, `var a = (f()) * 2.0;` is untyped, `(s).a` / `(mk1()).a` do not parse.
 
 [[entries]]
 name = "tuples_v677"
@@ -6480,6 +6735,13 @@ every OP=, a tuple-literal element (stack_enum_unboxed_payload_variants_v6555).
 that struct — `(a, b)` is a tuple, another type" (ST-15); a multi-value call is not a struct value at any size (RET-5,
 struct_value_copies_and_result_type_checks_v6611); an undeclared fn whose returns are all `(a, b)` is counted, so
 `var t: (i64, i64, i64) = dm(..)` is refused (RET-2).
+6.7.13: the "bind it first" refusal of a multi-value call as a tuple ARGUMENT (R17) covers a callee counted by pass 1
+(undeclared, every `return` `(a, b)`), a free fn or a method, not only a declared one (MV-1). ⚠ A non-tuple word into
+a tuple parameter (`take(5)`, `take(one(3))`, a scalar-declared multi-value callee) still compiles — it is passed as
+the tuple's ADDRESS and crashes (filed, 6.7.14, a language question): build or bind a tuple variable and pass that.
+An element that is a whole dereference of a `*S` (`(*ps, 1)`, `(*gp(), 1)`, `(*(&s), 1)`) is refused "a tuple element
+is i64, f64 or bool, not struct 'P8'", as `(s, 1)` is (D2 (a), ST-7) — it compiled as the struct's word; `(ps, 1)` and
+`(ps.a, 1)` are i64s.
 TOOLS: `cyrius header` prints a tuple parameter as one `cyr_val` and, since 6.7.11, a two-value RETURN as `cyr_val2`
 under the x86_64 SysV guard (aarch64 returns it in x0:x2) — three values are refused; the LSP's semantic tokens colour the
 parameters after a tuple parameter and not its element types (both read a parameter list by paren depth).
@@ -6603,6 +6865,10 @@ qemu-aarch64, cx, wine, and on ecb / ach / cass / pi at the release gate. CHANGE
 6.7.11 (RET-10): D19 (a default on an operator fn) is reported ONCE, at the fn's first default with its
 column, not per use; a direct call still fills it. A parameter whose type is refused keeps its default, so
 short calls are not refused again. CHANGELOG [6.7.11].
+6.7.13 (MV-5): a refused parameter DEFAULT (a value its type does not take, a default on a struct parameter, a trait
+method implementation's default) keeps the fn's minimum argument count, so it is ONE error at the default — through
+6.7.12 it set the minimum to the maximum and every short call was refused again ("'f' expects 1 argument, got 0"). A
+fn defined twice with defaults still checks every argument. CHANGELOG [6.7.13].
 
 [[entries]]
 name = "dyn_v678"
@@ -6645,8 +6911,12 @@ the declaration zone), an assignment, a classic-for step, a field store (local, 
     inline global, a `*T` local / parameter / global / field, a call or method returning `*T`, an untyped impl
     `self`, a pointer-mode handle;
   - a DECLARED scalar (an integer type, f64 / f32, bool, an enum, cstring; local, global or parameter) or a
-    literal (`5`, `'A'`, `2.5`, `true`) — the data word is the VALUE, for a scalar impl.
-Parentheses around the whole source are transparent. Refused by name, once, at the source: an untyped name
+    literal (`5`, `'A'`, `2.5`, `true`) — the data word is the VALUE, for a scalar impl;
+  - since 6.7.13 (D15, RC-8) a call through `fncallN` / `callptr` whose callee is written `&f`, wrapped or not — read
+    as the direct call: a dyn result is a COPY, a `*T` result forms; a callee held in a variable stays refused.
+Parentheses around the whole source are transparent. A dyn ELEMENT of a struct literal takes a wrapped dyn-returning
+call as it takes the unwrapped one since 6.7.13 (D17, RC-10: `H { 7, (pass(o)), 8 }`); `var x = (pass(o));` stays
+refused (V4d). Refused by name, once, at the source: an untyped name
 ("cannot form dyn Show from 'x' - an untyped name may hold a pointer (ADR-002): …"), a bare inline struct ("… - no
 implicit `&`: write `&p` (the dyn holds its address)"), `&` of a pointer / handle / scalar / dyn, a captured
 name, any other expression, no impl ("no `impl Show for R` - a dyn Show is formed only from a type that
@@ -6829,10 +7099,11 @@ is an element, not an array - a second [..] is not supported"; "&a[i] is not sup
 through `*u8`..`*u32`, `*i8`..`*i32`, `*f32`, `*p` is `p[0]`: read at T's width (sign- / zero-extended, an f32 typed
 f32), `*p = v` / `*p OP= v` store T's width with `p[0] = v`'s checks (f32 rounding, the narrowing / int-into-float
 warnings), statement, expression and for step alike. The operand must be KNOWN to be that pointer: a name, a `*T`
-field, a `: *T` call, `p ± n`, `n + p` (a one-byte one too), parentheses, an if-expression of such. Anything else
-is the 8-byte word: an untyped address (`var w = p; *w` is the explicit word access), an 8-byte pointee (`*i64`,
-`*u64`, `*f64`, `*bool` — `p[0]` is their typed spelling), `**pp`, a bitwise / comparison / negation result, a call
-result's untyped field. Before 6.7.8: `*q = 5` through a `*i32` zeroed the next element; `*p = 1.5` through a
+field, a `: *T` call, `p ± n`, `n + p` (a one-byte one too), parentheses, an if-expression of such — and since
+6.7.13 `*pp` of a `pp: **T` (D9 (a), ST-19), so `**pp` through a narrow T is the element at its width and `*pp + n`
+steps elements (it was on the word list below through 6.7.12). Anything else is the 8-byte word: an untyped address
+(`var w = p; *w` is the explicit word access), an 8-byte pointee (`*i64`, `*u64`, `*f64`, `*bool` — `p[0]` is their
+typed spelling), a bitwise / comparison / negation result, a call result's untyped field. Before 6.7.8: `*q = 5` through a `*i32` zeroed the next element; `*p = 1.5` through a
 `*f32` stored the f64 bits as a word; `*s` on a `*u8` read eight characters.
 
 NO BOUNDS CHECK outside the bounds-checked mode (bounds_checked_mode_v678); under it `p[i]` is checked for a
@@ -6918,9 +7189,9 @@ itself, so a write reaches it. `take(*p + a)` passes the operator's result (at t
 refused by name). A `*U` of another struct is refused (`cannot pass 'pu' to a parameter of a different
 struct type`); an untyped `*x` is still the word it reads. Through 6.7.9: the word the dereference read
 was passed as the struct's address — a crash on every target.
-  ⚠ Known defect: a whole field of 3 / 5 / 6 / 7 B is still loaded as an 8-byte word on the way (in every
-  value use — an argument, a right operand): an object ending exactly at the end of a mapping faults. (A
-  dereference of a 1-7 B `*S` reads exactly the struct since 6.7.11, ST-1; through 6.7.10 it read 8 bytes.)
+  A whole field of 3 / 5 / 6 / 7 B was still loaded as an 8-byte word on the way through 6.7.12 (an
+  object ending exactly at the end of a mapping faulted); since 6.7.13 it is read byte-exact — see below.
+  (A dereference of a 1-7 B `*S` reads exactly the struct since 6.7.11, ST-1.)
 
 AN UNTYPED BINDING OF A STRUCT-RETURNING OPERATOR TAKES ITS STRUCT TYPE (decision 12): `var c = a + b;`
 with `fn S_add(..): T` declares `c` an inline `T` at every size (as over 8 B, where the result's temporary
@@ -6936,6 +7207,27 @@ result — a method chain, an if-expression of struct branches, a 9-16 B result 
 was an untyped word through 6.7.10) — and a leading call types the binding only when it is the WHOLE initialiser
 (`var r = mk3(4) - s;` with an integer `P3_sub` is untyped now; it was typed `P3`):
 struct_copies_returns_and_operator_results_v6711.
+
+6.7.13 — EXACT BYTES, ZERO-SIZE STRUCTS, `*(&p)`, AND NO STRUCT INTO A WORD POINTER (CHANGELOG [6.7.13] ST-1, ST-2,
+ST-3, ST-5, ST-12; the user's D5 (a)):
+  - A WHOLE STRUCT-TYPED FIELD of 3 / 5 / 6 / 7 B used as a value — an argument, `return w.s`, an operator operand,
+    an untyped `var u = w.s`, a top-level `var G: S3 = GW.s` — is read byte-exact through its address, its padding
+    0; a zero-size field reads no byte (ST-3).
+  - EVERY WORD A STRUCT OF 8 B OR LESS TRAVELS IN HAS PADDING 0 — a by-value `self` from a `*S`, a `*S` into a
+    by-value parameter, a handle or a captured handle passed by value, `return q;` of a `*S` parameter (ST-1). They
+    carried frame garbage past `sizeof(S)` (255 after a frame-dirtying call).
+  - A ZERO-SIZE STRUCT MOVES NO BYTE: into a struct-typed field from any source (a `*E` global, a `: *E` call, a
+    by-value call, an untyped value); a zero-size `*p` value is the word 0, into a `*E` parameter the pointer, and
+    `*p + l` dispatches (ST-2).
+  - `*(&p)` / `*&p` JOINS THE HANDLE LINE: of an INLINE struct (a local, a by-value parameter, a value global, a
+    captured copy) it is the struct value `p` is — `take(*(&p))`, `var q: S = *(&p);` and `l = *(&p)` copy the whole
+    struct, `*(&p) + a` dispatches, `*(&u)` of another struct is refused by name. A handle's or a `*T`'s `&h` is its
+    SLOT, so `*(&h)` is the slot's word; `*(&s) OP= v` is still the first-word op (ST-5).
+  - A STRUCT VALUE INTO A WORD POINTER IS REFUSED (D5 (a), ST-12): `ri(s)` with `ri(p: *i64)` (or `*u8`, `*f64`,
+    `**T`) is "cannot pass 's' to a parameter that is not a pointer to its struct type in a call to 'ri' - pass &s
+    for its address". A handle, a `*T` and a `Str` already hold the address and pass. Into a `*V` the vectors lane's
+    D33 refuses it in its own words (typed_simd_value_type_abi). Not yet refused (filed): a field, call or
+    dereference argument of struct type — pass its address.
 
 GATES: tests/gates/codegen/small_struct_handle_line.sh, tests/gates/codegen/struct_value_codegen.sh;
 tests/tcyr/crossos/{small_struct_handle_line, small_struct_global_handle_line, small_struct_pointer_arg,
@@ -6954,8 +7246,8 @@ tags = ["v6.7.11", "structs", "copy", "dereference", "*p = v", "struct return", 
 ---
 `*p` OF A STRUCT UNDER 8 B READS EXACTLY THE STRUCT (ST-1): every consumer — a global declared or assigned from
 it, `l = *p`, `f(*p)`, `return *p`, `*p + a` — reads 1..7 bytes and the word's padding is 0.
-  WAS: 8 bytes (SIGSEGV at a mapping's end, foreign bytes in the padding). Still open: a whole 3 / 5 / 6 / 7 B
-  FIELD used as a value reads 8 bytes.
+  WAS: 8 bytes (SIGSEGV at a mapping's end, foreign bytes in the padding). A whole 3 / 5 / 6 / 7 B FIELD used as a
+  value still read 8 bytes through 6.7.12; byte-exact since 6.7.13 (ST-3).
 
 EVERY STRUCT DESTINATION TAKES EVERY STRUCT SOURCE THE SAME WAY (ST-2, ST-3, ST-4, ST-8, ST-9; D2, D4):
 
@@ -6969,7 +7261,10 @@ EVERY STRUCT DESTINATION TAKES EVERY STRUCT SOURCE THE SAME WAY (ST-2, ST-3, ST-
 
   `*S` / handle sources into a `*S` / handle destination REBIND (`GP = q`, `GP = &x`); a `*U` of another struct is
   refused by name everywhere. `*p = v` copies exactly sizeof(S) bytes (0 for a zero-size struct); `*p OP= v` is
-  refused (write the field); an untyped value through `*p` is stored at sizeof(S) bytes, at most 8.
+  refused (write the field); an untyped value through `*p` is stored at sizeof(S) bytes, at most 8 — `*p = 0` on a
+  16-byte struct clears the first 8 only (D11 (a), kept and confirmed in 6.7.13, ST-18). Since 6.7.13 `*p = mk(..);`
+  of a MULTI-VALUE call through a `*S` is refused "is not assigned to struct 'S' - bind it first", as `G = mk(..);`
+  is (D26, MV-15; 6.7.11's D4: `*p = v` copies what `G = v` copies); a `*i64` takes the first value.
   WAS: `l = *p` and `q = *p` stored ONE word (into a `*S`, `q = *p` REBOUND q to the struct's first word — write
   `q = p.first` to load a pointer kept in the first field); `o.s = GP`, `o.s = gp()`, `o.s = w.p` stored the address;
   a generic `: *T` call was no source; `GP = l` stored l's first word into GP; `*p = v` wrote 8 bytes, overrunning a
@@ -6979,11 +7274,16 @@ A STRUCT RETURN IS CHECKED BY ITS STRUCT, AND A POINTER RETURNS ITS POINTEE, AT 
 8 B or less another struct's value, a `*U` and a handle of another struct are refused by name ("a fn returning the
 struct `S8` takes a value of that struct, or a pointer to one — got `u` (a `U8`)"); `return E;` with E a `*S`
 (local, parameter, global, `: *S` call / method, field, arithmetic, `*E`) returns a copy of the pointee in all three
-return classes. `return &s;` is untyped (filed as a decision). WAS: an 8 B fn returned u's bytes, or the address.
+return classes. WAS: an 8 B fn returned u's bytes, or the address.
+  6.7.13 — `return &s;` IS `return s;` (D4 (a), ST-10, ST-10r): in a fn declared `: S`, at every size — a local,
+  `&G`, a by-value parameter's `&p`, wrapped. `&u` of another struct is refused by name ("… got `&u` (a `*U`)");
+  `return &w.s;` gets D3's message at every size, once. ⚠ `return &h;` of a handle, a `*S` local or an untyped
+  `self` is still the SLOT's address (filed, 6.7.14) — write `return h;`.
 
 A TUPLE LITERAL IS NOT THE STRUCT A FN RETURNS (ST-15, D39): `return (a, b[, c]);` in a fn declared `: S` (a named
 struct) is refused in every class — "a fn returning the struct `P` returns that struct — `(a, b)` is a tuple,
-another type". Build the struct (`var r: P = P { a, b }; return r;`). `ret2(a, b)` there still compiles (filed).
+another type". Build the struct (`var r: P = P { a, b }; return r;`). `ret2(a, b)` there is refused too since 6.7.13,
+in every class (D22, MV-11): ret2_rethi.
 
 IN A 9-16 B STRUCT FN A RETURNED CALL MUST END THE VALUE (ST-16, D40): `return mk2(1) == p;` is refused by name (it
 returned a 16-byte struct from an 8-byte result); `return mk2(1) + p;` (a dispatch) and `return mk2(1);` are
@@ -6993,37 +7293,52 @@ INTEGER OPERATORS GIVE INTEGERS; UNARY MINUS NEGATES A STRUCT'S WORD (ST-12, ST-
 arithmetic with an INTEGER result, so `n - s + 10` never dispatches `S_add`; `-s + t` is an integer add at every
 size and `t + -s` passes the negated word; nothing is refused. `-` never dispatches. Every integer arm (`% << >> >>>
 & | ^`, comparisons, `&& ||`, saturating / checked ops, `~`, unary `-`) clears the struct type it used to leak from
-its right operand. An f64 right operand's type is kept (kind 2). WAS: `-s + t` called `S_add` with the minus dropped.
+its right operand. WAS: `-s + t` called `S_add` with the minus dropped.
+  6.7.13 — AN F64 RIGHT OPERAND TOO (D12 (a), RC-4): a comparison, `&& ||` and `& | ^ % << >> >>>` clear an f64 /
+  f32 right operand's type as well — `(n < x) * 3` is 3 and `(n & x) * 3` multiplies integers with `x: f64`. Only
+  `+ - * /` keep it (kind 2, 6.7.11's D41): they have f64 forms. (Through 6.7.12 the f64 type leaked: `(n < x) * 3`
+  was an f64 multiply.)
 
 AN UNTYPED BINDING TAKES THE STRUCT OF EVERY WHOLE STRUCT RESULT (ST-18, D42; ST-10): an operator (6.7.10), a
 method, a method chain, an if-expression of struct branches, any of them wrapped in parentheses — at every size —
 so `c + 1` dispatches `S_add` (or is refused); write `c.v + 1`, or annotate `: i64` to keep the word. A LEADING call
 types it only when the call is the WHOLE initialiser: `var r = mk3(4) - s;` with an integer `P3_sub` is untyped
 (`r.x` is refused by name — *no struct type in scope for 'r'*). A chain ending in an integer method stays an
-integer; an untyped global keeps the word.
+integer; an untyped global keeps the word. A leading `: f64` call types the binding f64 only while the WHOLE
+initialiser is still an f64 (6.7.13, RC-5): `var x = f() * 2.0;` is f64; `var c = f() < 1.0;` is the integer 0 / 1
+(it was typed f64, so `-c` flipped the sign bit).
 6.7.12 — A PLAIN NAME TOO (D29 (a)): `var q = p;` / `var q = (p);` in a fn, with `p` an inline struct local, a
 by-value struct parameter (`self: T` included) or a closure's captured copy, is `var q: P = p;` — `q.y` reads /
 writes the COPY (in a closure too), `take(q)` passes the struct, `q + n` dispatches `P_add` (refused when there
-is none). A `*T` source (an untyped impl `self`), a handle, a struct global named in a fn and every untyped
-global stay words — annotate (`var q: P = G;`) for a copy of a global; a bare `q` value (`return q;`,
-`raw(q)`, `q == 3`) is still the first word. WAS (6.6.0 – 6.7.11): `q` was `p`'s first word — `q.y` "no struct
-type in scope for 'q'" ("undefined variable 'q'" in a closure), `take(q)` faulted. CHANGELOG [6.7.12] FX-5.
+is none). A `*T` source (an untyped impl `self`), a handle and every untyped global stay words; a bare `q` value
+(`return q;`, `raw(q)`, `q == 3`) is still the first word. WAS (6.6.0 – 6.7.11): `q` was `p`'s first word — `q.y` "no
+struct type in scope for 'q'" ("undefined variable 'q'" in a closure), `take(q)` faulted. CHANGELOG [6.7.12] FX-5.
+6.7.13 — AND A STRUCT GLOBAL (D6 (b), ST-13): `var q = G;` in a fn, with G an INLINE struct global, is a copy of G
+at every size — wrapped, inside a closure too. A handle G (a handle global, or a local / captured handle shadowing
+G) keeps the word; top level is unchanged (`var q = G;` there is the word). Through 6.7.12 a struct global named in
+a fn stayed a word and needed `var q: P = G;`.
 
-A METHOD'S `*T` RESULT CHAINS (ST-19, D43): `h.get().b`, `.q.b`, `.m()`, through a dyn and a generic method;
-`h.get().b = 5` is refused as `get2(&h).b = 5` is. WAS: *it does not return a struct* (the method arm missed what
-the free-call arm learned in 6.6.17).
+A METHOD'S `*T` RESULT CHAINS (ST-19, D43): `h.get().b`, `.q.b`, `.m()`, through a dyn and a generic method. WAS:
+*it does not return a struct* (the method arm missed what the free-call arm learned in 6.6.17).
+  6.7.13 — A `: *T` CALL'S FIELD IS AN LVALUE (D8 (a), ST-15): `gp().n = 5;`, `gp().m += 5;` (the call runs once),
+  `gpg<H>().n = 5;`, `o.gp().n = 5;` and `h.get().b = 5;` store through the returned pointer (6.7.11 refused the
+  method form as `get2(&h).b = 5` was). A BY-VALUE result's field stays "the result is a temporary".
 
 A PARENTHESISED FREE STRUCT CALL IS A NESTED-LITERAL ELEMENT (ST-20, D44): `H { 7, (mkq(4, 9)), 8 }` at every size,
 with the unwrapped call's refusals (top level over 8 B; another struct by name — the one-leaf 8 B form that compiled
-is refused now). Still open: a wrapped 9-16 B METHOD / operator element (*unexpected '}'*).
+is refused now). A wrapped 9-16 B METHOD / operator element (*unexpected '}'* through 6.7.12) is taken since 6.7.13,
+and a wrapped struct-typed FIELD `(h.q)` with it (RC-3); a wrapped struct NAME `(q0)` as an element is still refused
+(filed).
 
 TOP-LEVEL COPY-INIT FROM A FIELD THROUGH A POINTER (ST-5): `var G: S = P.s;`, `gp().s`, `VV.p.s` (over 8 B) copy; a
 source declared BELOW G in the leading block is refused by name, never the value store.
 
-THE SCANNER DECODES A NESTED DERIVED STRUCT (ST-21): derive_str_fields.
+THE SCANNER DECODES A NESTED DERIVED STRUCT (ST-21): derive_str_fields. Since 6.7.13 it also walks a SCALAR field's
+object / array / mismatched string whole (ST-4) — the scanner and the pairs form agree.
 
 ONE int + f64 MIX WARNS ONCE (ST-11, D41), however far its result is carried; a captured name's write in a closure is
-"'x' is captured by value; a captured name is not assignable in a closure" (ST-17).
+"'x' is captured by value; a captured name is not assignable in a closure" (ST-17) — since 6.7.13 its fix-it names
+the local from the capture, `(var x_l = x;)` (RC-15).
 
 GATES: tests/tcyr/crossos/{struct_pointer_source_copy, small_struct_pointer_copy, struct_operator_result_binding,
 struct_deref_whole_operand}.tcyr; tests/gates/codegen/small_struct_handle_line.sh and the lane's ST rows. The guide:

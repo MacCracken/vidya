@@ -9,6 +9,8 @@
 # cyrius_watch_output_is_unsigned_on_apple_silicon_v6712, a_windows_checkout_rewrites_a_committed_lib_to_crlf_v6712,
 # bootstrap_sh_builds_no_cycc_v6712, a_formatters_rewrite_and_its_check_accept_different_sets_v6712,
 # pin_bump_order_with_a_full_vendored_lib_v6712. 10 entries (DERIVED at 6.7.12).
+# 6.7.13: +1 entry — a_signalled_cyrius_dies_by_the_signal_v6713 (D39). Updated: pin_bump_order_with_a_full_vendored_
+# lib_v6712 (D41, D42, TL-10). 11 entries (DERIVED at 6.7.13).
 
 [[entries]]
 name = "bash_subshell_clobbers_stateful_helpers"
@@ -396,9 +398,9 @@ accepted 4 as 2. language/tooling.cyml audit_test_check_pipeline (LAYER 2). CHAN
 
 [[entries]]
 name = "pin_bump_order_with_a_full_vendored_lib_v6712"
-description = "In a project that vendors the whole snapshot, run `cyrius lib sync --full` FIRST after moving `[package].cyrius`; since 6.7.12 `cyrius deps` / `cyrius build` refuse to re-lock until then (rc 1, the stale files named, the lock unchanged — D19). Follow the refusal's remedy, not `--locked`'s 'run cyrius deps'."
+description = "In a project that vendors the whole snapshot, run `cyrius lib sync --full` FIRST after moving `[package].cyrius`; since 6.7.12 `cyrius deps` / `cyrius build` refuse to re-lock until then (rc 1, the stale files named, the lock unchanged — D19), and since 6.7.13 a refused run leaves lib/ untouched too (D41) and every other lock writer refuses the same way (D42)."
 category = "cyrius"
-tags = ["v6.7.12", "pin bump", "lib sync", "--full", "cyrius.lock", "deps", "D19", "--relock"]
+tags = ["v6.7.12", "v6.7.13", "pin bump", "lib sync", "--full", "cyrius.lock", "deps", "D19", "D41", "D42", "--relock"]
 ---
     # edit [package] cyrius = "6.7.12"
     cyrius lib sync --full        # FIRST: re-vendors the whole snapshot and re-locks what it wrote
@@ -407,6 +409,29 @@ tags = ["v6.7.12", "pin bump", "lib sync", "--full", "cyrius.lock", "deps", "D19
 In a project that vendors the WHOLE snapshot, `cyrius lib sync --full` goes first after moving `[package].cyrius`.
 Since 6.7.12 `cyrius deps` / `cyrius build` at the moved pin REFUSE to re-lock while lib/ holds an out-of-closure file
 the new snapshot ships with other bytes (rc 1, each stale file named, cyrius.lock unchanged — D19); `--relock` does not
-bypass it. ⚠ After the refusal the closure files are already at the new pin, so `--verify` fails on them until the
-remedy runs (filed) — follow the REFUSAL's remedy (`cyrius lib sync --full`, or `rm <file> && cyrius deps`), not
-`--locked`'s "run `cyrius deps`". language/tooling.cyml lib_sync_relock_v6617. CHANGELOG [6.7.12] TL-12, TL-12r.
+bypass it. Under 6.7.12 the closure files were already at the new pin after the refusal, so `--verify` failed on them
+until the remedy ran. Since 6.7.13: a refused `deps` / `build` leaves lib/ AND the lock untouched (a silent scratch
+resolve learns the closure first — D41); `deps --locked` names the same remedy (TL-10); and a bare `deps --lock` and a
+scoped `lib sync` / `update` refuse too (D42). So the recipe is simply `cyrius lib sync --full` first, and every verb
+that would stamp the pin points there. language/tooling.cyml lib_sync_relock_v6617. CHANGELOG [6.7.12] TL-12, TL-12r;
+[6.7.13] TL-10, TL-11, TL-12.
+
+[[entries]]
+name = "a_signalled_cyrius_dies_by_the_signal_v6713"
+description = "A `cyrius` stopped by SIGTERM / SIGINT / SIGHUP cleans up its children, scratch and temp dir, then DIES of the signal (6.7.13, D39). A shell's `$?` reads 128+N on every version, but a parent reading the wait status saw WIFEXITED 128+N on 6.7.12 alone — so bash's SIGINT loop-stop did not fire for `cyrius` there. With `exec_capture_status`, test st[1] (the signal bit), not the code."
+category = "cyrius"
+tags = ["v6.7.13", "signals", "SIGINT", "SIGTERM", "SIGHUP", "WIFSIGNALED", "WIFEXITED", "exec_capture_status", "D39", "cleanup"]
+---
+    for f in *.cyr; do cyrius build "$f" "bin/${f%.cyr}" || exit 1; done   # Ctrl-C stops the loop again (6.7.13)
+
+    var st: i64[2];
+    exec_capture_status(args, buf, n, &st);    # args: a vec of cstrs
+    if (st[1] == 1) { … }          # killed by a signal — st[1], not `st[0] == 130`
+
+A `cyrius` run stopped by SIGTERM / SIGINT / SIGHUP stops its children and removes its scratch and temp dir, then
+re-raises the signal and dies of it. A shell's `$?` reads 128+N either way (143 / 130 / 129) — the difference is the
+WAIT STATUS: WIFSIGNALED on 6.7.11 and on 6.7.13 onward, but WIFEXITED 128+N on 6.7.12 alone, which is why a Ctrl-C'd
+`cyrius` did not stop a non-interactive shell loop there (bash stops its loop only on a child that DIED of SIGINT). A
+cyrius parent reading the status should test `exec_capture_status`'s st[1] (1 = killed by a signal), not the code
+alone. An inherited SIG_IGN (nohup, a `&` job's SIGINT) is kept. Windows catches nothing. language/tooling.cyml
+cyrius_cli (A KILLED RUN). CHANGELOG [6.7.13] TL-18 (D39).

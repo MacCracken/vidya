@@ -5,6 +5,8 @@
 # xfsync "no-op on Windows" line), identity_lookups_musl_pattern (a signed id field), tls_native_server_alpn (the client
 # side), dir_list_contract_v6711 (audit_walk's O_DIRECTORY), tls_module_contract_v6614 (the Windows trust store,
 # CONFORMANCE, BOUND VARS).
+# 6.7.13 updated: file_locking (Windows `xflock` re-lock — a re-lock to the held mode is a no-op, LIB-1), csv_module
+# (bayan 1.7.0's RFC 4180 CRLF records). 27 entries (unchanged).
 # 24 entries (re-derived at the 6.6.20 closeout: it read 22 after 6.6.19 added the x86-macOS
 # threads entry, and 6.6.20 adds boxed) — a CURATED subset of the lib/*.cyr modules (not the full
 # surface). 6.6.20 (2026-10-06): +1 entry boxed_runtime_tag_box_v662 — lib/boxed.cyr, the storable
@@ -283,10 +285,35 @@ off-Linux:
                                  EX / UN; 0 for `LOCK_UN` of a lock not held; -1
                                  otherwise. A blocking LOCK_EX / LOCK_SH WAITS. SH ↔
                                  EX on one handle drops and re-takes the lock (not
-                                 atomic, like flock); the lock is per HANDLE. Until
+                                 atomic, like flock) — since 6.7.13 for a mode
+                                 CHANGE only; the lock is per HANDLE. Until
                                  6.7.12 it was -1 for every op. Gate:
                                  tests/tcyr/crossos/xflock_two_handle.tcyr (cass —
                                  wine does not enforce the lock).
+                                 RE-LOCK (6.7.13, LIB-1): re-taking the mode the
+                                 handle already holds (`LOCK_SH` on a `LOCK_SH`
+                                 holder, `LOCK_EX` on a `LOCK_EX` holder, with or
+                                 without `LOCK_NB`) is a NO-OP returning 0 that
+                                 never lets go of the lock, as under flock(2).
+                                 6.7.12 dropped and re-took it, so a handle
+                                 waiting for the lock got in between (patra
+                                 re-takes `LOCK_EX` per statement inside a
+                                 transaction: a second handle's INSERTs returned
+                                 PATRA_OK and were lost), and a `LOCK_NB` re-lock
+                                 could fail -11 and leave the handle holding
+                                 nothing. The held mode is a kernel lock on one
+                                 more byte beside the sentinel — 2^63 − 2 while
+                                 holding `LOCK_EX`, 2^63 − 3 while holding
+                                 `LOCK_SH` — probed with `UnlockFileEx` before the
+                                 sentinel is touched, and it dies with the handle
+                                 (a reused handle value inherits nothing).
+                                 `LOCK_UN` drops all three bytes; a program's own
+                                 `LockFileEx` on bytes 2^63 − 3 … 2^63 − 1 would
+                                 collide with `xflock`. Gate:
+                                 tests/tcyr/crossos/xflock_relock_keeps_lock.tcyr
+                                 (its threaded rows are the discriminating ones —
+                                 cass red on every run with the 6.7.12 arm, wine
+                                 only sometimes). CHANGELOG [6.7.13] LIB-1.
   fn xfsync(fd)                — see the crash-safe set above
   fn xrmdir(path)              — unlinkat + AT_REMOVEDIR
   fn xmkdir(path, mode)        — Windows DOES route here (83 is in the PE
@@ -378,6 +405,11 @@ bayan_csv_escape(field)      — quote field if it contains comma, quote, or new
 bayan_csv_write_line(fields) — write vec of fields as CSV line with escaping
 
 Handles: quoted fields, escaped quotes (""), commas within quotes.
+
+⚠ bayan 1.7.0 (folded at cyrius 6.7.13) reads and writes RFC 4180 as Python's `csv` does: a written
+record ends in CRLF (it was LF), a trailing empty field is a field, and a field holding CR is quoted;
+since 1.7.1 the writers return 0 on a refused allocation. A consumer comparing written CSV byte for byte
+against LF-terminated text sees the change (cyrius's own tests/tcyr/formats/csv.tcyr expects the CRLF).
 
 [[entries]]
 name = "http_module"
