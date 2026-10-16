@@ -1,5 +1,10 @@
 # Cyrius — Stdlib Modules (per-module usage)
 # How to use specific stdlib modules — APIs, conventions, gotchas.
+# 27 entries at 6.7.12 (DERIVED; +args_init_contract_v6712, +epoll_event_readers_v6712 — the line read 24 against a
+# live 25: dir_list_contract_v6711 and the 6.6.19 x86-macOS threads entry never moved it). 6.7.12 also updated: file_locking (Windows xflock / xsymlink; the stale
+# xfsync "no-op on Windows" line), identity_lookups_musl_pattern (a signed id field), tls_native_server_alpn (the client
+# side), dir_list_contract_v6711 (audit_walk's O_DIRECTORY), tls_module_contract_v6614 (the Windows trust store,
+# CONFORMANCE, BOUND VARS).
 # 24 entries (re-derived at the 6.6.20 closeout: it read 22 after 6.6.19 added the x86-macOS
 # threads entry, and 6.6.20 adds boxed) — a CURATED subset of the lib/*.cyr modules (not the full
 # surface). 6.6.20 (2026-10-06): +1 entry boxed_runtime_tag_box_v662 — lib/boxed.cyr, the storable
@@ -224,7 +229,8 @@ fn file_rename(old, new)
 fn xfsync(fd)
     `sys_fsync` on Linux/macOS (macOS SYS_FSYNC=74 → BSD-95 via
     ESYSXLAT), `sys_sync()` on AGNOS (a documented coarser residual),
-    no-op on Windows.
+    kernel32 `FlushFileBuffers` on Windows since 6.6.9 (the literal
+    fsync number 74 is rerouted; this line said "no-op" until 6.7.12).
 fn file_create_exclusive(path, mode)
     `O_CREAT|O_EXCL` on POSIX and Windows (O_EXCL → CREATE_NEW, mapped
     at v6.4.58); `file_exists`+create on AGNOS, which has no exclusive-
@@ -264,7 +270,23 @@ off-Linux:
   fn xlseek(fd, off, whence)   — portable (SYS_LSEEK is peer-carried everywhere)
   fn xflock(fd, op)            — centralizes the per-target flock number
                                  (peer carries SYS_FLOCK ONLY on agnos; Linux
-                                 x86#73 / aarch64#32 / macos#92 live in xflock)
+                                 x86#73 / aarch64#32 / macos#92 live in xflock).
+                                 WINDOWS (6.7.12): kernel32 `LockFileEx` /
+                                 `UnlockFileEx` (reroutes 0xF04C / 0xF04D) on ONE
+                                 sentinel byte at offset 2^63 − 1, length 1 —
+                                 Windows byte locks are MANDATORY, so the data stays
+                                 readable and writable through every handle while
+                                 the lock excludes other lockers. 0 granted; -11
+                                 when `LOCK_NB` finds it held (EAGAIN on PE —
+                                 lib/syscalls_windows.cyr declares no `EAGAIN`;
+                                 Darwin's is -35); -22 for an op that is not SH /
+                                 EX / UN; 0 for `LOCK_UN` of a lock not held; -1
+                                 otherwise. A blocking LOCK_EX / LOCK_SH WAITS. SH ↔
+                                 EX on one handle drops and re-takes the lock (not
+                                 atomic, like flock); the lock is per HANDLE. Until
+                                 6.7.12 it was -1 for every op. Gate:
+                                 tests/tcyr/crossos/xflock_two_handle.tcyr (cass —
+                                 wine does not enforce the lock).
   fn xfsync(fd)                — see the crash-safe set above
   fn xrmdir(path)              — unlinkat + AT_REMOVEDIR
   fn xmkdir(path, mode)        — Windows DOES route here (83 is in the PE
@@ -277,7 +299,18 @@ off-Linux:
                                  longer returns -1 rather than truncating,
                                  since a truncated mkdir creates the WRONG
                                  directory.
-  fn xsymlink(target, linkpath)
+  fn xsymlink(target, linkpath)  — WINDOWS (6.7.12; Developer Mode or an
+                                 elevated process): a link path of ANY length
+                                 (`\\?\` at 248+ units — it failed -1 past 260
+                                 units and was refused at 519+) and an ABSOLUTE
+                                 target of any length (a drive-absolute / UNC
+                                 target whose full form is 248+ units is passed
+                                 `\\?\`-prefixed); a RELATIVE target is stored as
+                                 written with `/` → `\`, never made absolute (an
+                                 NT link resolves it later, against the link). The
+                                 raw reroute 0xF03E takes UTF-8 since 6.7.12 (UTF-16
+                                 before) — call xsymlink. Gate:
+                                 tests/tcyr/crossos/symlink_long_path.tcyr.
   fn xreadlink(path, buf, bufsize)
   fn xlink(oldpath, newpath)
 xopen/xstat/xunlink/xgetdents landed v6.2.26; xlseek/xflock v6.2.33;
@@ -516,6 +549,14 @@ Each reader uses the same shape:
     land in strbuf; record_buf holds ints + pointers into strbuf.
   * Return codes: 1=found, 0=not found, -1=file unreadable,
     -2=strbuf overflow.
+  * A uid / gid field is ONE decimal number with an optional
+    leading `-` (Darwin's `nobody` is uid / gid -2, listed AHEAD of
+    root); a line whose id field is not one number is skipped like a
+    short line, and `grp_getgrouplist` adds no gid for it. Since
+    6.7.12 (WN-2r); before, the readers stopped at the first
+    non-digit, so on macOS `pwd_getpwuid(0)` / `grp_getgrgid(0)`
+    answered `nobody` and `pwd_getpwuid(-2)` found nothing. Darwin's
+    gid 0 is `wheel`, not `root`.
 
 == API ==
 
@@ -896,6 +937,10 @@ server protocol the client also offered. No overlap -> nothing negotiated
 (lenient; no `no_application_protocol` alert), and the HTTP/1.1 default
 still works. Every read is bounds-checked against the untrusted client offer.
 
+THE CLIENT SIDE (6.7.12, LIB-15): a server's ALPN selection OUTSIDE the client's offer is illegal_parameter,
+with nothing selected; an ALPN extension in EncryptedExtensions when the client offered none is
+unsupported_extension (tls_module_contract_v6614 CONFORMANCE).
+
 PRE-v6.2.22 the setter was CLIENT-ONLY: a server set ALPN, got TLS_OK, and
 silently never negotiated (h2-over-TLS unreachable). The fix reuses the
 existing `TLS_CTX_OFF_ALPN_SEL` slot + the existing accessor — no ctx-layout
@@ -1104,7 +1149,9 @@ SINCE 6.7.11 (the stdlib lane; agora 1.9.1's filing):
   - Windows (`FindFirstFileW`) and agnos (`AO_DIRECTORY`, which the agnos open REQUIRES) are unchanged.
 ⚠ `dir_list` cannot say "I could not look" — an unreadable directory lists as EMPTY. Anything that walks a
 tree to reach a verdict (a test runner, an auditor, a coverage count) uses `dir_list_checked` /
-`dir_walk_checked` (6.6.10). `lib/audit_walk.cyr`'s Linux lister does not use `O_DIRECTORY` yet (filed).
+`dir_walk_checked` (6.6.10). Since 6.7.12 (LIB-4) `lib/audit_walk.cyr`'s Linux lister (`_aw_dir_list_typed`) opens
+with `O_DIRECTORY` too: `audit_fmt_walk` / `audit_lint_walk` / `audit_doc_walk` report a FIFO or a file as an
+unlistable directory ("error 20") at once, and a path `_fs_cpath` refuses (4096+ bytes, an embedded NUL) is -36.
 Field note: field_notes/language/platform_abi.cyml
 open_a_directory_you_will_list_with_o_directory_v6711. CHANGELOG [6.7.11] (the
 stdlib lane).
@@ -1280,6 +1327,16 @@ auto-downloaded yet is not there; add it with `tls_ctx_load_verify_locations`, w
 REPLACES the ctx's roots (libssl ADDS) and reads at most `TLS_CAFILE_MAX` (16 MiB).
 `tls_native_ca_skipped(ctx)` counts what could not be used: installed + skipped == the PEM blocks
 (plus, on Windows, the refused roots).
+WINDOWS SINCE 6.7.12 (WN-6): a root with a NotBefore distrust (props 126 / 127) covering the purpose is taken
+with an ISSUANCE BOUND and anchors only a leaf whose notBefore precedes it, as SChannel does (D9); a Disable date,
+name constraints, or an unreadable property still refuse a root whole. The auto-updated disallowed CTL's
+public-key entries (the MD5 of a subjectPublicKey) and the Disallowed store's certificates bind EVERY certificate
+of a path, not only the root; a present but unreadable CTL makes `tls_native_set_ca_system` fail
+(`TLS_ERR_IO`). `ProtectedRoots` is applied by crypt32 when the store is opened, so the set follows it. Roots
+Windows would fetch on demand are NOT fetched (D9 — a server under one fails `TLS_ERR_CERT_INVALID` until the
+program adds the root with `tls_ctx_load_verify_locations`). A caller's bundle carries no trust policy. Not
+applied: the CTL's 48-byte entries (filed). `TLS_CTX_LEN` 624 -> 632 (a program that hard-codes the ctx size
+reads `TLS_CTX_LEN`).
 
 PEM DECODE: STRICT OR LENIENT (sigil 3.13.7, which cyrius 6.6.14 folds). `pem_decode_certs_into`
 is all-or-nothing: one bad block fails the input. `pem_decode_certs_lenient_into(pem, len, chain,
@@ -1306,6 +1363,28 @@ data since sigil 3.5.9): signatures byte-identical, and faster (P-256 13.3 -> 2.
 the TPM / Secure Boot / IMA / dm-verity / LUKS helpers fail closed (CYRIUS-2026-0024). The lessons: features
 `secret_var_compound_ops` (WHAT IT DOES NOT COVER) and platform_abi
 `a_rooted_posix_path_is_drive_relative_on_windows_and_any_local_user_can_plant_it`.
+
+CONFORMANCE (native, 6.7.12 — LIB-15; no decision, the RFCs). The 1.3 client walks EVERY ServerHello /
+EncryptedExtensions extension: one it did not offer is unsupported_extension; one it offered that the message may
+not carry is illegal_parameter; an unframed block is decode_error. The server's ALPN choice must be one the client
+offered (illegal_parameter). A 1.3 ECDSA CertificateVerify scheme must match the leaf's curve. 1.3
+CertificateVerify and 1.2 ServerKeyExchange signatures end their messages EXACTLY. A 1.2 client restricted by
+`tls_native_set_groups` refuses an ECDSA leaf on an unlisted curve. The native 1.2 server refuses a session id
+over 32 bytes. The 1.3 client now SENDS the alert a flight refusal records (the 1.2 client sends none). The test
+techniques: field_notes/compiler/methodology.cyml read_what_you_sent_and_put_an_over_read_at_a_prot_none_page_v6712.
+
+BOUND VARS (6.7.12 — D15, D16, D17). The 14 `var X = _X;` publics (the TLS stack's nine — `TLS_RECORD_MAX_PLAINTEXT`,
+`TLS_AEAD_NONCE_LEN`, `TLS12_VERIFY_DATA_LEN`, `TLS12_RANDOM_LEN`, `TLS_RANDOM_LEN`, `TLS_HKDF_LABEL_BUF_LEN`,
+`TLS_MAX_DIGEST_LEN`, `TLS_HANDSHAKE_HEADER_LEN`, `TLS_SHA384_CTX_LEN` — and five outside it: `KEV_SIZE`,
+`SPAWN_ARGV_MAX`, `SPAWN_ENV_MAX`, `TLOCAL_MAX_SLOTS`, `TLS_REG_MAX`) are READ-ONLY MIRRORS: lib/ reads the const
+`_X` everywhere (198 TLS sites rewritten), so a write changes nothing — they stay writable vars (D16; a `const`
+conversion belongs to the public-constants arc). Through 6.7.11 the TLS stack still read the vars:
+`TLS12_RANDOM_LEN = 256` copied 512 bytes into the 64-byte PRF seed (SIGSEGV). `TLS_RECORD_MAX_PLAINTEXT` is the
+protocol's 2^14, not a fragment-size knob (D17): a lowered value no longer shrinks outgoing fragments or refuses a
+peer's full records, a raised one no longer seals over-length records (2^14 + 1 is `TLS_ERR_RECORD_OVERFLOW`);
+RFC 6066 max_fragment_length is a separate feature. `TLS_CA_MAX_ROOTS` is kept and inert (D15). Still a hazard
+(filed, 6.7.14): `var TLS_SHA256_CTX_LEN = 144;`, a LITERAL public var with no twin, still sizes a copy into a
+208-byte stack clone. CHANGELOG [6.7.12] LIB-11 .. LIB-15, WN-6.
 
 [[entries]]
 name = "boxed_runtime_tag_box_v662"
@@ -1384,3 +1463,46 @@ pre-accepts a pending conn or peeks one byte, handed back by the next accept / r
 1→32 ms sleep backoff — a pipe / file / keyboard fd answers 1 at once there. A cooperative server
 that does non-blocking accept → EAGAIN → `async_await_readable(sfd)` no longer spins at 100 % CPU on
 macOS, Windows or agnos. CHANGELOG [6.6.19] (Threads / async).
+
+[[entries]]
+name = "args_init_contract_v6712"
+description = "lib/args.cyr `args_init` (6.7.12, D7): returns the bytes read (Linux, Windows), 0 on success on macOS / agnos, and a NEGATIVE errno on failure — test `< 0`, never `== 0`. Linux reads /proc/self/cmdline to EOF (it read one 2 MiB buffer and `argc()` silently described a prefix)."
+category = "cyrius"
+tags = ["v6.7.12", "args", "args_init", "argc", "argv", "errno", "proc", "cmdline", "ARG_MAX", "D7"]
+---
+RETURNS. The bytes read on Linux and Windows; 0 on success on macOS / agnos (argv is read from the entry stack); a
+NEGATIVE errno on failure (D7, the user, 2026-10-15). Linux gives the open's / read's errno, or -12 (ENOMEM); Windows
+gives -5 when `GetCommandLineW` fails and -12 for `CommandLineToArgvW` / an allocation. So test `< 0`, never `== 0` —
+0 is macOS's SUCCESS value.
+
+LINUX READS TO EOF. `/proc/self/cmdline` is read to its end, doubling a 2 MiB first buffer. Through 6.7.11 it was ONE
+read of a fixed 2 MiB buffer, and `argc()` silently described a 2,097,152-byte prefix of a longer command line (Linux
+ARG_MAX is RLIMIT_STACK / 4, capped at 6 MiB, so an unprivileged `ulimit -s` makes such lines possible). A failure
+publishes NOTHING, so `argc()` never describes a prefix.
+
+Field note: field_notes/language/platform_abi.cyml linux_arg_max_is_not_a_constant_2_mib_v6712. Style sibling:
+file_read_whole_errno_contract_v6612. CHANGELOG [6.7.12] LIB-14, LIB-14r.
+
+[[entries]]
+name = "epoll_event_readers_v6712"
+description = "6.7.12 (LIB-5): `epoll_event_events(ev)`, `epoll_event_data(ev)` and `const EPOLL_EVENT_SIZE` (12 on x86_64 Linux and x86-macOS, 16 on aarch64) sit beside `epoll_event_new` in each syscall peer. Walk a `sys_epoll_wait` array by EPOLL_EVENT_SIZE — x86_64's `struct epoll_event` is packed, and lib/async.cyr's 16-byte stride read every event after the first 4, 8, … bytes off."
+category = "cyrius"
+tags = ["v6.7.12", "epoll", "epoll_event", "EPOLL_EVENT_SIZE", "async", "reactor", "syscall peers", "const", "packed"]
+---
+THE READERS. Each syscall peer carries, beside `epoll_event_new`:
+
+    epoll_event_events(ev)     # the u32 events mask
+    epoll_event_data(ev)       # the u64 data word (x86_64: at +4; aarch64: at +8)
+    const EPOLL_EVENT_SIZE     # 12 on x86_64 Linux and x86-macOS, 16 on aarch64
+
+Walk a `sys_epoll_wait` array by `EPOLL_EVENT_SIZE` (event i at `buf + i * EPOLL_EVENT_SIZE`) and read through the two
+readers — never a hand-written 16-byte stride or a `+ 8` data offset. x86_64 Linux's `struct epoll_event` is
+`EPOLL_PACKED` (12 B, data @4); aarch64's is not (16 B, data @8). `lib/async.cyr`'s reactor strode 16 on every arch, so
+on x86_64 the 2nd..8th events of one wait were read 4, 8, … bytes off; level-triggered epoll re-reported the missed fd
+on the next wait, so nothing hung and every test passed until a row woke two waiters in ONE wait.
+
+⚠ IT IS A `const`. A program's own `EPOLL_EVENT_SIZE` after `lib/syscalls.cyr` is a compile error (a const declared
+twice), and so is a build that includes two syscall peers (no target's dispatch does). There is still no writer for
+a caller-owned buffer (filed, 6.7.14). Field notes: field_notes/language/platform_abi.cyml
+x86_64_epoll_event_is_packed_and_the_stride_is_the_layout_v6712; field_notes/compiler/gotchas.cyml
+a_const_two_peers_share_turns_a_paste_every_peer_harness_into_a_compile_error_v6712. CHANGELOG [6.7.12] LIB-5.

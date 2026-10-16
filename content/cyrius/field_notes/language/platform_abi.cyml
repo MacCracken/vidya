@@ -26,6 +26,13 @@
 # v6.7.11: +4 entries — dce_compaction_moves_a_kernels_data_v6711, cyrius_header_return_types_and_agnos_hosts_v6711,
 # open_a_directory_you_will_list_with_o_directory_v6711, tagged_handles_exact_ranges_and_time_bounds_where_zero_means_
 # none_v6711; agnos_two_sided_abi_mirror gained the #109-#111 peers. 20 entries (DERIVED at 6.7.11).
+# v6.7.12: +8 entries — sys_sigprocmask_works_on_macos_per_thread_v6712, xflock_on_windows_waits_and_answers_minus_11_v6712,
+# getpwuid_zero_on_macos_is_root_since_6_7_12, windows_native_tls_trusts_what_the_chain_engine_trusts_minus_fetching_v6712,
+# windows_symlink_long_paths_v6712, x86_64_epoll_event_is_packed_and_the_stride_is_the_layout_v6712,
+# linux_arg_max_is_not_a_constant_2_mib_v6712, cx_pointer_wrappers_outside_cxvms_translated_set_v6712. Updated:
+# raw_syscall_numbers_on_aarch64… (the native-region warning; sys_openat keeps its dirfd on arm64 macOS),
+# cyrius_header_return_types_and_agnos_hosts_v6711 (pairs modelled, vectors refused, the aarch64 CLI's refusals),
+# open_a_directory… (audit_walk, `_fs_cpath`), tagged_handles… (the `fd & 7` class, dissolved). 28 entries (DERIVED at 6.7.12).
 # 15 entries (re-DERIVED at 6.6.14 after three class entries: the drive-relative rooted path
 # (CYRIUS-2026-0012/CYRIUS-2026-0014/CYRIUS-2026-0020 + the DLL search order), SIGPIPE (CYRIUS-2026-0021 + the open net.cyr writers), and the
 # Winsock socket that is not a file handle — DERIVE with `grep -c "^\[\[entries\]\]"`, do not
@@ -512,6 +519,16 @@ that knows about the translation chain — and note the failure mode is
 never a compile error and never a signal, just a different syscall
 returning a plausible errno.
 
+**6.7.12 — IT WARNS NOW, IN YOUR OWN FILE ONLY (DW-1).** In a native-aarch64
+region a raw number that is also an x86-compat row source is STILL
+renumbered: `syscall(9, …)` runs mmap, and `syscall(39, …)` returns a
+PID. Since 6.7.12 the compiler WARNS when that literal sits in the call's
+own file, and names the `1000+N` spelling (`raw syscall 9 inside a
+native-aarch64 region is renumbered → 222 (mmap); write 1009 for native
+lgetxattr`). Write that alias, or the `SYS_*` name. It does NOT warn yet
+for a per-arch file you `include` under the guard, or for a constant you
+declare there (filed, 6.7.14) — check those by hand.
+
 ═══════════════════════════════════════════════════════════════
 2. The `AT_*` flags diverge on Darwin — and only the dirfd was fixed
 ═══════════════════════════════════════════════════════════════
@@ -561,6 +578,15 @@ execution-coverage fixture's `asm_test.cyr` therefore runs on pi only.
 The same split shows in the numbers the builtin itself treats as an
 exit: raw 231 is exit_group on x86 / cx, `munlockall` on aarch64 Linux,
 and unrouted (-38, the program goes on) on PE.
+
+**6.7.12 — THE DIRFD ITSELF WAS DROPPED ON arm64 macOS (WN-3).** The
+at-call route there shifted the arguments onto the BSD path call, so
+`sys_openat(dirfd, rel, …)` opened `rel` against the CWD. Since 6.7.12
+`sys_openat` keeps its dirfd (Darwin `openat` 463), and a raw
+`syscall(56, -100, …)` still means the cwd (translated to Darwin's -2).
+⚠ `sys_mkdirat` / `sys_fchmodat` there STILL drop the dirfd (`mkdirat(dirfd,
+"x")` made `./x` in the cwd and returned 0 on ecb — filed, 6.7.14): pass
+them an ABSOLUTE path on arm64 macOS until it is fixed.
 
 [[entries]]
 name = "the_stdlib_now_names_the_send_side_truncate_memfd_and_the_scheduler_pair"
@@ -1010,7 +1036,7 @@ A dead fn the compiler could not size (an `in` / `out` in `asm`) stays in the im
 
 [[entries]]
 name = "cyrius_header_return_types_and_agnos_hosts_v6711"
-description = "`cyrius header` refuses a return it cannot size from one file (another file's struct, a generic instance, a struct holding one, `#ifdef`'d fields, three values) with rc 1, the other prototypes still printed; on Win64 a 9–16 B / `dyn` / two-value return is a comment, not a prototype. Build agnos images on an x86_64 Linux host: the Windows and macOS CLIs refuse `--agnos` and the bare-metal targets by name; the aarch64 Linux CLI still accepts `--agnos` and writes an aarch64 Linux binary (filed, High)."
+description = "`cyrius header` refuses a return it cannot size from one file (another file's struct, a generic instance, a struct holding one, `#ifdef`'d fields, three values) with rc 1, the other prototypes still printed; on Win64 a 9–16 B / `dyn` / two-value return is a comment, not a prototype; since 6.7.12 a `: Result` / `: Option` / `: Tagged` pair is modelled and an unannotated pair or a vector return refused. Build agnos images on an x86_64 Linux host: every non-x86_64-Linux CLI refuses `--agnos` and the x86 bare-metal target by name (the aarch64 Linux CLI since 6.7.12)."
 category = "cyrius"
 ---
 CYRIUS HEADER (6.7.11). A public fn's return becomes `cyr_val` (8 B or less, a pointer, a scalar, `Str`), `cyr_val2` (a
@@ -1019,14 +1045,19 @@ AAPCS64's x0:x1) or `cyr_valN` (over 16 B, the rounded size: the callee writes w
 another file's struct, a generic instance, a struct holding one, a struct with `#ifdef`'d fields or three values makes
 `cyrius header` exit 1 (the other prototypes still printed): make the fn private / `_`-named or wrap it. On Win64 a
 9–16 B / `dyn` / two-value return gets a named comment, not a prototype (Win64 C returns anything over 8 B through a
-hidden pointer, so cycc's rax:rdx pair matches no Win64 C type). Still `cyr_val` (filed): a SIMD vector return and a
-`: stack` enum return (`: Result` / `: Option`) — hand-write those.
+hidden pointer, so cycc's rax:rdx pair matches no Win64 C type). SINCE 6.7.12: a `: Result` / `: Option` /
+`: Tagged` (or the file's own `enum E: stack`) return is `cyr_val2` (tag in w0, payload in w1) under the x86_64 SysV
+guard, a named comment on aarch64 (the pair is x0:x2 there) and Win64; a public fn whose signature says a word but whose
+body returns the pair (`fn f(x): i64 { return Ok(x); }`) is refused by name, rc 1 (D23); a SIMD vector return is refused
+by name, rc 1 (D24). Still `cyr_val` (filed): a pair reached only through `?`, and a vector PARAMETER — hand-write those.
 
 AGNOS / BARE-METAL IMAGES BUILD ON AN x86_64 LINUX HOST. `CYRIUS_TARGET_AGNOS` / `CYRIUS_ELF64_KERNEL` are read by
 `src/main.cyr` only. The Windows and macOS CLIs refuse `--agnos`, `--target=x86_64-bare-metal-elf` and
-`--target=aarch64-bare-metal-elf` by name, rc 1, before compiling; the aarch64 Linux CLI still accepts `--agnos` and
-writes an aarch64 Linux binary at rc 0 (filed, High) — check `file` on the output if you build there.
-CHANGELOG [6.7.11] (TL-10, TL-11).
+`--target=aarch64-bare-metal-elf` by name, rc 1, before compiling; since 6.7.12 (D6) the aarch64 Linux CLI refuses
+`--agnos` and `--target=x86_64-bare-metal-elf` by name too (through 6.7.11 it wrote an aarch64 Linux binary at rc 0), and
+any two emit targets in one run are refused (D20). Still open: `--win` on aarch64 Linux writes an aarch64 ELF (filed,
+High) — check `file` on the output if you build there. CHANGELOG [6.7.11] (TL-10, TL-11), [6.7.12] (TL-10, TL-22, TL-23,
+TL-30).
 
 [[entries]]
 name = "open_a_directory_you_will_list_with_o_directory_v6711"
@@ -1040,8 +1071,11 @@ planted where a server lists a directory freezes it (agora 1.9.1's poll server).
 a non-directory at path resolution — Linux does, and so does Darwin, which checks `O_DIRECTORY` before the FIFO open
 (measured on ecb and ach; macOS now answers -20 for a regular file too, not -22). A `stat`-first guard leaves a
 stat / open swap open; `O_DIRECTORY` closes it. `lib/fs.cyr`'s listers (`dir_list`, `dir_list_checked`,
-`dir_list_into`) open this way since 6.7.11 (language/stdlib_modules.cyml dir_list_contract_v6711);
-`lib/audit_walk.cyr`'s Linux lister does not yet (filed). agnos already required `AO_DIRECTORY`. CHANGELOG [6.7.11].
+`dir_list_into`) open this way since 6.7.11 (language/stdlib_modules.cyml dir_list_contract_v6711), and
+`lib/audit_walk.cyr`'s `_aw_dir_list_typed` since 6.7.12 (two instances now). agnos already required `AO_DIRECTORY`.
+THE SECOND HALF OF THE LESSON (6.7.12): hand the kernel exactly the Str's bytes (`_fs_cpath`), never `str_data(path)` —
+a Str is not NUL-terminated at its end, and an embedded NUL would open a PREFIX; `_fs_cpath` refuses both (4096+ bytes, an
+embedded NUL: -36). CHANGELOG [6.7.11], [6.7.12] LIB-4.
 
 [[entries]]
 name = "tagged_handles_exact_ranges_and_time_bounds_where_zero_means_none_v6711"
@@ -1050,8 +1084,12 @@ category = "cyrius"
 ---
 RECOGNISE A TAGGED HANDLE RANGE EXACTLY. Write `fd >= TAG && fd <= TAG + 7`, never `fd & TAG`: every negative i64 has
 every high bit set, so `fd & TAG` took a failed open's -1 for slot `-1 & 7 = 7`. On agnos `sys_write(-1)` wrote to the
-8th socket's peer and `sys_close(-1)` tore its connection down, returning 0 (fixed 6.7.11). The same shape in a helper
-that indexes `fd & 7` with no range test is the same bug (the agnos `lib/net.cyr` arms: filed).
+8th socket's peer and `sys_close(-1)` tore its connection down, returning 0 (fixed 6.7.11). THE CLASS: a table indexed by
+`fd & 7` must first test that `fd` IS a tagged socket fd. 6.7.11: `_agnos_is_sock_fd` exact, `_agnos_fd_conn`,
+`sys_close`. 6.7.12 (LIB-2): the four slot helpers (`_agnos_sock_bind`, `_agnos_listen_stash`, `_agnos_listen_start`,
+`_agnos_fd_listen`) answer -1, and the `lib/net.cyr` arms answer `Err(9)` / `Err(88)` — Linux's EBADF / ENOTSOCK — before
+any table write or kernel call; `sock_connect` / `net_connect_nb` test BEFORE `#47`, or the conn opened for a bad fd
+leaks.
 
 A TIME BOUND WHERE 0 MEANS "NO BOUND" MUST NEVER RECEIVE A CLAMPED-TO-ZERO "TIME LEFT". `sock_send_dl`#109's
 `timeout_us` is one such bound; Linux reads a negative `SO_SNDTIMEO` the same way. Test the deadline first and break,
@@ -1062,3 +1100,134 @@ the call was good. #109 answers -1 both on a pre-1.57.13 kernel and for a dead o
 dead conn would cost every later write its deadline on a kernel that has #109. `_agnos_sock_send_left` caches it only
 when the `#48` fallback then answers >= 0. Compiler side: field_notes/compiler/gotchas.cyml
 agnos_is_an_x86_host_that_is_not_linux_and_the_predefines_do_not_say_so (4b). CHANGELOG [6.7.11] (the stdlib lane).
+
+[[entries]]
+name = "sys_sigprocmask_works_on_macos_per_thread_v6712"
+description = "On macOS `sys_sigprocmask` works since 6.7.12 and is PER-THREAD, as on Linux (Darwin's `__pthread_sigmask`, 329, via the 1329 alias). Code that took its old -78 as 'no signal mask on macOS, skip' now really blocks or unblocks; an exec-family child starts with an empty mask there too."
+category = "cyrius"
+tags = ["v6.7.12", "macos", "darwin", "signals", "sigprocmask", "per-thread", "exec", "process.cyr"]
+---
+- On macOS `sys_sigprocmask` works since 6.7.12 and changes the CALLING THREAD's mask, as on Linux (Darwin's
+  `__pthread_sigmask`, 329). Code that took its old -78 as "no signal mask on macOS, skip" now really blocks or
+  unblocks.
+- Darwin's sigset is 32 bits: the wrapper takes the usual 8-byte set and zeroes `oldset`'s upper word, so the same
+  8-byte buffers work on every target.
+- Do NOT issue Darwin's own `sigprocmask` (48) for a thread's mask: XNU applies it to EVERY thread of the process (a
+  two-thread probe on ach and ecb: the other thread's mask read 536870912 after the main thread blocked SIGUSR1).
+- An exec-family child on macOS now starts with an EMPTY mask (Linux since 6.7.9). A child that must keep a signal
+  blocked blocks it itself.
+language/features.cyml sys_sigprocmask_on_macos_v6712. CHANGELOG [6.7.12] DW-5.
+
+[[entries]]
+name = "xflock_on_windows_waits_and_answers_minus_11_v6712"
+description = "`xflock` on Windows (6.7.12) is a real lock that leaves the data readable and writable through other handles; `LOCK_NB` on a held lock answers -11 (no `EAGAIN` constant on PE — compare with -11); a blocking lock now WAITS where it returned -1 at once; the lock is per handle."
+category = "cyrius"
+tags = ["v6.7.12", "windows", "pe", "xflock", "flock", "LockFileEx", "EAGAIN", "patra", "wine"]
+---
+`xflock` on Windows is a real lock since 6.7.12 (kernel32 `LockFileEx` on one sentinel byte far past the data), and it
+leaves the file's DATA readable and writable through every other handle — it excludes other lockers only, as flock
+does. What changes for code that ran on Windows before:
+
+- `LOCK_NB` on a held lock answers -11. There is no `EAGAIN` constant on PE (lib/syscalls_windows.cyr declares none),
+  so compare with -11 (Darwin's EAGAIN is -35).
+- A blocking `LOCK_EX` / `LOCK_SH` now WAITS where it returned -1 at once — a program that treated -1 as "Windows has
+  no locks, go on" now blocks behind a real holder.
+- The lock is per HANDLE: a second `file_open` of the same file is another locker.
+- -22 for an op that is not SH / EX / UN; `LOCK_UN` of a lock not held is 0.
+
+A Windows test of lock exclusion needs REAL Windows: wine does not enforce a byte lock against another handle's I/O.
+language/stdlib_modules.cyml file_locking. CHANGELOG [6.7.12] WN-1.
+
+[[entries]]
+name = "getpwuid_zero_on_macos_is_root_since_6_7_12"
+description = "Before 6.7.12 `pwd_getpwuid(0)` / `grp_getgrgid(0)` on macOS answered `nobody` (Darwin's first record is uid / gid -2, read as 0) and `pwd_getpwuid(-2)` found nothing. Since 6.7.12 they answer root / wheel and -2 finds nobody; a passwd / group line with a malformed id is skipped on every target."
+category = "cyrius"
+tags = ["v6.7.12", "macos", "darwin", "pwd", "grp", "passwd", "nobody", "uid", "gid", "wheel"]
+---
+Darwin ships `nobody:*:-2:-2:` (and `nogroup:*:-1:`) AHEAD of root. The readers stopped at the first non-digit and
+never checked the field's end, so on macOS `pwd_getpwuid(0)` / `grp_getgrgid(0)` answered `nobody`, and
+`pwd_getpwuid(-2)` found nothing. Since 6.7.12 a uid / gid field is ONE decimal number with an optional leading `-`:
+uid 0 is root, gid 0 is `wheel`, -2 finds nobody, and a line whose id field is not one number is skipped on every
+target (`grp_getgrouplist` adds no gid for it).
+⚠ Darwin's gid 0 is `wheel`, not `root` — a cross-platform test that compares the group name of gid 0 must accept both.
+language/stdlib_modules.cyml identity_lookups_musl_pattern. CHANGELOG [6.7.12] WN-2r.
+
+[[entries]]
+name = "windows_native_tls_trusts_what_the_chain_engine_trusts_minus_fetching_v6712"
+description = "The Windows native trust store since 6.7.12: a NotBefore-dated root anchors only leaves issued before its date (D9); any certificate the disallowed CTL or the Disallowed store names fails the chain at ANY depth; a root Windows would fetch on demand is not there, so a server under it fails TLS_ERR_CERT_INVALID until the program adds the root. TLS_CTX_LEN is 632."
+category = "cyrius"
+tags = ["v6.7.12", "windows", "tls", "tls_native", "trust store", "crypt32", "NotBefore", "disallowed", "CTL", "TLS_CTX_LEN"]
+---
+- A NotBefore-dated root (the root program's issuance-date distrust) anchors only leaves issued BEFORE its date, as
+  SChannel does (D9) — through 6.7.11 such a root was refused whole.
+- Any certificate the auto-updated disallowed CTL (public-key MD5s) or the Disallowed store names fails the chain at
+  ANY depth, not only as the root. A present but unreadable CTL makes `tls_native_set_ca_system` fail (`TLS_ERR_IO`).
+- A root Windows would fetch on demand is NOT there (cyrius does not fetch — D9), so a server under it fails
+  `TLS_ERR_CERT_INVALID` until the program adds the root (`tls_ctx_load_verify_locations`). A Windows box shows only
+  the roots fetched so far (40 on cass), so a floor sized by a Linux bundle (> 50 anchors) is a Linux fixture.
+- A program that hard-codes the ctx size reads `TLS_CTX_LEN` (632 since 6.7.12; 624 before).
+language/stdlib_modules.cyml tls_module_contract_v6614 (TRUST STORE). CHANGELOG [6.7.12] WN-6.
+
+[[entries]]
+name = "windows_symlink_long_paths_v6712"
+description = "`xsymlink` on Windows (Developer Mode or elevated) takes link paths and absolute targets of any length since 6.7.12; a relative target is stored as written with `/` turned into `\\` (an NT link does not read `/` as a separator); an absolute target of 248+ units is passed `\\\\?\\`-prefixed. A raw `syscall(0xF03E, …)` takes UTF-8 since 6.7.12."
+category = "cyrius"
+tags = ["v6.7.12", "windows", "pe", "xsymlink", "CreateSymbolicLinkW", "MAX_PATH", "long paths", "UTF-8"]
+---
+- `xsymlink` on Windows (it still needs Developer Mode or an elevated process) takes a link path of ANY length (it
+  failed -1 past 260 units and was refused at 519+) and an ABSOLUTE target of any length (one whose full form is 248+
+  units is passed `\\?\`-prefixed).
+- A RELATIVE target is stored as written, with `/` turned into `\`: an NT link stores its target verbatim and resolves
+  it later against the link, and it does not read `/` as a separator (a `subdir/inner.txt` target never resolved). It
+  is never made absolute — that would change what the link means when the tree moves.
+- A raw `syscall(0xF03E, …)` takes UTF-8 since 6.7.12 (UTF-16 before) — call `xsymlink` instead.
+language/stdlib_modules.cyml file_locking (xsymlink). CHANGELOG [6.7.12] WN-4, WN-4r.
+
+[[entries]]
+name = "x86_64_epoll_event_is_packed_and_the_stride_is_the_layout_v6712"
+description = "x86_64's `struct epoll_event` is EPOLL_PACKED — 12 bytes, data @4 — while aarch64's is 16 bytes, data @8, and the STRIDE is part of the layout: v6.4.42 fixed the data OFFSET per arch, but lib/async.cyr kept a 16-byte stride on every arch until 6.7.12. Walk an epoll_wait array by EPOLL_EVENT_SIZE through the readers."
+category = "cyrius"
+tags = ["v6.7.12", "epoll", "epoll_event", "packed", "x86_64", "aarch64", "stride", "async", "EPOLL_EVENT_SIZE"]
+---
+- x86_64 is `EPOLL_PACKED`: 12 bytes, data @4. aarch64 is unpacked: 16 bytes, data @8.
+- v6.4.42 (field_notes/compiler/retros/resolved_traps.cyml, its BUG 2) fixed the data OFFSET per arch — but
+  `lib/async.cyr` kept a 16-byte STRIDE on every arch. So on x86_64 the 2nd..8th event of one `epoll_wait` were read 4,
+  8, … bytes off. Level-triggered epoll re-reported the missed fd on the next wait, so nothing hung and every test
+  passed.
+- Never stride an `epoll_wait` array by 16 on x86_64: use `EPOLL_EVENT_SIZE` / `epoll_event_data` (6.7.12). A struct's
+  layout includes its SIZE, not just its field offsets.
+- Methodology: a switch called "value-identical" in a plan was identical on one arch only. A row that holds two events
+  of ONE wait (two ready pipes, one `_async_poll` waking both waiters) is what caught it.
+language/stdlib_modules.cyml epoll_event_readers_v6712. CHANGELOG [6.7.12] LIB-5.
+
+[[entries]]
+name = "linux_arg_max_is_not_a_constant_2_mib_v6712"
+description = "Linux ARG_MAX is RLIMIT_STACK / 4, capped at 6 MiB, and an unprivileged `ulimit -s` raises it — read /proc/self/cmdline to EOF, never with one read of a fixed buffer. `args_init` did that until 6.7.12, and `argc()` silently described a 2,097,152-byte prefix. Return a negative errno on failure, never 0 (macOS's success value)."
+category = "cyrius"
+tags = ["v6.7.12", "linux", "ARG_MAX", "argv", "args_init", "proc", "cmdline", "RLIMIT_STACK", "secureexec"]
+---
+- Linux ARG_MAX is RLIMIT_STACK / 4, capped at 6 MiB (3/4 of the kernel's 8 MiB `_STK_LIM`), and an UNPRIVILEGED
+  `ulimit -s` raises it — it is not the constant 2 MiB that `getconf ARG_MAX` prints under the default limit.
+- Read `/proc/self/cmdline` to EOF, never with one read of a fixed buffer. `args_init` did that until 6.7.12, and
+  `argc()` silently described a 2,097,152-byte prefix. It now doubles a 2 MiB first buffer until EOF and publishes
+  nothing on failure.
+- A secureexec (setuid / file caps) clamps the soft stack limit to 8 MiB, so a privileged exec chain carries at most
+  2 MiB of argv + envp — why the truncation was a bug, not a vulnerability.
+- Return a NEGATIVE errno on failure, never 0, because 0 is macOS's success value (D7). Test `args_init() < 0`.
+language/stdlib_modules.cyml args_init_contract_v6712. CHANGELOG [6.7.12] LIB-14.
+
+[[entries]]
+name = "cx_pointer_wrappers_outside_cxvms_translated_set_v6712"
+description = "On the cx target a pointer-taking stdlib wrapper outside cxvm's translated set cannot work: cxvm translates read / write / open and serves getrandom / clock_gettime, and everything else reaches the host with the guest's raw registers. Since 6.7.12 four wrappers refuse honestly (D13); the rest still hand the host a guest address."
+category = "cyrius"
+tags = ["v6.7.12", "cx", "cxvm", "guest contract", "mmap", "pipe", "fstat", "unlink", "sandbox"]
+---
+- cxvm translates `read` / `write` / `open` and serves `getrandom` / `clock_gettime`; everything else reaches the HOST
+  kernel with the guest's raw registers — so a guest pointer arrives as a meaningless host address.
+- Since 6.7.12 four wrappers refuse honestly (D13): `cyr_mmap` -1 (so `mmap_anon` 0), and `sys_pipe` / `sys_fstat` /
+  `sys_unlink` -38. Check the result; a cx arm of a test asserts the refusal by name.
+- The rest still hand the host a guest address (filed, 6.7.14). ⚠ Two raw-`mmap` paths still return a HOST address as
+  success: `mmap_stack` (lib/thread.cyr) and `fl_alloc` (lib/freelist.cyr's `_fl_mmap`, which traps on first use).
+  And since the 8 MiB guest a guest address can equal cxvm's own image (text 0x400000, data 0x600000).
+- `sys_unlink` does not remove a file on cx, so a probe file a cx program creates through the translated open STAYS.
+language/features.cyml cx_tail_calls_and_cxvm_guest_traps_v6612 (6.7.12). CHANGELOG [6.7.12] LIB-7, LIB-8.

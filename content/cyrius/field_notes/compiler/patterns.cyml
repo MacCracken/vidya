@@ -8,6 +8,8 @@
 # For non-obvious internal traps see gotchas.cyml.
 # For full backstory + retrospective context see retros/.
 #
+# 11 entries at 6.7.12 (DERIVED; +fold_once_report_the_fact_to_every_consumer_v6712 — the header had read 9
+# while the file held 10 since 6.7.3's in-place rebuild entry).
 # 9 entries (DERIVED at 6.6.16 with `grep -c '^\[\[entries\]\]'`: +2 — an allocator-aware path is
 # only as arena-clean as its deepest callee, and a test that may hang must fail, not hang).
 
@@ -652,3 +654,35 @@ group. Invariant kept: no group any live path crosses has an EMPTY slot (fhm_del
 choice relies on it). Measured: 1,114,112 → 278,528 B at 7,000 live / 16,384 slots over 3M rounds.
 Test: tests/tcyr/stdlib/hashmap_fast_rebuild_in_place.tcyr (52 rows, four mutants killed).
 
+[[entries]]
+name = "fold_once_report_the_fact_to_every_consumer_v6712"
+description = "Once a compile-time fold knows a site's value, everything downstream that tested that value at RUN time can be specialised — have the fold report the fact, and every consumer read it. cyrius 6.7.12's XLAT-3 (arm64 Mach-O) and its x86 twin: the syscall fold reports the number the kept chain leaves, and ESYSCALL / EEXIT emit only the fixups that number needs."
+category = "cyrius"
+tags = ["v6.7.12", "compile-time-fold", "esysxlat", "EMACHO_SYSXLAT", "macho", "XLAT-3", "fixups", "specialisation"]
+---
+THE PATTERN. A fold that turns a run-time value into a compile-time fact usually stops at its own output (6.6.18's
+`_esx_fold` left x16 a known constant) — but the code AROUND the site kept testing that value at run time: arm64
+Mach-O's ESYSCALL bracketed every `svc #0x80` with a 3-word pipe stash before it and a 5-word fork fixup plus an
+8-word pipe store after it, 64 B a site, even where the fold had already decided x16. Report the fact to every
+consumer instead.
+
+arm64 (XLAT-3, DW-3). `_esx_walk` also reports the x16 the kept words leave (`_esx_body_x16`) — read by WALKING the
+chain, not from the last emitted word, so a `#naked` chain cannot fool it; 0xFFFF when no row matched, -1 when the body
+holds a branch. `_esx_fold` hands it to ESYSCALL through `_esx_lit_x16`, which emits the pipe halves only for 42
+(pipe2 59 -> 42) and the fork half only for 2 (clone 220 -> 2); -1 keeps the run-time tests (variable-number sites,
+`#naked` inline chains, EEXIT). The filed `syscall(39)` went from 72 B after its `movz` to `svc; csneg` (8 B).
+
+x86 TWIN (DW-4). `_msx_fold` replays EMACHO_SYSXLAT in a query mode (`_msx_qon == 2`, in its own fn `_msx_fq` to stay
+off EMACHO_SYSXLAT's cybs reference count): a literal site is one `mov rax, imm32` and keeps only `_msx_fork_fix` at 57
+and only `_msx_pipe_fix` at 22 (argc ≥ 2); EEXIT's pre-classed exit folds to NOTHING (exit does not return). A run-time
+number calls one shared stub per arity class (XLAT-2).
+
+THE TRAP. The module var carrying the fact must be reset BOTH before the fold and after its ESYSCALL: mutation (h),
+"never reset", leaks a literal's x16 into the next variable / `#naked` site (0 / 0 fixup words where 4 / 2 are needed),
+and `esysxlat_fold.sh` axis 8 pins a variable and a `#naked` site emitted after a literal one. Keep the rows
+themselves untouched, so the route-parity gates still read the truth.
+
+Measured: the arm64-macOS CLI 901,628 -> 885,244 B; the x86-macOS compiler 2,883,584 -> 1,937,408 B (−32.8 %, the
+x86 fold + XLAT-2); ELF output byte-identical. Gotchas: gotchas.cyml
+fold_a_hand_written_chain_by_simulating_it_in_its_own_order_and_prove_it_by_interpreting_it (6.6.18 + the 6.7.12
+twin), native_region_rules_and_the_macho_fold_report_v6712 #4. CHANGELOG [6.7.12] DW-3, DW-3r, DW-4.

@@ -151,6 +151,14 @@
 # const_and_const_fn_v672, visibility_public_private_v650, auto_call_main_v59x + cx_tail_calls_and_cxvm_guest_traps_
 # v6612 (cx auto-calls `main`), elf64_kernel_multiboot2_emit_v51143 (kernel DCE compaction). 111 entries (DERIVED at
 # 6.7.11).
+# v6.7.12 (2026-10-15, Break 2 repair 2 — the platform release): +1 entry — sys_sigprocmask_on_macos_v6712 (per-thread,
+# `__pthread_sigmask` 329 via 1329). Updated: typed_simd_value_type_abi (a vector value into `*V` is an address, D27; Win64
+# hidden pointer at every vector call), f32v8_avx2_256bit_simd (`*f32v8` is a `*V`), struct_copies_returns_and_operator_
+# results_v6711 (an untyped `var q = p;` is a typed copy, D29), struct_value_operands_and_parentheses_v676 (D28 through
+# `fncallN(&f, ..)`), enum_namespacing (a prior constant 0 counts, D30), aarch64_xattr_statx_rlimit_fchown_wrappers_and_
+# native_region_exemption_v6612 (the renumber warning, DW-1), darwin_concurrency_syscall_wrappers_v6543 (1329),
+# windows_directory_listing (`win_handle_under`), cx_tail_calls_and_cxvm_guest_traps_v6612 (4 MiB / 8 MiB, the guest
+# contract, D12 / D13). 112 entries (DERIVED at 6.7.12).
 
 [[entries]]
 name = "byte_array_literal"
@@ -735,6 +743,14 @@ SEMANTICS:
     `enum B { X = 2; }`, `A.X` is 1 and `B.X` is 2. The BARE `X`
     keeps "last definition wins" (2) and warns
     `duplicate symbol 'X' redefined with conflicting value`.
+    A prior constant ZERO counts since 6.7.12 (D30): `var a = 0;
+    var a = 5;` warns "duplicate symbol 'a' redefined with
+    conflicting value (last definition wins)" as every differing
+    pair does (through 6.7.11 a recorded 0 read as "no constant",
+    so two files' `var _shared = 0;` / `= 5;` became one cell
+    unseen). A same value stays silent, a computed prior is not
+    compared, and the new value is compared only as an exact
+    `= NUM ;` literal (filed, 6.7.14). CHANGELOG [6.7.12] FX-6.
 
     BEFORE 6.6.11 THE QUALIFIER WAS IGNORED. The parser only asked
     whether the name after the dot was a global, so `Foo.EB` and
@@ -2153,9 +2169,30 @@ HAS a working spelling: `callptr(&f, ..)`.
 A `p: *V` PARAMETER IS A POINTER (D33): one integer word (the C ABI's pointer — an ABI change from the
 value-form arrival it had through 6.7.10), `p + 1` steps one whole vector, `rd(&b)` compiles, `rd(b)` with a
 vector local passes `&b` (as a struct into `*T` does since 6.6.20), and a vector of another type (the same
-size included) is refused by name; `p[1]` on it is refused as on a `*V` local. Open (filed): `rd(mkv(..))`
-/ `rd(*pv)` pass lane 0 as the address — bind the vector to a local first; on Win64 a DISCARDED vector
-result of an indirect call still passes no hidden pointer (filed, High). CHANGELOG [6.7.11] (ARG-2, ARG-4).
+size included) is refused by name; `p[1]` on it is refused as on a `*V` local. CHANGELOG [6.7.11] (ARG-2,
+ARG-4). (6.7.11's open items — `rd(mkv(..))` / `rd(*pv)` passing lane 0, the Win64 discarded vector result —
+are closed in 6.7.12, below.)
+
+6.7.12 — A VECTOR VALUE INTO `*V` IS AN ADDRESS (D27, fork B): a call declared to return the vector — by name,
+wrapped in parentheses, `fncallN(&f, ..)` / `callptr(&f, ..)`, an inferred generic, a method's argument, a tail
+position — passes a frame temporary's address (Win64: the call's hidden result pointer), so `rd(mkv(1.0, 2.0))`
+works; `rd(*pv)` with `pv` a `*V` (local, parameter, capture, field, global, `: *V` call, `pv + n`) passes `pv`.
+Another vector type is refused with ARG-4's words. At top level there is no frame: "'mkv' returns a vector by
+value, and a vector result needs storage in a fn's frame - call it inside a fn".
+A VECTOR LOCAL INTO ANOTHER POINTER KIND IS REFUSED (D27): `p: *Pt`, `*i64`, `*u8`, `**T` — "cannot pass 'b' to
+a parameter that is not a pointer to its vector type in a call to 'rp' - pass &b for its address", every such
+argument reported (the refusal does not latch the panic flag, so `rp(b) + ri(b)` names both). WAS: lane 0's
+bits as the address (139 / 139 / a cx fault / PE exit 5), except Win64's `rp(b)` into `*Pt`, which passed `&b`
+by accident.
+ON WIN64 EVERY VECTOR-RETURNING CALL GETS ITS HIDDEN POINTER (FX-2): a discarded statement, an untyped
+`var x = callptr(&f, ..)`, an argument to an untyped parameter, a method, an operator fn — at top level too
+(storage: a frame temporary, or a hidden global at top level; the value, where one is read, is lane 0). WAS:
+exit 5, or `s.mv(..)` overwriting `s`.
+Still open (filed, 6.7.13): a vector call result or `*pv` into `*Pt` / `*i64`; a vector local into a by-value
+struct; a METHOD or explicit-instance call result into `*V` (lane 0 still — bind it to a local first);
+`rd(*&b)` / `rd(**ppb)`; a captured vector into another pointer kind (runs, unrefused); `lanes(mkv(..))` into
+a value-form `x: f64v2` (PE exit 5). Field notes: field_notes/compiler/gotchas.cyml vector_addresses_typed_copies_and_zero_as_none_v6712
+(the step word's vector field; the Win64 hidden pointer at every call site). CHANGELOG [6.7.12] FX-1, FX-2.
 
 [[entries]]
 name = "f32v4_packed_single_simd"
@@ -2385,6 +2422,13 @@ lib/simd.cyr WRAPPERS (pointer-form first; value-form deferred):
     use exact-product inputs for bit-equality. bench_f32v8_gemm ~1.48×
     (256 vs 128-bit; sub-2× — fixed per-cell reduce overhead). Phase 4
     CLOSES: f32 SIMD complete on x86 (f32v4 128-bit + f32v8 256-bit).
+
+PARAMETERS (6.7.12): `p: *f32v8` is a `*V` — `r8(e)` with a vector local
+  passes `&e` (it passed lane 0 and faulted through 6.7.11; see
+  typed_simd_value_type_abi). The value-form `v: f32v8` PARAMETER still
+  receives only its first word on every target (filed, 6.7.13:
+  2026-10-15-value-form-f32v8-parameter-receives-one-word.md) — pass
+  `*f32v8` until then. CHANGELOG [6.7.12] FX-1.
 
 [[entries]]
 name = "overload_dispatch_pointer_vs_value"
@@ -3493,6 +3537,14 @@ transitively. This completes the Windows file surface (process /
 thread / TLS-via-args / env / file-I/O / directory enumeration all
 work as of v6.1.16–v6.1.18). v6.1.18.
 
+Since 6.7.12 `fs_win` also carries `win_handle_under(h, root_h)`: 1
+when the object behind `h` lies strictly inside the directory behind
+`root_h`, by their FINAL paths; 0 when not; -1 when a final path
+cannot be had (never 1 — it fails closed). Through a new kernel32
+reroute, 0xF04E `GetFinalPathNameByHandleW`; the `[embed]` open uses
+it to refuse a junction planted after the check (language/tooling.cyml
+the `[embed]` entry). CHANGELOG [6.7.12] WN-3.
+
 [[entries]]
 name = "bayan_ganita_stdlib_carve"
 description = "Data-format + advanced-math carved OUT of the core stdlib into opt-in siblings — lib/bayan.cyr (json/toml/cyml/csv/base64/bigint/u128, v6.1.25) + lib/ganita.cyr (matrix/linalg/advanced-math, v6.1.26)"
@@ -4385,7 +4437,8 @@ backends and adds the peer wrappers:
 Source numbers are the v6.5.7 private-alias band (>= 1000, renumbered by
 ESYSXLAT / EMACHO_SYSXLAT, spelled `1000 + the native number` so the alias
 documents itself): 1360 -> 360, 1361 -> 361, 1366 -> 366, 1515 -> 515,
-1516 -> 516. `UL_COMPARE_AND_WAIT` is operation 1; `ULF_WAKE_ALL` is 0x100;
+1516 -> 516 (and since 6.7.12 1329 -> 329, `__pthread_sigmask`, behind
+`sys_sigprocmask` — sys_sigprocmask_on_macos_v6712). `UL_COMPARE_AND_WAIT` is operation 1; `ULF_WAKE_ALL` is 0x100;
 `sys_ulock_wait`'s timeout is MICROSECONDS, 0 meaning forever.
 
 ⛔ THESE DO NOT MAKE A THREAD ON THEIR OWN. `bsdthread_register` must run once
@@ -5263,6 +5316,25 @@ without a word: measured on 6.6.12, `syscall(9, ...)` (native lgetxattr) inside
 `#ifdef CYRIUS_ARCH_AARCH64` compiles silently and runs `mmap` under qemu. The guide's rule 3
 stands: never write the aarch64-native number — use the peer's `SYS_*` name or the wrapper.
 
+6.7.12 — THE RENUMBER IS WARNED (DW-1, D1). On ELF-aarch64 a raw syscall LITERAL that an x86-compat ESYSXLAT
+row renumbers is warned when it sits inside a native-aarch64 region opened in the call's OWN file (the region
+is `#ifdef CYRIUS_ARCH_AARCH64`, `#ifplat aarch64`, `#ifndef CYRIUS_ARCH_X86`, or the `#else` of their
+opposites), naming the spelling that would reach the call you meant:
+
+    raw syscall 9 inside a native-aarch64 region is renumbered → 222 (mmap); write 1009 for native lgetxattr
+    … no 1000+N alias exists for native <name> (the chain has no 1NNN row)
+
+The number is STILL translated (the user's decision D1, 2026-10-15: warn only), so no binary changes; the
+alias is derived by running the chain with 1000+N. Judged: one integer-literal token (hex too, `0x9`). NOT
+judged: `(9)`, `9 + 0`, any `SYS_*` / enum constant (the stdlib's renumber by design: aarch64 `SYS_FSYNC = 74`
+→ 82), and a file `include`d from inside a region (the stdlib's shared syscall files write x86 numbers there on
+purpose: `fd_wait_ready`'s 7, `sys_epoll_wait`'s 232). The two unjudged shapes that matter — a per-arch file
+included under the guard, and the author's own constant — are filed for 6.7.14
+(2026-10-15-native-region-warning-misses-included-files-and-author-constants.md), so "silent is not safe"
+still holds for them. Gate: tests/gates/platform/native_region_literal_warns.sh. Field notes:
+field_notes/compiler/gotchas.cyml native_region_rules_and_the_macho_fold_report_v6712 (the inherited vs
+file-local region rules). CHANGELOG [6.7.12] DW-1.
+
 THE 3-ARG `kill` ARITY WARNING IS BACK ON x86-LINUX. 6.6.10 skipped the arity check for
 Darwin's `kill(pid, sig, posix)` with no target test, and the Linux arity table runs on every
 non-aarch64 backend, so `syscall(62, pid, sig, x)` compiled SILENTLY on x86-Linux from 6.6.10
@@ -5292,7 +5364,7 @@ jmp f`, the x86 `mov rsp, rbp; pop rbp; jmp` shape. Measured:
     # 6.6.11 cycc_cx + cxvm: exit 1 — garbage from the 513th frame on
 
 GUEST FAULTS TRAP (the cxvm host-memory bug). Before 6.6.12 `programs/cxvm.cyr` checked nothing a guest
-controls: a guest address past the 1 MB data segment (or negative) read and wrote cxvm's own
+controls: a guest address past the 1 MB data segment (8 MiB since 6.7.12) (or negative) read and wrote cxvm's own
 heap — the register file, the stacks, the loaded code; guest address 0 (the in-memory copy of
 the bytecode) stored silently; the 1024-entry call stack had no bound, so the 513th nested
 frame overwrote the loaded code; `read` / `write` / `getrandom` / `clock_gettime` buffers ending
@@ -5308,9 +5380,11 @@ past 1 MB had the HOST kernel write cxvm's heap; an unknown opcode was a silent 
   the null page;
 - the translated syscall buffers are checked for their full length (a path up to its NUL) and
   answer `-EFAULT` without reaching the host;
-- both VM stacks hold 65536 entries (512 KiB each) and trap on overflow and underflow, so the
-  guest's own 1 MB — not the host arrays — bounds recursion (non-tail depth 5000 returns the
-  right value; it gave garbage past 512 before);
+- both VM stacks hold 524288 entries since 6.7.12 (65536, 512 KiB each, at 6.6.12) and trap on
+  overflow and underflow, so the guest's own segment (8 MiB since 6.7.12; 1 MB before) — not the
+  host arrays — bounds recursion (non-tail depth 5000 returns the right value; it gave garbage
+  past 512 before; at 65536 entries an 8 MiB guest's runaway recursion would have met the
+  call-stack trap first);
 - `sub sp` traps before the guest stack reaches the loaded image (its globals and the
   `lib/alloc_cx.cyr` heap);
 - a negative pc traps, an unknown opcode traps (`cxvm: unknown opcode 0xNN at pc <N>`).
@@ -5335,6 +5409,21 @@ E the narrow stores; every trap reddened by its own revert).
 
 6.7.11: cx calls `fn main` from the entry epilogue like every image target (auto_call_main_v59x); a cx test that left
 its asserts in `main` used to pass vacuously (cxvm printed nothing, exit 0).
+
+6.7.12 — THE SIZES AND THE GUEST CONTRACT (LIB-7, LIB-8; D12, D13). cycc_cx holds a program's bytecode in a FIXED
+4 MiB off-heap code region (`_CX_CODE_CAP`; it was 512 KiB) and refuses by name past it: "cx bytecode exceeds the cx
+code region (4194304 B): … build this program for a native target". cxvm's guest memory is 8 MiB (`_CX_MEM_SIZE`
+8388608), its two VM stacks 524288 entries, and it reads a `.cyx` up to the guest memory + 8 — past it "error: .cyx
+exceeds cxvm's guest memory (8388608 B of code and data)". A 4.1 MB `.cyx` runs. The guest contract (D13): on cx
+`cyr_mmap` answers -1 (so `mmap_anon` 0) and `sys_pipe` / `sys_fstat` / `sys_unlink` -38 — they REFUSE instead of
+handing the host a guest offset (they answered -EFAULT, and unlink left the file). The seven corpus files that hit
+the contract assert the refusal and print a named SKIP.
+⚠ AND THE SANDBOX CAVEAT GREW: since the 8 MiB segment a guest address can equal cxvm's own Linux image (text
+0x400000, data 0x600000) — `cyr_munmap(0x400000, …)` kills cxvm, and a raw fstat into guest 0x600100 writes over
+cxvm's data (filed, 6.7.14: 2026-10-15-cx-untranslated-pointer-wrappers-can-reach-cxvm-image.md). Two raw-mmap paths
+still return a HOST address as success on cx: `mmap_stack` (lib/thread.cyr) and `fl_alloc` (lib/freelist.cyr's
+`_fl_mmap`). Every pointer-taking wrapper outside the four still passes guest addresses raw. CHANGELOG [6.7.12] LIB-7,
+LIB-8.
 
 [[entries]]
 name = "v6613_language_changes_builtins_array_sizes_global_layout"
@@ -6265,6 +6354,11 @@ receive is a HANDLE (the user's D31, 2026-10-13) — right for a `: *S` callee, 
 returned by value (use the two-word receive at 9-16 B, or an out-pointer). A parenthesised callee
 `callptr((&mk), ..)` counts as a variable (filed). The NAME INTRINSIC paragraph above holds for every
 other callee shape.
+6.7.12 (D28) — THE SAME REFUSAL THROUGH A FN POINTER WRITTEN `&f`: `var x: i64 = fncall1(&mk3, 5);` /
+`callptr(&mk3, 5)` with a struct over 8 B is "cannot initialise 'x: i64' from 'mk3', which returns the struct
+'P3' - declare 'x: P3' or bind a field" (through 6.7.11 it read the first field). A callee in a variable stays
+a word; a parenthesised callee `(&mk3)` is refused when the parenthesised-callee fix lands (6.7.13); top level
+is not judged (filed). CHANGELOG [6.7.12] FX-3.
 
 [[entries]]
 name = "tuples_v677"
@@ -6907,6 +7001,13 @@ so `c + 1` dispatches `S_add` (or is refused); write `c.v + 1`, or annotate `: i
 types it only when the call is the WHOLE initialiser: `var r = mk3(4) - s;` with an integer `P3_sub` is untyped
 (`r.x` is refused by name — *no struct type in scope for 'r'*). A chain ending in an integer method stays an
 integer; an untyped global keeps the word.
+6.7.12 — A PLAIN NAME TOO (D29 (a)): `var q = p;` / `var q = (p);` in a fn, with `p` an inline struct local, a
+by-value struct parameter (`self: T` included) or a closure's captured copy, is `var q: P = p;` — `q.y` reads /
+writes the COPY (in a closure too), `take(q)` passes the struct, `q + n` dispatches `P_add` (refused when there
+is none). A `*T` source (an untyped impl `self`), a handle, a struct global named in a fn and every untyped
+global stay words — annotate (`var q: P = G;`) for a copy of a global; a bare `q` value (`return q;`,
+`raw(q)`, `q == 3`) is still the first word. WAS (6.6.0 – 6.7.11): `q` was `p`'s first word — `q.y` "no struct
+type in scope for 'q'" ("undefined variable 'q'" in a closure), `take(q)` faulted. CHANGELOG [6.7.12] FX-5.
 
 A METHOD'S `*T` RESULT CHAINS (ST-19, D43): `h.get().b`, `.q.b`, `.m()`, through a dyn and a generic method;
 `h.get().b = 5` is refused as `get2(&h).b = 5` is. WAS: *it does not return a struct* (the method arm missed what
@@ -6929,3 +7030,32 @@ struct_deref_whole_operand}.tcyr; tests/gates/codegen/small_struct_handle_line.s
 § Where a struct lives, § A store through a `*S` copies the struct, § Parentheses. Field notes:
 field_notes/language/semantics_runtime.cyml struct_copies_and_operator_results_since_6_7_11;
 field_notes/compiler/gotchas.cyml struct_destinations_peek_ends_and_replayed_returns_v6711. CHANGELOG [6.7.11] (ST-1 .. ST-21).
+
+[[entries]]
+name = "sys_sigprocmask_on_macos_v6712"
+description = "cyrius 6.7.12: `sys_sigprocmask(how, set, oldset)` works on both Macs — it returns 0 and changes the CALLING THREAD's mask, as on Linux (through 6.7.11 it returned -78). It is Darwin's `__pthread_sigmask` (329) through the private alias 1329, never Darwin's process-wide `sigprocmask` (48); so the exec family empties an inherited mask on macOS too."
+category = "cyrius"
+tags = ["v6.7.12", "macos", "darwin", "signals", "sigprocmask", "__pthread_sigmask", "alias band", "1329", "process.cyr", "exec"]
+---
+WHAT IT IS. Since 6.7.12 `sys_sigprocmask(how, set, oldset)` returns 0 on x86 and arm64 macOS and changes the CALLING
+THREAD's mask, as Linux's `rt_sigprocmask` does. It is Darwin's `__pthread_sigmask` (329) — the call libSystem's
+`pthread_sigmask` uses — reached through the private alias 1329 (1000 + the BSD number, routed on both Mach-O
+backends; darwin_concurrency_syscall_wrappers_v6543 lists the band). It is NOT Darwin's `sigprocmask` (48), which XNU
+applies to EVERY thread of the process, and it is not a renumber of rt_sigprocmask: Darwin's sigset is 32 bits, with no
+sigsetsize argument.
+
+THE SHIM. It passes the usual 8-byte set (Darwin reads the low half) and zeroes `oldset`'s upper word, so a caller's
+8-byte buffers read the same on every target. `how` is the peer's SIG_BLOCK / SIG_UNBLOCK / SIG_SETMASK (1 / 2 / 3 on
+Darwin).
+
+WHAT FOLLOWS. `lib/process.cyr`'s exec family (`run`, `run_capture`, `spawn`, `exec_*`, `exec_cmd`) empties a mask
+inherited from a launcher on macOS too, completing 6.7.9's rule: every exec-family child starts with SIGPIPE / SIGXFSZ
+at SIG_DFL and an empty signal mask (Linux since 6.7.9, macOS since 6.7.12). A child that must keep a signal blocked
+blocks it itself. Code that took the old -78 as "no signal mask on macOS, skip" now really blocks or unblocks.
+
+Decisions: D3 (a public shim) and its scope, per-thread — both the user's, 2026-10-15 (the darwin lane's review
+measured 48 changing another thread's mask: `thread_after=536870912` on ach and ecb, 0 with 329). Gate: a crossos row
+asserting another thread's mask is unchanged, with `THREADS_CONCURRENT == 1` asserted on macOS so it cannot pass
+vacuously; tests/tcyr/crossos/{sigprocmask_every_target, exec_child_signal_state}.tcyr. Field notes:
+field_notes/language/platform_abi.cyml sys_sigprocmask_works_on_macos_per_thread_v6712; field_notes/compiler/gotchas.cyml
+a_stated_cause_or_a_carried_number_is_not_evidence_seven_times (the brief's premise). CHANGELOG [6.7.12] DW-5, DW-5r.

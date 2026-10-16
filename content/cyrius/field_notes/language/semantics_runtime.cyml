@@ -36,6 +36,12 @@
 # rule), vector_value_return_binding_forms (a vector local takes a vector), float_builtin_results_are_float_operands_
 # since_6_6_10 (the argument warning), fn_main_is_not_the_entry_point (cx), generic_using_t_as_a_struct_has_no_i64_
 # instance (carrier fields, methods). 44 entries (DERIVED at 6.7.11).
+# v6.7.12: +2 entries — a_same_value_redeclaration_is_silent_by_design_v6712 (D30), a_stack_enum_cannot_be_its_own_fns_
+# return_annotation_v6712 (D23). Updated: call_arguments_and_fn_pointer_results_since_6_7_11 (a vector value into `*V`
+# is an address, D27; D28), generics_and_the_frontend_since_6_7_11 (`var q = p;` is a typed copy, D29),
+# vector_value_return_binding_forms (Windows' unreceived vector call), var_name_bracket_is_bytes_not_elements (cyrlint's
+# N and top-level arrays), an_over_budget_array_local_is_static_storage_and_says_so (two buffers in one fn),
+# println_dispatches_on_the_declared_return_type (`println(vec_get(..))`). 46 entries (DERIVED at 6.7.12).
 
 [[entries]]
 name = "heap_allocation_patterns"
@@ -188,8 +194,10 @@ its 8-byte slot: `a[5]` exits 134 even inside the rounded storage.
 
 ⚠ 6.7.11 — cyrlint now catches the CONSTANT overrun. `var vals[5]` in a fn holds ONE i64 (8 bytes); four `store64`s at
 +0..+24 overrun the frame silently (the check driver itself did exactly that until 6.7.11). cyrlint warns on a
-literal-offset `load*/store*(&a + K)` past a literal-N bare local; mark a deliberate offset `# lint: offset-ok` (on
-the call's name line). A const-sized `var a[BUF]` and a top-level bare array are not checked yet (filed). Use
+literal-offset `load*/store*(&a + K)` past a bare local; mark a deliberate offset `# lint: offset-ok` (on the call's
+name line). Since 6.7.12 (TL-21) N is sized as the compiler sizes it — a literal, a `const NAME = <literal>;`, an enum
+constant with a literal value (bare or `E.X`), or `+ - *` over those — and a TOP-LEVEL bare `var g[N]` is checked too,
+at N × 8 bytes, in every fn that does not shadow it; the warning names the spelling and its value. Use
 `var vals: i64[5]` for five slots.
 
 [[entries]]
@@ -966,6 +974,9 @@ one lane and left the other stale) — declare it bare; a vector GLOBAL still ta
 `fncallN(&f, ..)` and `(f(..))` receive whole (the old "no working spelling for a vector-returning callptr" is
 history); a callee in a variable, a word (`load64(..)`, `= 5`), `&w`, a method call and `*p` are refused by name.
 A `p: *f64v2` PARAMETER is a pointer since 6.7.11 (call_arguments_and_fn_pointer_results_since_6_7_11).
+On Windows a vector-returning call nothing receives — a statement, an argument to an untyped parameter, a method, an
+operator fn — no longer faults (6.7.12, FX-2): it gets its hidden result pointer like a receive; its value, where one
+is read, is lane 0.
 
 [[entries]]
 name = "public_marker_leaks_onto_next_declaration_v664"
@@ -1104,6 +1115,11 @@ per call and not per thread. If the fn can be re-entered or run on two threads, 
 buffer to `alloc()`. Two known consumers (a 256 KB crypto scratch and a test server buffer)
 bank theirs deliberately and are correct as they stand.
 
+**The budget is per FN, so it can meet two buffers (6.7.12).** Two 64 KB array locals in ONE fn pass the frame budget
+(15,360 slots): the first is stack storage and the SECOND silently becomes the static, shared-by-every-thread buffer
+(the warning names it). Give each large buffer its own fn — `lib/fs_win.cyr`'s `_fs_handle_under_path` was split out
+for exactly this (WN-3) — or `alloc()` it.
+
 **Before v6.6.5** the same declaration ALSO took a program-wide global name, so it captured
 every later reference to that identifier in any file (measured: 7 where 3 was right) and, from
 v6.6.4, produced a visibility error naming the CONSUMER's variable. It was invisible to the
@@ -1189,6 +1205,11 @@ cstring-only primitive rather than the overloaded name — the check driver alre
 `: i64` is this codebase's default annotation for *everything* (ADR-002), so the two
 collide constantly. When a stdlib call prints or formats the wrong KIND of thing, suspect
 the declared return type of whatever produced the argument before you suspect the callee.
+
+ONE MORE, IN cyrius's OWN CLI (6.7.12, TL-14): `println(vec_get(v, i))` prints the POINTER — `vec_get` returns i64, so
+the dispatch picks `println_int`; `cyrius lib sync --dry-run` printed `would sync: 140207630426008` for each file
+through 6.7.11. The rule above covers it: print a cstring held in a vec through a cstring-only primitive (or a
+`: cstring`-typed local).
 
 [[entries]]
 name = "float_negation_is_a_sign_flip_since_6_6_8"
@@ -1819,7 +1840,11 @@ one word, and `var p: P3 = callptr(fp, 5);` is a HANDLE to whatever that word ad
 returned by value. Give a variable callee an out-pointer, or receive a 9-16 B struct's two words.
 
 A `p: *f64v2` PARAMETER IS A POINTER. It was a value-form vector until 6.7.11 (`rd(&b)` refused, `rd(b)` crashed);
-now pass `rd(&b)` or `rd(b)` (its address). `rd(mkv(..))` is still not an address — bind the vector to a local first.
+now pass `rd(&b)` or `rd(b)` (its address). Since 6.7.12 (D27) a vector VALUE passed to `*V` is an address at every
+source except a method or an explicit-instance call result (still lane 0, filed 6.7.13 — bind those to a local):
+`rd(mkv(..))`, `rd(fncall2(&mkv, ..))`, `rd(*pv)` all work. A vector LOCAL into `*Pt` / `*i64` / `*u8` / `**T` is
+refused by name — pass `&b`. At top level a vector call result into `*V` is refused (no frame to hold it). And
+`var x: i64 = fncall1(&mk, 5);` with a struct over 8 B is refused as the direct call is (D28).
 (The value-form vector local rule is in vector_value_return_binding_forms.)
 
 A STRUCT POINTER CONVERTS INTO ANY STRUCT PARAMETER (`take8(pu)` copies the pointee); its DEREFERENCE does not —
@@ -1904,8 +1929,11 @@ A GENERIC METHOD CALLED WITH A SCALAR WHERE ITS BODY USES T AS A STRUCT IS REFUS
 `p.pick(9)` returned 0 silently through 6.7.10. (generic_using_t_as_a_struct_has_no_i64_instance.)
 
 IN A CLOSURE, A CAPTURED SLICE IS A COPY: `s.len` / `s.ptr` and `slice_len(&s)` / `slice_ptr(&s)` read it; `s[i]` and a
-store into `s.len` / `s.ptr` are refused by name. Declare the slice in the closure to subscript or re-point it. An
-untyped struct copy (`var q = p;`) still cannot be read as `q.y` inside a closure — type it (`var q: P = p;`).
+store into `s.len` / `s.ptr` are refused by name. Declare the slice in the closure to subscript or re-point it.
+AN UNTYPED NAME COPY OF A STRUCT VALUE IS A COPY (6.7.12, D29): `var q = p;` binds `p`'s struct — `q.y` works in a fn and
+in a closure, `take(q)` passes it, and `q + n` now DISPATCHES `P_add` (refused when there is none) where it added to the
+first word. A `*T` or handle source, a struct global named in a fn and an untyped global stay words — annotate
+(`var q: P = G;`) for a copy of a global. A bare `q` value (`return q;`, `q == 3`) is still the first word.
 
 THE VALUE OF `await f` IS A PLAIN WORD whatever `f` is declared.
 
@@ -1937,3 +1965,42 @@ silently drops the last byte (the shadow_pam SKIP line lost its `s\n`); one LONG
 Since 6.7.11 `cyrius lint` warns on a `syscall(SYS_WRITE|1, …)` / `sys_write` / `_aw_write` whose literal length is
 wrong (`#skip-lint` silences it). Prefer a length the compiler computes (`strlen`, a `Str`) wherever the literal can
 change. CHANGELOG [6.7.11] (TL-3).
+
+[[entries]]
+name = "a_same_value_redeclaration_is_silent_by_design_v6712"
+description = "Two libraries that pick the same private-looking global name with the SAME initial value share ONE global with no diagnostic (the 6.6.6 two-files-one-global rule); since 6.7.12 a differing value warns even when the first was `= 0` (D30). Only a census sees the same-value case — give module-private globals a module prefix."
+category = "cyrius"
+tags = ["v6.7.12", "globals", "redeclaration", "duplicate symbol", "last definition wins", "folds", "D30"]
+---
+    # a.cyr                      # b.cyr
+    var _shared = 0;             var _shared = 5;    # 6.7.12: warns "duplicate symbol '_shared' redefined with
+                                                     #   conflicting value (last definition wins)"; silent before
+    var _err = 0;                var _err = 0;       # silent BY DESIGN: one global, both files write it
+
+A top-level `var` repeated across files is ONE global (the 6.6.6 rule — "last definition wins"). Since 6.7.12 a
+DIFFERING constant value warns even when the first was `= 0` (D30; through 6.7.11 a recorded 0 read as "no constant",
+so the pair was silent). A SAME value stays silent: two libraries that pick the same private-looking name with the same
+initial value share one cell, and each sees the other's writes. Only a census sees that case — cyrius's own folds are
+held to it by `fold_namespace_collisions.sh` axis 4 (sankoch's `_bre_err` was niyama's global until sankoch 2.8.7). In a
+consumer, give module-private globals a module prefix. Not compared yet (filed, 6.7.14): a computed prior, and a new
+value that is not an exact `= NUM ;` literal. language/agents.cyml § NO `var x` REDECL; field_notes/compiler/gotchas.cyml
+vector_addresses_typed_copies_and_zero_as_none_v6712 #4. CHANGELOG [6.7.12] FX-6.
+
+[[entries]]
+name = "a_stack_enum_cannot_be_its_own_fns_return_annotation_v6712"
+description = "`fn f(x): E { return Va(x); }` with the file's own `enum E: stack` is refused (`type 'E' cannot be a fn return type`) — annotate `: Tagged` (which compiles and returns the pair) or nothing. And whatever a fn's annotation says, `return Ok(x);` makes it return TWO values: `fn f(x): i64 { return Ok(x); }` refuses `var z = f(3);` ('bind both')."
+category = "cyrius"
+tags = ["v6.7.12", ": stack", "enum", "Result", "Tagged", "return type", "pair", "cyrius header", "D23"]
+---
+    enum E: stack { Va(v); Vb(); }
+    fn f(x): E { return Va(x); }          # refused: type 'E' cannot be a fn return type
+    fn g(x): Tagged { return Va(x); }     # compiles; returns the (tag, payload) pair
+    fn h(x): i64 { return Ok(x); }        # compiles AND returns two values — the annotation does not narrow it
+    var z = h(3);                         # refused: "bind both" (var t, v = h(3);)
+
+A `: stack` enum's own name is not in the return-type set; `: Tagged` (or `: Result` / `: Option`, or no annotation)
+is. Pair-ness propagates through a fn's body whatever its annotation says, so a `: i64` on a fn that returns `Ok(x)` is
+a promise the compiler does not enforce at the definition — it surfaces at the caller's single bind. `cyrius header`
+refuses such a PUBLIC fn by name since 6.7.12 (D23 — TL-22), so a C caller is never told it gets a word. On aarch64 the
+pair is x0:x2, not AAPCS64's x0:x1 (field_notes/compiler/gotchas.cyml tools_lane_signals_pairs_paths_and_the_lock_v6712 #2).
+CHANGELOG [6.7.12] TL-22.

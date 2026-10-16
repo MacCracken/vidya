@@ -5,6 +5,10 @@
 # POSIX-mandatory, and `grep -c` exiting 1 on a legitimate count of 0.
 # 6.7.10: +1 entry — the_shell_reports_its_own_process_not_your_command_v6710 (a subshell's crash
 # message, `| head &&`, per-worker binary names). 5 entries.
+# 6.7.12: +5 entries — the toolchain-workflow gotchas a cyrius user meets at the shell:
+# cyrius_watch_output_is_unsigned_on_apple_silicon_v6712, a_windows_checkout_rewrites_a_committed_lib_to_crlf_v6712,
+# bootstrap_sh_builds_no_cycc_v6712, a_formatters_rewrite_and_its_check_accept_different_sets_v6712,
+# pin_bump_order_with_a_full_vendored_lib_v6712. 10 entries (DERIVED at 6.7.12).
 
 [[entries]]
 name = "bash_subshell_clobbers_stateful_helpers"
@@ -332,3 +336,77 @@ scratch name.
 
 Related: bash_pre_increment_set_e_zero_exit (a status you meant to INSPECT under `set -e`),
 grep_dash_c_prints_zero_and_exits_one. CHANGELOG [6.7.10] (P5-B).
+
+[[entries]]
+name = "cyrius_watch_output_is_unsigned_on_apple_silicon_v6712"
+description = "The macOS tarballs ship `cyrius-watch.sh` since 6.7.12. It compiles with raw `cat | cycc`, so on Apple Silicon its output is unsigned and AMFI kills it at exec (137; 42 after `codesign -s -`), and an entry-relative `include` that `cyrius build` resolves fails under it on every OS. Use `cyrius build` until the watcher's recipe is settled."
+category = "cyrius"
+tags = ["v6.7.12", "macos", "apple silicon", "codesign", "AMFI", "cyrius-watch.sh", "cyrius build", "include"]
+---
+- The macOS tarballs ship `cyrius-watch.sh` since 6.7.12 (D4: every `[release] scripts` entry ships). Run it as
+  `cyrius-watch.sh [src] [out]` — there is no `cyrius watch` verb.
+- It compiles with raw `cat | cycc`, so on Apple Silicon its output is UNSIGNED and AMFI kills it at exec (exit 137; the
+  same binary exits 42 after `codesign -s -`). `cyrius build` ad-hoc signs.
+- An entry-relative `include` that `cyrius build` resolves (the `#@incdir` marker) fails under it on EVERY OS.
+- Use `cyrius build` until the filed issue (6.7.14,
+  2026-10-15-cyrius-watch-builds-with-raw-cycc-unsigned-on-apple-silicon.md) settles the watcher's recipe.
+language/tooling.cyml helper_scripts. CHANGELOG [6.7.12] DW-6.
+
+[[entries]]
+name = "a_windows_checkout_rewrites_a_committed_lib_to_crlf_v6712"
+description = "cyrius.lock hashes the exact bytes `cyrius deps` wrote; Git for Windows' default `core.autocrlf=true` rewrites a committed lib/ to CRLF on checkout, so `deps --verify` and `--locked` fail on every file. Since 6.7.12 the failure names it. The cure is `lib/** -text` in `.gitattributes`, committed, then check lib/ out again — never re-lock the converted bytes."
+category = "cyrius"
+tags = ["v6.7.12", "windows", "git", "autocrlf", "CRLF", "gitattributes", "cyrius.lock", "deps --verify", "--locked"]
+---
+cyrius.lock hashes the EXACT bytes `cyrius deps` wrote. Git for Windows' default `core.autocrlf=true` rewrites a
+committed lib/ to CRLF on checkout, so `cyrius deps --verify` and `--locked` fail on every file. Since 6.7.12 the
+failure names the cause (`… CRLF checkout: add `lib/** -text` to .gitattributes`).
+
+The cure: `lib/** -text` in `.gitattributes`, committed, then check lib/ out again. NEVER re-lock the converted bytes —
+`cyrius deps` would, and the lock then churns between Windows and Linux checkouts. A CRLF checkout still FAILS
+verification by design: exact bytes are the proof. `cyrius init` writes the line and `cyrius port` creates or appends it
+(D10). language/tooling.cyml (the cyrius.lock paragraph). CHANGELOG [6.7.12] TL-27.
+
+[[entries]]
+name = "bootstrap_sh_builds_no_cycc_v6712"
+description = "`bootstrap/bootstrap.sh` assembles cybs from the seed and builds asm — never a cycc. `scripts/seed-derive-cycc.sh` PROVES the tracked build/cycc descends from the seed and itself needs build/cycc to exist. Neither makes a missing build/cycc: restore it with `git checkout build/cycc`."
+category = "cyrius"
+tags = ["v6.7.12", "bootstrap", "seed", "cybs", "build/cycc", "seed-derive", "cyriusly setup"]
+---
+- `bootstrap/bootstrap.sh` assembles cybs from the 29 KB seed and builds asm — it never produces a cycc.
+- `scripts/seed-derive-cycc.sh` PROVES that the tracked build/cycc descends from the seed (seed → cybs → gen1 → gen2 ==
+  build/cycc), and itself needs build/cycc to exist (`ERROR: build/cycc missing`).
+- Neither makes a missing build/cycc. Restore it with `git checkout build/cycc` (the tracked compiler is what CI and the
+  installer bootstrap from). `cyriusly setup` refuses by name without it since 6.7.12 — it used to run 15 compiles
+  against the missing compiler and leave 15 zero-byte tools.
+language/tooling.cyml cyriusly_native_port_v51110. CHANGELOG [6.7.12] TL-4.
+
+[[entries]]
+name = "a_formatters_rewrite_and_its_check_accept_different_sets_v6712"
+description = "`cyrfmt <file>` writes the CANONICAL form (a 2-space continuation step); `cyrfmt --check` accepts 2 or 4. Anything that judges 'formatted' must ask the check, never byte-compare the rewrite — `cyrius audit` did until 6.7.12 and flagged files `--check` passed (D26)."
+category = "cyrius"
+tags = ["v6.7.12", "cyrfmt", "fmt", "--check", "audit", "continuation indent", "D26"]
+---
+`cyrfmt <file>` writes the CANONICAL form (a 2-space continuation step per open paren level); `cyrfmt --check` accepts 2
+OR 4 (the 2026-08-18 formatter contract; deeper is rejected). So "is it formatted?" has two answers depending on whom you
+ask. Anything that judges "formatted" must ask the CHECK, never byte-compare the rewrite with the file — `cyrius audit`
+did until 6.7.12 and flagged files `--check` passed (D26, TL-20). To REQUIRE the canonical form exactly, compare
+`cyrfmt <file>` with the file yourself — and know that is a stricter rule than the contract. `cyrius fmt` rewrites an
+accepted 4 as 2. language/tooling.cyml audit_test_check_pipeline (LAYER 2). CHANGELOG [6.7.12] TL-20.
+
+[[entries]]
+name = "pin_bump_order_with_a_full_vendored_lib_v6712"
+description = "In a project that vendors the whole snapshot, run `cyrius lib sync --full` FIRST after moving `[package].cyrius`; since 6.7.12 `cyrius deps` / `cyrius build` refuse to re-lock until then (rc 1, the stale files named, the lock unchanged — D19). Follow the refusal's remedy, not `--locked`'s 'run cyrius deps'."
+category = "cyrius"
+tags = ["v6.7.12", "pin bump", "lib sync", "--full", "cyrius.lock", "deps", "D19", "--relock"]
+---
+    # edit [package] cyrius = "6.7.12"
+    cyrius lib sync --full        # FIRST: re-vendors the whole snapshot and re-locks what it wrote
+    cyrius deps --verify          # passes
+
+In a project that vendors the WHOLE snapshot, `cyrius lib sync --full` goes first after moving `[package].cyrius`.
+Since 6.7.12 `cyrius deps` / `cyrius build` at the moved pin REFUSE to re-lock while lib/ holds an out-of-closure file
+the new snapshot ships with other bytes (rc 1, each stale file named, cyrius.lock unchanged — D19); `--relock` does not
+bypass it. ⚠ After the refusal the closure files are already at the new pin, so `--verify` fails on them until the
+remedy runs (filed) — follow the REFUSAL's remedy (`cyrius lib sync --full`, or `rm <file> && cyrius deps`), not
+`--locked`'s "run `cyrius deps`". language/tooling.cyml lib_sync_relock_v6617. CHANGELOG [6.7.12] TL-12, TL-12r.
