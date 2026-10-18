@@ -20,6 +20,9 @@
 # cyml_toml_plus_markdown_frontmatter's example are indented, not entries).
 # v6.7.12: +1 entry — a_const_and_its_public_var_twin_are_safe_only_when_lib_reads_the_const_v6712; the distlib sidecar
 # entry gained the end of the `WS_*` tie (D11: a companion module includes its sibling's constants). 7 entries (DERIVED).
+# v6.7.14: +1 entry — a_tls_peer_that_pads_or_repeats_now_fails_the_handshake_v6714 (LIB-8). Updated:
+# a_const_and_its_public_var_twin_are_safe_only_when_lib_reads_the_const_v6712 (`TLS_SHA256_CTX_LEN` has its twin and is
+# inert — 15 names, LIB-2). 8 entries (DERIVED at 6.7.14 with the line-anchored grep).
 
 [[entries]]
 name = "str_data_not_nul_terminated"
@@ -404,9 +407,9 @@ and its enum constants, which cannot be assigned or have their address taken. CH
 
 [[entries]]
 name = "a_const_and_its_public_var_twin_are_safe_only_when_lib_reads_the_const_v6712"
-description = "A `const _X` / `var X = _X;` pair is safe only when the library reads `_X` EVERYWHERE: one read of the public var lets a caller's write steer storage the const sized. 6.7.9 fixed the non-TLS twins; 6.7.12 fixed the TLS stack's 198 sites (`TLS12_RANDOM_LEN = 256` was a SIGSEGV in the PRF seed copy). The 14 public names stay writable but inert (D16)."
+description = "A `const _X` / `var X = _X;` pair is safe only when the library reads `_X` EVERYWHERE: one read of the public var lets a caller's write steer storage the const sized. 6.7.9 fixed the non-TLS twins; 6.7.12 fixed the TLS stack's 198 sites (`TLS12_RANDOM_LEN = 256` was a SIGSEGV in the PRF seed copy). The public names stay writable but inert (D16) — 15 since 6.7.14, when the literal `TLS_SHA256_CTX_LEN` gained its const twin."
 category = "cyrius"
-tags = ["v6.7.12", "const", "public var", "twin", "bound vars", "tls", "TLS_RECORD_MAX_PLAINTEXT", "D16", "D17"]
+tags = ["v6.7.12", "v6.7.14", "const", "public var", "twin", "bound vars", "tls", "TLS_RECORD_MAX_PLAINTEXT", "TLS_SHA256_CTX_LEN", "D16", "D17"]
 ---
 THE SHAPE. 6.7.6 gave each public bound a `const _X` that sizes its storage, and kept `var X = _X;` for the API. The
 pair is safe only when the library reads `_X` everywhere: one read of the public var lets a caller's write steer
@@ -415,9 +418,34 @@ still read the vars until 6.7.12 — `TLS12_RANDOM_LEN = 256` copied 512 bytes i
 raised `TLS12_VERIFY_DATA_LEN` overran `expected`, a raised `TLS_SHA384_CTX_LEN` overran the transcript clone. 198
 reads now go to `_X` (`lib_buffers_sized_by_const.sh` axis 6 holds every derived twin).
 
-WHAT A CALLER SEES. The 14 public names stay WRITABLE but INERT (D16): a write reads back (they are still vars) and
-changes nothing — read-only mirrors. `TLS_RECORD_MAX_PLAINTEXT` is a protocol constant (D17), and "tuning" it never
-worked: a lowered value refused peers' full 2^14-byte records. A LITERAL public var that sizes a copy into const-sized
-storage is the same hazard: `TLS_SHA256_CTX_LEN` (no twin; `= 4096` then a SHA-256 transcript digest exits 139), filed
-for 6.7.14. language/stdlib_modules.cyml tls_module_contract_v6614 (BOUND VARS). CHANGELOG [6.7.12] LIB-11, LIB-12,
-LIB-13.
+WHAT A CALLER SEES. The public names stay WRITABLE but INERT (D16): a write reads back (they are still vars) and
+changes nothing — read-only mirrors. 14 at 6.7.12; 15 since 6.7.14. `TLS_RECORD_MAX_PLAINTEXT` is a protocol constant
+(D17), and "tuning" it never worked: a lowered value refused peers' full 2^14-byte records.
+
+A LITERAL PUBLIC VAR THAT SIZES A COPY INTO CONST-SIZED STORAGE IS THE SAME HAZARD as a twin read. `var
+TLS_SHA256_CTX_LEN = 144;` had no twin through 6.7.13 and sized both the SHA-256 transcript's heap ctx and the copy into
+its 208-byte stack clone: a program that set it to 4096 crashed inside `tls_native_transcript_digest` (139; an access
+violation on Windows), and one that lowered it under-allocated the ctx. Since 6.7.14 it has the twin shape — `const
+_TLS_SHA256_CTX_LEN = 144;` + `var TLS_SHA256_CTX_LEN = _TLS_SHA256_CTX_LEN;`, lib/ reads the const — so a write is
+inert like the other fourteen (6.7.12's D16, a fifteenth name). language/stdlib_modules.cyml tls_module_contract_v6614
+(BOUND VARS). CHANGELOG [6.7.12] LIB-11, LIB-12, LIB-13; [6.7.14] LIB-2.
+
+[[entries]]
+name = "a_tls_peer_that_pads_or_repeats_now_fails_the_handshake_v6714"
+description = "Since 6.7.14 the native TLS client refuses what 6.7.12's conformance bite left: a server that repeats an extension, leaves bytes after an extension block, or answers ALPN with anything but exactly one non-empty name (two names: the client used to take the first) fails the handshake with an alert, and a 1.2 ServerHello is walked against the 1.2 ClientHello. That is the RFC's answer — the fix is on the server."
+category = "cyrius"
+tags = ["v6.7.14", "tls", "tls_native", "handshake", "extensions", "ALPN", "alert", "decode_error", "illegal_parameter", "unsupported_extension", "RFC 8446", "RFC 7301"]
+---
+A server that passed against 6.7.13's native client can fail against 6.7.14's, with an alert — every one an RFC MUST on
+peer input (LIB-8; no decision):
+  - an extension type twice in a ServerHello / EncryptedExtensions block, TLS 1.2 or 1.3: illegal_parameter (the
+    client took the first);
+  - bytes after a 1.3 ServerHello's or EncryptedExtensions' extension block: decode_error (the check was `>`);
+  - an ALPN answer that is not exactly ONE non-empty name filling the extension (RFC 7301 §3.1): decode_error, and
+    nothing is stored (a list of two selected the first; a malformed body selected nothing and passed);
+  - the 1.2 client's ServerHello is now walked against the 1.2 ClientHello it built: an unsolicited extension or an ALPN
+    answer to no offer is unsupported_extension, a protocol not offered illegal_parameter, a session id over 32 bytes
+    decode_error — and `tls_native_connect_12` SENDS the alert (it sent none).
+The fix is on the server. A test that calls `tls_native_client_parse_server_hello_12` directly must build the client's
+own hello on that ctx first (`tls_native_12_build_client_hello`), or every extension reads as unoffered.
+language/stdlib_modules.cyml tls_module_contract_v6614 (CONFORMANCE). CHANGELOG [6.7.14] LIB-8.

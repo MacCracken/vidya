@@ -1,6 +1,15 @@
 # Cyrius — Core Reference
 # Overview, syntax, compiler architecture, dev loop, current limitations,
 # porting guide, stdlib catalog.
+# 2026-10-17 at v6.7.14: overview version/size line re-stamped (cycc 2,433,512 B, .text 2,210,192 from
+# readelf; cycc-native-aarch64 2,351,456 B; modules 32, unchanged; .tcyr / crossos / lib / programs / shell-gate
+# counts and api-surface 5,891 DERIVED on the 6.7.14 tree; heap map 115 regions — the six IR bands retired; dead-code
+# floor 52 fns / 10,597 B; the release gate was running at this refresh, so no self_compile is quoted); the IR
+# pipeline line (the arena, its ceilings); the reserved-word bullet (TOKNAME_OP); syntax's INLINE ASM block (`in` /
+# `out`, whole-name mnemonics); type_names_v6616 (a `var` annotation refused by name; `Result` / `Option` / `Tagged`
+# handles only while no struct takes the name); compiler_architecture's cx clause and limitation 13 (cx far
+# conditionals); the stdlib io line (Windows errnos); limitation 22's remainder (the whole-value wrap, the wrapped
+# destructure, a `?` pair forward below its caller) resolved.
 # 2026-10-16 at v6.7.13: overview version/size line re-stamped (cycc 2,299,144 B, .text
 # 2,078,520 (the gate bench); cycc-native-aarch64 2,151,872 B; modules 32, unchanged; .tcyr /
 # crossos / lib / programs / shell-gate counts and api-surface 5,888 DERIVED on the 6.7.13 tree; heap map
@@ -99,28 +108,33 @@ THE COMPILER BINARY:
   version_str | wc -l`; it read 31 at 6.7.10 — 6.7.11 added the pure
   `frontend/lex_attr.cyr` the lexer and six tools include — and 28
   at 6.6.19).
-- As of 6.7.13 (2026-10-16, Break 2 repair 3 — struct values;
-  the user tags; 6.7.12 is the last tag, at 97abbfec): `cycc` (the
-  binary name, forever; the version is `cycc --version` = 6.7.13)
-  self-hosts byte-identical at 2,299,144 B (.text 2,078,520),
-  +54,448 B over 6.7.12's 2,244,696 (six lanes merged in two waves:
-  structs, multi-value and tools, then receives + closures, vectors
-  and stdlib; rebuilt once per wave on the merged tree, fixpoint and
-  seed-derive OK each time); `build/cycc-native-aarch64` 2,151,872 B
-  (0.94x); dead-code floor 52 fns / 10,597 B (x86, unchanged); 624
-  .tcyr (318 in crossos/); 106 lib/*.cyr; 85 programs/*.cyr; 523
-  shell gate scripts under `tests/gates/<bucket>/*.sh` in 8 buckets
-  (some registered by exact path in `programs/checks/main.cyr`, the
-  rest driven from `scripts/check.sh` — all of them run; a gate that
-  CANNOT run exits 77 and is a SKIP, never a pass, since 6.6.11);
-  heap map 121 regions / 0 overlaps (unchanged — 6.7.13's new
-  tables, the pointer-to-pointer pin table `_pp_tab` and the
-  per-global `_gv_ppn`, are alloc()'d on first use, no map region,
-  no two-step bootstrap); api-surface 5,888 (+31, bayan 1.9.0's
-  `bayan_markdown_*`). Bench: self_compile 1,594 ms (the release
-  gate's bench run on e28c69b6). The 6.7.13 release gate was still
-  running when this line was stamped — read check.sh's count and the
-  cross-OS result from CHANGELOG [6.7.13], not from here. (6.7.12,
+- As of 6.7.14 (2026-10-17, Break 2 repair 4 — generics, the
+  frontend, infra; the user tags; 6.7.13 is the last tag, at
+  19a7ae21): `cycc` (the binary name, forever; the version is
+  `cycc --version` = 6.7.14) self-hosts byte-identical at
+  2,433,512 B (.text 2,210,192), +134,368 B over 6.7.13's 2,299,144
+  (nine lanes merged in three waves: infra, generics, frontend,
+  tools and platform; structs, receives + multi-value and stdlib;
+  vectors — rebuilt once per wave on the merged tree, the first
+  through the IR arena's two-step bootstrap, fixpoint and
+  seed-derive OK each time); `build/cycc-native-aarch64`
+  2,351,456 B (0.97x); dead-code floor 52 fns / 10,597 B (x86,
+  unchanged); 642 .tcyr (335 in crossos/); 106 lib/*.cyr; 85
+  programs/*.cyr; 550 shell gate scripts under
+  `tests/gates/<bucket>/*.sh` in 8 buckets (some registered by exact
+  path in `programs/checks/main.cyr`, the rest driven from
+  `scripts/check.sh` — all of them run; a gate that CANNOT run exits
+  77 and is a SKIP, never a pass, since 6.6.11; check.sh on the
+  wave-3 merge: 554 / 554, the driver 131 / 131); heap map 115
+  regions / 0 overlaps (121 through 6.7.13 — the six IR bands are
+  RETIRED, the IR is one alloc()'d arena grown on demand: the
+  release's one heap-layout change, a two-step bootstrap);
+  api-surface 5,891. The 6.7.14 release gate was still running when
+  this line was stamped — read check.sh's count, the cross-OS
+  result and self_compile from CHANGELOG [6.7.14], not from here.
+  (6.7.13, 2026-10-16: 2,299,144 B (.text 2,078,520); ARM
+  2,151,872 B; 624 .tcyr; 523 gates; heap map 121; api-surface
+  5,888; self_compile 1,594 ms from the gate's bench run. 6.7.12,
   release gate GREEN 2026-10-15 on 2a4be9e0: 2,244,696 B (.text
   2,024,160); ARM 2,150,672 B; check.sh 522 of 522 shell gates, the
   driver 131 of 131, the 2 named agnos-parity SKIPs; ecb · ach · pi
@@ -185,7 +199,19 @@ OPTIONAL COMPILER MODES:
   (disable) or =N (cap at first N fns, bisection).
 - IR pipeline: CYRIUS_IR=1 records IR + emits x86; CYRIUS_IR=3
   also runs the optimization passes (LASE + const-fold + bitmap
-  liveness DCE + DSE + fixed-point driver).
+  liveness DCE + DSE + fixed-point driver). Since 6.7.14 (IN-1) the
+  IR is one `alloc()`'d arena taken when CYRIUS_IR switches
+  recording on (a default build never takes it), growing 2x from
+  262,144 nodes / 32,768 blocks; the only limits are runaway
+  ceilings (`error: IR node table exceeds 64M nodes`, `error: IR
+  block table exceeds 16M blocks`; `error: cannot allocate the IR
+  arena (CYRIUS_IR)`). `IR node buffer full` / `IR block table
+  full` are gone — an IR build of anything the default build
+  accepts succeeds. ⚠ IR=3 is still opt-in, not release-grade: one
+  corpus file still fails under it (`derive_enum_inside_ifdef.tcyr`
+  — a const fold over a dead store NOP-fills its own immediate;
+  filed, 6.7.15). The f64 field store through a pointer was closed in
+  6.7.14 (ST-1: a float literal's `movabs` recorded no IR node).
 - Profiling: CYRIUS_PROF=1 (clock_gettime wall-clock; cross-platform
   via __got on Mach-O / kernel32 on PE).
 
@@ -260,7 +286,13 @@ LANGUAGE FEATURES SHIPPED (not exhaustive):
   lists itself (26 statement keywords + `f64_sqrt` / `callptr`) =
   107 reserved token types at 6.6.20 — derive, never quote. The
   parser NAMES the one you collided with (v6.4.77) instead of
-  reporting `got unknown`.
+  reporting `got unknown`. Since 6.7.14 (FE-1) TOKNAME names EVERY
+  token the lexer emits, not only the reserved set: `TOKNAME_OP`
+  covers `<=` `>=` `&` `%` `|` `^` `~` `<<` `>>` `&&` `||` `...` `?`
+  `@unsafe`, the nine wrapping / saturating / checked operators and a
+  float literal, so "expected '=', got '<='" never reads `got
+  unknown` (pinned by `tokname_every_emitted_token.sh`). The reserved
+  set itself (TOKNAME_BUILTIN + IS_KEYWORD_TOK) is unchanged.
 - `thread_local_alloc()` — a real allocator for thread-local
   slots (v6.4.65), so two libraries can no longer collide on a
   hardcoded slot index. `TLOCAL_MAX_SLOTS` 16 → 128.
@@ -475,6 +507,27 @@ INLINE ASM:
     asm { cli; sti; hlt; }     # mnemonics
     asm { mov cr3, rax; }      # privileged
     asm { lgdt [rax]; }        # descriptor tables
+    asm { in al, dx; }         # port I/O (6.7.14): in al|ax|eax, dx
+    asm { out dx, eax; }       #   out dx, al|ax|eax — the width is the encoding
+    asm { 0xE4; 0x60; }        # an immediate port is raw bytes (in al, 0x60)
+
+    Since 6.7.14 (IN-13, IN-14; D16): `in` is the for-in keyword and
+    still the mnemonic inside `asm { }`. `in` / `out` take the
+    accumulator (`al` / `ax` / `eax`) and `dx`, and the accumulator's
+    width IS the encoding: `in al|ax|eax, dx` = EC / 66 ED / ED,
+    `out dx, al|ax|eax` = EE / 66 EF / EF (through 6.7.13 `out dx, eax`
+    assembled as `out dx, al`, a one-byte EE). Any other operand is
+    refused by name (`in takes al, ax or eax and then dx, not 'bl'`).
+    A mnemonic is matched on its WHOLE name, and one the assembler does
+    not have is refused by name (`unknown x86 asm mnemonic 'clix'`,
+    `unknown aarch64 asm mnemonic 'nopx'`) — until 6.7.14 the first
+    letters decided (`clix` = cli, `inb` = in, `nopx` = nop). aarch64
+    has no `in` / `out` (refused by name); cx has no inline asm (refused,
+    naming the mnemonic). ⚠ Still true (filed, 6.7.15): `lgdt` / `lidt`
+    / `invlpg` / `mov crN` / `ltr` / `int N` IGNORE their operand
+    register (`lgdt [rbx]` assembles `lgdt [rax]`, `int 256` is `int 0`)
+    — write exactly the spellings above. aarch64 mnemonics take no
+    operand (`asm { dmb ish }` does not compile; filed, 6.7.15).
 
 KERNEL MODE:
     kernel;                    # emit bare-metal multiboot1 ELF
@@ -490,12 +543,16 @@ category = "cyrius"
 THE VOCABULARY (src/frontend/parse_types.cyr `_tn_resolve`, struct lookup first):
     i8 i16 i32 i64 / u8 u16 u32 u64    1 2 4 8      (u128: a keyword, 16)
     f32 f64                            4 8
-    bool cstring Result Option Tagged  8            plain words
+    bool cstring Result Option Tagged  8            plain words (Result / Option / Tagged
+                                                    only while the program declares no
+                                                    struct of that name — 6.7.14 below)
     Vec  (and Vec<T>)                  8            a vec_new() handle, as a field takes it
                                                     (a bare `Vec` FIELD: see 6.7.13 below)
     an enum (declared either side)     8
     f64v2 f32v4 i8v16 u8v16 i16v8 u16v8 i32v4 u32v4 i64v2 u64v2   16
-    f64v4 f32v8                        32
+    f64v4 f32v8                        32           (not reserved: a program's own struct /
+                                                    union of a vector name is that struct
+                                                    everywhere since 6.7.14, D41)
     a struct / union                   STRUCTSZ     (a struct NAMED like a
                                                      scalar — u8pair — is the struct)
     a type parameter in scope          its argument; the i64 base 8
@@ -525,7 +582,12 @@ RULES:
     misspelt prefix, and the vocabulary with "(missing include?)".
   - A param ALSO takes Str, cstring, Result, Option, Tagged and the vector
     names BY NAME — `s: Str` in a unit without lib/str.cyr is the by-name
-    handle the param ABI always took.
+    handle the param ABI always took. Since 6.7.14 Result / Option / Tagged
+    and the vector names are by-name only while the program declares no
+    struct (or union) of that name: a program's own `struct Result` is a
+    plain struct, COPIED into a by-value parameter like any other (ST-5),
+    and its own `struct f32v4` is the struct (D41, VC-16). `Str` stays a
+    handle by name whatever declares it.
   - A return type keeps its set: a struct, i8..i64, f64, a vector,
     Result / Option / Tagged / cstring (6.7.x added bool, a tuple, `dyn`
     and a generic's type parameter — see 6.7.11 below). `fn f(): u8` (or
@@ -564,8 +626,8 @@ annotation — or drop it (an unannotated var is an i64).
     in scope. Refused by name: a tuple, an unknown name (`Vec<nosuchtype>` compiled through 6.7.10 — the brackets
     were unread text), a vector, a slice, u128, a POINTER element (`Vec<*Pt>` — write `Vec<i64>`, the handle holds
     words either way), a non-type token, a second argument, a zone global's element declared below it. Still unread
-    (filed): a `Vec<..>` as a type argument, a multi-value element, a trait member's parameter, a field's nested
-    `Vec<Vec<..>>`. (`sizeof(Vec<i64>)` is a handle's 8 — sizeof has taken `T<..>` since 6.6.17, so the RULES
+    (filed then; READ since 6.7.14, GN-10 — below): a `Vec<..>` as a type argument, a multi-value element, a trait
+    member's parameter, a field's nested `Vec<Vec<..>>`. (`sizeof(Vec<i64>)` is a handle's 8 — sizeof has taken `T<..>` since 6.6.17, so the RULES
     line above saying `expected ')'` is stale for every generic type.)
   - THE RETURN-TYPE SET (GF-10) as accepted today: a struct, i8..i64, f64, a vector, Result / Option / Tagged /
     cstring, `bool`, `(T1, T2[, T3])`, `dyn Trait`, and a generic fn's first or second type parameter.
@@ -581,8 +643,28 @@ annotation — or drop it (an unannotated var is an i64).
     steps `sizeof(T)`, `**pp` through a narrow T reads the element at its width, `***T`'s `*ppp` is a `**T`. A
     program names at most 126 distinct pointee types of a pointer to a pointer ("too many pointer-to-pointer pointee
     types (max 126)", an error, never a silent word); the pins are interned per STRUCT, so every struct counts on its
-    own (127 two-word structs through `**S` are refused — they compiled on 6.7.12; filed, Low). See features.cyml
-    typed_pointer_step_is_sizeof_t_v6617.
+    own (127 two-word structs through `**S` are refused — they compiled on 6.7.12; filed, Low — FIXED at 6.7.14:
+    16,383, below). See features.cyml typed_pointer_step_is_sizeof_t_v6617.
+
+6.7.14 — EVERY ANNOTATION POSITION TAKES A TYPE OR IS REFUSED BY NAME (CHANGELOG [6.7.14] FE-20, GN-10, GN-11, ST-5,
+VC-1, VC-16; the user's D15 (a), D4 (a), D5 (a), D6 (a), D41):
+  - A `var`'s annotation too (D15 (a), FE-20): `var b: 1 = 0;` is "expected a type for variable 'b', got number 1"
+    — in a fn, either top-level zone and a for-init (`cyrius lint` reports it); a stray operator or a typo like
+    `var n: 8 = ..` compiled as i64 through 6.7.13. A missing one (`var b: = 0;`) is "expected '='". The var ladder
+    was the last that stepped a token blind.
+  - Every `Vec<..>` position reads its element (GN-10): a field's nested `Vec<Vec<..>>`, a trait member's parameter
+    and `: Vec<..>` return, a multi-value element, `Box<Vec<..>>`, `idv<Vec<..>>(c)`, `sizeof(Box<Vec<..>>)`. A
+    GENERIC element's own list is read as that struct's annotation reads it, minting nothing: `Vec<Box<nosuch>>` and
+    `Vec<Box<(i64, i64)>>` are refused, and a struct FIELD `Vec<Box<Later>>` needs `Later` declared above the struct
+    (as a field `Box<Later>` always did). A non-generic element's list (`Vec<Pt<..>>`) is still skipped (filed).
+  - A parameter's or return's `G<..>` reads its type arguments at the DEFINITION, called or not (GN-11, D6 (a)): `fn
+    gm(m: Mp<K, V>, b)` with K / V undeclared, `m: Box<Zork>`, `m: Box<u8>` are refused; a generic's own `fn
+    gm<K, V>(m: Mp<K, V>)` and a struct declared below the fn are fine. Still unread (filed): a multi-value element's
+    arguments, a trait member's parameter, a `*fn(..)` parameter type.
+  - `Result` / `Option` / `Tagged` / the vector names: by-name handles / vectors only while the program declares no
+    struct of that name (ST-5, D41 — above).
+  - A program names at most 16,383 distinct pointee types of a pointer to a pointer since 6.7.14 (VC-1: "too many
+    pointer-to-pointer pointee types (max 16383)"; 126 in 6.7.13).
 
 [[entries]]
 name = "compiler_architecture"
@@ -640,17 +722,22 @@ OPTIMIZATION PIPELINE (CYRIUS_IR=3):
     - DSE (dead-store elimination)
     - Fixed-point driver (re-runs passes until no further changes)
 
-MOST OF THE COMPILER'S MEMORY IS A FIXED brk/mmap MAP (121 regions
-at 6.7.12 and 6.7.13, `sh tests/gates/memory/heapmap.sh`), BUT THE LARGE TABLES
+MOST OF THE COMPILER'S MEMORY IS A FIXED brk/mmap MAP (115 regions
+at 6.7.14 — 121 at 6.7.12 / 6.7.13, before the six IR bands were
+retired for an alloc()'d arena — `sh tests/gates/memory/heapmap.sh`), BUT THE LARGE TABLES
 GROW. fn tables double to 131072, var tables to 1,048,576, the fixup
 table to 64M entries; codebuf is an off-heap 8 MiB alloc growing +8
 MiB to 64 MiB (cx: a fixed 4 MiB off-heap alloc, `_CX_CODE_CAP`, that
 never grows — past it cycc_cx refuses by name, "cx bytecode exceeds
 the cx code region (4194304 B): … build this program for a native
 target"; cxvm's guest memory is 8 MiB; both since 6.7.12, D12 — it
-was a fixed 512 KiB heap region); the output image is a lazily-mapped
-off-heap 1 GiB alloc; fn side tables and the string-intern index are
-alloc'd on first use. A cap that is still fixed (preprocessed source
+was a fixed 512 KiB heap region; since 6.7.14 a cx conditional
+reaches the whole region — every patchable `jz` / `jnz` is the
+inverted short branch over a 24-bit `jmp`, LIB-1); the output image
+is a lazily-mapped off-heap 1 GiB alloc; fn side tables, the
+string-intern index and (since 6.7.14) the IR arena are alloc'd on
+first use, and the DCE registries grow past their first 4,096
+records. A cap that is still fixed (preprocessed source
 24 MB, identifier pool 8 MiB, tokens 4,194,304, string data 2 MiB,
 struct definitions 1024) errors out with a message naming it.
 When an agent proposes "trim the fixture to fit", reject it: grow
@@ -792,7 +879,15 @@ CURRENT LIMITATIONS (active — work around these):
     that grows +8 MiB to a 64 MiB ceiling (v6.4.49); cx keeps a
     fixed 4 MiB off-heap region (6.7.12, D12; 512 KiB before), not
     growable and refused by name past it — cxvm loads up to its
-    8 MiB guest memory.
+    8 MiB guest memory. Since 6.7.14 (LIB-1) a cx conditional
+    reaches the whole region: every patchable `jz` / `jnz` is the
+    inverted short branch (`jz r0,+2` / `jnz r0,+2`) over a 24-bit
+    `jmp` — +4 B per conditional, ~1.5-2 % of a `.cyx`. Through
+    6.7.13 a conditional over more than 128 KiB WRAPPED its signed
+    16-bit offset at rc 0 and cxvm jumped to the wrong place. Two
+    consequences: a program within ~2 % of the region now meets the
+    by-name code-region refusal, and `src/main.cyr` through cycc_cx
+    sits at 92 % of it (its advisory read 90 % before).
 
 14. CYRIUS `/` AND `%` ARE SIGNED: The `/` operator lowers to
     `idiv`, not `div`. For u64 operations where the top bit is
@@ -832,10 +927,16 @@ CURRENT LIMITATIONS (active — work around these):
     every pair check~~ — RESOLVED 6.7.13 (MV-2, MV-8 / D19): the
     inherited default may sit below its caller, and `(f(7))` around a
     WHOLE pair call is the call (`var v = (f(7));` is refused "bind
-    both", `(f(7))?` propagates). Still open (filed, 6.7.14): an
-    operand that starts inside the wrap (`var v = (f(7) + 1);`) keeps
-    the tag, and `var a, b = (f(7));` is refused — still never wrap
-    a pair call.
+    both", `(f(7))?` propagates). The rest RESOLVED 6.7.14 (D45,
+    D46 — RC-20, RC-21): a store whose WHOLE value is parenthesised
+    and starts with a pair call (`var v = (f(7) + 1);`, `h.a = (f(7) *
+    2);`) is refused "bind both" as unwrapped, and `var a, b =
+    (f(7));` / `a, b = ((f()));` / `var t: (i64, i64) = (two(3));`
+    destructure and capture through the wrap. `x = (3 + f(7));` keeps
+    the tag (the wrap does not START with the call) and `(f(7) + 1) *
+    2` is no whole wrap. And a fn that propagates a pair with `f(..)?`
+    returns one wherever it is defined, above or below its callers
+    (RC-15).
 
 GOTCHAS (expected behavior, not bugs):
 
@@ -922,7 +1023,7 @@ string.cyr      — strlen, streq, memeq, memcpy, memset, memchr, strchr, strstr
 alloc.cyr       — alloc_init, alloc, alloc_reset, alloc_used (bump from brk; routes to alloc_macos.cyr mmap on macOS, alloc_windows.cyr VirtualAlloc on Windows). Also the allocator vtable (allocator_new / alloc_via) and arenas: arena_new / arena_alloc / arena_reset / arena_free plus the v6.5.9 growable + exhaustion-policy set (arena_new_growable, arena_set_on_full over ARENA_FULL_NULL|GROW|SPILL|ABORT, arena_capacity_total, arena_allocator_growable). NOTE: alloc_reset INVALIDATES every pointer it has handed out — including, pre-v6.5.7, the memoized default allocator itself (fixed: the vtable now lives outside any resettable region)
 str.cyr         — Str struct (data+len): str_from, str_len, str_eq, str_cat, str_sub, str_contains, str_split, str_trim
 vec.cyr         — Dynamic array: vec_new, vec_push, vec_pop, vec_get, vec_set, vec_len, vec_find, vec_remove
-io.cyr          — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists, plus flock(2) wrappers (file_lock, file_trylock, file_lock_shared, file_append_locked), the crash-safe set file_write_atomic / file_rename / xfsync / file_create_exclusive (v6.4.57; portable to Windows via MoveFileExW; v6.6.6: file_write_atomic keeps an existing file's mode, and file_replace_atomic also writes THROUGH a symlink, for a file a user owns), and the portable x* wrapper family (xopen/xstat/xunlink/xgetdents/xlseek/xflock; xrmdir v6.5.2; xmkdir/xmkdir_p/xsymlink/xreadlink/xlink v6.5.7)
+io.cyr          — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists, plus flock(2) wrappers (file_lock, file_trylock, file_lock_shared, file_append_locked), the crash-safe set file_write_atomic / file_rename / xfsync / file_create_exclusive (v6.4.57; portable to Windows via MoveFileExW; v6.6.6: file_write_atomic keeps an existing file's mode, and file_replace_atomic also writes THROUGH a symlink, for a file a user owns), and the portable x* wrapper family (xopen/xstat/xunlink/xgetdents/xlseek/xflock; xrmdir v6.5.2; xmkdir/xmkdir_p/xsymlink/xreadlink/xlink v6.5.7). On Windows a failed open / read / write / seek answers a negative errno through `GetLastError` since 6.7.14 (it was -1 / 0 / 0 / 0): `file_open_r` says `IoNotFound`, and a pipe whose writer closed still reads 0 — test `< 0`, never `== -1`
 fmt.cyr         — Formatting: fmt_int, fmt_hex, fmt_hex0x, fmt_bool, fmt_byte, fmt_pad, fmt_int_buf, sprintf, fmt_float
 args.cyr        — CLI args: args_init, argc, argv. args_init returns the bytes read; a failure is a NEGATIVE errno on Linux / Windows, and 0 is macOS / agnos success — test `< 0` (6.7.12, D7). Linux reads /proc/self/cmdline to EOF (a command line past 2 MiB is read whole). See stdlib_modules `args_init_contract_v6712`
 fnptr.cyr       — Function pointers: fncall0–fncall8 (see "fncall_ceiling" entry for ABI rules)

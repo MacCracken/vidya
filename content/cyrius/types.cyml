@@ -15,6 +15,11 @@
 # 2,078,520; ARM 2,151,872 B; dead-code floor 52 fns / 10,597 B; heap map 121 regions, unchanged; the typed-pointer step
 # word's FOURTH field, the pointer-to-pointer pin, bits 56-62 — `_pp_tab`, 126 pins interned per struct; `_gv_ppn`;
 # `_lfi_base`'s Str byte; ESTRUCT_PAIR_HI_SYNC removed; the hidden-temp census 34).
+# 2026-10-17 at cyrius 6.7.14: compiler_structural_facts gained a 6.7.14 DELTAS block (cycc 2,433,512 B, .text
+# 2,210,192; ARM 2,351,456 B; dead-code floor 52 fns / 10,597 B; heap map 115 regions — the six IR bands RETIRED, the IR
+# one alloc()'d arena; WPNR / WPSW grow past their first 4,096 records; the pin re-laid as bit 62 + a 14-bit pin in bits
+# 48-61, 16,383 pins, tables that double; `_lfi_base`'s Str byte retired; `_vdecl_base`; EPE_ERRNO_STUBS; the
+# hidden-temp census 36); the growable-table, heap-map, IR-opcode and backend-module sections point at it.
 
 [[entries]]
 name = "type_id_encoding"
@@ -1013,7 +1018,7 @@ sized entirely by their descriptor.
 
 [[entries]]
 name = "compiler_structural_facts"
-description = "Structural facts: the full snapshot at cycc 6.6.19 (re-derived at the 6.6.20 closeout) plus the 6.7.10, 6.7.11, 6.7.12 and 6.7.13 deltas (size, the ARM size and its relative bound, the dead-code floor, heap-map count, the fn_flags value-count bits, packed field widths, the handle line's records, the hidden-temp census): heap map, growable-table caps, identifier pool, fixup table, IR opcode set, backend modules, and the 7 per-target main forks — the numbers the design entries above are written against. NOTE: the entry NAME is deliberately version-less; it was `compiler_structural_facts_v6510` while describing 6.5.72, so the name itself had gone stale"
+description = "Structural facts: the full snapshot at cycc 6.6.19 (re-derived at the 6.6.20 closeout) plus the 6.7.10, 6.7.11, 6.7.12, 6.7.13 and 6.7.14 deltas (size, the ARM size and its relative bound, the dead-code floor, heap-map count — 115 since 6.7.14's IR arena —, the fn_flags value-count bits, packed field widths, the handle line's records, the typed-pointer step word's fields, the hidden-temp census): heap map, growable-table caps, identifier pool, fixup table, IR opcode set, backend modules, and the 7 per-target main forks — the numbers the design entries above are written against. NOTE: the entry NAME is deliberately version-less; it was `compiler_structural_facts_v6510` while describing 6.5.72, so the name itself had gone stale"
 category = "cyrius"
 ---
 The design entries in this file describe MECHANISM. This entry pins the
@@ -1035,6 +1040,106 @@ written into two other docs before the gate was run: the real number is
 multi-scalar band lines carrying no `[BYTES]` field. Deriving a number is
 not enough — derive it THE WAY THE GATE DOES, or run the gate.
 
+== 6.7.14 DELTAS (2026-10-17; Break 2 repair 4 — generics, the frontend, infra; 6.7.13 the last tag; the release gate was running at this refresh) ==
+
+  cycc 6.7.14 — x86_64 self-host 2,433,512 B (.text 2,210,192, readelf),
+  +134,368 B over 6.7.13's 2,299,144 — nine lanes merged in THREE waves
+  (infra, generics, frontend, tools, platform: 2,371,072 B at fda60731,
+  rebuilt through IN-1's two-step bootstrap; structs, receives +
+  multi-value, stdlib: 2,416,968 B at 12440d72; vectors: 2,433,512 B at
+  ced0bff9), fixpoint and seed-derive OK each time. build/cycc-native-aarch64
+  2,351,456 B (`cyrius pulsar`, 76e100a6; 0.97x — inside the 1.10x
+  relative bound). Dead-code floor: 52 unreachable fns / 10,597 B (x86,
+  cycc's own `note:` line, unchanged — IN-18's instruction-aligned call
+  graph did not move cycc's own count; tests/fixtures/dead_code_floor.txt
+  gains the infra lane's helpers on the forks that never call them).
+  HEAP MAP: 115 regions, 0 overlaps (`sh tests/gates/memory/heapmap.sh`;
+  121 through 6.7.13). THE RELEASE'S ONE HEAP-LAYOUT CHANGE IS IN-1, proven
+  by the two-step bootstrap (gen1 = the slot-open cycc on the new src,
+  gen1 == gen2 == gen3) before any other src/ bite branched from it: the
+  six fixed IR bands are RETIRED — ir_nodes 0x5E9D000 [16 MB], ir_cp
+  0x6E9D000 [4 MB], ir_blocks 0xB3A000 [4 MB], ir_state 0xF3A000 [4 KB],
+  ir_live_in / ir_live_out 0x207B000 / 0x217B000 [1 MB each] — 26 MB + 4 KB
+  recorded as three free gaps (0xA4A000-0x107B000, 0x207B000-0x457C000,
+  whose first 4.6 MB `cx_fixup_tbl` covers on cx, and 0x5E1D000-0x7400000);
+  brk-final 0xF600000 unchanged.
+  THE IR ARENA (IN-1). `IR_SENABLE` takes ONE `alloc()` (`_ir_arena_init`)
+  when `CYRIUS_IR` switches recording on — inside IR_SENABLE, so no driver
+  can enable IR without it; a default build never takes it. The five
+  tables are carved from it (nodes 16 B, node CPs 4 B, BBs 32 B, live-in
+  and live-out 8 B each; bases and caps in `_ir_nodes_base`, `_ir_cp_base`,
+  `_ir_ncap`, `_ir_bb_base`, `_ir_livein_base`, `_ir_liveout_base`,
+  `_ir_bcap`). Initial 262,144 nodes / 32,768 BBs — small on purpose, so
+  cycc's own IR build walks both grows; `_ir_nodes_grow` (nodes + CPs) and
+  `_ir_bbs_grow` (BBs + live-in + live-out, one alloc) double, leaking the
+  old storage as `_fixup_grow` does. The only limits are runaway ceilings,
+  each named: `error: IR node table exceeds 64M nodes` (1.25 GiB),
+  `error: IR block table exceeds 16M blocks` (768 MiB), and a refused
+  alloc `error: cannot allocate the IR arena (CYRIUS_IR)`. The old caps
+  (1,048,576 nodes / 131,072 BBs, `IR node buffer full` / `IR block table
+  full`) are gone; cycc's own IR=1 self-compile had reached 654,161 nodes.
+  ir_state is four globals (`_ir_ncnt`, `_ir_bcnt`, `_ir_curbb`,
+  `_ir_enabled`); the accessors keep their `S` parameter.
+  THE DCE REGISTRIES GROW (IN-4). WPNR (`0xC0000`) and WPSW (`0xF0000`)
+  hold the FIRST 4,096 records, then `_wpnr_grow` / `_wpsw_grow` alloc a
+  doubled table (WPNR's with room for `_wp_sort_prefix`'s merge scratch)
+  and copy the live records, as WPJS (`0x60000`, the first 49,152) has
+  since 6.6.20 — the initial regions do not move (not a layout change).
+  `_wpnr_ovf` / `_wpsw_ovf` now mean only that an alloc failed; no dead-run
+  count makes compaction give up. Every new DCE side table is alloc()'d on
+  first use: the live-start index (IN-5), the losing-body ranges (IN-6,
+  shifted by `wp_compact`, `_wp_fnr_shift`), the call-graph span map and
+  the raw-asm list (IN-18), the SYMS skip bitmap (IN-8).
+  THE TYPED-POINTER STEP WORD'S PIN IS RE-LAID (VC-1; 6.7.13's 7-bit pin
+  capped a unit at 126 distinct `**S` pointees, a capacity regression once
+  pins were keyed per struct): a pinned word is bit 62 (the "pinned" flag)
+  plus a 14-bit pin in bits 48-61 (`_ps_pinned`, `_ps_pin`, `_ps_pw`) —
+  free bits, because a `**T`'s pointee is a pointer and its word names no
+  vector (bits 48-55 were always 0 there); `_ps_vdesc` answers 0 for a
+  pinned word. So the word is: bits 0-39 the step, 40-47 the element kind,
+  48-55 a `*V`'s vector descriptor less 2048 — or, with bit 62 set, 48-61
+  the pin — and bit 63 CLEAR (every reader still tests `> 0`). `_pp_intern`
+  holds 16,383 pins ("too many pointer-to-pointer pointee types (max
+  16383)"); `_pp_tab` / `_pp_sids` start at 128 entries and double
+  (`_pp_grow`); `_gv_ppn` keeps a `**T` global's pin in 16 bits (a 2 MiB
+  table, alloc()'d on first use, `load16` / `store16`). The intern key
+  keeps the struct. The slot mark `0 - 0x7E00 - w` still fits (the
+  largest pinned word is below 2^63 - 0x7E00).
+  `_lfi_base`'s per-slot value 2 (6.7.13's bare `var t: Str;` mark) is
+  RETIRED (ST-12): a bare `var t: Str;` is an inline `Str` (D20 (a)), and
+  `_istr_unset` / `_istr_bare` / `_istr_bare_cap` / `_istr_cpmark` are gone.
+  New per-var-slot side table `_vdecl_base` (SVDECL, PL-6): the declaring
+  name token's offset per var slot, alloc()'d at the var-table cap
+  (1,048,576 x 4 B) like `_vecp_base`, so the native-region renumber
+  warning can judge a constant where it was DECLARED; the region scanner
+  is an instance (an alloc()'d state block) so the call-site and
+  declaration scans do not share a cursor. Generics (no map change): every
+  new or grown table is alloc()'d — `_edup`, `_bbf_vis`, `_bbf_t`, and the
+  stub scan's `_gcr` / `_gsn` / `_bnr_tab` grow by doubling (`_tab_grow`;
+  their 64-entry caps are gone, GN-3); the bounded-forward judgement keeps
+  a 64-deep REACH cap (GN-14 — refuses a valid deeper chain; filed).
+  Backends: x86 gains `EPE_ERRNO_STUBS` (PL-1): the PE `GetLastError` →
+  negative-errno table is emitted ONCE after EEXIT by every x86 driver,
+  beside EMACHO_SYSX_STUBS; each reroute site is a 13-byte `call .`
+  placeholder registered in WPJS (`_wpjs_add_raw`, so compaction moves it)
+  and FIXUP asserts every placeholder patched (`_pew_stubs_drained`) —
+  +13,824 B on cycc_win.exe where a per-site table was +156,672 B. The
+  arm64 Mach-O at-rows all keep x0 (`_esx_arm_atfd`; the arg-shift emitter
+  `_esx_arm_shift` is REMOVED, PL-5). cycc_cx (not cycc): every patchable
+  `jz` / `jnz` is the inverted short branch over a 24-bit `jmp` (+4 B a
+  conditional, LIB-1). IR opcode set: UNCHANGED (IN-2's narrow-field loads
+  and ST-1's float literal record `IR_RAW_EMIT`). Hidden temps
+  (`hidden_temp_census.sh`): 36 `_HTEMP(S)` call sites — `_istr_rax_into`
+  (ST-12) and `_dvi_park` (VC-13) new, `_ret_addr_field` renamed
+  `_ret_park_copy` (ST-11), `_vrcv_demit` renamed `_vrcv_dparse` (VC-13).
+  cybs (IN-10 - IN-12): labels 508 / 512, input 119,157 / 131,072 B, code
+  22,890 / 65,536 B (the seed-assembled cybs 23,010 B); its preprocessor
+  caps are refused by name — 15 MB stdin, a 2 MB slot per include depth
+  (`r15 + 0x9000000 + depth x 2 MB`), 8 depths, a 16 MB expansion.
+  Modules: 32 (unchanged). Corpus: 642 .tcyr (335 in crossos/), 550 shell
+  gates (check.sh 554 / 554 on the wave-3 merge, the driver 131 / 131),
+  api-surface 5,891.
+
 == 6.7.13 DELTAS (2026-10-16; Break 2 repair 3 — struct values; 6.7.12 the last tag; the release gate was running at this refresh) ==
 
   cycc 6.7.13 — x86_64 self-host 2,299,144 B (.text 2,078,520, the gate bench),
@@ -1049,7 +1154,8 @@ not enough — derive it THE WAY THE GATE DOES, or run the gate.
   heap / brk layout change, no two-step bootstrap).
   THE TYPED-POINTER STEP WORD gains a FOURTH field (D9 (a), ST-19): bits
   0-39 the step sizeof(T), bits 40-47 the element kind (6.7.8), bits 48-55
-  a `*V`'s vector descriptor less 2048 (6.7.12), and bits 56-62 a PIN — an
+  a `*V`'s vector descriptor less 2048 (6.7.12), and bits 56-62 a PIN (RE-LAID
+  at 6.7.14 as bit 62 + a 14-bit pin in bits 48-61, 16,383 pins — above) — an
   index 1..126 into `_pp_tab`, an alloc()'d table of interned pointee words
   (`_pp_intern`; `_ek_pin` / `_pp_pin_at` / `_pp_word_at`) holding the
   pointee's own step word for a `**T` / `***T` (recursively: a `***T`'s
@@ -1058,13 +1164,15 @@ not enough — derive it THE WAY THE GATE DOES, or run the gate.
   (VC-11's mutation M-DR3: interned by the step word alone, `**Q3` shared
   `**P3`'s pin), so the 126 cap counts distinct structs ("too many
   pointer-to-pointer pointee types (max 126)", an error, never a silent
-  word; 127 two-word structs through `**S` hit it — filed, Low). A
+  word; 127 two-word structs through `**S` hit it — filed, Low; FIXED at
+  6.7.14, VC-1: max 16,383). A
   dereference's result word is stamped (`_PK_MARK`); `*pp OP= n` sets
   `_asg_cstep`. The per-global pin table `_gv_ppn` is LAZILY allocated, as
   `_gv_ped` / `_gv_pvd` — no map region. A field `**S` naming the struct
   being declared pins S late and is sized at the dereference (`_pp_inner`).
   `_lfi_base`'s per-slot byte gains a value: 2 marks a `var t: Str;` with
-  no initialiser (ST-14r; the float flag's 1 never meets a `Str` slot).
+  no initialiser (ST-14r; the float flag's 1 never meets a `Str` slot;
+  RETIRED at 6.7.14, ST-12 — above).
   Backends: ESTRUCT_PAIR_HI_SYNC is REMOVED from all three backends (MV-12:
   nothing that compiles lands a multi-value return in a 9-16 B struct fn;
   a lane that calls it will not link). Hidden temps
@@ -1128,7 +1236,11 @@ not enough — derive it THE WAY THE GATE DOES, or run the gate.
   line; unchanged from 6.7.10). The DCE call graph is a BYTE SCAN (an E8 /
   E9 + rel32 landing on a fn start counts as a call), so the per-fork floor
   in tests/fixtures/dead_code_floor.txt follows the data layout: `ir_emit1`
-  on the cx fork left and came back with no reference change (filed).
+  on the cx fork left and came back with no reference change (filed;
+  FIXED at 6.7.14, IN-18: on x86 a call counts only when it STARTS an
+  instruction the length decoder walks to, with the byte scan kept where
+  the bytes may not be instructions — a raw `asm { 0x.. }` byte, a switch's
+  jump table, VEX / `in` / `out`).
   Heap map: 123 regions, 0 overlaps (`sh tests/gates/memory/heapmap.sh` on
   the 6.7.11 tree) — 6.7.11 adds NO region. fn_flags (GFLG, the lazy
   `_fnflg_base`, one word per fn): bits 16 / 17 (65536 / 131072) hold an
@@ -1230,10 +1342,24 @@ band, so they add no map line, no layout change, and therefore no two-step
 bootstrap. That is now the default shape for a new fn- or vcnt-indexed
 table (see the exhaustive_match entry's CURRENCY note).
 
+⚠ THE 102 ABOVE IS THE 6.6.19 SNAPSHOT. The v6.7.x minor took the count to
+123 (6.7.10 / 6.7.11), 121 (6.7.12: cx's two fixed regions FREED) and
+**115 at 6.7.14**: the six IR bands (ir_nodes, ir_cp, ir_blocks, ir_state,
+ir_live_in, ir_live_out) were RETIRED when the IR became one alloc()'d
+arena (IN-1 — that release's one heap-layout change, a two-step
+bootstrap). See the DELTAS blocks above; derive the live number with the
+gate.
+
 == GROWABLE TABLE CAPS ==
 
 Four families are grow-on-demand; the heap-map offset is the INITIAL
-base, valid only under the first cap.
+base, valid only under the first cap. (6.6.19 snapshot. Since then: the
+IR arena — no map region at all since 6.7.14, 262,144 nodes / 32,768 BBs
+initial, doubling, runaway ceilings 64M nodes / 16M BBs; the DCE
+registries WPNR `0xC0000` / WPSW `0xF0000`, the first 4,096 records then
+alloc()'d and doubling since 6.7.14, as WPJS `0x60000` past 49,152 since
+6.6.20; the `**T` pin table `_pp_tab`, 128 entries doubling to 16,383
+pins since 6.7.14 — the 6.7.14 DELTAS block above has each.)
 
   fn table       init 2048 (`_fnt_cap`, v6.5.51 — half the fixed
                  4096-slot hash regions; was 4096 from v6.5.40, 8192
@@ -1279,7 +1405,10 @@ base, valid only under the first cap.
                  `_cx_code_base`, a FIXED off-heap `alloc(4194304)`
                  (4 MiB, `_CX_CODE_CAP`) that never grows and is refused
                  by name past it, with its break-chain shadow an
-                 `alloc(cap + 8)` in `_codebuf_base`. Until 6.7.12 it
+                 `alloc(cap + 8)` in `_codebuf_base`; since 6.7.14 a cx
+                 conditional reaches the whole region (an inverted
+                 short branch over a 24-bit `jmp`, LIB-1 — a `jz` /
+                 `jnz` over 128 KiB wrapped silently before). Until 6.7.12 it
                  was a FIXED 512 KiB at 0x54A000 (cx_codebuf) with the
                  shadow at 0x41A000 [3 MB] (cx_brk_shadow, the pre-.49
                  codebuf base) — both heap-map regions are FREED.
@@ -1368,6 +1497,13 @@ without renumbering:
   100-101            MOV_R3_RAX / MOV_RAX_R3 (three-value returns,
                      v6.5.21)
 
+Unchanged through 6.7.14. An emitter with no opcode of its own records
+RAW_EMIT — every one must record SOMETHING, because IR=3's passes
+NOP-fill a node's range up to the next node's cp, so unrecorded bytes
+belong to the node before them (6.7.14: the narrow-field `movsx` IN-2,
+the float literal's `movabs` ST-1). Its STORAGE changed in 6.7.14: one
+alloc()'d arena, not six heap bands (the DELTAS block above).
+
 == BACKEND MODULES (src/backend/) ==
 
   x86/       emit.cyr, jump.cyr, fixup.cyr, decode.cyr (length-decoder),
@@ -1388,7 +1524,9 @@ without renumbering:
   6.7.12 it also generates `_SYSX_A64(n)`, the aarch64 names the
   native-region renumber warning prints); x86/emit.cyr holds
   `EMACHO_SYSX_STUBS` since 6.7.12 (the x86 Mach-O run-time-number
-  stubs, called by every x86 driver between EEXIT and FIXUP)
+  stubs, called by every x86 driver between EEXIT and FIXUP) and
+  `EPE_ERRNO_STUBS` since 6.7.14 (the PE GetLastError → errno table,
+  emitted once beside them; FIXUP asserts every `call .` site patched)
 
 == PER-TARGET FORKS: 7 ==
 

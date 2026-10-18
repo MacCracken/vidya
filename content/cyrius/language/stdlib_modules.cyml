@@ -7,6 +7,10 @@
 # CONFORMANCE, BOUND VARS).
 # 6.7.13 updated: file_locking (Windows `xflock` re-lock — a re-lock to the held mode is a no-op, LIB-1), csv_module
 # (bayan 1.7.0's RFC 4180 CRLF records). 27 entries (unchanged).
+# 6.7.14 updated (2026-10-17): epoll_event_readers_v6712 (the writer `epoll_event_set`, LIB-4 — kept in this entry, no
+# sibling), tls_module_contract_v6614 (the CTL's 48-byte prop-15 entries applied, PL-10; CONFORMANCE's 6.7.14
+# paragraph, LIB-8; BOUND VARS 14 -> 15, `TLS_SHA256_CTX_LEN`, LIB-2), file_locking (Windows `file_create_exclusive`
+# over a directory, PL-3; `xlseek`'s Windows errnos, PL-2). 27 entries (unchanged, DERIVED).
 # 24 entries (re-derived at the 6.6.20 closeout: it read 22 after 6.6.19 added the x86-macOS
 # threads entry, and 6.6.20 adds boxed) — a CURATED subset of the lib/*.cyr modules (not the full
 # surface). 6.6.20 (2026-10-06): +1 entry boxed_runtime_tag_box_v662 — lib/boxed.cyr, the storable
@@ -236,7 +240,13 @@ fn xfsync(fd)
 fn file_create_exclusive(path, mode)
     `O_CREAT|O_EXCL` on POSIX and Windows (O_EXCL → CREATE_NEW, mapped
     at v6.4.58); `file_exists`+create on AGNOS, which has no exclusive-
-    create AO_* bit.
+    create AO_* bit. On Windows, since 6.7.14 (PL-3), CREATE_NEW answers
+    -17 itself for an existing file or link; over an existing DIRECTORY
+    real Windows answers ERROR_ACCESS_DENIED (-13 — wine answers
+    ERROR_FILE_EXISTS), which the Windows arm classifies by asking the
+    name, so the call is -17 on every target. (A plain `file_open` of a
+    directory, or `O_CREAT|O_EXCL` over one through `file_open`, is -13
+    on Windows.)
 
 Filed by **thoth**, whose model `edit`/`create_file` tools rewrite user
 source. Gate: `tests/tcyr/crossos/atomic_write.tcyr` on real aarch64 +
@@ -269,7 +279,13 @@ off-Linux:
   fn xstat(path, buf)          — length-carrying stat
   fn xunlink(path)             — length-carrying unlink
   fn xgetdents(fd, buf, n)     — agnos getdents#29 vs Linux getdents64#217
-  fn xlseek(fd, off, whence)   — portable (SYS_LSEEK is peer-carried everywhere)
+  fn xlseek(fd, off, whence)   — portable (SYS_LSEEK is peer-carried everywhere).
+                                 On Windows a failed seek answers -22 / -9 since
+                                 6.7.14 (PL-2; it answered 0 — a "seek to the
+                                 start" while the pointer stayed put). ⚠ A seek on
+                                 fd 0 / 1 / 2 fails -9 there (the std fds reach
+                                 SetFilePointerEx as raw HANDLE values; filed,
+                                 6.7.15) — seek a handle you opened.
   fn xflock(fd, op)            — centralizes the per-target flock number
                                  (peer carries SYS_FLOCK ONLY on agnos; Linux
                                  x86#73 / aarch64#32 / macos#92 live in xflock).
@@ -1366,9 +1382,14 @@ public-key entries (the MD5 of a subjectPublicKey) and the Disallowed store's ce
 of a path, not only the root; a present but unreadable CTL makes `tls_native_set_ca_system` fail
 (`TLS_ERR_IO`). `ProtectedRoots` is applied by crypt32 when the store is opened, so the set follows it. Roots
 Windows would fetch on demand are NOT fetched (D9 — a server under one fails `TLS_ERR_CERT_INVALID` until the
-program adds the root with `tls_ctx_load_verify_locations`). A caller's bundle carries no trust policy. Not
-applied: the CTL's 48-byte entries (filed). `TLS_CTX_LEN` 624 -> 632 (a program that hard-codes the ctx size
-reads `TLS_CTX_LEN`).
+program adds the root with `tls_ctx_load_verify_locations`). A caller's bundle carries no trust policy.
+`TLS_CTX_LEN` 624 -> 632 (a program that hard-codes the ctx size reads `TLS_CTX_LEN`). Since 6.7.14 (PL-10, D57)
+the CTL's 48-byte entries are APPLIED too: each is crypt32's prop 15, the "signature hash" — the SHA-384 of a
+SHA-384-signed certificate's tbsCertificate (prop 15 hashes the TBS with the certificate's OWN signature digest, so
+its length follows that digest: 20 / 32 / 48 B). Confirmed on cass: the six DarkMatter intermediates, each
+`CERT_TRUST_IS_EXPLICIT_DISTRUST` with both Disallowed stores empty. Only sha384WithRSA / ecdsa-with-SHA384
+certificates are hashed, and only for the Windows system set's policy. A CTL entry of another length (20 / 32 /
+64 B) is not applied (filed, 6.7.15).
 
 PEM DECODE: STRICT OR LENIENT (sigil 3.13.7, which cyrius 6.6.14 folds). `pem_decode_certs_into`
 is all-or-nothing: one bad block fails the input. `pem_decode_certs_lenient_into(pem, len, chain,
@@ -1402,21 +1423,36 @@ not carry is illegal_parameter; an unframed block is decode_error. The server's 
 offered (illegal_parameter). A 1.3 ECDSA CertificateVerify scheme must match the leaf's curve. 1.3
 CertificateVerify and 1.2 ServerKeyExchange signatures end their messages EXACTLY. A 1.2 client restricted by
 `tls_native_set_groups` refuses an ECDSA leaf on an unlisted curve. The native 1.2 server refuses a session id
-over 32 bytes. The 1.3 client now SENDS the alert a flight refusal records (the 1.2 client sends none). The test
+over 32 bytes. The 1.3 client now SENDS the alert a flight refusal records. The test
 techniques: field_notes/compiler/methodology.cyml read_what_you_sent_and_put_an_over_read_at_a_prot_none_page_v6712.
+6.7.14 (LIB-8; no decision, the RFCs): an extension type TWICE in a ServerHello / EncryptedExtensions block, 1.2 or
+1.3, is illegal_parameter (RFC 8446 §4.2 names no alert for a repeat; the HelloRetryRequest walk's precedent fills
+the gap); bytes after a 1.3 ServerHello's or EE's extension block are decode_error; the server's ALPN answer must be
+exactly ONE non-empty name filling the extension (decode_error), and nothing is stored otherwise (a two-name answer
+was read as its first). The 1.2 client walks its ServerHello's block against the 1.2 ClientHello it built (buffered
+on the ctx, `TLS_CTX_OFF_CH_BUF`), AFTER the supported_versions check: an unoffered extension is
+unsupported_extension, ALPN to no offer unsupported_extension, a protocol not offered illegal_parameter, a session
+id over 32 bytes decode_error. Every 1.2 ServerHello refusal records its alert, and `tls_native_connect_12` SENDS it
+(through 6.7.13 the 1.2 client sent none). ⚠ A direct `tls_native_client_parse_server_hello_12` call needs
+`tls_native_12_build_client_hello` on that ctx first — a ctx that never built its hello reads every extension as
+unoffered. A server that repeats an extension, pads a block or answers ALPN with two names now fails the native
+client's handshake with an alert: the RFC's answer; the fix is on the server.
 
-BOUND VARS (6.7.12 — D15, D16, D17). The 14 `var X = _X;` publics (the TLS stack's nine — `TLS_RECORD_MAX_PLAINTEXT`,
-`TLS_AEAD_NONCE_LEN`, `TLS12_VERIFY_DATA_LEN`, `TLS12_RANDOM_LEN`, `TLS_RANDOM_LEN`, `TLS_HKDF_LABEL_BUF_LEN`,
-`TLS_MAX_DIGEST_LEN`, `TLS_HANDSHAKE_HEADER_LEN`, `TLS_SHA384_CTX_LEN` — and five outside it: `KEV_SIZE`,
+BOUND VARS (6.7.12 — D15, D16, D17; the fifteenth 6.7.14). The 15 `var X = _X;` publics (the TLS stack's ten —
+`TLS_RECORD_MAX_PLAINTEXT`, `TLS_AEAD_NONCE_LEN`, `TLS12_VERIFY_DATA_LEN`, `TLS12_RANDOM_LEN`, `TLS_RANDOM_LEN`,
+`TLS_HKDF_LABEL_BUF_LEN`, `TLS_MAX_DIGEST_LEN`, `TLS_HANDSHAKE_HEADER_LEN`, `TLS_SHA384_CTX_LEN`, and since 6.7.14
+`TLS_SHA256_CTX_LEN` — and five outside it: `KEV_SIZE`,
 `SPAWN_ARGV_MAX`, `SPAWN_ENV_MAX`, `TLOCAL_MAX_SLOTS`, `TLS_REG_MAX`) are READ-ONLY MIRRORS: lib/ reads the const
 `_X` everywhere (198 TLS sites rewritten), so a write changes nothing — they stay writable vars (D16; a `const`
 conversion belongs to the public-constants arc). Through 6.7.11 the TLS stack still read the vars:
 `TLS12_RANDOM_LEN = 256` copied 512 bytes into the 64-byte PRF seed (SIGSEGV). `TLS_RECORD_MAX_PLAINTEXT` is the
 protocol's 2^14, not a fragment-size knob (D17): a lowered value no longer shrinks outgoing fragments or refuses a
 peer's full records, a raised one no longer seals over-length records (2^14 + 1 is `TLS_ERR_RECORD_OVERFLOW`);
-RFC 6066 max_fragment_length is a separate feature. `TLS_CA_MAX_ROOTS` is kept and inert (D15). Still a hazard
-(filed, 6.7.14): `var TLS_SHA256_CTX_LEN = 144;`, a LITERAL public var with no twin, still sizes a copy into a
-208-byte stack clone. CHANGELOG [6.7.12] LIB-11 .. LIB-15, WN-6.
+RFC 6066 max_fragment_length is a separate feature. `TLS_CA_MAX_ROOTS` is kept and inert (D15). Since 6.7.14
+(LIB-2) `TLS_SHA256_CTX_LEN` has the twin shape too — `const _TLS_SHA256_CTX_LEN = 144`, lib/ reads the const, and a
+write to the var is inert (6.7.12's D16); through 6.7.13 it was a LITERAL public var with no twin that sized a copy
+into a 208-byte stack clone. A literal public var that sizes a copy into const-sized storage is the same hazard as a
+twin read. CHANGELOG [6.7.12] LIB-11 .. LIB-15, WN-6; [6.7.14] LIB-2, LIB-8, PL-10.
 
 [[entries]]
 name = "boxed_runtime_tag_box_v662"
@@ -1517,15 +1553,25 @@ file_read_whole_errno_contract_v6612. CHANGELOG [6.7.12] LIB-14, LIB-14r.
 
 [[entries]]
 name = "epoll_event_readers_v6712"
-description = "6.7.12 (LIB-5): `epoll_event_events(ev)`, `epoll_event_data(ev)` and `const EPOLL_EVENT_SIZE` (12 on x86_64 Linux and x86-macOS, 16 on aarch64) sit beside `epoll_event_new` in each syscall peer. Walk a `sys_epoll_wait` array by EPOLL_EVENT_SIZE — x86_64's `struct epoll_event` is packed, and lib/async.cyr's 16-byte stride read every event after the first 4, 8, … bytes off."
+description = "6.7.12 (LIB-5): `epoll_event_events(ev)`, `epoll_event_data(ev)` and `const EPOLL_EVENT_SIZE` (12 on x86_64 Linux and x86-macOS, 16 on aarch64) sit beside `epoll_event_new` in each syscall peer. Walk a `sys_epoll_wait` array by EPOLL_EVENT_SIZE — x86_64's `struct epoll_event` is packed, and lib/async.cyr's 16-byte stride read every event after the first 4, 8, … bytes off. 6.7.14 (LIB-4) adds the writer, `epoll_event_set(ev, events, data)`, for a buffer the caller owns: write with it, read with the readers, never a hand-gated offset pair."
 category = "cyrius"
-tags = ["v6.7.12", "epoll", "epoll_event", "EPOLL_EVENT_SIZE", "async", "reactor", "syscall peers", "const", "packed"]
+tags = ["v6.7.12", "v6.7.14", "epoll", "epoll_event", "epoll_event_set", "EPOLL_EVENT_SIZE", "async", "reactor", "syscall peers", "const", "packed"]
 ---
-THE READERS. Each syscall peer carries, beside `epoll_event_new`:
+THE READERS AND THE WRITER. Each syscall peer carries, beside `epoll_event_new`:
 
     epoll_event_events(ev)     # the u32 events mask
     epoll_event_data(ev)       # the u64 data word (x86_64: at +4; aarch64: at +8)
     const EPOLL_EVENT_SIZE     # 12 on x86_64 Linux and x86-macOS, 16 on aarch64
+    epoll_event_set(ev, events, data)   # 6.7.14 (LIB-4): fills a buffer the caller owns
+                                        # (a stack `var ev[16]`, at least EPOLL_EVENT_SIZE):
+                                        # events at 0, data at the peer's offset; returns ev
+                                        # for `sys_epoll_ctl`
+
+`epoll_event_new` is `alloc(16)` plus the writer since 6.7.14. THE RULE: write with `epoll_event_set`, read with the
+readers, step by `EPOLL_EVENT_SIZE` — never an `#ifdef CYRIUS_ARCH_AARCH64` `+4` / `+8` offset pair (`lib/async.cyr`
+has none left). ⚠ "Last definition wins" is global: a program's OWN `epoll_event_set` defined after the include
+replaces the stdlib's for every caller — `epoll_event_new` and `lib/async.cyr`'s registrations run it (measured:
+`epoll_event_new(1, 5)` returned the program's 77). Read the `duplicate fn` warning; rename yours.
 
 Walk a `sys_epoll_wait` array by `EPOLL_EVENT_SIZE` (event i at `buf + i * EPOLL_EVENT_SIZE`) and read through the two
 readers — never a hand-written 16-byte stride or a `+ 8` data offset. x86_64 Linux's `struct epoll_event` is
@@ -1534,7 +1580,8 @@ on x86_64 the 2nd..8th events of one wait were read 4, 8, … bytes off; level-t
 on the next wait, so nothing hung and every test passed until a row woke two waiters in ONE wait.
 
 ⚠ IT IS A `const`. A program's own `EPOLL_EVENT_SIZE` after `lib/syscalls.cyr` is a compile error (a const declared
-twice), and so is a build that includes two syscall peers (no target's dispatch does). There is still no writer for
-a caller-owned buffer (filed, 6.7.14). Field notes: field_notes/language/platform_abi.cyml
+twice), and so is a build that includes two syscall peers (no target's dispatch does). The caller-owned-buffer
+writer is `epoll_event_set` since 6.7.14 (above). Field notes: field_notes/language/platform_abi.cyml
 x86_64_epoll_event_is_packed_and_the_stride_is_the_layout_v6712; field_notes/compiler/gotchas.cyml
-a_const_two_peers_share_turns_a_paste_every_peer_harness_into_a_compile_error_v6712. CHANGELOG [6.7.12] LIB-5.
+a_const_two_peers_share_turns_a_paste_every_peer_harness_into_a_compile_error_v6712. CHANGELOG [6.7.12] LIB-5;
+[6.7.14] LIB-4.

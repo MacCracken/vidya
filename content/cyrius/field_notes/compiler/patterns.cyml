@@ -8,6 +8,7 @@
 # For non-obvious internal traps see gotchas.cyml.
 # For full backstory + retrospective context see retros/.
 #
+# 12 entries at 6.7.14 (DERIVED; +cx_has_no_bss_a_static_buffer_costs_its_size_in_every_cyx_v6714 — still 11 at 6.7.13).
 # 11 entries at 6.7.12 (DERIVED; +fold_once_report_the_fact_to_every_consumer_v6712 — the header had read 9
 # while the file held 10 since 6.7.3's in-place rebuild entry).
 # 9 entries (DERIVED at 6.6.16 with `grep -c '^\[\[entries\]\]'`: +2 — an allocator-aware path is
@@ -686,3 +687,27 @@ Measured: the arm64-macOS CLI 901,628 -> 885,244 B; the x86-macOS compiler 2,883
 x86 fold + XLAT-2); ELF output byte-identical. Gotchas: gotchas.cyml
 fold_a_hand_written_chain_by_simulating_it_in_its_own_order_and_prove_it_by_interpreting_it (6.6.18 + the 6.7.12
 twin), native_region_rules_and_the_macho_fold_report_v6712 #4. CHANGELOG [6.7.12] DW-3, DW-3r, DW-4.
+
+[[entries]]
+name = "cx_has_no_bss_a_static_buffer_costs_its_size_in_every_cyx_v6714"
+description = "cx has no bss, so every `var` is written into the `.cyx`: the stdlib's 128 KB static heap cost 128 KB in every allocating program (151,546 B for `alloc(16)`). 6.7.14's LIB-7 moved the heap to a break the VM serves in guest space — which needs the stack trap moved to the break, granted memory zeroed and an exact-size retry, and makes the `.cyx` / cxvm pair a versioned contract."
+category = "cyrius"
+tags = ["v6.7.14", "cx", "cxvm", "bss", "brk", "alloc", "static heap", "guest memory", "LIB-7", "LIB-7r"]
+---
+THE PATTERN. On a target with no bss, a static buffer is not free: its size is written into every image that includes
+it. Serve the storage at run time from the VM instead — here a break in GUEST space (cxvm's brk), so `alloc()` gets the
+guest's free memory and the `.cyx` carries no heap.
+
+WHAT IT NEEDED (three things, each load-bearing):
+- the stack trap moved from the image end to the break, so the guest stack and the heap meet at a checked boundary;
+- granted memory ZEROED, because the guest stack may have dirtied it and `alloc()` callers rely on fresh memory being
+  zero;
+- an exact-size retry when a 64 KB step is refused, so a request near the top of guest memory is still served.
+
+THE TRAP THAT CAME WITH IT: the `.cyx` / VM pair is now VERSIONED. A new allocating `.cyx` on an old cxvm gets a HOST
+break back from brk and faults at its first store. Name the mismatch where you can — `alloc_init` does, when brk
+answers <= 0. And bound every VM-side write by the segment, never by a guest register (the review's LIB-7r: gotchas.cyml
+cx_guest_branch_reach_vm_bounds_and_the_lib_leaf_order_v6714 #2). A gate that scans `lib/` file by file read the new
+`lib/alloc_cx.cyr`'s `syscall(12, …)` as an unrouted brk on the Macs (gotchas.cyml tools_lane_host_compilers_masks_and_
+dry_passes_v6713 #8). User-facing: language/features.cyml cx_tail_calls_and_cxvm_guest_traps_v6612. CHANGELOG [6.7.14]
+LIB-7, LIB-7r.

@@ -24,6 +24,12 @@
 # v6.7.12: live_compiler_capacity_ceilings — cx's code region is 4 MiB (off-heap, fixed, refused by name past it; D12).
 # still 10 entries.
 # v6.7.13: the capacity entry (the_gvar_wall) gains the `**T` pointee cap (126, D9). Still 10 entries.
+# v6.7.14: +2 entries — a_diagnostic_names_a_method_and_an_instance_as_written_v6714 (`'S.m'` / `'g<i32>'`, the arity
+# without `self`, FE-23), cyrius_ir_3_is_still_opt_in_v6714 (the arena, three IR=3 miscompiles fixed, one filed).
+# Updated: live_compiler_capacity_ceilings (the `**T` pointee cap is 16383, VC-1; the CYRIUS_IR arena, IN-1 — the
+# 6.7.13 line above put that cap in the_gvar_wall, it is in this entry), a_kept_dead_fn_is_ud2_and_the_syms_map_predates_
+# compaction_v6711 (its two known defects fixed — CYRIUS_SYMS maps the compacted image, the pad is zeros; a live-holding
+# dead fn is kept; no run cap; the dead count can rise; the name kept as the key). 12 entries (DERIVED at 6.7.14).
 
 [[entries]]
 name = "the_gvar_wall"
@@ -293,7 +299,7 @@ error unconditional and moved the escape hatch to `--allow-undef`.
 
 [[entries]]
 name = "live_compiler_capacity_ceilings"
-description = "The capacity ceilings a consumer can actually hit — re-verified live at 6.6.20 against `_capacity_warnings`, parse_fn.cyr, lex.cyr and the drivers: fn_table init 2048 growing to a 131072 hard ceiling, identifier pool 8 MiB at 0xEC00000, var_table 8192 growing to 1,048,576, fixup_table 1,048,576 growing to 64M entries, string_data 2097152, code buffer 8 MiB growing to 64 MiB (4 MiB on cx since 6.7.12, off-heap and fixed; 512 KiB before), preprocessed source 24 MB. Read this instead of any older 262144 / 524288 / 32768-ceiling figure."
+description = "The capacity ceilings a consumer can actually hit — re-verified live at 6.6.20 against `_capacity_warnings`, parse_fn.cyr, lex.cyr and the drivers: fn_table init 2048 growing to a 131072 hard ceiling, identifier pool 8 MiB at 0xEC00000, var_table 8192 growing to 1,048,576, fixup_table 1,048,576 growing to 64M entries, string_data 2097152, code buffer 8 MiB growing to 64 MiB (4 MiB on cx since 6.7.12, off-heap and fixed; 512 KiB before), preprocessed source 24 MB, `**T` pointee types 16383 (126 in 6.7.13), and since 6.7.14 the CYRIUS_IR arena growing from 262,144 nodes to a 64M-node runaway ceiling. Read this instead of any older 262144 / 524288 / 32768-ceiling figure."
 category = "cyrius"
 ---
 THE LIVE NUMBERS (source of truth: `src/common/util.cyr::_capacity_warnings`
@@ -325,12 +331,26 @@ v6.5.10 pass's numbers had gone 4-16x stale behind v6.5.40 / v6.5.51):
     preprocessed    25,165,824 (24 MB, `_SRC_CAP`, v6.5.40)
     output buffer   1073741824 (1 GiB, off-heap alloc, since v6.4.52)
     gvar_toks       4096 deferred non-literal global inits, at 0x729000
-    `**T` pointees  126 distinct pointee types of a pointer to a pointer
-                    (6.7.13, D9: the step word's 7-bit pin, interned per
-                    STRUCT in the alloc()'d `_pp_tab`) — past it an
-                    error, "too many pointer-to-pointer pointee types
-                    (max 126)", never a silent word. 127 two-word
-                    structs through `**S` hit it (filed, Low).
+    `**T` pointees  16383 distinct pointee types of a pointer to a
+                    pointer since 6.7.14 (VC-1: a 14-bit pin, interned
+                    per STRUCT in the alloc()'d, doubling `_pp_tab`) —
+                    past it an error, "too many pointer-to-pointer
+                    pointee types (max 16383)", never a silent word.
+                    6.7.13 (its D9) capped it at 126 with a 7-bit pin,
+                    so 127 two-word structs through `**S` were refused
+                    — programs 6.7.12 compiled. (Struct definitions
+                    themselves cap at 1024: "too many struct
+                    definitions (max 1024)".)
+    IR arena        only under CYRIUS_IR (6.7.14, IN-1): one alloc()'d
+                    arena taken when IR recording switches on (a default
+                    build never takes it), 262,144 nodes / 32,768 blocks
+                    initially, doubling; runaway ceilings "IR node table
+                    exceeds 64M nodes" / "IR block table exceeds 16M
+                    blocks" (and "cannot allocate the IR arena
+                    (CYRIUS_IR)"). The old fixed caps — "IR node buffer
+                    full" (1,048,576 nodes) / "IR block table full"
+                    (131,072) — are gone: a CYRIUS_IR build of anything
+                    the default build accepts succeeds.
 
 HOW TO SEE YOUR OWN NUMBERS:
 
@@ -518,19 +538,34 @@ already wrong. Gate: tests/gates/frontend/default_named_args_checked.sh rows R24
 
 [[entries]]
 name = "a_kept_dead_fn_is_ud2_and_the_syms_map_predates_compaction_v6711"
-description = "Under CYRIUS_DCE=1 a dead fn holding an instruction the compiler cannot size (an `in` / `out` in `asm`) stays in the image with `ud2; ud2; nop` where it called a removed fn — dead, not a miscompile; and CYRIUS_SYMS lists PRE-compaction addresses (a known defect, filed): use the plain build's map."
+description = "Under CYRIUS_DCE=1 a dead fn the compiler keeps — one holding an instruction it cannot size (an `in` / `out` in `asm`), or since 6.7.14 one whose code range holds a live fn's start — stays in the image with `ud2; ud2; nop` where it called a removed fn: dead, not a miscompile. Since 6.7.14 CYRIUS_SYMS lists the COMPACTED image's addresses (it predated compaction through 6.7.13, which the entry's name records) and `.text`'s pad after the moved code is zeros; and the dead-fn count can rise against 6.7.13 for the same source — re-measure, do not pin it."
 category = "cyrius"
+tags = ["v6.7.11", "v6.7.14", "CYRIUS_DCE", "dead code", "compaction", "ud2", "CYRIUS_SYMS", "crash address", "generics"]
 ---
 A KEPT DEAD FN DISASSEMBLES AS `ud2; ud2; nop` (6.7.11). Compaction removes a dead fn only when its length decoder can
 size every instruction in it; one holding an `in` / `out` in an `asm` block is KEPT, and its calls / tail calls into
 removed fns become `ud2; ud2; nop` (its `&fn` of a removed fn reads 0). It is dead — nothing calls it — so this is not a
-miscompile; any other rel32 from it into removed code refuses the build by name. Known (filed for 6.7.12): W^X
-compaction leaves stale old bytes in `.text`'s alignment pad — never executed, but they read like a miscompile in a
-disassembly.
+miscompile; any other rel32 from it into removed code refuses the build by name. Since 6.7.14 (IN-5) a dead fn whose
+code range holds a LIVE fn's start is kept whole too, and still reported unreachable: a generic instance is emitted
+inside the fn that first needs it, so a dead forwarder can contain a live instance — through 6.7.13 the sweep removed
+the live body with it (x86 SIGILL 132, an aarch64 hang, a PE fault).
 
-`CYRIUS_SYMS` UNDER `CYRIUS_DCE=1` LISTS PRE-COMPACTION ADDRESSES (a known defect, filed for 6.7.12): the map is written
-before compaction, so a removed fn appears at a live fn's address and the rest sit high by the removed bytes. Take
-addresses from the PLAIN build's map. CHANGELOG [6.7.11] (INF-5).
+`CYRIUS_SYMS` UNDER `CYRIUS_DCE=1` MAPS THE BINARY IT SHIPS BESIDE since 6.7.14 (IN-8). Through 6.7.13 it was written
+before compaction: a removed fn appeared at a live fn's address and every later fn sat high by the removed bytes, so a
+crash address resolved to the wrong function (this entry's name records that defect; it is kept as the key). Now it
+lists the compacted addresses, without the removed fns, and a kept dead fn where it sits: resolve a crash address
+against the map of the binary that crashed. And `.text`'s alignment pad after the compacted code is zeros since 6.7.14
+(IN-3; it kept stale pre-compaction bytes that read like a miscompile in a disassembly) — after `CYRIUS_IR=3`'s
+compaction too.
+
+NO DEAD-FN COUNT MAKES COMPACTION GIVE UP (6.7.14, IN-4). Through 6.7.13 more than 4,096 dead-code runs declined the
+whole compaction ("compaction declined on x86_64 ELF: more than 4096 dead-code runs, the repair registry cap"); a
+decline now means only that an allocation failed ("… could not grow (alloc failed)"). A redefined fn's losing body keeps
+nothing alive: what only it calls is removed (IN-6). ⚠ RE-MEASURE, DO NOT PIN THE COUNT: since 6.7.14 the x86 call
+graph counts a `call` / `jmp rel32` only where an instruction STARTS (IN-18 — it counted any E8 byte whose rel32 landed
+on a fn start, so the dead set moved when an unrelated global was added), so a `CYRIUS_DCE=1` "N unreachable fns" note
+or `dead:` list can be longer than 6.7.13's for the same source. CHANGELOG [6.7.11] (INF-5), [6.7.14] IN-3 – IN-6, IN-8,
+IN-18.
 
 [[entries]]
 name = "a_compile_mode_switch_is_0_or_1_since_6_7_11"
@@ -545,3 +580,55 @@ reads the same answer. `cyrius fuzz --poison` hands the compiler `CYRIUS_POISON=
 on-demand cx builds strip the three switches (and `CYRIUS_COVERAGE_FILE`) so a tracked compiler is never built in a
 mode; your own compiles keep them. To scrub any OTHER variable read raw, `unset` it (`V=` keeps it set and empty).
 CHANGELOG [6.7.11] (TL-8, TL-9).
+
+[[entries]]
+name = "a_diagnostic_names_a_method_and_an_instance_as_written_v6714"
+description = "Since cycc 6.7.14 a call-site diagnostic names a method `S.m` and a generic call `g<i32>` as the source spells them — never the mangled `S_m` / `T_Tr_m` / `g$i32` — and a method call's arity counts the arguments in its parentheses, without `self`. Grep for `'S.m'` / `'g<i32>'`. A generic METHOD's generics refusals still say `P_pick` (filed)."
+category = "cyrius"
+tags = ["v6.7.14", "diagnostics", "methods", "generics", "arity", "mangled names", "#deprecated", "#must_use", "#pure", "grep"]
+---
+    s.two(1, 2)     # fn two(self, a) — 6.7.14: 'S.two' expects 1 argument, got 2   (6.7.13: 'S_two' expects 2 arguments, got 3)
+    s.ri(b)         # 6.7.14: … in a call to 'S.ri' - pass &b for its address      (6.7.13: 'S_ri')
+    s.nope(1)       # 6.7.14: undefined function 'S.nope'                         (6.7.13: 'S_nope')
+
+A diagnostic at a call — arity, named arguments, the struct-type and vector-argument refusals, `#pure`, `#deprecated`,
+`#must_use`, `private`, the multi-value destructure, the bool / cstring parameter checks, "undefined function" — names
+a method `S.m` (a trait-qualified one `T.m`, not `T_Tr_m`; an inferred generic method `P.id<f64>`) and a generic call
+`g<i32>` (`g2<i32, i64>`, `gx<Box<i64>>`, `g<f64v2>`) as the source spells them (FE-23), and a struct-argument
+refusal names a method result `'Pt.dup'` (VC-11). Through 6.7.13 they printed the mangled `S_m` / `T_Tr_m` and the
+instance `g$i32`. A free fn named `S_x` (no impl) and a `mod` fn `mm_f` keep their names.
+
+A METHOD CALL'S ARITY COUNTS THE ARGUMENTS IN ITS PARENTHESES, WITHOUT `self` — a `dyn` call likewise (`d.show(1)` on
+`show(self)`: "expects 0 arguments, got 1"). The free spelling `S_two(&s, 1, 2)` is named `S.two` and counts its `&s`
+("'S.two' expects 2 arguments, got 3"), and a method declaring no parameter at all keeps the receiver in its count
+(`g.zero()` on `fn zero()`: "'MG.zero' expects 0 arguments, got 1").
+
+So a script or a test that greps diagnostics greps `'S.m'` and `'g<i32>'`, and a build log's warnings that name a method
+or an instance (`#deprecated`, `#must_use`, `#pure`, "undefined function" under `--allow-undef`) read the new spelling.
+Nothing compiles differently. ⚠ The generics refusals that name a generic METHOD keep its mangled name — "generic
+'P_pick' has no i64 … instance", "generic 'P_bm': its type argument does not implement trait 'Show'" (filed, 6.7.15).
+Instance NAMES in the coverage dump and `cyrius syms` stay `$`-mangled (semantics_runtime.cyml generics_since_6_7_14).
+CHANGELOG [6.7.14] FE-23, VC-11.
+
+[[entries]]
+name = "cyrius_ir_3_is_still_opt_in_v6714"
+description = "`CYRIUS_IR=3` (the IR optimisation pipeline) is opt-in and not release-grade in 6.7.14: a const fold over a dead store NOP-fills its own immediate (filed, 6.7.15). 6.7.14 removed its storage caps (an IR build of anything the default build accepts succeeds) and fixed three miscompiles (a signed narrow field read, a field read after a dead store, a float literal). Measure with it; ship the default pipeline."
+category = "cyrius"
+tags = ["v6.7.14", "CYRIUS_IR", "IR=3", "optimizer", "LASE", "DSE", "const fold", "opt-in", "miscompile"]
+---
+    fn f(): i64 { var r = 0; r = r + 10; r = r + 100; return r; }   # CYRIUS_IR=3: faults (filed, 6.7.15) — default: 110
+
+`CYRIUS_IR=3` runs the IR passes (LASE, const fold, DCE, DSE) over the emitted x86 code. It is an opt-in measuring mode,
+and no release build uses it. What 6.7.14 changed under it:
+  - THE STORAGE (IN-1): the IR is one `alloc()`'d arena that grows (live_compiler_capacity_ceilings), so "IR node buffer
+    full" / "IR block table full" are gone — an IR build of anything the default build accepts succeeds (a 3.0 MB
+    program was refused under IR=1 / IR=3 through 6.7.13).
+  - THREE MISCOMPILES FIXED: a signed narrow field read through a pointer or a capture added the field's ADDRESS, a field
+    read right after a dead store read through a stale register (IN-2), and a float literal let LASE keep a stale
+    register across it (`q.f = 2.5;` through a pointer stored through 2.5's bits; ST-1). Each came from an emitter that
+    recorded no IR node: the passes NOP-fill a node's byte range, and bytes nobody recorded belong to the node before
+    them.
+  - ⚠ STILL OPEN (filed, 6.7.15): a const fold over a dead store NOP-fills its own immediate — the fn above faults; one
+    corpus file (`derive_enum_inside_ifdef`) exits 139 under IR=3.
+So use `CYRIUS_IR=3` to measure, and ship the default pipeline; `CYRIUS_DCE_CAP=0` / `CYRIUS_DSE_CAP=0` narrow down which
+pass misbehaves. CHANGELOG [6.7.14] IN-1, IN-2, IN-3, ST-1.

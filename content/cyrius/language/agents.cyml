@@ -30,6 +30,10 @@
 # tests/gates/<bucket>/ (372; it said `ls tests/*.sh`, which matches nothing);
 # a top-level `var` redeclaration only warns; cycc's big tables grow (it said
 # there is no allocator); reserved words are 107 tokens.
+# 2026-10-17 at 6.7.14: the memory paragraph (115 heap-map regions; the IR
+# arena, the growing DCE registries, cx far conditionals) and the top-level
+# redeclaration rule (a folded constant warns, FE-18; integer vs bool is an
+# error, FE-19).
 # 3 entries.
 
 [[entries]]
@@ -167,9 +171,14 @@ A prior constant ZERO counts since 6.7.12 (D30): `var a = 0;
 var a = 5;` warns as every differing pair does (through 6.7.11
 it was silent — two files' `var _shared = 0;` / `= 5;` became
 one cell unseen). A SAME value stays silent by design (two files
-naming one global share it), a computed prior is not compared,
-and the new value is compared only as an exact `= NUM ;` literal
-(filed, 6.7.14). Give module-private globals a module prefix.
+naming one global share it) and a computed prior is not compared.
+Since 6.7.14 (FE-18) a later initializer that FOLDS to a different
+constant warns too (`= 2 + 1`, `= -5`, `= (7)`; `true` / `false`
+compare as 1 / 0) — it was compared only as an exact `= NUM ;`
+literal — while a NAMED constant on either side is not compared yet
+(filed, 6.7.15); and one name declared as an integer and as `bool`
+is an ERROR, "redeclared with a different type or size" (D9 (a),
+FE-19). Give module-private globals a module prefix.
 
 == MIXED `&&` / `||` PARSES CORRECTLY (since v6.3.36) ==
 
@@ -318,15 +327,19 @@ fine.
 
 == A FIXED HEAP MAP, BUT THE LARGE TABLES GROW ==
 
-MOST OF THE COMPILER'S MEMORY IS A FIXED brk/mmap MAP (121 regions
-at 6.7.12 and 6.7.13, `sh tests/gates/memory/heapmap.sh`), BUT THE LARGE TABLES
+MOST OF THE COMPILER'S MEMORY IS A FIXED brk/mmap MAP (115 regions
+at 6.7.14 — 121 at 6.7.12 / 6.7.13, before the six IR bands were
+retired for an alloc()'d arena — `sh tests/gates/memory/heapmap.sh`), BUT THE LARGE TABLES
 GROW. fn tables double to 131072, var tables to 1,048,576, the fixup
 table to 64M entries; codebuf is an off-heap 8 MiB alloc growing +8
 MiB to 64 MiB (cx: a fixed 4 MiB off-heap alloc that never grows and
 is refused by name past it; cxvm's guest memory 8 MiB — 6.7.12, D12;
-it was a fixed 512 KiB region); the output image is a lazily-mapped
-off-heap 1 GiB alloc; fn side tables and the string-intern index are
-alloc'd on first use. A cap that is still fixed (preprocessed source
+it was a fixed 512 KiB region; a cx conditional reaches the whole
+region since 6.7.14); the output image is a lazily-mapped off-heap
+1 GiB alloc; fn side tables, the string-intern index and (since
+6.7.14) the IR arena are alloc'd on first use — `CYRIUS_IR` builds
+grow to runaway ceilings of 64M nodes / 16M blocks — and the DCE
+registries grow past their first 4,096 records. A cap that is still fixed (preprocessed source
 24 MB, identifier pool 8 MiB, tokens 4,194,304, string data 2 MiB,
 struct definitions 1024) errors out with a message naming it.
 
