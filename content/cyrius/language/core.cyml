@@ -1,6 +1,19 @@
 # Cyrius — Core Reference
 # Overview, syntax, compiler architecture, dev loop, current limitations,
 # porting guide, stdlib catalog.
+# 2026-10-19 at v6.7.15: overview version/size line re-stamped (cycc 2,542,240 B, .text 2,314,392 from readelf;
+# cycc-native-aarch64 2,755,520 B; modules 37 — +frontend/parse_fn_def.cyr (the parse_fn.cyr split, 6.7.15's D25 A)
+# and the four frontend/ts/driver*.cyr (the TypeScript front end on every compiler, 6.7.15's D38); .tcyr / crossos /
+# lib / programs / shell-gate counts DERIVED on the 6.7.15 tree, api-surface 5,891 and heapmap.sh's 115 regions
+# unchanged; dead-code floor 52 fns / 10,597 B; check.sh / self_compile / cross-OS from the 6.7.15 release gate, GREEN
+# 2026-10-19 on dc6533f90; the cross-build sizes re-measured on the release tree); the TS/TSX line (every compiler
+# but cycc_cx); the IR pipeline line (IR=3's last corpus failure fixed, the IR=3 + DCE corpus gate); syntax's STRUCTS
+# (the comma rule, D1 (a)), INCLUDES (include-once by the whole spelling) and INLINE ASM blocks (the x86 operands
+# encoded, the aarch64 barriers' options, D37); type_names_v6616 (a non-generic `Name<..>` refused, D6; the last
+# signature positions read their type arguments, D7 – D10; a trait member's return, D3 / D4 / D9; a `:` with no type;
+# a refused annotation's uses); compiler_architecture (parse_fn_def.cyr, the TS driver files, the FIXUP seed pass);
+# limitation 10 (a constant f64 initializer baked); the stdlib's io / process / syscalls lines and a new regression.cyr
+# line (CYRIUS-2026-0036).
 # 2026-10-17 at v6.7.14: overview version/size line re-stamped (cycc 2,433,512 B, .text 2,210,192 from
 # readelf; cycc-native-aarch64 2,351,456 B; modules 32, unchanged; .tcyr / crossos / lib / programs / shell-gate
 # counts and api-surface 5,891 DERIVED on the 6.7.14 tree; heap map 115 regions — the six IR bands retired; dead-code
@@ -66,7 +79,7 @@
 # to `syntax` (bitwise shares the +/- tier — NOT C's); and three live
 # limitations added (#19 precedence, #20 float/bit intrinsics can't flank a
 # TERM operator, #21 string-literal → Str coerces only at a `: Str` param).
-# 7 entries.
+# 8 entries (this line still read 7 after v6.6.16 added type_names_v6616; recounted at 6.7.15).
 
 [[entries]]
 name = "overview"
@@ -100,39 +113,55 @@ THE COMPILER BINARY:
 - Windows PE32+ self-hosts natively byte-identical (`cycc_win.exe`
   on Windows 11 produces output matching Linux cross-build
   byte-for-byte).
-- 32 compiler modules (frontend lex/lex_attr/lex_pp/parse +
-  parse_{cov,ctrl,decl,expr,fn,types}, frontend/ts/{lex,parse},
+- 37 compiler modules (frontend lex/lex_attr/lex_pp/parse +
+  parse_{cov,ctrl,decl,expr,fn,fn_def,types},
+  frontend/ts/{lex,parse,driver,driver_args,driver_flags,driver_input},
   backend/{x86,aarch64,macho,pe,cx,js,common},
   common/{heap_regions,util,ir,syscall_xlat}) + 7 per-target main
   forks (derive: `find src -name '*.cyr' | grep -v /main | grep -v
-  version_str | wc -l`; it read 31 at 6.7.10 — 6.7.11 added the pure
-  `frontend/lex_attr.cyr` the lexer and six tools include — and 28
-  at 6.6.19).
-- As of 6.7.14 (2026-10-17, Break 2 repair 4 — generics, the
-  frontend, infra; the user tags; 6.7.13 is the last tag, at
-  19a7ae21): `cycc` (the binary name, forever; the version is
-  `cycc --version` = 6.7.14) self-hosts byte-identical at
-  2,433,512 B (.text 2,210,192), +134,368 B over 6.7.13's 2,299,144
-  (nine lanes merged in three waves: infra, generics, frontend,
-  tools and platform; structs, receives + multi-value and stdlib;
-  vectors — rebuilt once per wave on the merged tree, the first
-  through the IR arena's two-step bootstrap, fixpoint and
-  seed-derive OK each time); `build/cycc-native-aarch64`
-  2,351,456 B (0.97x); dead-code floor 52 fns / 10,597 B (x86,
-  unchanged); 642 .tcyr (335 in crossos/); 106 lib/*.cyr; 85
-  programs/*.cyr; 550 shell gate scripts under
+  version_str | wc -l`; it read 32 at 6.7.11 – 6.7.14 — 6.7.15 added
+  `frontend/parse_fn_def.cyr` (parse_fn.cyr split at cyrfmt's /
+  cyrlint's read cap, W0-2, 6.7.15's D25 A) and the four
+  `frontend/ts/driver*.cyr` (the TypeScript front end on every
+  compiler, PL-13, 6.7.15's D38); 31 at 6.7.10 — 6.7.11 added the
+  pure `frontend/lex_attr.cyr` the lexer and six tools include — and
+  28 at 6.6.19).
+- As of 6.7.15 (2026-10-19, Break 2 repair 5 — what 6.7.14 filed;
+  the user tags; 6.7.14 is the last tag, at f1d6eb0a): `cycc` (the
+  binary name, forever; the version is `cycc --version` = 6.7.15)
+  self-hosts byte-identical at 2,542,240 B (.text 2,314,392),
+  +108,728 B over 6.7.14's 2,433,512 (seven lanes over four waves:
+  wave 0 on main — the check driver's SIGPIPE, the parse_fn.cyr
+  split, byte-identical — then generics, the frontend, infra / tools
+  and platform; structs and vectors; receives; a libfix lane beside
+  each later wave for the lib / fold defects the lanes found —
+  rebuilt once per wave on the merged tree, fixpoint and seed-derive
+  OK each time; no heap-layout change, so no two-step bootstrap);
+  `build/cycc-native-aarch64` 2,755,520 B (1.08x; +404,064 B, most of
+  it the TypeScript front end every compiler but cycc_cx now
+  carries, 6.7.15's D38); dead-code floor 52 fns / 10,597 B (x86,
+  unchanged); 663 .tcyr (353 in crossos/); 106 lib/*.cyr; 85
+  programs/*.cyr; 565 shell gate scripts under
   `tests/gates/<bucket>/*.sh` in 8 buckets (some registered by exact
   path in `programs/checks/main.cyr`, the rest driven from
   `scripts/check.sh` — all of them run; a gate that CANNOT run exits
-  77 and is a SKIP, never a pass, since 6.6.11; check.sh on the
-  wave-3 merge: 554 / 554, the driver 131 / 131); heap map 115
-  regions / 0 overlaps (121 through 6.7.13 — the six IR bands are
-  RETIRED, the IR is one alloc()'d arena grown on demand: the
-  release's one heap-layout change, a two-step bootstrap);
-  api-surface 5,891. The 6.7.14 release gate was still running when
-  this line was stamped — read check.sh's count, the cross-OS
-  result and self_compile from CHANGELOG [6.7.14], not from here.
-  (6.7.13, 2026-10-16: 2,299,144 B (.text 2,078,520); ARM
+  77 and is a SKIP, never a pass, since 6.6.11); heap map 115
+  regions / 0 overlaps (unchanged — every table the lanes added is
+  alloc()'d); api-surface 5,891 (unchanged). Release gate GREEN
+  2026-10-19 on dc6533f90: check.sh 569 / 569 shell gates, the driver
+  131 / 131, the 2 named agnos-parity SKIPs; ecb · ach · cass · pi
+  SELFHOST_OK + LIBTEST_OK on the FULL `tests/tcyr` corpus;
+  self_compile 1,190 ms (the gate's bench run) — same-box A/B 6.7.14
+  1,765 → 6.7.15 1,197 ms (-32.2 %), and -34.6 % on the SAME input:
+  one patch dominates, the DCE seed pass made linear (IT-9, `prof:
+  fixup=` 820 → 112 ms; a 16,000-fn program's FIXUP 9,934 → 114 ms).
+  (6.7.14, release gate GREEN 2026-10-17 on 1b0f84d4: 2,433,512 B
+  (.text 2,210,192); ARM 2,351,456 B; 642 .tcyr; 550 gates, check.sh
+  554 / 554, the driver 131 / 131; all four hosts on the full corpus
+  for the first time; heap map 115 (121 through 6.7.13 — the six IR
+  bands retired for an alloc()'d arena, a two-step bootstrap);
+  api-surface 5,891; self_compile 1,770 ms.
+  6.7.13, 2026-10-16: 2,299,144 B (.text 2,078,520); ARM
   2,151,872 B; 624 .tcyr; 523 gates; heap map 121; api-surface
   5,888; self_compile 1,594 ms from the gate's bench run. 6.7.12,
   release gate GREEN 2026-10-15 on 2a4be9e0: 2,244,696 B (.text
@@ -175,9 +204,16 @@ THE COMPILER BINARY:
   unit-suffixed entries it had been silently skipping. Same
   number, different arithmetic; the old 100 was not "right all
   along".
-  Cross-builds in the 6.6.19 slot: cycc_aarch64 1,114,920 B /
-  cycc_win 1,561,088 B / cycc_cx 1,019,744 B / cycc-native-aarch64
-  1,323,400 B; cyrld 932,512 B; cyrius-lsp 149,032 B.
+  Cross-builds at 6.7.15 (re-measured on the release tree,
+  `build/cycc < src/main_<fork>.cyr`): cycc_aarch64 2,358,456 B /
+  cycc_win (the PE32+ compiler, `CYRIUS_TARGET_WIN=1`) 3,028,992 B
+  and its Linux-hosted cross 2,528,872 B / cycc_cx 1,980,928 B (no
+  TypeScript front end) / cycc-native-aarch64 2,755,520 B. Each fork
+  but cx grew ~0.26 – 0.34 MB for the TS front end at 6.7.15 (D38).
+  (6.6.19 slot: cycc_aarch64 1,114,920 B / cycc_win 1,561,088 B /
+  cycc_cx 1,019,744 B / cycc-native-aarch64 1,323,400 B; cyrld
+  932,512 B; cyrius-lsp 149,032 B — cyrld and cyrius-lsp not
+  re-measured since.)
 
 BUILD / COMPILE / TEST:
 - Bootstrap:   `sh bootstrap/bootstrap.sh` (~40ms)
@@ -207,11 +243,19 @@ OPTIONAL COMPILER MODES:
   block table exceeds 16M blocks`; `error: cannot allocate the IR
   arena (CYRIUS_IR)`). `IR node buffer full` / `IR block table
   full` are gone — an IR build of anything the default build
-  accepts succeeds. ⚠ IR=3 is still opt-in, not release-grade: one
-  corpus file still fails under it (`derive_enum_inside_ifdef.tcyr`
-  — a const fold over a dead store NOP-fills its own immediate;
-  filed, 6.7.15). The f64 field store through a pointer was closed in
-  6.7.14 (ST-1: a float literal's `movabs` recorded no IR node).
+  accepts succeeds. IR=3 is still opt-in (no default build runs its
+  passes), but since 6.7.15 the whole .tcyr corpus passes under it:
+  IT-1 fixed its last failure (`derive_enum_inside_ifdef.tcyr` — a
+  const fold over a dead-store-eliminated node left that node's
+  pending NOP-fill to land inside the new `mov eax, imm32`, and the
+  compaction spliced the next instruction into the immediate: a
+  fault; the fold now consumes every node inside its span), and IT-2's
+  `ir3_dce_corpus.sh` runs every .tcyr under `CYRIUS_IR=3
+  CYRIUS_DCE=1` TOGETHER — the pair is the only mode that acts on a
+  position the IR=3 compaction made stale — with an expected-failure
+  list that is EMPTY and may only shrink. The f64 field store through
+  a pointer was closed in 6.7.14 (ST-1: a float literal's `movabs`
+  recorded no IR node).
 - Profiling: CYRIUS_PROF=1 (clock_gettime wall-clock; cross-platform
   via __got on Mach-O / kernel32 on PE).
 
@@ -260,7 +304,22 @@ LANGUAGE FEATURES SHIPPED (not exhaustive):
   function in `object;` mode.
 - TS/TSX → JS emitter: `cycc --emit-js file.tsx` (+ `cyrius build
   --target=js`) — type-strips + lowers JSX to `h(...)`, emits
-  runnable JS (v6.1.11/.12; `backend/js`).
+  runnable JS (v6.1.11/.12; `backend/js`). Since 6.7.15 (6.7.15's
+  D38, PL-13) `--lex-ts` / `--parse-ts` / `--emit-js` run on EVERY
+  compiler but `cycc_cx` — the aarch64 Linux cross and native
+  compilers, both macOS compilers, Windows `cycc.exe` and its
+  Linux-hosted cross — with x86_64 Linux's exit codes, diagnostics
+  and JS bytes, from stdin or `<flag> <file>` (on Windows the
+  command line is split as CommandLineToArgvW splits it). Through
+  6.7.14 those compilers IGNORED the flags and compiled the
+  TypeScript as cyrius (`--parse-ts` on `var x = 42;` wrote an ELF,
+  exit 0; an aarch64 install's `ts_test_runner` failed every file).
+  `cyrius build --target=js` runs on every POSIX host and is refused
+  by name on Windows (the CLI has no spawn there that writes the
+  output to a file: run `cycc.exe --emit-js <f.ts> > <out.js>`) — the
+  CLI half goes beyond D38's text, filed for confirmation at the
+  6.7.16 open. ⚠ On the /proc-reading drivers a `<file>` path past
+  255 bytes is cut and the cut name opened (filed, 6.7.16).
 - Numeric preprocessor: `#if NAME >= VALUE` (`== != < > <= >=`)
   over `#define NAME VALUE` ints (v5.6.x; e.g. sakshi `SAKSHI_LEVEL`).
 - PIE codegen: `--pie` / `CYRIUS_PIE=1` → ET_DYN position-
@@ -334,7 +393,11 @@ LANGUAGE FEATURES SHIPPED (not exhaustive):
 OPTIMIZATIONS LANDED:
 - Constant folding (parse-time + IR-level).
 - Tail-call optimization.
-- DCE (bitmap O(T+N) for unreachable fns; bitmap-liveness in IR).
+- DCE (bitmap O(T+N) for unreachable fns; bitmap-liveness in IR). Its
+  FIXUP seed pass asks "is this call site inside a fn?" by binary
+  search over the merged fn ranges since 6.7.15 (IT-9) — a scan of
+  the whole fn table per call site before, paid by EVERY build, since
+  the `N unreachable fns` note runs the walk either way.
 - Jump tables (dense switches).
 - Dead-store elimination.
 - Return-by-value small structs (ret2/rethi).
@@ -364,7 +427,9 @@ FUNCTIONS:
     # there isn't one. (Calling an extern-C fn through fncall* IS
     # capped — that's an FFI ABI boundary, not a cyrius limit; see
     # field_notes/language/platform_abi.cyml.)
-    # Forward calls work (call functions defined later)
+    # Forward calls work (call functions defined later) — since 6.7.15
+    # (ST-1) also into a fn whose signature names a struct declared below
+    # it (a by-value argument / `: S` return there faulted before)
 
 CONTROL FLOW:
     if (x == 1) { ... } elif (x == 2) { ... } else { ... }
@@ -444,6 +509,12 @@ POINTERS:
 STRUCTS:
     struct Point { x; y; }
     var p = Point { 10, 20 };
+    var n = Point { y: 20, x: 10, };  # named form; a trailing comma is allowed
+    # Elements are separated by COMMAS: a missing one (`Point { 10 20 }`,
+    # `Point { y: 20 x: 10 }`) is one error at the second element, "expected
+    # ',' between struct literal elements", in every position (6.7.15's D1 (a),
+    # FE-8; through 6.7.14 both compiled, the values landing where the commas
+    # would have put them). `enum E { A B }` is not decided (filed, 6.7.16).
     p.x = 42;
     struct Rect { tl: Point; br: Point; }  # nested
     var r = Rect { 0, 0, 10, 5 };
@@ -501,15 +572,33 @@ INCLUDES:
     #      `..`-free — a hostile .cyr can write one, so it may never
     #      name an absolute path. `cyrius build /abs/dir/x.cyr` gets no
     #      marker and keeps the old CWD-only behaviour.
+    # INCLUDE-ONCE BY SPELLING: a second `include` of the same spelling is
+    # skipped, so a file's top-level statements run once and its fns are
+    # defined once. The key is the spelling as written, WHOLE, at any length
+    # (since 6.7.15, IT-5 — until then only its first 127 bytes were kept, so
+    # a 128+ character spelling, easy through directories or an absolute deps
+    # path, was silently included again). `"./a.cyr"` and `"a.cyr"` are two
+    # spellings. At most 256 distinct includes per unit; the 257th is refused
+    # (`include-once table full (256 files)`).
 
 INLINE ASM:
     asm { 0x90; }              # raw bytes
     asm { cli; sti; hlt; }     # mnemonics
-    asm { mov cr3, rax; }      # privileged
-    asm { lgdt [rax]; }        # descriptor tables
+    asm { mov cr3, rax; }      # privileged: mov crN, r64 / mov r64, crN
+    asm { mov cr8, rax; }      #   44 0F 22 C0 (6.7.15: it wrote CR0)
+    asm { lgdt [rax]; }        # descriptor tables: lgdt / lidt / invlpg [r64]
+    asm { lgdt [rbx]; }        #   0F 01 13 (6.7.15: it was lgdt [rax])
+    asm { ltr bx; }            # ltr r16: 0F 00 DB
+    asm { int 3; }             # int 0..255 (int 256 is refused)
     asm { in al, dx; }         # port I/O (6.7.14): in al|ax|eax, dx
     asm { out dx, eax; }       #   out dx, al|ax|eax — the width is the encoding
     asm { 0xE4; 0x60; }        # an immediate port is raw bytes (in al, 0x60)
+
+    #ifplat aarch64
+    asm { dmb ish; }           # D5033BBF — a barrier takes its option (6.7.15, D37)
+    asm { dsb sy; }            # D5033F9F
+    asm { isb; }               # D5033FDF — bare = the full-system barrier (sy)
+    #endif
 
     Since 6.7.14 (IN-13, IN-14; D16): `in` is the for-in keyword and
     still the mnemonic inside `asm { }`. `in` / `out` take the
@@ -523,11 +612,41 @@ INLINE ASM:
     `unknown aarch64 asm mnemonic 'nopx'`) — until 6.7.14 the first
     letters decided (`clix` = cli, `inb` = in, `nopx` = nop). aarch64
     has no `in` / `out` (refused by name); cx has no inline asm (refused,
-    naming the mnemonic). ⚠ Still true (filed, 6.7.15): `lgdt` / `lidt`
-    / `invlpg` / `mov crN` / `ltr` / `int N` IGNORE their operand
-    register (`lgdt [rbx]` assembles `lgdt [rax]`, `int 256` is `int 0`)
-    — write exactly the spellings above. aarch64 mnemonics take no
-    operand (`asm { dmb ish }` does not compile; filed, 6.7.15).
+    naming the mnemonic).
+
+    Since 6.7.15 (IT-6; the refusals are 6.7.14's D16) the x86 system
+    instructions encode the operand they NAME: `lgdt` / `lidt` /
+    `invlpg` take one 64-bit register in brackets (`[rax]` – `[r15]`);
+    `mov` moves between a control register (cr0, cr2, cr3, cr4, cr8)
+    and a 64-bit register, either way round; `ltr` takes a 16-bit
+    register (ax – di, r8w – r15w); `int` takes a vector 0 – 255. Any
+    other operand is refused, naming it (`mov cr9, rax` → 'cr9', `int
+    256` → '256', `ltr eax` → 'eax', `lgdt [raxx]` → 'raxx'). Through
+    6.7.14 each emitter stepped over its operand unread and encoded rax
+    / ax whatever the source said — `lgdt [rbx]` loaded the GDT from
+    `[rax]`, `mov cr8, rax` WROTE CR0, `mov cr9, rax` was `mov cr1,
+    rax`, and `int` kept the vector's low 8 bits (`int 256` = `int 0`).
+    Every spelling lib/ and the guide used was the hard-coded one, so
+    nothing shipped changed.
+
+    aarch64 (IT-7, IT-8; 6.7.15's D37): the mnemonics are `svc` (=
+    `svc #0`; the immediate cannot be written, `#` starts a comment),
+    `wfi`, `wfe`, `nop`, `ret`, `eret`, `param_load(reg, idx)` and the
+    barriers. `dmb` / `dsb` take sy, st, ld, ish, ishst, ishld, nsh,
+    nshst, nshld, osh, oshst or oshld; `isb` takes sy; a bare barrier
+    is sy. The next instruction is never read as an option (`dmb`,
+    `dsb`, `isb` on three lines are three barriers); a word the barrier
+    has no option for is refused by name (`dmb foo`, `isb ish`).
+    Through 6.7.14 a barrier took no option (`dmb ish`, the guide's own
+    `#ifplat` example, was "unknown aarch64 asm mnemonic 'ish'") and the
+    bare words were WRONG instructions: `dsb` was SSBB (a speculative-
+    store-bypass barrier — it ordered no memory accesses), `wfe` an MSR
+    that faults SIGILL at EL0, `dmb` / `isb` the reserved option #0
+    (runs as sy; only the bytes change). qemu-user ran all of them
+    without a trap — only a decode showed it.
+    ⚠ Still true (filed, 6.7.16): `param_load(raxx, 0)` compiles as rax
+    and `param_load(r8d, 0)` as a 64-bit r8 load — its register is
+    still read by its first letters.
 
 KERNEL MODE:
     kernel;                    # emit bare-metal multiboot1 ELF
@@ -650,21 +769,58 @@ annotation — or drop it (an unannotated var is an i64).
 VC-1, VC-16; the user's D15 (a), D4 (a), D5 (a), D6 (a), D41):
   - A `var`'s annotation too (D15 (a), FE-20): `var b: 1 = 0;` is "expected a type for variable 'b', got number 1"
     — in a fn, either top-level zone and a for-init (`cyrius lint` reports it); a stray operator or a typo like
-    `var n: 8 = ..` compiled as i64 through 6.7.13. A missing one (`var b: = 0;`) is "expected '='". The var ladder
-    was the last that stepped a token blind.
+    `var n: 8 = ..` compiled as i64 through 6.7.13. A missing one (`var b: = 0;`) was "expected '='" at 6.7.14 —
+    named since 6.7.15 (FE-6, below). The var ladder was the last that stepped a token blind.
   - Every `Vec<..>` position reads its element (GN-10): a field's nested `Vec<Vec<..>>`, a trait member's parameter
     and `: Vec<..>` return, a multi-value element, `Box<Vec<..>>`, `idv<Vec<..>>(c)`, `sizeof(Box<Vec<..>>)`. A
     GENERIC element's own list is read as that struct's annotation reads it, minting nothing: `Vec<Box<nosuch>>` and
     `Vec<Box<(i64, i64)>>` are refused, and a struct FIELD `Vec<Box<Later>>` needs `Later` declared above the struct
-    (as a field `Box<Later>` always did). A non-generic element's list (`Vec<Pt<..>>`) is still skipped (filed).
+    (as a field `Box<Later>` always did). A non-generic element's list (`Vec<Pt<..>>`) was still skipped (filed then;
+    REFUSED since 6.7.15, GN-3 — below).
   - A parameter's or return's `G<..>` reads its type arguments at the DEFINITION, called or not (GN-11, D6 (a)): `fn
     gm(m: Mp<K, V>, b)` with K / V undeclared, `m: Box<Zork>`, `m: Box<u8>` are refused; a generic's own `fn
-    gm<K, V>(m: Mp<K, V>)` and a struct declared below the fn are fine. Still unread (filed): a multi-value element's
-    arguments, a trait member's parameter, a `*fn(..)` parameter type.
+    gm<K, V>(m: Mp<K, V>)` and a struct declared below the fn are fine. Still unread (filed then; READ since 6.7.15,
+    GN-9 — below): a multi-value element's arguments, a trait member's parameter, a `*fn(..)` parameter type.
   - `Result` / `Option` / `Tagged` / the vector names: by-name handles / vectors only while the program declares no
     struct of that name (ST-5, D41 — above).
   - A program names at most 16,383 distinct pointee types of a pointer to a pointer since 6.7.14 (VC-1: "too many
-    pointer-to-pointer pointee types (max 16383)"; 126 in 6.7.13).
+    pointer-to-pointer pointee types (max 16383)"; 126 in 6.7.13). The intern is hashed since 6.7.15 (VC-3).
+
+6.7.15 — `<..>` ONLY ON A GENERIC, AND READ IN EVERY SIGNATURE POSITION (CHANGELOG [6.7.15] GN-3, GN-7, GN-9 – GN-13,
+FE-6, RC-5; 6.7.15's D3, D4, D6 – D10, all (a), the user 2026-10-18). Items marked ⚠ go beyond their decision's text
+and are filed for keep-or-restore at the 6.7.16 open:
+  - `Name<..>` on a NON-generic struct or a scalar is refused once, at the name (D6, GN-3): "'Pt' is not a generic
+    struct: it takes no type arguments", "'i64' takes no type arguments". It covers a local, a global, a `*Pt<..>`
+    local, a parameter, a struct return, `sizeof(Pt<..>)`, a literal head `Pt<i64> { .. }`, an explicit type argument
+    (`g<Pt<i32>>`, `g<i64<u8>>`) and a Vec element (`Vec<Pt<..>>`) — the list was skipped UNREAD through 6.7.14 (a
+    name inside it was never checked). Delete the `<..>`: it was ignored. A program's own non-generic `struct slice`
+    written `slice<u8>` is refused too. Not reached yet (filed, 6.7.16): a pointer field `p: *Pt<i64>`, a trait
+    member's parameter, a multi-value element `(Pt<i64>, i64)`, a `*fn(Pt<i64>)` / `**Pt<i64>` parameter, a
+    `*i32<u8>` local / global / `: *T` return.
+  - A GENERIC struct's type arguments are read at the definition, used or not, in the three positions 6.7.14 left
+    (D7, GN-9): a multi-value element `(Box<Zork>, i64)`, a trait member's parameter or return, a `*fn(Box<Zork>):
+    i64` type — "unknown type 'Zork' as a type argument (...)", once (they compiled as the base `Box`). ⚠ Every
+    type-argument refusal applies there (`(Box<u8>, i64)`, a tuple, `Result`), not only D7's unknown name.
+  - A pointer FIELD `p: *G<..>` (G generic) is checked at the field, once, used or not (D8, GN-7): `*Box<Zork>`,
+    `*Box<1>`. ⚠ Every type-argument refusal, as a by-value `b: Box<..>` field already had. Two structs pointing at
+    each other through `*Box<B>` / `*Box<A>` still compile.
+  - A Vec element's generic struct is held to its BOUNDS at the element, nothing minted (D10, GN-13): with `struct
+    Box<T: Show>` and no `impl Show for Pt`, `var w: Vec<Box<Pt>> = 0;` is refused as `var w: Box<Pt>;` is.
+    ⚠ A bare `Vec<Box>` is judged as Box's i64 base.
+  - A trait member's own return holds to a fn's return set (GN-10, GN-11): `: Vec<..>` is "type 'Vec' cannot be a fn
+    return type" at the trait (D9; ⚠ a bare `: Vec` too), `: u128` is "`u128` is not supported as a fn return type
+    yet" (D3). An impl method's return is checked against its member's and refused by name at the impl (D4, GN-12):
+    "'P.c' returns i64, trait 'T' declares f64" — 6.7.0 – 6.7.14 compared an impl to its trait by parameter COUNT
+    only, so a bounded caller read the integer bits. The types compare as forming a dyn compares them (no annotation
+    is i64; `Box<i64>` is `Box`); ⚠ an omitted return on either side counts as i64. Parameter types are not compared.
+  - A `var` whose `:` has no type (FE-6; 6.7.14's D15 (a) applied to `=` / `;`): `var b: = 0;` is "expected a type
+    for variable 'b', got '='" at that token, `= 0` read as the initializer; `var G: ;` "... got ';'", one error.
+    ⚠ The declaration zone's `var c: ; var d = 2;` — which COMPILED with c = 2 (d's initializer) and d never
+    declared — is refused.
+  - A variable or parameter whose annotation was refused adds no error of its own at its `.field` reads, field
+    stores and `.m()` calls (RC-5): the annotation's error is the one (each use printed "no struct type in scope"
+    through 6.7.14). Not yet a top-level `var P: *Foo` GLOBAL, whose uses still name an unrelated struct (filed,
+    6.7.16).
 
 [[entries]]
 name = "compiler_architecture"
@@ -686,9 +842,29 @@ MODULES (included by src/main.cyr and the 6 other per-target forks):
     frontend/lex.cyr         — tokenizer
     frontend/lex_pp.cyr      — preprocessor (include / ifdef / derive /
                                macros)
-    frontend/parse.cyr + parse_{ctrl,decl,expr,fn,types}.cyr
-                             — parser + codegen
-    frontend/ts/*            — TypeScript-syntax lexer + parser
+    frontend/parse.cyr + parse_{cov,ctrl,decl,expr,fn,fn_def,types}.cyr
+                             — parser + codegen. parse_fn_def.cyr (6.7.15,
+                               W0-2, 6.7.15's D25 A) holds the top-level
+                               scans (pass 1 / pass 2, the directive
+                               dispatcher, `use`, the declaration-after-
+                               the-first-statement rule), the definition
+                               identity / duplicate checks and
+                               `_PARSE_FN_DEF_IMPL`, moved unchanged out of
+                               parse_fn.cyr, which had grown to 3,347 B
+                               under cyrfmt's / cyrlint's 1,052,672 B read
+                               cap; parse.cyr includes it right after
+                               parse_fn.cyr, the token stream is the same,
+                               and every fork built byte-identical
+    frontend/ts/*            — TypeScript-syntax lexer + parser, and since
+                               6.7.15 (D38) the driver pieces main.cyr's TS
+                               modes moved into, token for token, at its own
+                               positions: driver_flags.cyr (the mode vars),
+                               driver_input.cyr (the `<file>` open),
+                               driver.cyr (the arena and the three modes),
+                               plus driver_args.cyr for the other forks (the
+                               /proc, Mach-O argv and Windows
+                               GetCommandLineW walkers). Every fork but
+                               main_cx.cyr includes them.
 
 COMPILATION FLOW:
     1. Read source (stdin or file) into input buffer
@@ -700,7 +876,12 @@ COMPILATION FLOW:
     6. Emit jmp over fn bodies → parse fn defs → patch jmp
     7. EMIT_GVAR_INITS: replay deferred global var initializations
     8. PARSE_PROG: parse main code statements
-    9. FIXUP: patch variable / string / function addresses
+    9. FIXUP: patch variable / string / function addresses, and walk
+       the call graph for the `N unreachable fns` note (and
+       CYRIUS_DCE=1). The walk's seed pass binary-searches an
+       alloc()'d index of merged fn ranges per call site since 6.7.15
+       (IT-9); it scanned the whole fn table per site, O(sites × fns),
+       on every x86 and aarch64 build.
     10. EMITELF: write ELF binary to stdout (or .o, or PE, or Mach-O)
 
 CODEGEN MODEL:
@@ -721,9 +902,15 @@ OPTIMIZATION PIPELINE (CYRIUS_IR=3):
     - ir_dce (dead-code elimination via bitmap liveness)
     - DSE (dead-store elimination)
     - Fixed-point driver (re-runs passes until no further changes)
+    - A pass that rewrites a byte span owns every IR node inside it:
+      since 6.7.15 (IT-1) a constant fold turns the dead-store-
+      eliminated nodes in its span to IR_NOP, so no pending NOP-fill
+      lands in its new immediate. x86_64 only (the forks include ir.cyr
+      but never run the fold); `ir3_dce_corpus.sh` runs the corpus
+      under IR=3 + DCE=1.
 
 MOST OF THE COMPILER'S MEMORY IS A FIXED brk/mmap MAP (115 regions
-at 6.7.14 — 121 at 6.7.12 / 6.7.13, before the six IR bands were
+at 6.7.14 and 6.7.15 — 121 at 6.7.12 / 6.7.13, before the six IR bands were
 retired for an alloc()'d arena — `sh tests/gates/memory/heapmap.sh`), BUT THE LARGE TABLES
 GROW. fn tables double to 131072, var tables to 1,048,576, the fixup
 table to 64M entries; codebuf is an off-heap 8 MiB alloc growing +8
@@ -737,9 +924,13 @@ inverted short branch over a 24-bit `jmp`, LIB-1); the output image
 is a lazily-mapped off-heap 1 GiB alloc; fn side tables, the
 string-intern index and (since 6.7.14) the IR arena are alloc'd on
 first use, and the DCE registries grow past their first 4,096
-records. A cap that is still fixed (preprocessed source
+records; since 6.7.15 the include-once table (still `S + 0x1C0000`,
+its band unchanged) holds POINTERS to alloc()'d whole spellings
+(IT-5 — its 128-byte entries kept 127 bytes, so a longer spelling
+was included twice). A cap that is still fixed (preprocessed source
 24 MB, identifier pool 8 MiB, tokens 4,194,304, string data 2 MiB,
-struct definitions 1024) errors out with a message naming it.
+struct definitions 1024, 256 distinct includes) errors out with a
+message naming it.
 When an agent proposes "trim the fixture to fit", reject it: grow
 the compiler.
 
@@ -862,7 +1053,16 @@ CURRENT LIMITATIONS (active — work around these):
     multiboot image). The live kernel-mode trap is different: a
     global's initializer runs AFTER the top-level program, and
     cycc warns (`in a kernel build the initializer of 'x' runs
-    after the top-level program`).
+    after the top-level program`). A declaration-zone CONSTANT
+    initializer is baked into the image instead, and not warned:
+    an integer constant (a folded zero / enum too since 6.7.14's
+    D11), a float literal (6.7.14), and since 6.7.15 a constant f64
+    EXPRESSION — an f64 const, `(1.5)`, `CF * 2.0 - 0.5`, `-CF`, an
+    f32's `= CF` binary32-rounded (FE-16; 6.7.15's D46 Keep applied to
+    expressions — beyond its text, filed for the 6.7.16 open). Its
+    filed repro warned on `var G: f64 = CF;` and G read 0. Still late
+    and named: a call, a NaN result (`0.0 / 0.0`), and arithmetic
+    with an integer or enum operand (`1.5 + 1`; filed, 6.7.16).
 
 11. PREPROCESSOR OUTPUT CAP: Expanded source is capped at 24 MB
     (v6.5.40; the cap surfaces as a clear error message). The
@@ -1023,15 +1223,15 @@ string.cyr      — strlen, streq, memeq, memcpy, memset, memchr, strchr, strstr
 alloc.cyr       — alloc_init, alloc, alloc_reset, alloc_used (bump from brk; routes to alloc_macos.cyr mmap on macOS, alloc_windows.cyr VirtualAlloc on Windows). Also the allocator vtable (allocator_new / alloc_via) and arenas: arena_new / arena_alloc / arena_reset / arena_free plus the v6.5.9 growable + exhaustion-policy set (arena_new_growable, arena_set_on_full over ARENA_FULL_NULL|GROW|SPILL|ABORT, arena_capacity_total, arena_allocator_growable). NOTE: alloc_reset INVALIDATES every pointer it has handed out — including, pre-v6.5.7, the memoized default allocator itself (fixed: the vtable now lives outside any resettable region)
 str.cyr         — Str struct (data+len): str_from, str_len, str_eq, str_cat, str_sub, str_contains, str_split, str_trim
 vec.cyr         — Dynamic array: vec_new, vec_push, vec_pop, vec_get, vec_set, vec_len, vec_find, vec_remove
-io.cyr          — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists, plus flock(2) wrappers (file_lock, file_trylock, file_lock_shared, file_append_locked), the crash-safe set file_write_atomic / file_rename / xfsync / file_create_exclusive (v6.4.57; portable to Windows via MoveFileExW; v6.6.6: file_write_atomic keeps an existing file's mode, and file_replace_atomic also writes THROUGH a symlink, for a file a user owns), and the portable x* wrapper family (xopen/xstat/xunlink/xgetdents/xlseek/xflock; xrmdir v6.5.2; xmkdir/xmkdir_p/xsymlink/xreadlink/xlink v6.5.7). On Windows a failed open / read / write / seek answers a negative errno through `GetLastError` since 6.7.14 (it was -1 / 0 / 0 / 0): `file_open_r` says `IoNotFound`, and a pipe whose writer closed still reads 0 — test `< 0`, never `== -1`
+io.cyr          — File I/O: file_open, file_read, file_write, file_close, file_read_all, file_write_all, file_exists, plus flock(2) wrappers (file_lock, file_trylock, file_lock_shared, file_append_locked), the crash-safe set file_write_atomic / file_rename / xfsync / file_create_exclusive (v6.4.57; portable to Windows via MoveFileExW; v6.6.6: file_write_atomic keeps an existing file's mode, and file_replace_atomic also writes THROUGH a symlink, for a file a user owns), and the portable x* wrapper family (xopen/xstat/xunlink/xgetdents/xlseek/xflock; xrmdir v6.5.2; xmkdir/xmkdir_p/xsymlink/xreadlink/xlink v6.5.7). On Windows a failed open / read / write / seek answers a negative errno through `GetLastError` since 6.7.14 (it was -1 / 0 / 0 / 0): `file_open_r` says `IoNotFound`, and a pipe whose writer closed still reads 0 — test `< 0`, never `== -1`. Since 6.7.15 a Windows close answers 0 or a negative errno too (PL-7; it was CloseHandle's BOOL, 1 / 0, so every `< 0` test was dead and `file_close_r` never said `Err` — now `Ok(0)` / `Err(IoBadFd)`); `sys_close(0|1|2)` there answers -9 and the std stream stays open (filed, 6.7.16: the std fds still reach CloseHandle raw); and a seek on fd 0 / 1 / 2 reaches the std stream (PL-8, 6.7.15's D55 — it failed -9)
 fmt.cyr         — Formatting: fmt_int, fmt_hex, fmt_hex0x, fmt_bool, fmt_byte, fmt_pad, fmt_int_buf, sprintf, fmt_float
 args.cyr        — CLI args: args_init, argc, argv. args_init returns the bytes read; a failure is a NEGATIVE errno on Linux / Windows, and 0 is macOS / agnos success — test `< 0` (6.7.12, D7). Linux reads /proc/self/cmdline to EOF (a command line past 2 MiB is read whole). See stdlib_modules `args_init_contract_v6712`
 fnptr.cyr       — Function pointers: fncall0–fncall8 (see "fncall_ceiling" entry for ABI rules)
 tagged.cyr      — Option / Either (Result in result.cyr) as `enum ...: stack` VALUE FORM since 6.6.0: a payload variant returns (tag, payload) in a register pair with zero allocation; bind with `var t, v = f();`. Storable heap boxes: boxed.cyr (boxed_new / boxed_tag / boxed_payload / boxed_is / tagged_new, 6.6.2)
 hashmap.cyr     — map_new (cstr keys) + map_new_str (Str keys, content-hashed) + map_u64_new (u64 keys, SplitMix64, zero-alloc hot path)
 fs.cyr          — Filesystem: is_dir, dir_list, sys_mkdir, sys_unlink, sys_chmod
-process.cyr     — Subprocess: run, run_capture, spawn, exec_vec, exec_env, exec_capture. Every exec-family child starts with SIGPIPE / SIGXFSZ at SIG_DFL and an EMPTY signal mask (Linux since 6.7.9, macOS since 6.7.12 — sys_sigprocmask works there now)
-syscalls.cyr    — Per-arch dispatch (x86_64_linux, aarch64_linux, macos, windows)
+process.cyr     — Subprocess: run, run_capture, spawn, exec_vec, exec_env, exec_capture. Every exec-family child starts with SIGPIPE / SIGXFSZ at SIG_DFL and an EMPTY signal mask (Linux since 6.7.9, macOS since 6.7.12 — sys_sigprocmask works there now). Since 6.7.15 (LF-6) a capture or env verb started with fd 0, 1 or 2 CLOSED still gets the child's real output, and the exec'd child starts with stdout and stderr open: a redirect never closes the std fd it just made (`dup2(fd, fd)` is a no-op, so the close that followed undid the redirect — `run_capture` read 0 bytes with fds 0 and 1 closed). lib/regression.cyr's redirecting verbs and lib/pam.cyr's helper are the same, and in regression's caller-file verbs the child lifts the parent-opened output fd above 2 before any redirect (LF-9)
+syscalls.cyr    — Per-arch dispatch (x86_64_linux, aarch64_linux, macos, windows). `sys_dup2(fd, fd)` on aarch64 Linux answers fd (open) or -9 (not) as dup2 does since 6.7.15 (LF-1; it answered -22 — x86's 33 routes to dup3, which refuses a self-dup; a raw `syscall(33, fd, fd)` still does, so call the wrapper). Windows `sys_dup2` fails closed: -38 on every call (LF-5, the user's wave-2 decision; it answered newfd and redirected nothing)
 net.cyr         — TCP socket wrappers
 http.cyr        — HTTP/1.0 client (GET, URL parser, response extraction; CRLF-injection hardened)
 http_server.cyr — Minimal HTTP/1.0 server (used by `vidya serve`, `cyrius doc --serve`)
@@ -1065,6 +1265,7 @@ overflow.cyr    — Saturating + checked arithmetic helpers (+|, -|, *|, +?, -?,
 random.cyr      — Kernel-entropy reader
 security.cyr    — Landlock policy enums
 test.cyr        — Table-driven test framework (test_each)
+regression.cyr  — Test-runner primitives (carved from programs/checks/ at v5.9.42): display / buffer-scan helpers, pipe-stdin-to-binary, fork+exec with a bounded timeout, exec-and-capture, exec-in-dir, a TCP probe, the SSH cluster verbs. Since 6.7.15 (LF-8, CYRIUS-2026-0036) the six `regression_exec_*capture*` verbs create their capture file EXCLUSIVELY — `audit_xc_<pid>` / `audit_xa_<pid>` (then `.1` … `.63`) under an absolute `$TMPDIR` (else `/tmp`), `O_EXCL | O_NOFOLLOW`, 0600; when none can be made they print one stderr line, run nothing and answer 0 bytes / status -1 (the pid-predictable `/tmp` name was opened O_TRUNC and followed a planted symlink). `regression_pipe_write_all` ignores SIGPIPE for its write (W0-1: a child exiting unread killed the caller). See stdlib_modules `regression_module`
 sandhi.cyr      — Service-boundary stdlib (HTTP/TLS/discovery)
 vidya.cyr       — Vidya knowledge-base access
 

@@ -14,6 +14,9 @@
 # 6.7.14: no new entry. Updated: cyrius_watch_output_is_unsigned_on_apple_silicon_v6712 (the watcher runs `cyrius build`
 # since D60, and `cat | cycc` is not a project build), a_signalled_cyrius_dies_by_the_signal_v6713 (the signal is
 # forwarded to the CLI's own git, TL-6; the unbounded wait filed). 11 entries (DERIVED at 6.7.14).
+# 6.7.15 (2026-10-19): +1 entry — a_parent_with_a_std_fd_closed_hands_that_number_to_its_next_fd_v6715 (the std-fd
+# class: LF-6, LF-9). Updated: a_signalled_cyrius_dies_by_the_signal_v6713 (the forwarded git gets 2 s, then SIGKILL,
+# D49; a killed scratch resolve unlinks only its own temps, IT-12). 12 entries (DERIVED at 6.7.15).
 
 [[entries]]
 name = "bash_subshell_clobbers_stateful_helpers"
@@ -426,9 +429,9 @@ that would stamp the pin points there. language/tooling.cyml lib_sync_relock_v66
 
 [[entries]]
 name = "a_signalled_cyrius_dies_by_the_signal_v6713"
-description = "A `cyrius` stopped by SIGTERM / SIGINT / SIGHUP cleans up its children, scratch and temp dir, then DIES of the signal (6.7.13, D39). A shell's `$?` reads 128+N on every version, but a parent reading the wait status saw WIFEXITED 128+N on 6.7.12 alone — so bash's SIGINT loop-stop did not fire for `cyrius` there. With `exec_capture_status`, test st[1] (the signal bit), not the code. Since 6.7.14 it first forwards the signal to its own git and waits for it."
+description = "A `cyrius` stopped by SIGTERM / SIGINT / SIGHUP cleans up its children, scratch and temp dir, then DIES of the signal (6.7.13, D39). A shell's `$?` reads 128+N on every version, but a parent reading the wait status saw WIFEXITED 128+N on 6.7.12 alone — so bash's SIGINT loop-stop did not fire for `cyrius` there. With `exec_capture_status`, test st[1] (the signal bit), not the code. Since 6.7.14 it first forwards the signal to its own git and waits for it — since 6.7.15 for at most 2 s, then SIGKILL (D49), so a `git` wrapper's cleanup must fit in 2 s."
 category = "cyrius"
-tags = ["v6.7.13", "v6.7.14", "git", "signals", "SIGINT", "SIGTERM", "SIGHUP", "WIFSIGNALED", "WIFEXITED", "exec_capture_status", "D39", "cleanup"]
+tags = ["v6.7.13", "v6.7.14", "v6.7.15", "git", "signals", "SIGINT", "SIGTERM", "SIGHUP", "SIGKILL", "WIFSIGNALED", "WIFEXITED", "exec_capture_status", "D39", "D49", "cleanup"]
 ---
     for f in *.cyr; do cyrius build "$f" "bin/${f%.cyr}" || exit 1; done   # Ctrl-C stops the loop again (6.7.13)
 
@@ -444,7 +447,55 @@ cyrius parent reading the status should test `exec_capture_status`'s st[1] (1 = 
 alone. An inherited SIG_IGN (nohup, a `&` job's SIGINT) is kept. Windows catches nothing.
 Since 6.7.14 a killed `cyrius deps` / `build` FORWARDS the signal to its own git (the cached checkout's verify, a clone)
 and waits for it before it dies, so git's own cleanup runs — a killed clone removes its partial cache directory — and the
-git captures and the scratch resolve of `deps --locked` / the pin-move dry pass are removed too (TL-6, TL-7). ⚠ The
-forwarded wait has no bound: a git that ignores SIGTERM delays the exit (filed, 6.7.15). `$?` and the signal death
-(D39) are unchanged. language/tooling.cyml cyrius_cli (A KILLED RUN). CHANGELOG [6.7.13] TL-18 (D39), [6.7.14] TL-6,
-TL-7.
+git captures and the scratch resolve of `deps --locked` / the pin-move dry pass are removed too (TL-6, TL-7). In 6.7.14
+the forwarded wait had no bound: a `git` first on PATH (a wrapper) that traps or ignores the signal held the CLI for as
+long as it ran, and a second Ctrl-C was held too. Since 6.7.15 (6.7.15's D49, IT-11) git gets 2 s after the forwarded
+signal, then SIGKILL: a killed `cyrius deps` (or a build that resolves) exits within about 2 s whatever git does. A
+wrapper's own cleanup must fit in those 2 s; real git exits on the signal, runs its cleanup and is unaffected (a killed
+clone still removes its partial directory). And a killed scratch resolve unlinks only the temp files it CREATED — a file
+another process put at a temp name the copy skipped stays (IT-12). `$?` and the signal death (D39) are unchanged.
+Windows has no POSIX signals: unchanged. language/tooling.cyml cyrius_cli (A KILLED RUN). CHANGELOG [6.7.13] TL-18
+(D39), [6.7.14] TL-6, TL-7, [6.7.15] IT-11, IT-12.
+
+[[entries]]
+name = "a_parent_with_a_std_fd_closed_hands_that_number_to_its_next_fd_v6715"
+description = "CLASS (6.7.15). A process started with fd 0, 1 or 2 closed (`<&-`, `>&-`, a supervisor, a daemon) hands that NUMBER to its next open or pipe, so a child-redirect sequence written for the normal case turns on itself: `dup2(fd, N); close(fd)` closes the redirect when fd already IS N, and a parent-opened output fd sitting at 0 is overwritten by the child's own stdin redirect. Close a redirect's source only when fd != N, and lift every parent-opened fd above 2 (`fcntl(fd, F_DUPFD, 3)`) before any redirect. lib/process.cyr, lib/regression.cyr and lib/pam.cyr do since 6.7.15; cbt/, programs/ and sigil's run-capture verbs not yet (filed, 6.7.16)."
+category = "cyrius"
+tags = ["v6.7.15", "fd", "stdin", "stdout", "stderr", "dup2", "close", "fork", "exec", "redirect", "capture", "process.cyr", "regression.cyr", "pam.cyr", "F_DUPFD", "/dev/fd", "qemu"]
+---
+    ./prog <&- >&-          # prog starts with fds 0 and 1 closed: its first pipe() answers (0, 1)
+
+THE MECHANISM. open, pipe and dup answer the LOWEST free fd. A process started with a std fd closed — by a shell's `<&-`
+/ `>&-`, a supervisor, a daemon that closed its std fds — hands that number to its next open or pipe: with fds 0 and 1
+closed `pipe()` answers (0, 1); with fd 2 closed `open("/dev/null")` answers 2. A child-redirect sequence written for
+the normal case then turns on itself, two ways:
+  1. `dup2(fd, N); close(fd)` CLOSES THE REDIRECT WHEN fd ALREADY IS N (LF-6). `dup2(1, 1)` is a no-op, so the close
+     after it closes the pipe's only write end: the exec'd program starts with stdout closed and the capture reads 0
+     bytes. With fd 2 closed, `dup2(2, 2); close(2)` leaves the program with fd 2 closed — its first open lands on 2,
+     and its diagnostics go into that file.
+  2. A PARENT-OPENED fd CAN BE 0, 1 OR 2, AND THE CHILD'S OWN REDIRECT OVERWRITES IT (LF-9). With fd 0 closed the output
+     file opens at 0; the child's stdin redirect (`dup2(devnull, 0)`, or the pipe's read end) replaces it before the
+     output redirect reads it, so stdout goes to /dev/null or the pipe and the capture is empty. Reordering the
+     redirects is not enough once the child carries two parent fds: with fds 0 and 1 closed the output is at 0 and the
+     pipe at 1, so stdin-first overwrites the output and out-first overwrites the pipe.
+
+THE RULE. In the child, before redirecting any std fd, move every parent-opened fd that is 2 or below above 2 —
+`fcntl(fd, F_DUPFD, 3)`, then close the old number (if F_DUPFD fails, carry on with the fd unchanged) — and close a
+redirect's source only when `fd != N` (when one fd feeds two targets, only when it is neither). With every std fd open,
+the normal case, both are no-ops and the child setup is identical.
+
+WHERE IT STANDS. Since 6.7.15 lib/process.cyr's capture and env verbs (`_proc_redirect`), lib/regression.cyr's
+redirecting verbs (`_regression_redirect`; `_regression_lift_fd` for the caller-file verbs
+`regression_exec_in_dir3[_env]`, `regression_pipe_to_bin_capture` and `regression_ssh_remote_exec_capture`) and
+lib/pam.cyr give the child's real output whichever std fds the caller closed, and the exec'd child starts with fds 0, 1
+and 2 open (stdin on /dev/null or the pipe). Still the shape (filed, 6.7.16): the cbt/ and programs/ child redirects —
+`cyrius build --target=js x.ts out.js 1>&-` fails "could not write the output (0 of 29 bytes): errno 9" —
+cbt/pulsar.cyr's redirect order, and the folded sigil's `agnosys_run_capture[_timeout]` /
+`agnosys_run_checked[_timeout]` (a fold defect, for sigil's source).
+
+TESTING IT. Run each row in a FORKED copy of the test that closes the fds first and answers through its exit code, and
+spawn the test itself as a probe child that reports which of fds 0, 1 and 2 it started with — every mask of the three
+(`tests/tcyr/crossos/process_capture_closed_std_fds.tcyr`, `regression_capture_stdin_closed.tcyr`). Probe an fd with
+`/proc/self/fd/N` on Linux and `/dev/fd/N` on macOS, which has no `/proc`. A self-spawning test fails under a bare
+`qemu-aarch64` without a binfmt registration (filed, 6.7.16): run it on aarch64 hardware.
+CHANGELOG [6.7.15] LF-6, LF-9.

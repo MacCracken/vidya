@@ -341,23 +341,30 @@ markdown body); legacy cyrius.toml is still read as a fallback.
 
 [[entries]]
 name = "existing_deps_registry"
-description = "Current Cyrius ecosystem deps: 12 sovereign stdlib libraries, all folded byte-identical into lib/ (0 git deps); fold versions re-read from the lib/ headers at cyrius 6.7.14 (patra 1.16.4 refolded in 6.7.14; bayan 1.9.0, sandhi 1.13.1 in 6.7.13; sakshi 2.5.10, sankoch 2.8.7 in 6.7.11; the other seven at their 6.7.6 / 6.7.10 refolds)"
+description = "Current Cyrius ecosystem deps: 12 sovereign stdlib libraries, all folded byte-identical into lib/ (0 git deps); fold versions re-read from the lib/ headers at cyrius 6.7.15 (patra 1.16.5 refolded in 6.7.15, its read path changed; 1.16.4 in 6.7.14; bayan 1.9.0, sandhi 1.13.1 in 6.7.13; sakshi 2.5.10, sankoch 2.8.7 in 6.7.11; the other seven at their 6.7.6 / 6.7.10 refolds)"
 category = "cyrius"
 ---
 Since v6.5.10 the ecosystem libraries are folded byte-identical into
-the stdlib (0 git deps). CURRENT FOLDS at cyrius 6.7.14 — each read from
+the stdlib (0 git deps). CURRENT FOLDS at cyrius 6.7.15 — each read from
 the header of the vendored lib/<name>.cyr and checked against cyrius
 `docs/ecosystem.md`'s rows, not carried from this list (every row below
 had gone stale since v6.5.10 until it was re-read at 6.6.15, and ALL
 TWELVE had drifted again by 6.7.11 — this table still read the 6.6.19
 wave):
 
-  sigil    3.13.12    patra    1.16.4     sankoch  2.8.7
+  sigil    3.13.12    patra    1.16.5     sankoch  2.8.7
   sakshi   2.5.10     bayan    1.9.0      ganita   1.2.15
   mabda    4.2.0      niyama   1.1.0      yantra   1.0.11
   vani     1.2.10     sandhi   1.13.1     yukti    2.3.17
 
-Refolded in 6.7.14: patra 1.16.3 -> 1.16.4 (tag @ bbded00; tests only —
+Refolded in 6.7.15: patra 1.16.4 -> 1.16.5 (tag @ 9c67b33, the user's
+tag; NOT tests only this time — the refold changes CODE in
+lib/patra.cyr: `_bytes_read_chain`, `_rs_materialize`,
+`patra_result_read_bytes` and `patra_result_read_text`, from three 6.7.15
+lanes: the platform lane's suite fixtures, the libfix lane's `fuzz_bytes`
+fix and the read path it exposed, libfix3's oversized ref; no public fn
+added or removed, pin unchanged). Refolded in 6.7.14: patra 1.16.3 ->
+1.16.4 (tag @ bbded00; tests only —
 `dist/patra.cyr` differs in its `# Version:` line alone). Refolded in
 6.7.13: patra 1.16.2 -> 1.16.3 (tag @ b8722b7), bayan 1.6.0 ->
 1.9.0 (tag @ 0c626c6), sandhi 1.10.9 -> 1.13.1 (tag @ bc7ef13). Refolded
@@ -413,7 +420,7 @@ TWO MORE FOLD TRAPS worth knowing before you touch a vendored lib:
     shipped with all 9 sub-profiles still carrying the 2.7.5 bug.
   - `cyrius lib sync` would REVERT every fold (it now refuses, v6.4.77).
 
-The headline version on each per-dep note below is the LIVE fold (6.7.14);
+The headline version on each per-dep note below is the LIVE fold (6.7.15);
 the prose under it is accumulated lineage and still names the release
 that introduced each change — what each fold changed since is in cyrius
 `docs/ecosystem.md`'s row for it and in that sibling's own CHANGELOG.
@@ -444,7 +451,41 @@ it re-matters the day a git dep comes back.
                      sakshi). No API or behaviour change. 2.5.9 (6.7.10):
                      compiles and runs on cx.
 
-  patra (1.16.4) — Structured storage and SQL queries. 1.16.4 (folded at
+  patra (1.16.5) — Structured storage and SQL queries. 1.16.5 (folded at
+                     cyrius 6.7.15, tag @ 9c67b33): THE BYTES / TEXT READ
+                     PATH. A length of 0 is the only empty value; a
+                     malformed chain (a bad page marker, an oversized or
+                     negative page length, a link out of the file, a
+                     chain looping back or running past its ref's length)
+                     keeps the row's length and reads `PATRA_ERR_PAGE`; a
+                     ref naming more bytes than the file can hold answers
+                     length -1 and `PATRA_ERR_PAGE` (the user's decision,
+                     2026-10-18). Through 1.16.4 each read as an empty
+                     value — or, looping, the wrong bytes — with
+                     `PATRA_OK` (the malformed chain since 1.12.8, the
+                     oversized ref since 1.14.0). -1 is also the
+                     getters' answer for a column of another type or a
+                     cell outside the result set: the read's code tells
+                     them apart (`PATRA_ERR_TYPE` / `PATRA_ERR_PARAM`
+                     versus `PATRA_ERR_PAGE`) — size a buffer only from a
+                     length >= 0 and check the read's return. ⚠ A
+                     NEGATIVE stored length also reads `PATRA_ERR_PAGE`
+                     (its getter gives the stored value), and
+                     `patra_insert_row` still ACCEPTS one with `PATRA_OK`
+                     — filed, a fold defect whose patch opens 6.7.16.
+                     Harnesses: `fuzz_bytes` plants its mutations on the
+                     chain the row names (it took a heap pointer for a
+                     page number and wrote past EOF since 1.12.8) and
+                     asserts the reader's answer; the macOS failed-sync
+                     row runs through the sync seam (macOS syncs
+                     /dev/null); every scratch path comes from one helper,
+                     tests/scratch_path.cyr (relative on Windows), and CI
+                     refuses a bare `/tmp` literal. Suite 1,752 on Linux
+                     x86_64 / aarch64, 1,675 on ecb / ach, 1,672 on cass;
+                     isolated CI 19 / 19 on the tag. lib/patra.cyr
+                     10,011 -> 10,033 lines; no public fn added or
+                     removed; pin unchanged (6.7.10).
+                     1.16.4 (folded at
                      cyrius 6.7.14, tag @ bbded00): its OWN suite runs on
                      Windows — per-target scratch paths (a drive-rooted
                      "/tmp/x" need not exist there) and the NUL device for
@@ -513,6 +554,14 @@ it re-matters the day a git dep comes back.
                      `hash_file_into`'s buffers are per-call stack locals,
                      so including sigil / tls / tls_native is warning-free
                      and the fold's static data falls 367,664 -> 105,520 B.
+                     ⚠ Still 3.13.12 at cyrius 6.7.15, with a fold defect
+                     filed there (its patch opens 6.7.16):
+                     `agnosys_run_capture[_timeout]` /
+                     `agnosys_run_checked[_timeout]` run `sys_dup2(fd, N);
+                     sys_close(fd)` with no same-fd guard, so a caller
+                     started with a std fd closed closes the redirect it
+                     just made — the class 6.7.15 fixed in lib/process.cyr,
+                     lib/regression.cyr and lib/pam.cyr (LF-6).
                      Bundled: dist/sigil.cyr. v2.9.0 added HKDF +
                      SHAKE-128/256; v2.9.1 consumers use AES-NI
                      cleanly after v5.5.21 fixed SSE m128 16-byte

@@ -23,6 +23,10 @@
 # v6.7.14: +1 entry — a_tls_peer_that_pads_or_repeats_now_fails_the_handshake_v6714 (LIB-8). Updated:
 # a_const_and_its_public_var_twin_are_safe_only_when_lib_reads_the_const_v6712 (`TLS_SHA256_CTX_LEN` has its twin and is
 # inert — 15 names, LIB-2). 8 entries (DERIVED at 6.7.14 with the line-anchored grep).
+# v6.7.15 (2026-10-19): +1 entry — a_corrupt_patra_value_reads_patra_err_page_not_an_empty_ok_v6715 (patra 1.16.5: LF-2,
+# LF-3, LF-7). Updated: a_tls_peer_that_pads_or_repeats_now_fails_the_handshake_v6714 (the 1.2 ServerHello and the
+# ClientHellos a native server reads fill their message, D40, PL-5, PL-6). 9 entries (DERIVED at 6.7.15 with the
+# line-anchored grep; cymlcheck.py's stripped match still counts the example's two indented lines, so it reports 2).
 
 [[entries]]
 name = "str_data_not_nul_terminated"
@@ -432,9 +436,9 @@ inert like the other fourteen (6.7.12's D16, a fifteenth name). language/stdlib_
 
 [[entries]]
 name = "a_tls_peer_that_pads_or_repeats_now_fails_the_handshake_v6714"
-description = "Since 6.7.14 the native TLS client refuses what 6.7.12's conformance bite left: a server that repeats an extension, leaves bytes after an extension block, or answers ALPN with anything but exactly one non-empty name (two names: the client used to take the first) fails the handshake with an alert, and a 1.2 ServerHello is walked against the 1.2 ClientHello. That is the RFC's answer — the fix is on the server."
+description = "Since 6.7.14 the native TLS client refuses what 6.7.12's conformance bite left: a server that repeats an extension, leaves bytes after an extension block, or answers ALPN with anything but exactly one non-empty name (two names: the client used to take the first) fails the handshake with an alert, and a 1.2 ServerHello is walked against the 1.2 ClientHello. Since 6.7.15 (D40) every extension block fills its message both ways: a 1.2 ServerHello, and a ClientHello a native SERVER reads, with bytes after the block, an overrunning block or a lone length byte fails with decode_error. That is the RFC's answer — the fix is on the peer."
 category = "cyrius"
-tags = ["v6.7.14", "tls", "tls_native", "handshake", "extensions", "ALPN", "alert", "decode_error", "illegal_parameter", "unsupported_extension", "RFC 8446", "RFC 7301"]
+tags = ["v6.7.14", "v6.7.15", "tls", "tls_native", "handshake", "extensions", "ALPN", "alert", "decode_error", "illegal_parameter", "unsupported_extension", "ClientHello", "ServerHello", "RFC 8446", "RFC 7301", "D40"]
 ---
 A server that passed against 6.7.13's native client can fail against 6.7.14's, with an alert — every one an RFC MUST on
 peer input (LIB-8; no decision):
@@ -448,4 +452,42 @@ peer input (LIB-8; no decision):
     decode_error — and `tls_native_connect_12` SENDS the alert (it sent none).
 The fix is on the server. A test that calls `tls_native_client_parse_server_hello_12` directly must build the client's
 own hello on that ctx first (`tls_native_12_build_client_hello`), or every extension reads as unoffered.
-language/stdlib_modules.cyml tls_module_contract_v6614 (CONFORMANCE). CHANGELOG [6.7.14] LIB-8.
+
+6.7.15 — THE EXTENSION BLOCK FILLS ITS MESSAGE, BOTH WAYS (D40; PL-5, PL-6). A peer that completed a handshake against
+6.7.14's native stack can fail against 6.7.15's, with decode_error:
+  - a TLS 1.2 ServerHello with bytes after its extension block fails the native 1.2 client (`TLS_ERR_BAD_HANDSHAKE`,
+    decode_error sent) — the 1.3 check came in 6.7.14;
+  - the native SERVERS now read a client's ClientHello the same way: `tls_native_accept` refuses a 1.3 ClientHello with
+    bytes after its block, and `tls_native_accept_12` / `tls_native_accept` a 1.2 one with bytes after the block, a
+    block longer than the message (it negotiated, without EMS and ALPN) or one byte where the block's length goes.
+A ClientHello with NO extension block still negotiates without extensions, and well-formed hellos (OpenSSL's, the
+native stack's own) are unaffected. The fix is on the peer. ⚠ The 1.2 server's other leniencies — a ClientHello with no
+compression_methods, one overrunning the message, an extension overrunning its block — still negotiate, and its early
+refusals send no alert (filed for a decision, 6.7.16).
+language/stdlib_modules.cyml tls_module_contract_v6614 (CONFORMANCE). CHANGELOG [6.7.14] LIB-8; [6.7.15] PL-5, PL-6.
+
+[[entries]]
+name = "a_corrupt_patra_value_reads_patra_err_page_not_an_empty_ok_v6715"
+description = "Since patra 1.16.5 (folded in cyrius 6.7.15) a corrupt BYTES / TEXT value is an ERROR, not an empty value: the read answers `PATRA_ERR_PAGE` (7) with nothing written, and the length getter keeps the row's length — or answers -1 for a ref longer than the file (the user's decision, 2026-10-18). Through 1.16.4 the getter said 0 and the read `PATRA_OK`. Size a buffer only from a length >= 0, and check the read's return; -1 also means another column type or a cell outside the result."
+category = "cyrius"
+tags = ["v6.7.15", "patra", "1.16.5", "fold", "BYTES", "TEXT", "PATRA_ERR_PAGE", "PATRA_OK", "corruption", "file format", "database"]
+---
+    var n = patra_result_get_bytes_len(rs, row, col);     # 1.16.5: the row's length — or -1, no valid length
+    if (n < 0) { … }                                       # -1: also another column type, or a cell outside the result
+    var out = alloc(n + 1);
+    if (patra_result_read_bytes(db, rs, row, col, out) != PATRA_OK) { … }   # PATRA_ERR_PAGE (7): corrupt, out untouched
+
+WHAT CHANGED (patra 1.16.5; LF-2, LF-3, LF-7). A BYTES / TEXT cell whose stored chain is malformed — a bad page marker,
+an oversized or negative page length, a link out of the file, a chain looping back, a ref shorter than its chain — read
+back as an EMPTY value since patra 1.12.8: `patra_result_get_bytes_len` / `_get_text_len` said 0 and
+`patra_result_read_bytes` / `_read_text` answered `PATRA_OK` with nothing written (a chain looping back read `PATRA_OK`
+with the wrong bytes). Since 1.16.5 the getter keeps the row's length and the read answers `PATRA_ERR_PAGE`, nothing
+written. A ref naming more bytes than the file can hold has NO valid length: the getter answers -1 and the read
+`PATRA_ERR_PAGE` (since 1.14.0 it was 0 / `PATRA_OK`). A cell with a NEGATIVE stored length reads `PATRA_ERR_PAGE` too,
+while its getter answers the stored value (`patra_insert_row` accepts a negative length: filed, 6.7.16).
+
+THE TRAPS. -1 is also the getters' answer for a column of another type and for a cell outside the result set — the READ
+tells them apart (`PATRA_ERR_TYPE` / `PATRA_ERR_PARAM` there, `PATRA_ERR_PAGE` here). And code that sized a buffer from
+the length and ignored the read's return now gets an UNTOUCHED buffer of that size where it got nothing: check the read.
+Databases patra wrote are unaffected — only a corrupt or crafted file reads differently, on every target.
+language/stdlib_modules.cyml patra_stdlib_module. CHANGELOG [6.7.15] LF-2, LF-3, LF-7 (patra 1.16.5).

@@ -8,6 +8,7 @@
 # For non-obvious internal traps see gotchas.cyml.
 # For full backstory + retrospective context see retros/.
 #
+# 13 entries at 6.7.15 (DERIVED; +byte_identity_through_a_driver_refactor_needs_the_blocks_own_positions_v6715).
 # 12 entries at 6.7.14 (DERIVED; +cx_has_no_bss_a_static_buffer_costs_its_size_in_every_cyx_v6714 — still 11 at 6.7.13).
 # 11 entries at 6.7.12 (DERIVED; +fold_once_report_the_fact_to_every_consumer_v6712 — the header had read 9
 # while the file held 10 since 6.7.3's in-place rebuild entry).
@@ -711,3 +712,42 @@ cx_guest_branch_reach_vm_bounds_and_the_lib_leaf_order_v6714 #2). A gate that sc
 `lib/alloc_cx.cyr`'s `syscall(12, …)` as an unrouted brk on the Macs (gotchas.cyml tools_lane_host_compilers_masks_and_
 dry_passes_v6713 #8). User-facing: language/features.cyml cx_tail_calls_and_cxvm_guest_traps_v6612. CHANGELOG [6.7.14]
 LIB-7, LIB-7r.
+
+[[entries]]
+name = "byte_identity_through_a_driver_refactor_needs_the_blocks_own_positions_v6715"
+description = "A refactor of the compiler's own source that must keep cycc byte-identical moves TOKENS, not code: the binary is a function of the expanded token stream, so a block moved into a shared include keeps the bytes only if the include sits at the block's own token position — one include per contiguous piece. A fn wrapper around the same code changes the binary. 6.7.15 did it twice: W0-2 split parse_fn.cyr at its fmt / lint read cap (the second half included right after the first: every compiler byte-identical), and PL-13 gave every fork the TypeScript front end through three includes at main.cyr's own three positions, while main.cyr's cycc stayed byte-identical."
+category = "cyrius"
+tags = ["v6.7.15", "refactor", "byte-identical", "include", "token stream", "driver", "src/main.cyr", "parse_fn.cyr", "parse_fn_def.cyr", "TypeScript", "driver_flags.cyr", "driver_input.cyr", "driver_args.cyr", "W0-2", "PL-13", "D25", "D38", "emit_js_per_host_fork"]
+---
+THE PATTERN. cyrius has no separate compilation: the preprocessor expands every `include` in place, and the compiler
+sees one token stream. So "move this block into a shared file" keeps the compiler byte-identical exactly when the
+stream is unchanged — the include must sit at the block's own position, and a block whose pieces are interleaved with
+code that stays behind needs ONE INCLUDE PER CONTIGUOUS PIECE. A fn wrapper around the same code (the obvious "shared
+helper" refactor) is not a move: it adds a call and a frame and shifts every later fn, so the binary changes.
+
+THE TWO 6.7.15 INSTANCES.
+- A FILE SPLIT AT ITS OWN SEAM (W0-2, 6.7.15's D25 A). `src/frontend/parse_fn.cyr` (1,049,325 B, 3,347 B under cyrfmt's
+  / cyrlint's 1,052,672 B read cap) was split: the top-level scans, the definition identity / duplicate checks and
+  `_PARSE_FN_DEF_IMPL` moved unchanged to `src/frontend/parse_fn_def.cyr`, which parse.cyr includes right after
+  parse_fn.cyr. Same stream, so cycc and every fork compiler (aarch64 cross and native, both Mach-O, PE, cx) built
+  byte-identical; seed-derive OK. The checks that read the moved fns by path followed them.
+- A DRIVER'S BLOCK SHARED WITH THE FORKS (PL-13, 6.7.15's D38). main.cyr's TypeScript pieces moved token for token into
+  three includes AT ITS OWN POSITIONS — three because the mode vars precede the cmdline loop, the `<file>` open precedes
+  the read loop, and the modes follow SBL: `src/frontend/ts/driver_flags.cyr`, `driver_input.cyr`, `driver.cyr`. The
+  triage's plan, a fn API (`_ts_flag_arm` / `_ts_run_modes`), would have changed main.cyr's binary. The forks that read
+  argv differently (/proc, the Mach-O entry stack, UTF-16 GetCommandLineW) share the flag TESTS through a fourth file
+  (`driver_args.cyr`) that the byte-identical driver does NOT include — main.cyr keeps its inline flag arms. Measured:
+  main.cyr's cycc cmp-identical to the pre-change compiler (2,433,512 B); the forks grew 0.26 – 0.34 MB, the cost D38
+  accepted; `cycc_cx` unchanged.
+
+HOW TO PROVE IT. `cmp` against the PRE-change compiler, not only the fixpoint: a changed compiler that reproduces itself
+is still a changed compiler. Then seed-derive, since cybs compiles the new include layout too (its include-once list and
+include depths are capped: cybs_cannot_lex_gtgtgt_the_cycc_fixpoint_does_not_substitute_for_seed_derive). For a split
+whose halves several gates read by path, grep the gates for the old path first.
+
+THE TRAP THAT CAME WITH IT. A gate built to turn red when its premise changes did exactly that: 6.6.6's emit-js gate
+said "a fork that later GAINS the front end turns this red". The fix is to re-derive the expectation from the include
+graph — `emit_js_per_host_fork.sh`: a fork carries all six TS files or none (partial is RED), and the CLI's
+`_target_cc_has_js` names exactly the forks that carry them — never to edit the expected answer by hand. Gotchas:
+gotchas.cyml unhandled_flag_falls_through_to_compile_stdin_6_6_6 (6.7.15), vector_values_win64_parity_inline_frames_and_
+post_parse_types_v6714 #5 (the read cap). CHANGELOG [6.7.15] W0-2, PL-13.

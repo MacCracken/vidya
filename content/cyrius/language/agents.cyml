@@ -34,6 +34,15 @@
 # arena, the growing DCE registries, cx far conditionals) and the top-level
 # redeclaration rule (a folded constant warns, FE-18; integer vs bool is an
 # error, FE-19).
+# 2026-10-19 at 6.7.15: the top-level redeclaration rule (a const- / enum-named
+# constant compared, FE-14; every zone constant redeclaration the value from
+# program start, 6.7.15's D2 (a), FE-13; a type change one error, FE-12);
+# include-once keyed on the WHOLE spelling (IT-5); the relaxed-ordering rule (a
+# signature naming a struct declared below its fn, ST-1; a declaration inside a
+# body, FE-17); the memory paragraph (115 regions unchanged; the include-once
+# pointers and its 256 cap); the shell-gate count (565) and the pipefail
+# `| grep -q` trap (PL-1 – PL-4); the closeout's step 10 (the folds check, not a
+# downstream check).
 # 3 entries.
 
 [[entries]]
@@ -175,10 +184,29 @@ naming one global share it) and a computed prior is not compared.
 Since 6.7.14 (FE-18) a later initializer that FOLDS to a different
 constant warns too (`= 2 + 1`, `= -5`, `= (7)`; `true` / `false`
 compare as 1 / 0) — it was compared only as an exact `= NUM ;`
-literal — while a NAMED constant on either side is not compared yet
-(filed, 6.7.15); and one name declared as an integer and as `bool`
-is an ERROR, "redeclared with a different type or size" (D9 (a),
-FE-19). Give module-private globals a module prefix.
+literal — and since 6.7.15 (FE-14) a const- or enum-NAMED constant
+on either side is compared too (`var a = 3; var a = C;`, `var a = C;
+var a = 3;`, `= E.B`, `var a = 0; var a = C;` warn; they were
+silent), each later constant against the last constant before it.
+One name declared as an integer and as `bool` (or another size) is
+an ERROR, "redeclared with a different type or size" (6.7.14's D9
+(a), FE-19) — since 6.7.15 ONE error (FE-12): a reader between the
+two declarations reads the first, and no value warning rides on it.
+
+WHICH VALUE A READER SEES (6.7.15's D2 (a), FE-13): in the
+declaration zone EVERY constant redeclaration — a literal, `= 0`,
+a const or enum name, a replay-folded `A + 1` — is the global's
+value FROM PROGRAM START, however the earlier declaration is
+spelled. `var a = D; var b = a; var a = C;` gives b == C (it gave
+D through 6.7.14, while the literal twin already gave the later
+value); a call between the two that WRITES the global keeps its
+write; an earlier constant declaration leaves no startup store. An
+earlier computed initializer still runs, its result discarded
+(beyond D2's text, filed for the 6.7.16 open). Not yet the same: a
+FLOAT-literal redeclaration keeps declaration order and is never
+compared, and a struct / tuple literal of other bytes keeps
+declaration order (both filed for the user, 6.7.16). Give
+module-private globals a module prefix.
 
 == MIXED `&&` / `||` PARSES CORRECTLY (since v6.3.36) ==
 
@@ -290,7 +318,21 @@ names survive there as thin aliases over `bayan_u128_*`.)
 
 You can reference a function before its definition. The
 compiler does a pre-scan pass to register all fn names +
-sigs. Mutual recursion just works.
+sigs. Mutual recursion just works. Since 6.7.15 (ST-1) that
+holds for a fn whose signature names a struct declared BELOW
+the fn, too: a call above it read a record with no struct, so
+a 16 / 24 B by-value argument was pushed as one word and a
+`: S` return took no hidden result pointer (SIGSEGV), and
+`h(t)` into `x: *R2` was falsely refused. The prescan now
+re-reads such a signature once every struct is registered.
+
+Declarations are the exception: `struct` / `enum` / `union` /
+`trait` / `impl` belong at TOP level. Inside a fn body or a
+block each is one error at its keyword since 6.7.15 (FE-17,
+"a `struct` declaration belongs to the declaration section at
+top level, not inside a fn body"), and a use of what it names
+adds nothing (FE-18) — through 6.7.14 it was "unexpected
+struct" plus two to four invented errors.
 
 == INLINE ASM OFFSETS ARE FRAGILE ==
 
@@ -314,21 +356,31 @@ preprocessing, NOT at runtime. You CAN'T do
 lookup that fails. Use `#ifdef CYRIUS_ARCH_X86 ...
 #endif` instead.
 
-== INCLUDES ARE INCLUDE-ONCE BY FILENAME ==
+== INCLUDES ARE INCLUDE-ONCE BY SPELLING ==
 
 `include "lib/foo.cyr"` will be inlined at most once per
-compilation unit, even if multiple files include it. The
-preprocessor tracks already-included filenames.
+compilation unit, even if multiple files include it: a second
+`include` of the same SPELLING is skipped, so a file's top-level
+statements run once and its fns are defined once. The key is the
+spelling as written, WHOLE, at any length. A unit holds at most
+256 distinct includes; the 257th is refused (`include-once table
+full (256 files)`).
+
+Until 6.7.15 (IT-5) only the first 127 bytes of a spelling were
+kept, so a spelling of 128+ characters (a deep path, an absolute
+`~/.cyrius/deps/…` path) was included AGAIN at its second
+`include` — its top level re-run, its fns redefined — silently,
+on every target since v4.8.4-alpha2.
 
 Caveat: relative paths and absolute paths to the same file
-ARE different from the include-once perspective. Stick to
-the conventional `include "lib/foo.cyr"` shape and you're
-fine.
+ARE different from the include-once perspective (`"./a.cyr"`
+and `"a.cyr"` are two spellings). Stick to the conventional
+`include "lib/foo.cyr"` shape and you're fine.
 
 == A FIXED HEAP MAP, BUT THE LARGE TABLES GROW ==
 
 MOST OF THE COMPILER'S MEMORY IS A FIXED brk/mmap MAP (115 regions
-at 6.7.14 — 121 at 6.7.12 / 6.7.13, before the six IR bands were
+at 6.7.14 and 6.7.15 — 121 at 6.7.12 / 6.7.13, before the six IR bands were
 retired for an alloc()'d arena — `sh tests/gates/memory/heapmap.sh`), BUT THE LARGE TABLES
 GROW. fn tables double to 131072, var tables to 1,048,576, the fixup
 table to 64M entries; codebuf is an off-heap 8 MiB alloc growing +8
@@ -339,9 +391,10 @@ region since 6.7.14); the output image is a lazily-mapped off-heap
 1 GiB alloc; fn side tables, the string-intern index and (since
 6.7.14) the IR arena are alloc'd on first use — `CYRIUS_IR` builds
 grow to runaway ceilings of 64M nodes / 16M blocks — and the DCE
-registries grow past their first 4,096 records. A cap that is still fixed (preprocessed source
+registries grow past their first 4,096 records; the include-once
+table holds pointers to alloc()'d whole spellings (6.7.15). A cap that is still fixed (preprocessed source
 24 MB, identifier pool 8 MiB, tokens 4,194,304, string data 2 MiB,
-struct definitions 1024) errors out with a message naming it.
+struct definitions 1024, 256 distinct includes) errors out with a message naming it.
 
 When sticky agents propose "trim the test fixture to fit"
 — REJECT that. The compiler grows to fit the language,
@@ -444,8 +497,8 @@ section "Test suite (.tcyr)" is the source of truth.
 
 Shell gates live in `tests/gates/<bucket>/*.sh` (8 buckets
 since v6.5.11: codegen, concurrency, diagnostics, frontend,
-ir-opt, memory, platform, toolchain) — 372 at 6.6.19, ALL
-live, some registered by exact path in
+ir-opt, memory, platform, toolchain) — 565 at 6.7.15 (372 at
+6.6.19), ALL live, some registered by exact path in
 `programs/checks/main.cyr` and the rest driven from
 `scripts/check.sh`. DERIVE with
 `find tests/gates -name '*.sh' | wc -l`; a flat `tests/*.sh`
@@ -467,7 +520,15 @@ structural regressions. Name it topically, never temporally.
 
 ⚠ A shell gate must be tested under `bash -eo pipefail`:
 `var=$(failing_cmd)` trips `set -e` before your bookkeeping
-runs, which is how SKIP/XFAIL gates go quietly vacuous.
+runs, which is how SKIP/XFAIL gates go quietly vacuous. And
+under pipefail `cmd | grep -q PAT` (or `| head -N`) can read
+FALSE on a hit: grep / head exit early, the writer dies of
+SIGPIPE (141) once its output passes the 64 KB pipe buffer, and
+pipefail fails the pipeline. Two gates COUNTED wrong that way,
+silently, until 6.7.15 (PL-1 – PL-4: removed_symbol_census.sh
+missed a large caller, stdlib_modules_self_sufficient.sh
+misclassified lib/sankoch.cyr). Count with `grep -c` (it reads
+to the end) inside a substitution and test the count.
 
 [[entries]]
 name = "agent_anti_patterns"
@@ -553,9 +614,11 @@ CLAUDE.md spells this out:
 CLAUDE.md spells out a 12-step closeout pass (plus step 3b)
 before every minor/major bump. Steps 1-3 + 3b are mechanical
 (3b = cross-OS self-host on REAL hardware), 4-8 are
-judgment-call, 9 is security re-scan, 10 is downstream
-check, 11 is CHANGELOG/roadmap/vidya sync, 12 is the backlog
-re-triage / rot sweep.
+judgment-call, 9 is security re-scan, 10 is the folds check
+(each folded stdlib at its tag, lib/ byte-identical to it —
+consumers are NEVER surveyed; this line said "downstream
+check" until 6.7.15), 11 is CHANGELOG/roadmap/vidya sync, 12
+is the backlog re-triage / rot sweep.
 
 Hand-waving the judgment-call passes ("heap-map audit
 clean", "refactor: no candidates") is where bugs hide.

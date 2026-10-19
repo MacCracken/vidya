@@ -11,6 +11,13 @@
 # sibling), tls_module_contract_v6614 (the CTL's 48-byte prop-15 entries applied, PL-10; CONFORMANCE's 6.7.14
 # paragraph, LIB-8; BOUND VARS 14 -> 15, `TLS_SHA256_CTX_LEN`, LIB-2), file_locking (Windows `file_create_exclusive`
 # over a directory, PL-3; `xlseek`'s Windows errnos, PL-2). 27 entries (unchanged, DERIVED).
+# 6.7.15 updated (2026-10-19): file_locking (Windows `sys_close` / `file_close` 0 or a negative errno, PL-7; a std-fd
+# `xlseek` reaches the std stream, PL-8 — 6.7.15's D55; `sys_dup2`'s self-dup on aarch64 Linux, LF-1, and -38 on
+# Windows, LF-5; lib/process.cyr's capture / env verbs with a std fd closed, LF-6), patra_stdlib_module (the BYTES /
+# TEXT read contract of patra 1.16.5, LF-2 / LF-3 / LF-7), regression_module (CYRIUS-2026-0036's exclusive capture
+# file, LF-8 / LF-8r; the std-fd rule, LF-6 / LF-9; `regression_pipe_write_all` and SIGPIPE, W0-1),
+# tls_module_contract_v6614 (CONFORMANCE: a hello's extension block fills its message, PL-5 / PL-6 — 6.7.15's D40; the
+# CTL's 20 / 32 / 64-byte entries applied, PL-14 — 6.7.15's D52). 27 entries (unchanged, DERIVED).
 # 24 entries (re-derived at the 6.6.20 closeout: it read 22 after 6.6.19 added the x86-macOS
 # threads entry, and 6.6.20 adds boxed) — a CURATED subset of the lib/*.cyr modules (not the full
 # surface). 6.6.20 (2026-10-06): +1 entry boxed_runtime_tag_box_v662 — lib/boxed.cyr, the storable
@@ -282,10 +289,20 @@ off-Linux:
   fn xlseek(fd, off, whence)   — portable (SYS_LSEEK is peer-carried everywhere).
                                  On Windows a failed seek answers -22 / -9 since
                                  6.7.14 (PL-2; it answered 0 — a "seek to the
-                                 start" while the pointer stayed put). ⚠ A seek on
-                                 fd 0 / 1 / 2 fails -9 there (the std fds reach
-                                 SetFilePointerEx as raw HANDLE values; filed,
-                                 6.7.15) — seek a handle you opened.
+                                 start" while the pointer stayed put). Since
+                                 6.7.15 (PL-8; 6.7.15's D55 named this the
+                                 answer once the raw-handle defect landed) a seek
+                                 on fd 0 / 1 / 2 there reaches the std stream
+                                 (GetStdHandle, as read / write map them): with a
+                                 redirected stdin, `xlseek(0, n, SEEK_SET)` moves
+                                 where the next read starts. Through 6.7.14 the
+                                 std fds reached SetFilePointerEx as the raw
+                                 HANDLE values 0 / 1 / 2 and every such seek
+                                 failed -9. ⚠ A seek on a PIPED or CONSOLE std
+                                 stream SUCCEEDS on real Windows and the stream
+                                 does not move (wine answers -1, Linux / macOS
+                                 -29; filed, 6.7.16), so a failing std-fd seek
+                                 does not tell a pipe on Windows.
   fn xflock(fd, op)            — centralizes the per-target flock number
                                  (peer carries SYS_FLOCK ONLY on agnos; Linux
                                  x86#73 / aarch64#32 / macos#92 live in xflock).
@@ -359,6 +376,17 @@ off-Linux:
 xopen/xstat/xunlink/xgetdents landed v6.2.26; xlseek/xflock v6.2.33;
 xrmdir v6.5.2; xmkdir / xmkdir_p / xsymlink / xreadlink / xlink v6.5.7.
 
+CLOSE ON WINDOWS (6.7.15, PL-7). `sys_close` / `file_close` answer 0 for a
+good close and a NEGATIVE ERRNO for a failed one (-9 for a handle that is
+not open, as Linux's EBADF), and `file_close_r` is `Ok(0)` / `Err(IoBadFd)`.
+Through 6.7.14 the PE close handed back CloseHandle's BOOL — 1 closed, 0
+failed — so every `sys_close(..) < 0` test was dead and `file_close_r` was
+`Ok(1)` / `Ok(0)`, never `Err`. Test a close with `< 0` (every in-tree
+caller does), never `== 1` / `!= 0` as success. ⚠ `sys_close(0 / 1 / 2)`
+answers -9 on Windows and the std stream stays open (the close passes the
+std fds as raw HANDLE values; `sys_ftruncate` likewise — filed, 6.7.16);
+Linux closes it.
+
 ⛔ WHY THIS SET EXISTS, restated by v6.5.7: `tests/syscall_wrapper_pass.sh`
 proves these wrappers COMPILE on five targets, which is most of the risk
 and NOT most of the bugs. Adding `tests/tcyr/crossos/syscall_wrappers.tcyr`
@@ -406,6 +434,45 @@ PROCESS + SIGNAL WRAPPERS worth knowing (lib/syscalls*.cyr):
                              disposition its own code never chose. Call it
                              between fork and execve — what
                              std::process::Command does for SIGPIPE.
+  fn sys_dup2(old, new)    — POSIX dup2 on every POSIX target, the self-dup
+                             included: `sys_dup2(fd, fd)` answers `fd` when it
+                             is open and -9 (EBADF) when it is not. aarch64
+                             Linux has no dup2 syscall, and `dup3(fd, fd, 0)`
+                             refuses the self-dup with -EINVAL — the one case
+                             where dup3 is not dup2-with-flags — so since
+                             6.7.15 (LF-1) that peer asks `fcntl(F_GETFD)`
+                             (musl's shape) and issues dup3 only for distinct
+                             fds; through 6.7.14 `sys_dup2(1, 1)` answered -22
+                             there (and a cx guest's dup2 on an aarch64 cxvm,
+                             which serves it through this wrapper since
+                             6.7.15). A RAW x86 `syscall(33, fd, fd)` still
+                             reaches dup3 (-22): branch on `old == new`, or
+                             call the wrapper. WINDOWS: -38 (ENOSYS) for EVERY
+                             call since 6.7.15 (LF-5, the user, 2026-10-18 at
+                             the wave-2 integration) — Win32 has no dup2 and
+                             the PE backend no route for one, so it fails
+                             closed like `sys_fcntl`; through 6.7.14 it
+                             answered `newfd` and redirected nothing
+                             (`sys_dup2(1, 50)` "succeeded" with nothing
+                             behind fd 50). Branch on `< 0`, never on the
+                             requested fd coming back; a Windows child's std
+                             handles are set at spawn.
+
+lib/process.cyr's REDIRECTS (6.7.15, LF-6). A caller started with fd 0, 1
+or 2 CLOSED hands that number to its next pipe or open (fds 0 + 1 closed:
+the capture pipe is (0, 1); fd 2 closed: the child's /dev/null opens at 2),
+and the child's `dup2(fd, N); close(fd)` with `fd == N` closed the redirect
+it had just made — `run_capture` / `exec_capture` read 0 bytes, and the
+exec'd program started with stderr closed (its first open landed on fd 2).
+Since 6.7.15 every child redirect (`_proc_redirect`: `run_capture`,
+`exec_capture_status` / `exec_capture`, `exec_capture_str`, `exec_env`,
+`exec_env_str`) closes the source only when it is not the target, so the
+caller gets the child's real output whichever std fds it closed, and the
+child starts with stdout and stderr open. With every std fd open nothing
+changes. lib/regression.cyr and lib/pam.cyr take the same rule
+(regression_module). Still open (filed, 6.7.16): cbt/ and programs/ child
+redirects, and the folded sigil's `agnosys_run_capture[_timeout]` /
+`agnosys_run_checked[_timeout]`.
 
 [[entries]]
 name = "csv_module"
@@ -456,7 +523,8 @@ SQL: CREATE TABLE, INSERT, SELECT (WHERE, ORDER BY, LIMIT),
      UPDATE, DELETE
 Storage: B-tree indexed 4KB pages in .patra file
 Concurrency: flock (advisory file locking)
-Types: INT (i64) and STR (fixed-size, null-terminated)
+Types: INT (i64), STR (fixed-size, null-terminated), and the
+       variable-length BYTES / TEXT (a page chain; below)
 Durability: Write-ahead logging (WAL) with crash recovery,
             fdatasync on commit
 
@@ -466,12 +534,46 @@ API:
   patra_exec(db, sql) → status code
   patra_query(db, sql) → result set
   patra_result_count / get_int / get_str / col_name / col_type
+  patra_result_get_bytes_len / read_bytes / get_text_len / read_text
   patra_begin / commit / rollback (transactions)
   patra_close(db)
 
 Distribution pattern: patra repo is source of truth,
 lib/patra.cyr is a single-file stdlib snapshot via
 `cyrius distlib`. `include "lib/patra.cyr"` and go.
+
+BYTES / TEXT CELLS (variable length, stored in a page chain behind a
+16-byte (page, len) row ref) — the read contract as of patra 1.16.5
+(folded at cyrius 6.7.15, LF-2 / LF-3 / LF-7):
+
+  patra_result_get_bytes_len(rs, row, col)   /  _get_text_len  → the length
+  patra_result_read_bytes(db, rs, row, col, out) / _read_text  → copy it
+
+  - Size `out` from the getter, then read. A length of 0 is the ONLY empty
+    value (PATRA_OK, nothing written).
+  - A MALFORMED chain — a bad page marker, an oversized or negative page
+    length, a link out of the file, a chain looping back, a ref shorter
+    than its chain — keeps the row's length and reads PATRA_ERR_PAGE,
+    nothing written. Since 1.12.8 it read as an empty value with PATRA_OK
+    (a guard zeroed the length along with the snapshot pointer, and the
+    reads tested `len <= 0` before `payload == 0`); a looping chain read
+    PATRA_OK with the wrong bytes.
+  - A ref naming more bytes than the file can hold answers length -1 and
+    reads PATRA_ERR_PAGE (the user's decision, 2026-10-18 at the wave-2
+    integration; since 1.14.0 it read as an empty value, PATRA_OK).
+  - -1 is also the getters' answer for a column of another type or a cell
+    outside the result set; the read's code tells them apart
+    (PATRA_ERR_TYPE / PATRA_ERR_PARAM against PATRA_ERR_PAGE).
+  - ⚠ A NEGATIVE stored length reads PATRA_ERR_PAGE too, its getter giving
+    the stored value; `patra_insert_row` still accepts one with PATRA_OK
+    (filed, 6.7.16 — a fold defect; the read side goes beyond the
+    decision's text and is filed for the user's call).
+  RULE: size a buffer only from a length >= 0, and check the read's return.
+  Databases written with non-negative lengths read as before. patra's own
+  `fuzz_bytes` harness had planted its corruption at a heap address (a
+  query result's snapshot pointer used as a page number) since 1.12.8, so
+  these read paths were never exercised until 1.16.5 aimed it at the
+  chain the row names (CHANGELOG [6.7.15] LF-4).
 
 [[entries]]
 name = "strstr_function"
@@ -860,7 +962,7 @@ byte-identical (same procedure used at v5.9.0 fold).
 name = "regression_module"
 description = "lib/regression.cyr — testing-stdlib primitives carved from programs/check.cyr at v5.9.42"
 category = "cyrius"
-tags = ["stdlib", "testing", "regression", "v5.9.42"]
+tags = ["stdlib", "testing", "regression", "v5.9.42", "v6.7.15", "CYRIUS-2026-0036", "capture-file", "O_EXCL", "std-fds", "sigpipe"]
 ---
 `lib/regression.cyr` carves out 22 reusable primitives accumulated
 through the v5.9.6 → v5.9.41 dispatcher conversions. Five surface
@@ -929,12 +1031,82 @@ CONVENTIONS:
     caller passes their own. Pass a 1-elem array of `0` for
     "empty environment".
   - Exit-code convention: 0..127 = normal exit; 128+sig on
-    signal; -1 on fork/exec/syscall failure; -2 specifically
-    for timeout (in `_run_with_timeout`).
+    signal; -1 on fork/exec/syscall failure — and, for a
+    capture verb, "nothing was run" (no capture file, below);
+    -2 specifically for timeout (in `_run_with_timeout`).
   - `regression_pipe_to_bin*` use a 1 MB src cap. Cyrius
     self-host's `_self_host_pipe` uses 2 MB and raw status —
     not interchangeable. Compile-shaped helpers stay in
     `programs/check.cyr` for that reason.
+  - THE CAPTURE FILE (6.7.15 — CYRIUS-2026-0036, P2; LF-8).
+    `regression_exec_capture[_status]`,
+    `regression_exec_with_arg_capture[_status]` and
+    `regression_exec_with_arg_capture_both[_status]` capture the
+    child's output through a file they create EXCLUSIVELY and
+    PRIVATELY: candidates `<base>/audit_xc_<pid>` (or
+    `audit_xa_<pid>`), then `.1` … `.63`, each opened
+    `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW`, mode 0600, with
+    each target's own O_* bits; a name that exists — a file, a
+    directory, a symlink dangling or not — is skipped, never
+    opened, followed or truncated. `<base>` is `$TMPDIR` when it
+    is an ABSOLUTE path (trailing slashes dropped — macOS sets
+    `/var/folders/…/T/`), else `/tmp`; a relative or empty TMPDIR
+    is ignored. When no file can be made (every name taken, the
+    directory missing or unwritable) the verb prints ONE stderr
+    line, `regression: cannot create the capture file <name> —
+    it and every name before it were taken; nothing was run` (or
+    `… <name> (errno N); nothing was run`), returns 0 bytes with
+    status -1 and runs nothing. After the child the file is read
+    by name and unlinked. Windows creates nothing (no fork) and
+    answers 0 / -1 as before. Through 6.7.14 the file was always
+    `/tmp/audit_x?_<pid>`, opened with Linux's literal 577
+    (O_WRONLY|O_CREAT|O_TRUNC; on Darwin 577 is
+    O_WRONLY|O_ASYNC|O_CREAT, no truncate), no O_EXCL, no
+    O_NOFOLLOW, mode 0644: ANOTHER LOCAL USER who planted a
+    symlink at an upcoming pid's name made the victim's capture
+    overwrite any file the victim can write, and a planted file
+    was read back as the capture. Linux's `protected_symlinks` /
+    `protected_regular` block the cross-user plant in a sticky
+    /tmp; macOS has neither, so the hole was live there. The
+    check driver runs every `.tcyr` through
+    `regression_exec_capture_status`. ⚠ The cost of O_EXCL: a
+    capture verb KILLED mid-capture leaves its file for ever (a
+    later process with the same pid skips the name; filed,
+    6.7.16). Gates: tests/gates/toolchain/
+    regression_capture_exclusive.sh (planted from ANOTHER
+    process: the planting shell `exec`s the probe, so `$$` is
+    the probe's pid), tests/tcyr/crossos/
+    regression_capture_exclusive.tcyr.
+  - STD FDS (6.7.15 — LF-6, LF-9). Every redirecting verb gives
+    the child's real output whichever of fds 0, 1, 2 the caller
+    started with closed: a child redirect closes its source only
+    when it is not the target (`_regression_redirect`, as
+    lib/process.cyr's `_proc_redirect`; `_with_arg_capture_both`
+    closes its fd only when it is neither 1 nor 2), and the
+    caller-file verbs — `regression_exec_in_dir3[_env]`,
+    `regression_pipe_to_bin_capture`,
+    `regression_ssh_remote_exec_capture` — open the caller's
+    `out_path` in the PARENT, where with stdin closed it lands at
+    fd 0, so the child LIFTS it above 2 first (`_regression_lift_fd`:
+    `fcntl(F_DUPFD, 3)`, then close the old number; on failure it
+    carries on unchanged), before any redirect onto 0 / 1 / 2.
+    Through 6.7.14 the stdin redirect overwrote that output fd and
+    the capture came back empty, and the pipe verb's child started
+    with stdin closed and stdout on the pipe's read end. A reorder
+    alone would not do: the pipe verb carries TWO parent fds. ⚠
+    The ssh verb's lift is pinned by no row (no host; filed,
+    6.7.16). ⚠ The caller-file verbs still open `out_path` with
+    the literal 577, so on macOS an existing longer file keeps its
+    old tail ("hi\ncious\n" where Linux reads "hi\n"; filed,
+    6.7.16) — pass a fresh path there.
+  - SIGPIPE (6.7.15, W0-1). `regression_pipe_write_all` (behind
+    `regression_pipe_to_bin*`) runs its write with SIGPIPE
+    ignored when the disposition is SIG_DFL and restores it
+    after, so a child that exits without reading its stdin is a
+    short write (EPIPE), not the CALLER's death by SIGPIPE (the
+    check driver died with 141 mid-run). A caller's own ignore or
+    handler stands; a child forked before the write keeps the
+    caller's disposition.
 
 WHAT THIS MODULE DOES NOT PROVIDE:
 
@@ -1387,9 +1559,17 @@ program adds the root with `tls_ctx_load_verify_locations`). A caller's bundle c
 the CTL's 48-byte entries are APPLIED too: each is crypt32's prop 15, the "signature hash" — the SHA-384 of a
 SHA-384-signed certificate's tbsCertificate (prop 15 hashes the TBS with the certificate's OWN signature digest, so
 its length follows that digest: 20 / 32 / 48 B). Confirmed on cass: the six DarkMatter intermediates, each
-`CERT_TRUST_IS_EXPLICIT_DISTRUST` with both Disallowed stores empty. Only sha384WithRSA / ecdsa-with-SHA384
-certificates are hashed, and only for the Windows system set's policy. A CTL entry of another length (20 / 32 /
-64 B) is not applied (filed, 6.7.15).
+`CERT_TRUST_IS_EXPLICIT_DISTRUST` with both Disallowed stores empty (6.7.15's D52 keeps this rule labelled
+confirmed). Since 6.7.15 (PL-14) the 20 / 32 / 64-byte entries are applied too: an entry's LENGTH names the
+certificate's own signature digest — 20 sha1WithRSA / ecdsa-with-SHA1, 32 SHA-256, 48 SHA-384, 64 SHA-512 — and a
+certificate is hashed (`_tn_tbs_sighash`, by its outer signatureAlgorithm) and judged only against the entries of
+its own digest's length; RSASSA-PSS, Ed25519 and MD2 / MD5-signed certificates are not judged by them. Through
+6.7.14 every length but 48 was dropped, so a certificate Microsoft listed by a SHA-1 / SHA-256 / SHA-512 signature
+hash stayed trusted natively while Windows refused it — latent: today's CTL has none (82 public-key MD5s + 6
+48-byte entries), so the new lengths are unconfirmed; the library's hash equals crypt32's prop 15 for all 53 of
+cass's ROOT certificates it judges. Only for the Windows system set's policy. ⚠ A 16-byte entry is ambiguous by
+length — a public-key MD5 (prop 25) or an MD2 / MD5-signed certificate's signature hash (prop 15) — and is read as
+the first only (filed, 6.7.16; latent). The policy grew 64 -> 112 B (underscore-private; no public symbol moved).
 
 PEM DECODE: STRICT OR LENIENT (sigil 3.13.7, which cyrius 6.6.14 folds). `pem_decode_certs_into`
 is all-or-nothing: one bad block fails the input. `pem_decode_certs_lenient_into(pem, len, chain,
@@ -1437,6 +1617,18 @@ id over 32 bytes decode_error. Every 1.2 ServerHello refusal records its alert, 
 `tls_native_12_build_client_hello` on that ctx first — a ctx that never built its hello reads every extension as
 unoffered. A server that repeats an extension, pads a block or answers ALPN with two names now fails the native
 client's handshake with an alert: the RFC's answer; the fix is on the server.
+6.7.15 (PL-5, PL-6; 6.7.15's D40, the user, 2026-10-18: "Refuse with decode_error"): EVERY native hello parser
+requires its extension block to fill the message. Bytes after the block are decode_error in the 1.2 client's
+ServerHello (`tls_native_client_parse_server_hello_12`; `tls_native_connect_12` sends the alert) and in a ClientHello
+at both native servers (1.3 `_tn_parse_client_hello`, 1.2 `_tn_12_parse_client_hello`; `tls_native_accept` /
+`tls_native_accept_12` send it) — the 1.3 client's ServerHello / EE got that rule in 6.7.14. The 1.2 server,
+documented LENIENT until then, also refuses a block that overruns the message (it read it as NO extensions — so no
+EMS, the legacy master secret, no ALPN, the server's first group — and negotiated) and a lone byte where the block's
+2-byte length goes. A ClientHello with NO block still negotiates without extensions; well-formed hellos (OpenSSL's,
+the native stack's) are unaffected. A peer that pads a hello past its block, or overruns it, now fails the native
+handshake with decode_error: the fix is on the peer. Still lenient (filed, 6.7.16; needs a decision as D40 did): the
+1.2 server's ClientHello with no compression_methods or one overrunning the message, an extension overrunning its
+block, and its early refusals recording no alert. CHANGELOG [6.7.15] PL-5, PL-6, PL-14.
 
 BOUND VARS (6.7.12 — D15, D16, D17; the fifteenth 6.7.14). The 15 `var X = _X;` publics (the TLS stack's ten —
 `TLS_RECORD_MAX_PLAINTEXT`, `TLS_AEAD_NONCE_LEN`, `TLS12_VERIFY_DATA_LEN`, `TLS12_RANDOM_LEN`, `TLS_RANDOM_LEN`,
