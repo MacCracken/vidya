@@ -11661,3 +11661,24 @@ the second copy of it.
 RULE: a walker beside the parse is a second parser for the construct it steps. Derive it from the parser's own reader
 (or call that reader), and when a construct gains a new spelling (`>>`, `*fn`, a binding form), grep every walker that
 reads the old one in the same bite.
+
+[[entries]]
+name = "a_per_name_check_must_ask_its_cheap_question_first_v6717"
+description = "6.7.17's D107 assignment twin and D111 operand check each asked the EXPENSIVE question (the name's declared annotation, a token walk back through every earlier statement and the top level) before the cheap one that decides it (is the value / the name a struct at all) — on every `NAME = ..` and every name operand. A fn of N assignments over N globals went quadratic: 10,000 globals compiled in 6 s (147 ms in 6.7.16), found by globals_scale_linear at the integration, fixed by reordering (172 ms). Byte-identical output; only the order of the questions changed."
+tags = ["v6.7.17", "compile time", "quadratic", "token walk", "_asa_ann", "_ppd_asg", "_ssv_at", "globals_scale_linear", "D107", "D111", "coverage counts", "bisect"]
+category = "cyrius"
+---
+FOUND: `globals_scale_linear.sh [ref]` (10,000 -> 20,000 globals, limit 3.0x) read 38/10x in the merged tree's check.sh
+and alone; bounds_mode_checked and tcyr_corpus_cross_compiles hit check.sh's 900 s deadline for the same reason.
+Bisected over the integration branch's first-parent commits to one merge (vala's round 4), then to its first commit
+(86cd83ac1). The compiler's own coverage mode (CYRIUS_COVERAGE=1 on src/main.cyr, then the instrumented compiler run on
+2,500 and 5,000 globals) named the hot fn without a profiler: `_asa_bind` went 6,252,500 -> 25,005,000 calls — n^2 / 2.
+
+THE SHAPE: `_ppd_asg` (D107's twin) read the destination's annotation (`_asa_ann`) on every assignment, then asked
+whether the value is a struct pointer; `_ssv_at` (D111) asked whether a lone name operand was declared a scalar, then
+whether it is a struct. Each refusal needs BOTH answers, so asking the table-cheap one first (`_pa_sid` over the
+value's own tokens, `_hl_amp_sid`) gives the same answer and walks only for the rare candidate.
+
+RULE: a check that runs per statement or per name must lead with the question that is O(1) (a table lookup, the
+value's own tokens) and walk the token stream only for what survives it. A gate measuring compile time against the
+global count is what catches the other order — read its ratio, not its absolute time, before calling a red "load".
