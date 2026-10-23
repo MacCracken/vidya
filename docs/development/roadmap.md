@@ -1,8 +1,8 @@
 # Vidya — Development Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-08-20
+> **Status**: Active | **Last Updated**: 2026-10-23
 >
-> **Version**: 2.8.4 (dependency cut — cyrius 6.5.35, vyakarana 2.4.0; P5 content opens in a later 2.8.x) | **Cyrius**: 6.5.35 (Zig content pin: 0.16.0)
+> **Version**: 2.8.6 (dependency cut — cyrius 6.6.20, vyakarana 2.4.3; P5 content opens in a later 2.8.x) | **Cyrius**: 6.6.20 (Zig content pin: 0.16.0; the host now ships 0.17.0, port pending)
 > **Topics**: 77 (77 fully covered) — **P0 → P4 complete** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 847 source files; concept files: 77
@@ -26,7 +26,7 @@ This table is one row per minor for navigation only.
 | 2.5.x | **P2 distributed systems** | +3 → 69 | 759/759 | 2026-05-03 |
 | 2.6.x | **P3 audio + AI/ML** | +5 → 74 | 814/814 | 2026-05-03 |
 | 2.7.x | **P4 build systems** (2.7.0–2.7.2 infra-only; 2.7.3 content) | +3 → 77 | 847/847 | 2026-06-12 |
-| 2.8.x | **Infra + correctness** — cyrius 6.1.41 → 6.4.2 (2.8.0), → 6.5.29 + sakshi stdlib fold-in (2.8.1), five user-visible defect fixes + the `src/vidya_core.cyr` split (2.8.2), then → 6.5.31 + a corpus-wide example review and four new gate checks (2.8.3), then → 6.5.35 + vyakarana 2.4.0 (2.8.4). P5 opens later in the series. | 77 | 847/847 | in progress |
+| 2.8.x | **Infra + correctness** — cyrius 6.1.41 → 6.4.2 (2.8.0), → 6.5.29 + sakshi stdlib fold-in (2.8.1), five user-visible defect fixes + the `src/vidya_core.cyr` split (2.8.2), then → 6.5.31 + a corpus-wide example review and four new gate checks (2.8.3), then → 6.5.35 + vyakarana 2.4.0 (2.8.4), → 6.6.2 (2.8.5), → 6.6.20 + vyakarana 2.4.3 (2.8.6). P5 opens later in the series. | 77 | 847/847 | in progress |
 
 ---
 
@@ -157,10 +157,11 @@ language-feature alignment. The cadence:
 5. CHANGELOG patch entry summarises the bump
 6. zugot recipe (in the upstream repo) tracks the same version
 
-Current pin: **6.5.35** (vidya 2.8.4). `lib/` and `cyrius.lock`
-are build artifacts (gitignored, rehydrated via `cyrius lib sync`
-then `cyrius deps` — **not** `cyrius update`, which ignores the
-manifest pin under wrapper drift), and `cyrius lint` / `cyrius fmt`
+Current pin: **6.6.20** (vidya 2.8.6). `lib/` and `cyrius.lock`
+are build artifacts (gitignored, rehydrated via `rm -rf lib cyrius.lock`,
+then `cyrius lib sync`, then `cyrius deps`, with the clean wipe required
+from 6.6.20. Do **not** use `cyrius update`, which ignores the
+manifest pin under wrapper drift.) `cyrius lint` / `cyrius fmt`
 are per-file from 5.7+. See CHANGELOG 2.7.1 for the full call-out, including the
 transitive-stdlib gap (sandhi pulls `TLS_EARLY_DATA_*`,
 `fdlopen_*`, `base64_encode` via enum/constant refs that v5.10.x

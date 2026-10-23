@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-08-22 (v2.8.4 ship — see the 2.8.4 sweep block below).
+> **Last refresh**: 2026-10-23 (v2.8.6 ship; see the 2.8.6 sweep block below). 2.8.5 shipped without a sweep, so its state was back-filled here.
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -17,6 +17,29 @@ type: state
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
+
+## 2026-10-23 sweep (v2.8.6)
+
+Release-cut refresh for a dependency-only cut (cyrius 6.6.2 → 6.6.20,
+vyakarana 2.4.0 → 2.4.3). **2.8.5 changed only `VERSION`, `cyrius.cyml` and
+`CHANGELOG.md`**, so `state.md`, `roadmap.md` and `sources.md` still described
+2.8.4 / 6.5.35 going into this sweep. The two releases are refreshed together.
+
+| Doc | Updated for 2.8.6 |
+|---|---|
+| `CHANGELOG.md` | 2.8.6 entry: the binary attribution (compiler −8,200 B, snapshot +233,744 B), the 65 → 73 `lib/` transitives, the clean-rehydrate requirement, a refuted-benchmark section, and the host Zig 0.17.0 note. |
+| `cyrius.cyml` | `[deps]` comment gains a 6.6.20 block, and the vyakarana block covers 2.4.1–2.4.3 (sidecar narrowed to 4 leaves). |
+| `CLAUDE.md` | Toolchain table: the `lib sync` overwrite note re-verified at 6.6.20, and a pin bump now **requires** `rm -rf lib cyrius.lock` (it was "belt-and-braces"). |
+| `docs/development/state.md` | Version, pin (with a note that the 6.7.17 wrapper dispatches on the manifest pin), binary size, gate line (host Zig 0.17), the bench-baseline reset, dep-pin rows, stdlib file count (73), the five-warnings paragraph retired, 2.8.6 and back-filled 2.8.5 posture entries, and zugot staleness (seven releases). `src/vidya_core.cyr` line count corrected, 1,537 → 1,573. |
+| `docs/development/roadmap.md` | Header stamp → 2.8.6 / 6.6.20, 2.8.x row extended through 2.8.6, "Current pin" paragraph → 6.6.20 with the clean-rehydrate rule. |
+| `docs/sources.md` | Cyrius pin row 6.5.35 → 6.6.20 (it had missed 2.8.5 as well). |
+
+**Process note**: two benchmark rows moved in the same direction in three of
+three interleaved rounds and were *still* not real. One is a per-process
+hash-seed lottery, and the other comes from a measuring harness that changed
+between pins. "Consistent across rounds" rules out noise *within* a binary,
+but not a change in the instrument itself, or randomness drawn once per
+process. A harness-free loop across several processes is what separated them.
 
 ## 2026-08-22 sweep (v2.8.4)
 

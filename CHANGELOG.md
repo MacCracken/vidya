@@ -7,6 +7,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.6] — 2026-10-23
+
+Dependency cut. **cyrius 6.6.2 → 6.6.20** and **vyakarana 2.4.0 → 2.4.3**, the
+last vyakarana tag on the 6.6.20 pin. The folded stdlib leaves move with the
+snapshot: sakshi 2.5.1 → 2.5.7, bayan 1.5.5 → 1.5.12, sandhi 1.9.16 → 1.10.8,
+sigil 3.12.16 → 3.13.10. No content added (77 topics / 847 examples, 0 gaps)
+and no source change: `cyrius test` **139/0**, 12 benchmarks green,
+`cyrius lint` / `cyrius fmt --check` output identical to 6.6.2 on both
+`src/` files.
+
+**Output is byte-identical to the 2.8.5 build.** Two checks against the 6.6.2
+binary: 8.6 MB of CLI output (`info` × 77, `code` × 847, which covers every
+example through vyakarana, plus `list` / `stats` / `gaps` / `languages` and five
+searches) and 11 `serve` endpoints, including the escaped-query and 404 paths.
+
+### Changed — cyrius 6.6.2 → 6.6.20
+
+The declared stdlib set is unchanged (25 modules). The snapshot under it is
+not: every declared module except `ct` changed content, and 59 of the 65
+previously vendored files moved. Largest source growth: `sigil` +211,769 B,
+`tls` +51,743, `bayan` +42,110, `process` +35,709, `net` +35,493, `io`
++34,300, `sandhi` +32,822.
+
+**Binary 2,457,488 → 2,683,032 B (+225,544, +9.2 %).** To attribute it, we
+built the 6.6.20 compiler against the **6.6.2** lib through a synthetic
+`CYRIUS_HOME`. That build is 2,449,288 B, so the compiler made the binary
+**8,200 B smaller** and the snapshot added **233,744 B**. Most of the snapshot
+growth is code vidya never reaches. Unreachable bytes went 979,196 →
+1,075,594 and a `CYRIUS_DCE=1` build is 1,605,784 B. Accepted for the same
+reason as 2.8.4's `bayan` growth: DCE is a build-wide switch, not a per-module
+opt-out.
+
+`lib/` went **65 → 73 files**, all transitive: `async` plus its `_agnos` /
+`_macos` / `_win` variants (via sandhi), `random` and `sys` (via sigil),
+`tls_hostid` (via tls), and `alloc_cx` and `poison` (via alloc). `assert.cyr`,
+the test-assertion library 2.8.4 noted entering the binary, is no longer
+vendored. One visible side effect: the **five long-expected
+`undefined function` warnings** (`random_bytes`, `async_new_in`,
+`async_spawn`, `async_run`, `async_await_readable`) no longer fire. Their
+definers are now vendored. Nothing calls them, so they are DCE-dead. The 6.6.2
+note about an oversized array local is now a warning located at
+`lib/sigil.cyr:28046`, a 256 KiB crypto-bank buffer that `serve` never
+reaches.
+
+**The pin bump now requires a clean rehydrate.** Done in place, `cyrius lib sync`
+refreshes only the declared subset and re-locks at the new pin. `cyrius deps`
+then **refuses** the 15 transitive leaves still holding 6.6.2 content
+(`atomic`, `hashseed`, `result`, `boxed`, `slice`, `freelist`, `mmap`, the
+`thread*` and `sync*` families): "cyrius.lock and the pinned stdlib snapshot
+DISAGREE". `cyrius deps --relock` gets past the refusal but leaves the
+orphaned 6.6.2 `assert.cyr` vendored and locked. The sequence that works is
+`rm -rf lib cyrius.lock && cyrius lib sync && cyrius deps`. CLAUDE.md's
+toolchain table had called this belt-and-braces since 2.8.1, and now says it
+is required. Overwriting a stale *declared* module still works as before:
+`fmt.cyr` was re-verified at 6.6.20.
+
+### Changed — vyakarana 2.4.0 → 2.4.3
+
+2.5.0 moves vyakarana to cyrius 6.7.9, so 2.4.3 is the newest tag on this pin.
+Two of the three steps are vyakarana's own toolchain bumps (2.4.1 → 6.6.2,
+2.4.3 → 6.6.20) with no source change. 2.4.2 renames the private
+`_stream_grow` to `_vyk_stream_grow` because it collided with sankoch's. vidya
+does not vendor sankoch, so that collision never reached it. At 2.4.3 the
+bundle gains a `# Requires` block, and its `.deps` sidecar now lists 4 leaves
+instead of 11, dropping `args`, `assert`, `fs` and `hashmap`. vidya declares
+the three of those it uses itself, so nothing depended on the sidecar. The
+public API is unchanged, with no call-site edits, and `code` output is
+byte-identical across all 847 examples (see above).
+
+### Benchmarks — two rows moved, and neither is real
+
+Interleaved A/B on one machine: three alternating rounds per pin, each pin
+built from its own tree.
+
+| Bench | 6.6.2 mean | 6.6.20 mean | Δ mean | per-round Δ |
+|---|---|---|---|---|
+| load_concept | 51.478 µs | 51.724 µs | +0.5 % | +3 / +1 / −2 % |
+| load_all | 8.313 ms | 8.051 ms | −3.2 % | −4 / −3 / −3 % |
+| reg_get_hit | 93 ns | 91 ns | −2.5 % | −3 / −1 / −3 % |
+| reg_get_miss | 241 ns | 87 ns | **−64.0 %** | −64 / −65 / −63 % |
+| search_text | 5.933 µs | 5.727 µs | −3.5 % | −4 / −1 / −5 % |
+| search_text_exact | 11.436 µs | 11.175 µs | −2.3 % | −2 / −3 / −3 % |
+| toml_sections | 1.883 µs | 2.082 µs | **+10.6 %** | +10 / +12 / +10 % |
+| json_info_response | 9.319 µs | 9.241 µs | −0.8 % | −1 / −1 / −0 % |
+| json_search_response | 255.195 µs | 249.278 µs | −2.3 % | −2 / −2 / −3 % |
+| json_list_response | 114.790 µs | 113.365 µs | −1.2 % | −2 / −2 / −0 % |
+| field_escaped | 3.399 µs | 3.379 µs | −0.6 % | −2 / −1 / +1 % |
+| field_raw_splice | 597 ns | 567 ns | −5.0 % | −5 / −5 / −5 % |
+
+Both outliers held their direction in all three rounds, which made them look
+real. A harness-free loop showed they are not. It timed 10⁶ `map_get` misses,
+10⁶ hits and 10⁵ × 3 `toml_get_sections` calls with `clock_now_ns`, taking the
+best of five, across **five separate processes per pin**:
+
+- **`toml_sections` is ~3 % *faster* at 6.6.20**, not 10 % slower: 1.99–2.01 µs
+  at 6.6.2 vs 1.93–1.95 µs at 6.6.20, with no overlap. The +10.6 % comes from the
+  harness. `lib/bench.cyr` was rewritten between the pins (20,668 → 55,545 B).
+  The 6.6.2 version subtracted a scalar timer floor from every per-sample
+  minimum, which the 6.6.20 file's own 6.6.5 entry calls "a mean subtracted
+  from a minimum" and shows is biased. On a ~2 µs op, a misplaced 1.3 µs floor
+  is a 10 % error.
+- **`reg_get_miss` has no pin effect.** Under the harness-free loop it ranged
+  from **49 to 611 ns per process at *both* pins**. `lib/hashmap.cyr` has seeded
+  its hash from `getrandom` on every process since cyrius 6.5.39 (the
+  hash-flooding fix), so the probe-chain length for one fixed missing key
+  changes with the seed. This bench row measures which seed was drawn, and
+  three short chains in a row produced the −64 %. The 6.6.2 harness was
+  bimodal on the same row too: 98 ns in one run, 484 ns in the next.
+- `reg_get_hit` holds at ~85–87 ns under both harnesses, as expected for a hit
+  on the first probe.
+
+**Consequence: `target/bench-history` snapshots from 2.8.5 and earlier are not
+comparable with 2.8.6 onward.** The measuring instrument changed, separately
+from anything it measures. A fresh baseline is recorded at
+`target/bench-history/20261023-171301-9745d59.txt`.
+
+### Known — host Zig 0.17.0 fails 37 of 77 Zig examples (CI unaffected)
+
+With this host's Zig (0.17.0, upgraded by pacman on 2026-10-21), the strict
+content gate ran **810 passed / 37 failed / 0 skipped**, and every failure is
+a `zig.zig` file. The corpus and CI pin **Zig 0.16.0** (`ZIG_VER` in `ci.yml`).
+Re-run under 0.16.0, taken from the pacman package cache, all **77/77** Zig
+examples pass, so the gate is **847/847** on the CI toolchain set. All 77
+Cyrius examples pass under 6.6.20. The 0.17.0 errors are 34 × "binary
+operator '*' has whitespace on one side, but not the other" and 6 × std
+`no field named` renames, plus two one-offs: a `@typeInfo` deprecation and a
+comptime interface check. Porting the
+corpus to 0.17 is separate content work, not part of this dependency cut.
+
 ## [2.8.5] — 2026-09-11
 
 ### Changed
