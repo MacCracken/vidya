@@ -45,7 +45,7 @@ fn nearest(query: []const i64) usize {
 }
 
 fn topKNeighbors(query: []const i64, k: usize, out: []usize) usize {
-    var marks: [N_CORPUS]bool = [_]bool{false} ** N_CORPUS;
+    var marks: [N_CORPUS]bool = @splat(false);
     var picked: usize = 0;
     while (picked < k) {
         var best_idx: i32 = -1;

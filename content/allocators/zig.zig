@@ -24,7 +24,7 @@ fn BumpAllocator(comptime capacity: usize) type {
     return struct {
         const Self = @This();
 
-        memory: [capacity]u8 = [_]u8{0} ** capacity,
+        memory: [capacity]u8 = @splat(0),
         offset: usize = 0,
         alloc_count: usize = 0,
 
@@ -65,7 +65,7 @@ fn SlabAllocator(comptime slot_size: usize, comptime count: usize) type {
         const Self = @This();
         const sentinel: usize = std.math.maxInt(usize);
 
-        memory: [slot_size * count]u8 = [_]u8{0} ** (slot_size * count),
+        memory: [slot_size * count]u8 = @splat(0),
         free_head: usize = 0,
         next: [count]usize = init_next(),
         allocated: usize = 0,
@@ -118,7 +118,7 @@ fn BitmapAllocator(comptime num_pages: usize) type {
     return struct {
         const Self = @This();
 
-        bitmap: [bitmap_bytes]u8 = [_]u8{0} ** bitmap_bytes,
+        bitmap: [bitmap_bytes]u8 = @splat(0),
         next_free: usize = 0,
         allocated: usize = 0,
 

@@ -190,7 +190,7 @@ const PageTable = struct {
     entries: [ENTRIES_PER_TABLE]PageTableEntry,
 
     fn empty() PageTable {
-        return .{ .entries = [_]PageTableEntry{PageTableEntry.empty()} ** ENTRIES_PER_TABLE };
+        return .{ .entries = @splat(PageTableEntry.empty()) };
     }
 };
 
@@ -307,12 +307,12 @@ const Tlb = struct {
 
     fn init() Tlb {
         return .{
-            .entries = [_]TlbEntry{.{
+            .entries = @splat(.{
                 .vaddr = 0,
                 .paddr = 0,
                 .valid = false,
                 .asid = 0,
-            }} ** TLB_SIZE,
+            }),
             .hits = 0,
             .misses = 0,
         };

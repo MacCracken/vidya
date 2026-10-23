@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.7] — 2026-10-23
+
+Content toolchain cut: **Zig 0.16.0 → 0.17.0**, for the corpus and the CI pin
+together. It was forced, not chosen. pacman upgraded the dev host's Zig to
+0.17.0 on 2026-10-21, after which 37 of the 77 Zig examples no longer
+compiled (2.8.6 "Known"). No other language and no project source changed.
+`cyrius test`, benchmarks and the binary are untouched.
+
+**45 `zig.zig` files changed, and every one prints exactly what its 0.16
+version printed.** Checked by building each file's HEAD source with Zig 0.16.0
+and the new source with 0.17.0, then diffing stdout. The only difference is
+two lines of `ownership_and_borrowing` output, reworded on purpose (GPA →
+SafeAllocator). Zig **77/77** under 0.17.0, and the strict content gate is
+**847/847** on this host.
+
+### Changed — the two 0.17 removals that broke compilation
+
+- **`**` array repetition is gone, replaced by `@splat` (111 lines, 34 files).**
+  0.17's tokenizer no longer has a `**` token. `[_]u8{0} ** N` now lexes as two
+  `*` and fails with "binary operator '*' has whitespace on one side, but not
+  the other", which does not point at the real cause. Every
+  `[_]T{v} ** N` became `@splat(v)`, and the nested `[_][M]T{[_]T{0} ** M} ** N`
+  became `@splat(@splat(0))`. `@splat` takes its length from the result type,
+  so the 13 untyped locals (`var ident = [_]u8{0} ** 16;`) gained an
+  explicit `[N]T` annotation. 107 lines were rewritten by a pattern rewrite and
+  4 by hand. The two string repeats are written out: `strings` now *teaches*
+  repetition as `const dashes: [5]u8 = @splat('-');` plus `&dashes` for the
+  slice, and `security` builds its oversized inputs the same way.
+- **Struct reflection is struct-of-arrays (3 files).** `@typeInfo(T).@"struct"`
+  no longer has a `fields` slice of records. It has parallel `field_names` /
+  `field_types` / `field_attrs` slices, and `std.meta.fields` is now a
+  `@compileError`. `macro_systems` iterates
+  `inline for (names, types, 0..) |name, FieldType, i|`, and its tuple walker
+  reads `field_names` directly. `type_systems` and
+  `trait_and_typeclass_systems` count `field_names.len`, and the former now
+  also asserts a field's type.
+
+### Fixed — a semantic change the compiler only half-caught
+
+- **`@hasDecl` sees only `pub` declarations.** Before 0.17 it also returned
+  true for a private declaration when the check sat in the same file.
+  `trait_and_typeclass_systems` checked its shapes' private `area()` /
+  `name()` that way, and the example's own comment taught the old rule ("checks
+  both public and private declarations"). Under 0.17 the comptime constraint
+  rejected `Circle`. That was a compile error *here* only because the check
+  feeds a `@compileError`. A `hasMethod` used as a plain boolean would just
+  have flipped. The six interface methods are now `pub`, and the comment
+  states the rule, including why the old one was a trap: a constraint could
+  pass in its own file and fail for every other caller.
+
+### Changed — off 0.17-deprecated API (compiled, but taught the old spelling)
+
+- `std.heap.DebugAllocator` → **`std.heap.SafeAllocator`** (11 sites, 10 files):
+  `var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});`.
+  `deinit` now returns a leak *count* rather than `.ok` / `.leak`, so
+  `ownership_and_borrowing` asserts `leaks == 0`. Its history note now reads
+  GeneralPurposeAllocator (≤0.15) → DebugAllocator (0.16) → SafeAllocator
+  (0.17).
+- `std.fmt.allocPrint` → **`allocator.print`**, and `std.fmt.bufPrint` →
+  **`std.mem.print`** (`strings`, `code_generation`).
+- `@import("builtin").os` → **`@import("builtin").target.os`**
+  (`module_systems`). The old form is slated for removal in 0.18.
+
+**How the deprecations were found**: the 0.17 std was scanned for every public
+name under a `/// Deprecated` doc comment (221 names), and the corpus was
+grepped for each one. That turned up the five real uses above, plus false
+positives on local names (`ElfConst.ELFCLASS64`, a `resolve` method, a
+`b.path` comment). The release notes' other silent changes do not apply here.
+Every `@bitCast` in the corpus is scalar ↔ scalar or packed struct ↔ integer,
+which 0.17 leaves unchanged. No example bitcasts an `extern struct`, and none
+calls `containsAtLeastScalar`.
+
+### Changed — CI
+
+- `ZIG_VER` **0.16.0 → 0.17.0**, and the download is now **sha256-verified**
+  against the checksum `ziglang.org/download/index.json` publishes. Before,
+  the step ran whatever the URL returned, and a bad download would surface as
+  unrelated compile errors 77 files later. The step's comment records what
+  0.17 changed.
+- Version stamps: `README.md`, `docs/sources.md`,
+  `docs/development/content-format.md`, `docs/guides/getting-started.md`,
+  and the roadmap's pin-maintenance row and header.
+
 ## [2.8.6] — 2026-10-23
 
 Dependency cut. **cyrius 6.6.2 → 6.6.20** and **vyakarana 2.4.0 → 2.4.3**, the

@@ -116,8 +116,8 @@ const MAXD: usize = 8;
 
 const Graph = struct {
     n: usize = 0,
-    depcnt: [MAXP]usize = [_]usize{0} ** MAXP,
-    deps: [MAXP][MAXD]usize = [_][MAXD]usize{[_]usize{0} ** MAXD} ** MAXP,
+    depcnt: [MAXP]usize = @splat(0),
+    deps: [MAXP][MAXD]usize = @splat(@splat(0)),
 
     fn reset(self: *Graph, n: usize) void {
         self.n = n;
@@ -130,7 +130,7 @@ const Graph = struct {
         self.depcnt[p] = c + 1;
     }
     fn hasCycle(self: *const Graph) bool {
-        var placed_flag = [_]bool{false} ** MAXP;
+        var placed_flag: [MAXP]bool = @splat(false);
         var placed: usize = 0;
         while (placed < self.n) {
             var progress = false;

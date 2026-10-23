@@ -49,7 +49,7 @@ fn testInputValidation() !void {
 
     // These should all fail
     try expect(validateUsername("") == error.EmptyUsername);
-    try expect(validateUsername("a" ** 33) == error.UsernameTooLong);
+    try expect(validateUsername(&@as([33]u8, @splat('a'))) == error.UsernameTooLong);
     try expect(validateUsername("alice; DROP") == error.InvalidCharacter);
     try expect(validateUsername("../etc") == error.InvalidCharacter);
     try expect(validateUsername("<script>") == error.InvalidCharacter);
@@ -207,5 +207,5 @@ fn testAllowlistValidation() !void {
     try expect(isAlphanumeric("Test 123.", 200));
     try expect(!isAlphanumeric("", 200));
     try expect(!isAlphanumeric("<script>", 200));
-    try expect(!isAlphanumeric("a" ** 201, 200));
+    try expect(!isAlphanumeric(&@as([201]u8, @splat('a')), 200));
 }

@@ -31,16 +31,19 @@ pub fn main() !void {
     const greeting = "hello" ++ " " ++ "world";
     try expect(mem.eql(u8, greeting, "hello world"));
 
-    // Repeat
-    const dashes = "-" ** 5;
-    try expect(mem.eql(u8, dashes, "-----"));
+    // Repeat: Zig 0.17 removed the `**` operator. `@splat` fills a
+    // fixed-size array (the length comes from the result type), and `&`
+    // turns that array into a slice
+    const dashes: [5]u8 = @splat('-');
+    try expect(mem.eql(u8, &dashes, "-----"));
 
     // ── Runtime concatenation needs an allocator ───────────────────
-    var gpa = std.heap.DebugAllocator(.{}){};
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const joined = try std.fmt.allocPrint(allocator, "{s} {s}", .{ "hello", "world" });
+    // 0.17: `allocPrint` moved onto the allocator (`std.fmt.allocPrint` is deprecated)
+    const joined = try allocator.print("{s} {s}", .{ "hello", "world" });
     defer allocator.free(joined);
     try expect(mem.eql(u8, joined, "hello world"));
 
@@ -80,7 +83,8 @@ pub fn main() !void {
 
     // ── Format to buffer (no allocation) ───────────────────────────
     var buf: [64]u8 = undefined;
-    const formatted = try std.fmt.bufPrint(&buf, "value: {d}", .{42});
+    // 0.17: `std.mem.print` (`std.fmt.bufPrint` is deprecated); error.NoSpaceLeft if it does not fit
+    const formatted = try std.mem.print(&buf, "value: {d}", .{42});
     try expect(mem.eql(u8, formatted, "value: 42"));
 
     // ── UTF-8 iteration ────────────────────────────────────────────
@@ -95,7 +99,7 @@ pub fn main() !void {
     try expect(utf8_len == 4); // 4 codepoints
 
     // ── Number to string and back ──────────────────────────────────
-    const num_str = try std.fmt.allocPrint(allocator, "{d}", .{42});
+    const num_str = try allocator.print("{d}", .{42});
     defer allocator.free(num_str);
     try expect(mem.eql(u8, num_str, "42"));
 

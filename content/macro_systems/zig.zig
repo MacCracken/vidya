@@ -82,19 +82,22 @@ fn serializeStruct(value: anytype, buf: []u8) []const u8 {
     }
 
     var pos: usize = 0;
-    const fields = info.@"struct".fields;
+    // Zig 0.17 reports struct fields struct-of-arrays style: parallel
+    // `field_names` / `field_types` slices, not one slice of field records.
+    const names = info.@"struct".field_names;
+    const types = info.@"struct".field_types;
 
-    inline for (fields, 0..) |field, i| {
-        const field_val = @field(value, field.name);
+    inline for (names, types, 0..) |name, FieldType, i| {
+        const field_val = @field(value, name);
 
         // Write field name
-        @memcpy(buf[pos..][0..field.name.len], field.name);
-        pos += field.name.len;
+        @memcpy(buf[pos..][0..name.len], name);
+        pos += name.len;
         buf[pos] = '=';
         pos += 1;
 
         // Write field value based on type
-        switch (@typeInfo(field.type)) {
+        switch (@typeInfo(FieldType)) {
             .int, .comptime_int => {
                 const digits = formatInt(field_val, buf[pos..]);
                 pos += digits;
@@ -117,7 +120,7 @@ fn serializeStruct(value: anytype, buf: []u8) []const u8 {
             },
         }
 
-        if (i + 1 < fields.len) {
+        if (i + 1 < names.len) {
             buf[pos] = ',';
             pos += 1;
             buf[pos] = ' ';
@@ -161,8 +164,9 @@ fn formatInt(val: anytype, buf: []u8) usize {
 fn processTuple(tuple: anytype) usize {
     var total: usize = 0;
     // inline for unrolls this — each iteration handles a different type
-    inline for (std.meta.fields(@TypeOf(tuple))) |field| {
-        const val = @field(tuple, field.name);
+    // A tuple is a struct whose field names are "0", "1", ... — @field reads them
+    inline for (@typeInfo(@TypeOf(tuple)).@"struct".field_names) |name| {
+        const val = @field(tuple, name);
         total += sizeContribution(val);
     }
     return total;

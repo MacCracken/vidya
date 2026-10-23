@@ -52,8 +52,8 @@ fn count_lit(fb: []const u8) usize {
 }
 
 pub fn main() !void {
-    var src: [FB_BYTES]u8 = [_]u8{0} ** FB_BYTES;
-    var dst: [FB_BYTES]u8 = [_]u8{0} ** FB_BYTES;
+    var src: [FB_BYTES]u8 = @splat(0);
+    var dst: [FB_BYTES]u8 = @splat(0);
 
     apply_bloom(&src, &dst, THRESHOLD);
     if (count_lit(&dst) != 0) return error.Empty;

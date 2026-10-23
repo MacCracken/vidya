@@ -46,9 +46,9 @@ fn gridBlock(g: *[GN]u8, x: usize, y: usize) void {
 
 fn bfs(grid: *const [GN]u8, start: usize, goal: usize) i64 {
     if (start == goal) return 0;
-    var visited = [_]bool{false} ** GN;
-    var dist = [_]i64{-1} ** GN;
-    var queue = [_]usize{0} ** GN;
+    var visited: [GN]bool = @splat(false);
+    var dist: [GN]i64 = @splat(-1);
+    var queue: [GN]usize = @splat(0);
     var head: usize = 0;
     var tail: usize = 0;
     queue[tail] = start; tail += 1;
@@ -83,8 +83,8 @@ fn astar(allocator: std.mem.Allocator, grid: *const [GN]u8,
          sx: usize, sy: usize, gx: usize, gy: usize) !i64 {
     const start = idx(sx, sy);
     const goal = idx(gx, gy);
-    var g_score = [_]i64{std.math.maxInt(i64)} ** GN;
-    var closed = [_]bool{false} ** GN;
+    var g_score: [GN]i64 = @splat(std.math.maxInt(i64));
+    var closed: [GN]bool = @splat(false);
     g_score[start] = 0;
 
     var open: PriorityQueue(Item, void, itemLess) = .empty;
@@ -120,7 +120,7 @@ fn astar(allocator: std.mem.Allocator, grid: *const [GN]u8,
 }
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 

@@ -113,7 +113,7 @@ const ObjectFile = struct {
     fn init(name: []const u8, alloc: Allocator) ObjectFile {
         return .{
             .name = name,
-            .code = [_]u8{0} ** 256,
+            .code = @splat(0),
             .code_len = 0,
             .symbols = SymbolTable.init(alloc),
             .relocs = undefined,

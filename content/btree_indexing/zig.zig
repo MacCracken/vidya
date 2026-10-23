@@ -29,9 +29,9 @@ const Node = struct {
         n.* = .{
             .is_leaf = true,
             .nkeys = 0,
-            .keys = [_]i64{0} ** CAP,
-            .vals = [_]i64{0} ** CAP,
-            .children = [_]?*Node{null} ** (CAP + 1),
+            .keys = @splat(0),
+            .vals = @splat(0),
+            .children = @splat(null),
         };
         return n;
     }
@@ -41,9 +41,9 @@ const Node = struct {
         n.* = .{
             .is_leaf = false,
             .nkeys = 0,
-            .keys = [_]i64{0} ** CAP,
-            .vals = [_]i64{0} ** CAP,
-            .children = [_]?*Node{null} ** (CAP + 1),
+            .keys = @splat(0),
+            .vals = @splat(0),
+            .children = @splat(null),
         };
         return n;
     }
@@ -149,7 +149,7 @@ fn btInsert(allocator: std.mem.Allocator, root: *Node, key: i64, val: i64) !*Nod
 }
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 

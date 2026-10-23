@@ -45,8 +45,8 @@ fn rngRange(max: i64) i64 {
     return @mod(rngNext(), max);
 }
 
-var maze_cells: [GN]u8 = [_]u8{WALLS_ALL} ** GN;
-var visited: [GN]bool = [_]bool{false} ** GN;
+var maze_cells: [GN]u8 = @splat(WALLS_ALL);
+var visited: [GN]bool = @splat(false);
 
 fn idx(x: usize, y: usize) usize {
     return y * GW + x;

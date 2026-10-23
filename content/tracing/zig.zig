@@ -80,7 +80,7 @@ const MAX_MSG_LEN = 128;
 const LogEntry = struct {
     level: LogLevel,
     scope: []const u8,
-    msg: [MAX_MSG_LEN]u8 = [_]u8{0} ** MAX_MSG_LEN,
+    msg: [MAX_MSG_LEN]u8 = @splat(0),
     msg_len: usize = 0,
 
     fn message(self: *const LogEntry) []const u8 {

@@ -23,11 +23,11 @@ const mem = std.mem;
 const Circle = struct {
     radius: f64,
 
-    fn area(self: Circle) f64 {
+    pub fn area(self: Circle) f64 {
         return std.math.pi * self.radius * self.radius;
     }
 
-    fn name(_: Circle) []const u8 {
+    pub fn name(_: Circle) []const u8 {
         return "Circle";
     }
 };
@@ -36,11 +36,11 @@ const Rectangle = struct {
     width: f64,
     height: f64,
 
-    fn area(self: Rectangle) f64 {
+    pub fn area(self: Rectangle) f64 {
         return self.width * self.height;
     }
 
-    fn name(_: Rectangle) []const u8 {
+    pub fn name(_: Rectangle) []const u8 {
         return "Rectangle";
     }
 };
@@ -49,11 +49,11 @@ const Triangle = struct {
     base: f64,
     height: f64,
 
-    fn area(self: Triangle) f64 {
+    pub fn area(self: Triangle) f64 {
         return 0.5 * self.base * self.height;
     }
 
-    fn name(_: Triangle) []const u8 {
+    pub fn name(_: Triangle) []const u8 {
         return "Triangle";
     }
 };
@@ -84,13 +84,17 @@ fn totalArea(shapes: anytype) f64 {
 /// Count the number of fields in a struct at compile time.
 fn fieldCount(comptime T: type) usize {
     return switch (@typeInfo(T)) {
-        .@"struct" => |info| info.fields.len,
+        // 0.17: struct info is struct-of-arrays (`field_names`, `field_types`, ...)
+        .@"struct" => |info| info.field_names.len,
         else => 0,
     };
 }
 
 /// Check if a type has a specific declaration at compile time.
-/// @hasDecl checks both public and private declarations.
+/// @hasDecl sees only `pub` declarations, so a duck-typed interface's
+/// methods must be `pub` (the shapes above are). Before Zig 0.17 a private
+/// declaration also counted when the check sat in the same file, so a
+/// constraint could pass in its own file and fail for every other caller.
 fn hasMethod(comptime T: type, comptime name: []const u8) bool {
     return @hasDecl(T, name);
 }

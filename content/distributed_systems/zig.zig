@@ -9,7 +9,7 @@ const R: usize = 2;
 const VCOrder = enum { less, equal, greater, concurrent };
 
 const VClock = struct {
-    c: [N_NODES]i64 = [_]i64{0} ** N_NODES,
+    c: [N_NODES]i64 = @splat(0),
 
     fn tick(self: *VClock, node: usize) void { self.c[node] += 1; }
     fn merge(self: *VClock, from: *const VClock) void {
@@ -34,9 +34,9 @@ const VClock = struct {
 };
 
 const QCluster = struct {
-    accounts: [N_NODES]i64 = [_]i64{0} ** N_NODES,
-    write_seq: [N_NODES]i64 = [_]i64{0} ** N_NODES,
-    alive: [N_NODES]bool = [_]bool{true} ** N_NODES,
+    accounts: [N_NODES]i64 = @splat(0),
+    write_seq: [N_NODES]i64 = @splat(0),
+    alive: [N_NODES]bool = @splat(true),
     global_seq: i64 = 0,
 
     fn partition(self: *QCluster, n: usize) void { self.alive[n] = false; }

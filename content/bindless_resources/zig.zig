@@ -7,8 +7,8 @@ const std = @import("std");
 const TABLE_CAP: u32 = 64;
 
 const Table = struct {
-    slots: [TABLE_CAP]u64 = [_]u64{0} ** TABLE_CAP,
-    free_links: [TABLE_CAP]u32 = [_]u32{0} ** TABLE_CAP,
+    slots: [TABLE_CAP]u64 = @splat(0),
+    free_links: [TABLE_CAP]u32 = @splat(0),
     next_id: u32 = 1,
     free_head: u32 = 0,
 

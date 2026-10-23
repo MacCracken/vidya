@@ -2,7 +2,7 @@
 
 > **Status**: Active | **Last Updated**: 2026-10-23
 >
-> **Version**: 2.8.6 (dependency cut — cyrius 6.6.20, vyakarana 2.4.3; P5 content opens in a later 2.8.x) | **Cyrius**: 6.6.20 (Zig content pin: 0.16.0; the host now ships 0.17.0, port pending)
+> **Version**: 2.8.7 (content toolchain cut — Zig 0.16 → 0.17 across the corpus; 2.8.6 took cyrius 6.6.20 + vyakarana 2.4.3; P5 content opens in a later 2.8.x) | **Cyrius**: 6.6.20 (Zig content pin: 0.17.0)
 > **Topics**: 77 (77 fully covered) — **P0 → P4 complete** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 847 source files; concept files: 77
@@ -26,7 +26,7 @@ This table is one row per minor for navigation only.
 | 2.5.x | **P2 distributed systems** | +3 → 69 | 759/759 | 2026-05-03 |
 | 2.6.x | **P3 audio + AI/ML** | +5 → 74 | 814/814 | 2026-05-03 |
 | 2.7.x | **P4 build systems** (2.7.0–2.7.2 infra-only; 2.7.3 content) | +3 → 77 | 847/847 | 2026-06-12 |
-| 2.8.x | **Infra + correctness** — cyrius 6.1.41 → 6.4.2 (2.8.0), → 6.5.29 + sakshi stdlib fold-in (2.8.1), five user-visible defect fixes + the `src/vidya_core.cyr` split (2.8.2), then → 6.5.31 + a corpus-wide example review and four new gate checks (2.8.3), then → 6.5.35 + vyakarana 2.4.0 (2.8.4), → 6.6.2 (2.8.5), → 6.6.20 + vyakarana 2.4.3 (2.8.6). P5 opens later in the series. | 77 | 847/847 | in progress |
+| 2.8.x | **Infra + correctness** — cyrius 6.1.41 → 6.4.2 (2.8.0), → 6.5.29 + sakshi stdlib fold-in (2.8.1), five user-visible defect fixes + the `src/vidya_core.cyr` split (2.8.2), then → 6.5.31 + a corpus-wide example review and four new gate checks (2.8.3), then → 6.5.35 + vyakarana 2.4.0 (2.8.4), → 6.6.2 (2.8.5), → 6.6.20 + vyakarana 2.4.3 (2.8.6), then Zig 0.16 → 0.17 across the corpus (2.8.7). P5 opens later in the series. | 77 | 847/847 | in progress |
 
 ---
 
@@ -93,7 +93,7 @@ churn. Ordered by trigger condition, not by patch slot.
 |---|---|---|
 | **Zugot recipe SHA backfill** | first 2.7.1 release tarball builds on GitHub Actions | Compute `sha256sum vidya-2.7.1-src.tar.gz` from the release artifact; fill the `sha256 = ""` placeholder in `zugot/marketplace/vidya.cyml`. |
 | **Content-validation matrix** | observed CI wallclock for the new `scripts/validate-content.sh` step | If the 847-example sweep exceeds ~15 min, split the content job per-language (matrix strategy) for parallelism. The script's per-language stages are independent. |
-| **Zig pin maintenance** | observed failures on `content/*/zig.zig` examples | Track zig's release cadence; bump the CI install pin (`0.16.0` today, matching `docs/sources.md` / `README.md`) when content needs newer language features. The 0.15→0.16 bump at v2.7.2 migrated all 14 zig examples to `std.Io` (Threaded backend, Writer "Writergate", `DebugAllocator`). |
+| **Zig pin maintenance** | observed failures on `content/*/zig.zig` examples | Track zig's release cadence; bump the CI install pin (`0.17.0` today, matching `docs/sources.md` / `README.md`) when content needs newer language features or a dev host moves ahead of it. The 0.15→0.16 bump at v2.7.2 migrated all 14 zig examples then in the corpus to `std.Io` (Threaded backend, Writer "Writergate", `DebugAllocator`). The 0.16→0.17 bump at v2.8.7 was forced by a host upgrade: 37 of 77 examples stopped compiling (`**` removed, struct reflection reshaped), and the port also moved `DebugAllocator` → `SafeAllocator`, `fmt.allocPrint` / `fmt.bufPrint` → `Allocator.print` / `mem.print`, and `builtin.os` → `builtin.target.os`. CI now checks the tarball's sha256. |
 | ~~**`scripts/bench-history.sh` audit**~~ | **DONE at 2.8.1** | Verified working: it drove the 6.4.2 → 6.5.29 A/B and the 2.8.2 regeneration. Its dead `cargo bench` line was removed at 2.8.0 and it now passes the explicit `tests/vidya.bcyr` path. Nothing outstanding. |
 
 ---

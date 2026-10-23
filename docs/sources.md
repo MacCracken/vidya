@@ -15,7 +15,7 @@ References for language specifications, algorithms, and standards used across vi
 | Go | [The Go Specification](https://go.dev/ref/spec) | Go 1.x |
 | TypeScript | [ECMAScript Language Specification](https://tc39.es/ecma262/) / [TypeScript Handbook](https://www.typescriptlang.org/docs/handbook/) | TS 7.0.2 / ES2025 |
 | Shell | [POSIX Shell Command Language](https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html) | POSIX.1-2017 |
-| Zig | [Zig Language Reference](https://ziglang.org/documentation/master/) | 0.16 (CI pinned to 0.16.0) |
+| Zig | [Zig Language Reference](https://ziglang.org/documentation/master/) | 0.17 (CI pinned to 0.17.0, sha256-checked) |
 | x86_64 ASM | Intel 64 and IA-32 Architectures Software Developer Manuals | Vol 1–4 |
 | AArch64 ASM | Arm Architecture Reference Manual (Arm ARM) | ARMv8-A / ARMv9-A |
 | OpenQASM | [Open Quantum Assembly Language](https://arxiv.org/abs/1707.03429) | 2.0 |

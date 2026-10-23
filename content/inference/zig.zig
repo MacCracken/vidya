@@ -6,7 +6,7 @@ const VOCAB_SIZE: usize = 8;
 const TOK_EOS: usize = 1;
 
 var BIGRAM: [VOCAB_SIZE][VOCAB_SIZE]i64 = init_blk: {
-    var b: [VOCAB_SIZE][VOCAB_SIZE]i64 = [_][VOCAB_SIZE]i64{[_]i64{0} ** VOCAB_SIZE} ** VOCAB_SIZE;
+    var b: [VOCAB_SIZE][VOCAB_SIZE]i64 = @splat(@splat(0));
     b[2][3] = 1000;
     b[2][4] = 100;
     b[3][6] = 800;
@@ -33,7 +33,7 @@ fn argmaxLogits(logits: []const i64) usize {
 }
 
 fn topkFilter(logits: []i64, k: usize) usize {
-    var marks: [VOCAB_SIZE]bool = [_]bool{false} ** VOCAB_SIZE;
+    var marks: [VOCAB_SIZE]bool = @splat(false);
     var picked: usize = 0;
     while (picked < k) {
         var best_idx: i32 = -1;

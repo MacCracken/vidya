@@ -126,7 +126,7 @@ fn testStrategyPattern() !void {
 const MAX_LISTENERS = 8;
 
 const EventEmitter = struct {
-    listeners: [MAX_LISTENERS]?*const fn ([]const u8, *[64]u8, *usize) void = .{null} ** MAX_LISTENERS,
+    listeners: [MAX_LISTENERS]?*const fn ([]const u8, *[64]u8, *usize) void = @splat(null),
     count: usize = 0,
 
     fn on(self: *EventEmitter, cb: *const fn ([]const u8, *[64]u8, *usize) void) void {
@@ -230,7 +230,7 @@ fn testStateMachine() !void {
 
 fn testRaiiDefer() !void {
     var log: [4][16]u8 = undefined;
-    var log_lens: [4]usize = .{0} ** 4;
+    var log_lens: [4]usize = @splat(0);
     var log_count: usize = 0;
 
     {
@@ -339,7 +339,7 @@ const StdoutLogger = struct {
 
 const TestLoggerData = struct {
     entries: [8][64]u8 = undefined,
-    entry_lens: [8]usize = .{0} ** 8,
+    entry_lens: [8]usize = @splat(0),
     count: usize = 0,
 
     fn log(ptr: *anyopaque, msg: []const u8, buf: *[128]u8) usize {

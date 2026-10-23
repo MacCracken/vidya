@@ -59,13 +59,13 @@ fn pageAlloc(io: std.Io, f: std.Io.File, h: *Header) !u64 {
     }
     const num = h.page_count;
     h.page_count += 1;
-    const zero = [_]u8{0} ** PAGE_SZ;
+    const zero: [PAGE_SZ]u8 = @splat(0);
     try pageWrite(io, f, num, &zero);
     return num;
 }
 
 fn pageFree(io: std.Io, f: std.Io.File, h: *Header, num: u64) !void {
-    var buf = [_]u8{0} ** PAGE_SZ;
+    var buf: [PAGE_SZ]u8 = @splat(0);
     std.mem.writeInt(u64, buf[FP_NEXT..][0..8], h.freehead, .little);
     try pageWrite(io, f, num, &buf);
     h.freehead = num;
@@ -101,7 +101,7 @@ pub fn main() !void {
     if (p2 != 2) return error.BadAlloc2;
 
     // 5. roundtrip
-    var buf: [PAGE_SZ]u8 = [_]u8{0} ** PAGE_SZ;
+    var buf: [PAGE_SZ]u8 = @splat(0);
     std.mem.writeInt(u64, buf[0..8], 42, .little);
     try pageWrite(io, f, p1, &buf);
     var rb: [PAGE_SZ]u8 = undefined;

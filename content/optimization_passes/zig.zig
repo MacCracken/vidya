@@ -78,7 +78,7 @@ const IRProgram = struct {
 // binary instruction with a load_const of the result.
 fn constantFold(prog: *IRProgram) void {
     // Track which temps hold known constants
-    var known: [256]?i64 = [_]?i64{null} ** 256;
+    var known: [256]?i64 = @splat(null);
 
     for (0..prog.len) |i| {
         switch (prog.insts[i]) {
@@ -118,7 +118,7 @@ fn constantFold(prog: *IRProgram) void {
 // any subsequent instruction. We scan backward, tracking which temps
 // are live (needed by later instructions).
 fn eliminateDeadCode(prog: *IRProgram) void {
-    var live: [256]bool = [_]bool{false} ** 256;
+    var live: [256]bool = @splat(false);
 
     // First pass: mark all temps that are used as sources
     for (prog.insts[0..prog.len]) |inst| {
@@ -155,7 +155,7 @@ fn eliminateDeadCode(prog: *IRProgram) void {
 //   x + 0   → copy x
 //   x - 0   → copy x
 fn strengthReduce(prog: *IRProgram) void {
-    var known: [256]?i64 = [_]?i64{null} ** 256;
+    var known: [256]?i64 = @splat(null);
 
     for (0..prog.len) |i| {
         switch (prog.insts[i]) {
@@ -241,7 +241,7 @@ fn strengthReduce(prog: *IRProgram) void {
 
 // ── IR Interpreter ───────────────────────────────────────────────────
 fn interpret(prog: *const IRProgram) !i64 {
-    var temps: [256]i64 = [_]i64{0} ** 256;
+    var temps: [256]i64 = @splat(0);
 
     for (prog.insts[0..prog.len]) |inst| {
         switch (inst) {

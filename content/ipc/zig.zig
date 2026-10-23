@@ -11,13 +11,13 @@ const CHAN_CAP: usize = 4;
 const CHAN_QUEUE_CAP: usize = 8;
 
 const Ipc = struct {
-    shm: [SHM_REGION_CAP][SHM_BYTES]u8 = [_][SHM_BYTES]u8{[_]u8{0} ** SHM_BYTES} ** SHM_REGION_CAP,
-    pipe_buf: [PIPE_CAP]u8 = [_]u8{0} ** PIPE_CAP,
+    shm: [SHM_REGION_CAP][SHM_BYTES]u8 = @splat(@splat(0)),
+    pipe_buf: [PIPE_CAP]u8 = @splat(0),
     pipe_head: usize = 0,
     pipe_count: usize = 0,
-    chan_open: [CHAN_CAP]bool = [_]bool{false} ** CHAN_CAP,
-    chan_queue: [CHAN_CAP][CHAN_QUEUE_CAP]u64 = [_][CHAN_QUEUE_CAP]u64{[_]u64{0} ** CHAN_QUEUE_CAP} ** CHAN_CAP,
-    chan_count: [CHAN_CAP]usize = [_]usize{0} ** CHAN_CAP,
+    chan_open: [CHAN_CAP]bool = @splat(false),
+    chan_queue: [CHAN_CAP][CHAN_QUEUE_CAP]u64 = @splat(@splat(0)),
+    chan_count: [CHAN_CAP]usize = @splat(0),
 
     fn shmWrite(self: *Ipc, region: i32, offset: i32, byte: u8) bool {
         if (region < 0 or region >= @as(i32, SHM_REGION_CAP) or offset < 0 or offset >= @as(i32, SHM_BYTES)) return false;

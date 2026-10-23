@@ -128,7 +128,7 @@ const SSABlock = struct {
 // ── Simple TAC Interpreter ───────────────────────────────────────────
 // Executes a sequence of TAC instructions and returns the ret value.
 fn interpretTac(program: []const TacInst) !i64 {
-    var temps: [256]i64 = [_]i64{0} ** 256;
+    var temps: [256]i64 = @splat(0);
 
     for (program) |inst| {
         switch (inst.op) {

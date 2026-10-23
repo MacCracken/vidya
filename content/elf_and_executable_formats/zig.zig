@@ -124,7 +124,7 @@ fn testElf64Ehdr() !void {
         std.debug.assert(@sizeOf(Elf64Ehdr) == 64);
     }
 
-    var ident = [_]u8{0} ** 16;
+    var ident: [16]u8 = @splat(0);
     ident[0] = 0x7F;
     ident[1] = 'E';
     ident[2] = 'L';

@@ -51,7 +51,7 @@ const AsmLine = struct {
 
 fn makeLine(comptime fmt: []const u8, args: anytype) AsmLine {
     var line: AsmLine = .{ .buf = undefined, .len = 0 };
-    const result = std.fmt.bufPrint(&line.buf, fmt, args) catch {
+    const result = std.mem.print(&line.buf, fmt, args) catch {
         // Truncate if too long
         line.len = MAX_LINE;
         return line;

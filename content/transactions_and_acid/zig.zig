@@ -10,15 +10,15 @@ const TX_CAP: usize = 4;
 const TxStatus = enum(u8) { free = 0, active = 1, committed = 2, aborted = 3 };
 
 const Store = struct {
-    accounts: [N_ACCOUNTS]i64 = [_]i64{0} ** N_ACCOUNTS,
-    version: [N_ACCOUNTS]i64 = [_]i64{0} ** N_ACCOUNTS,
-    status: [N_TX]TxStatus = [_]TxStatus{.free} ** N_TX,
-    wcount: [N_TX]usize = [_]usize{0} ** N_TX,
-    wkeys: [N_TX][TX_CAP]i32 = [_][TX_CAP]i32{[_]i32{0} ** TX_CAP} ** N_TX,
-    wvals: [N_TX][TX_CAP]i64 = [_][TX_CAP]i64{[_]i64{0} ** TX_CAP} ** N_TX,
-    rcount: [N_TX]usize = [_]usize{0} ** N_TX,
-    rkeys: [N_TX][TX_CAP]i32 = [_][TX_CAP]i32{[_]i32{0} ** TX_CAP} ** N_TX,
-    rsnaps: [N_TX][TX_CAP]i64 = [_][TX_CAP]i64{[_]i64{0} ** TX_CAP} ** N_TX,
+    accounts: [N_ACCOUNTS]i64 = @splat(0),
+    version: [N_ACCOUNTS]i64 = @splat(0),
+    status: [N_TX]TxStatus = @splat(.free),
+    wcount: [N_TX]usize = @splat(0),
+    wkeys: [N_TX][TX_CAP]i32 = @splat(@splat(0)),
+    wvals: [N_TX][TX_CAP]i64 = @splat(@splat(0)),
+    rcount: [N_TX]usize = @splat(0),
+    rkeys: [N_TX][TX_CAP]i32 = @splat(@splat(0)),
+    rsnaps: [N_TX][TX_CAP]i64 = @splat(@splat(0)),
 
     fn accountSetRaw(self: *Store, k: usize, v: i64) void {
         self.accounts[k] = v;

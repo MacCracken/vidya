@@ -17,7 +17,7 @@ const FB_SIZE: usize = 320 * 240; // 76800
 const COLOR_KEY: u8 = 0;
 const FX_SHIFT: u5 = 16;
 
-var fb: [FB_SIZE]u8 = [_]u8{0} ** FB_SIZE;
+var fb: [FB_SIZE]u8 = @splat(0);
 
 fn fbClear(color: u8) void {
     @memset(&fb, color);

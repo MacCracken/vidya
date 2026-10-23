@@ -23,11 +23,11 @@ pub fn main() !void {
     // Zig: you pass the allocator explicitly. No hidden allocations.
     print("1. Explicit allocators:\n", .{});
     {
-        var gpa = std.heap.DebugAllocator(.{}){};
+        var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
         defer {
-            const check = gpa.deinit();
-            // In debug mode, deinit returns .leak if memory was leaked
-            assert(check == .ok);
+            // deinit logs each leaked allocation and returns how many there were
+            const leaks = gpa.deinit();
+            assert(leaks == 0);
         }
         const allocator = gpa.allocator();
 
@@ -185,16 +185,17 @@ pub fn main() !void {
 
     // ── 8. No use-after-free at language level ───────────────────
     // Rust: borrow checker prevents use-after-free at compile time.
-    // Zig: no compile-time prevention, but DebugAllocator
-    // (`GeneralPurposeAllocator` was renamed in 0.16 and no longer exists)
-    //       detects use-after-free in debug/safe builds at runtime.
-    // Zig's philosophy: use tools (GPA, sanitizers) not type systems.
+    // Zig: no compile-time prevention, but SafeAllocator detects
+    //       use-after-free and double free at runtime. (It replaces
+    //       DebugAllocator, deprecated in 0.17, which had replaced
+    //       GeneralPurposeAllocator in 0.16.)
+    // Zig's philosophy: use tools (SafeAllocator, sanitizers) not type systems.
     print("\n8. Runtime safety (debug mode):\n", .{});
     {
-        print("   GPA detects leaks on deinit()\n", .{});
+        print("   SafeAllocator reports leaks on deinit()\n", .{});
         print("   Safe mode: bounds checks, null checks, overflow\n", .{});
         print("   ReleaseSafe: keeps safety checks in release builds\n", .{});
-        print("   Debug + GPA = catches most memory bugs at runtime\n", .{});
+        print("   Debug + SafeAllocator = catches most memory bugs at runtime\n", .{});
     }
 
     // ── 9. Arena allocator — batch lifetime ──────────────────────
@@ -204,7 +205,7 @@ pub fn main() !void {
     //       request-scoped or parse-tree-scoped allocations.
     print("\n9. Arena allocator — batch lifetime:\n", .{});
     {
-        var gpa = std.heap.DebugAllocator(.{}){};
+        var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
         defer _ = gpa.deinit();
 
         var arena = std.heap.ArenaAllocator.init(gpa.allocator());

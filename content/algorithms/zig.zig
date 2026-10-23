@@ -235,7 +235,7 @@ const MAX_NODES = 16;
 
 const Graph = struct {
     adj: [MAX_NODES][MAX_NODES]u8 = undefined,
-    degree: [MAX_NODES]u8 = [_]u8{0} ** MAX_NODES,
+    degree: [MAX_NODES]u8 = @splat(0),
     n: usize,
 
     fn addEdge(self: *Graph, u: usize, v: usize) void {
@@ -246,8 +246,8 @@ const Graph = struct {
     }
 
     fn bfs(self: *const Graph, start: usize, end: usize) ?[MAX_NODES]u8 {
-        var visited = [_]bool{false} ** MAX_NODES;
-        var parent = [_]i8{-1} ** MAX_NODES;
+        var visited: [MAX_NODES]bool = @splat(false);
+        var parent: [MAX_NODES]i8 = @splat(-1);
         var queue: [MAX_NODES]u8 = undefined;
         var front: usize = 0;
         var back: usize = 0;

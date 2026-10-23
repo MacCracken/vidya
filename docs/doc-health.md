@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-10-23 (v2.8.6 ship; see the 2.8.6 sweep block below). 2.8.5 shipped without a sweep, so its state was back-filled here.
+> **Last refresh**: 2026-10-23 (v2.8.7 ship; see the 2.8.7 block below, and the 2.8.6 sweep from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -17,6 +17,20 @@ type: state
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
+
+## 2026-10-23 (v2.8.7) — Zig 0.17 stamps
+
+| Doc | Updated for 2.8.7 |
+|---|---|
+| `CHANGELOG.md` | 2.8.7 entry: the `**` → `@splat` and reflection ports, the `@hasDecl` semantic fix, the deprecated-API moves, the 221-name deprecation scan, and CI's sha256 check. |
+| `README.md`, `docs/sources.md`, `docs/development/content-format.md`, `docs/guides/getting-started.md` | Zig 0.16 → 0.17. |
+| `docs/development/roadmap.md` | Header Zig pin → 0.17.0, and the "Zig pin maintenance" row records the forced 0.16 → 0.17 bump. |
+| `docs/development/state.md` | Version → 2.8.7, gate line (the host/CI Zig gap closed), 2.8.7 posture entry, and the "Next" line no longer lists the port. |
+| `.github/workflows/ci.yml` | `ZIG_VER` 0.17.0 plus `sha256sum -c` against ziglang.org's published checksum, and the step comment lists 0.17's changes. |
+
+Left as written: `docs/development/ecosystem-action-pins.md` says "CI installs
+`0.16.0`; latest release is `0.16.0`". That is a dated record of the 2.8.4
+sweep and was true then, so it is not a current-state claim.
 
 ## 2026-10-23 sweep (v2.8.6)
 

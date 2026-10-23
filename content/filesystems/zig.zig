@@ -25,7 +25,7 @@ const NUM_BLOCKS: usize = 64;
 const BITMAP_BYTES: usize = NUM_BLOCKS / 8;
 
 const BlockBitmap = struct {
-    bits: [BITMAP_BYTES]u8 = [_]u8{0} ** BITMAP_BYTES,
+    bits: [BITMAP_BYTES]u8 = @splat(0),
     used_count: usize = 0,
 
     fn isUsed(self: *const BlockBitmap, block: usize) bool {
@@ -76,7 +76,7 @@ const Inode = struct {
     itype: InodeType = .free,
     size: usize = 0,
     block_count: usize = 0,
-    direct_blocks: [MAX_DIRECT_BLOCKS]?usize = .{null} ** MAX_DIRECT_BLOCKS,
+    direct_blocks: [MAX_DIRECT_BLOCKS]?usize = @splat(null),
 
     fn isActive(self: *const Inode) bool {
         return self.itype != .free;
@@ -103,7 +103,7 @@ const Inode = struct {
 const MAX_NAME_LEN: usize = 12;
 
 const DirEntry = struct {
-    name: [MAX_NAME_LEN]u8 = [_]u8{0} ** MAX_NAME_LEN,
+    name: [MAX_NAME_LEN]u8 = @splat(0),
     name_len: usize = 0,
     inode: ?usize = null,
 
@@ -136,10 +136,10 @@ const MAX_INODES: usize = 16;
 const MAX_DIR_ENTRIES: usize = 16;
 
 const SimpleFS = struct {
-    inodes: [MAX_INODES]Inode = [_]Inode{.{}} ** MAX_INODES,
+    inodes: [MAX_INODES]Inode = @splat(.{}),
     bitmap: BlockBitmap = .{},
-    data: [NUM_BLOCKS][BLOCK_SIZE]u8 = [_][BLOCK_SIZE]u8{[_]u8{0} ** BLOCK_SIZE} ** NUM_BLOCKS,
-    root_entries: [MAX_DIR_ENTRIES]DirEntry = [_]DirEntry{.{}} ** MAX_DIR_ENTRIES,
+    data: [NUM_BLOCKS][BLOCK_SIZE]u8 = @splat(@splat(0)),
+    root_entries: [MAX_DIR_ENTRIES]DirEntry = @splat(.{}),
     root_entry_count: usize = 0,
 
     /// Allocate a free inode. Returns inode index or null.
@@ -186,7 +186,7 @@ const SimpleFS = struct {
             }
         }
         inode.block_count = 0;
-        inode.direct_blocks = .{null} ** MAX_DIRECT_BLOCKS;
+        inode.direct_blocks = @splat(null);
 
         // Allocate new blocks and copy data
         var offset: usize = 0;

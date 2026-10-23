@@ -70,7 +70,7 @@ pub fn main() !void {
     const r = decodeVarint(buf[0..n]) orelse return error.RoundtripDecode;
     if (r.value != 1234567890 or r.consumed != n) return error.Roundtrip;
 
-    const bomb = [_]u8{0xFF} ** 11;
+    const bomb: [11]u8 = @splat(0xFF);
     if (decodeVarint(&bomb) != null) return error.Overflow;
 
     const payload = "hello, world";

@@ -80,7 +80,7 @@ const ElfConst = struct {
 };
 
 fn buildMinimalElf64Header() Elf64Ehdr {
-    var ident = [_]u8{0} ** 16;
+    var ident: [16]u8 = @splat(0);
     ident[0] = 0x7F;
     ident[1] = 'E';
     ident[2] = 'L';

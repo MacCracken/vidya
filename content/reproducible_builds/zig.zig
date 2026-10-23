@@ -49,8 +49,8 @@ fn cas_path(content: i64) i64 {
 const MAX_FILES: usize = 128;
 
 const FileSet = struct {
-    name: [MAX_FILES]i64 = [_]i64{0} ** MAX_FILES,
-    content: [MAX_FILES]i64 = [_]i64{0} ** MAX_FILES,
+    name: [MAX_FILES]i64 = @splat(0),
+    content: [MAX_FILES]i64 = @splat(0),
     n: usize = 0,
 
     fn set(self: *FileSet, i: usize, name: i64, content: i64) void {

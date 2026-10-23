@@ -47,8 +47,8 @@ fn argmax(x: []const i64) usize {
     return best_idx;
 }
 
-var last_hidden: [N_HIDDEN]i64 = [_]i64{0} ** N_HIDDEN;
-var last_output: [N_OUT]i64 = [_]i64{0} ** N_OUT;
+var last_hidden: [N_HIDDEN]i64 = @splat(0);
+var last_output: [N_OUT]i64 = @splat(0);
 
 fn forward(input: []const i64) usize {
     dense(&W_HIDDEN, &B_HIDDEN, input, last_hidden[0..], N_IN, N_HIDDEN);

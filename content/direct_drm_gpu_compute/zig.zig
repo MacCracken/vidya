@@ -9,10 +9,10 @@ const VA_CAP: usize = 32;
 
 const Device = struct {
     fd: i64 = 0,
-    bo_size: [BO_CAP]u64 = [_]u64{0} ** BO_CAP,
+    bo_size: [BO_CAP]u64 = @splat(0),
     next_bo: u32 = 1,
-    va_addr: [VA_CAP]u64 = [_]u64{0} ** VA_CAP,
-    va_bo: [VA_CAP]u32 = [_]u32{0} ** VA_CAP,
+    va_addr: [VA_CAP]u64 = @splat(0),
+    va_bo: [VA_CAP]u32 = @splat(0),
     va_count: usize = 0,
     next_seq: u64 = 1,
     completed_seq: u64 = 0,

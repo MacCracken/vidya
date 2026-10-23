@@ -7,11 +7,11 @@ const std = @import("std");
 const PASS_CAP: usize = 16;
 
 const Graph = struct {
-    pass_id: [PASS_CAP]u64 = [_]u64{0} ** PASS_CAP,
-    reads: [PASS_CAP]u64 = [_]u64{0} ** PASS_CAP,
-    writes: [PASS_CAP]u64 = [_]u64{0} ** PASS_CAP,
+    pass_id: [PASS_CAP]u64 = @splat(0),
+    reads: [PASS_CAP]u64 = @splat(0),
+    writes: [PASS_CAP]u64 = @splat(0),
     count: usize = 0,
-    topo_order: [PASS_CAP]usize = [_]usize{0} ** PASS_CAP,
+    topo_order: [PASS_CAP]usize = @splat(0),
     topo_len: usize = 0,
 
     fn addPass(self: *Graph, id: u64, r: u64, w: u64) i32 {
@@ -29,7 +29,7 @@ const Graph = struct {
     }
 
     fn topoSort(self: *Graph) usize {
-        var in_degree: [PASS_CAP]i32 = [_]i32{0} ** PASS_CAP;
+        var in_degree: [PASS_CAP]i32 = @splat(0);
         var i: usize = 0;
         while (i < self.count) : (i += 1) {
             var j: usize = 0;

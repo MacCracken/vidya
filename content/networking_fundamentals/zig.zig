@@ -12,17 +12,17 @@ const ST_FIN_WAIT: u8 = 4;
 const SOCK_CAP: usize = 8;
 const BUF_CAP: usize = 256;
 
-var state: [SOCK_CAP]u8 = [_]u8{ST_CLOSED} ** SOCK_CAP;
-var port_arr: [SOCK_CAP]u16 = [_]u16{0} ** SOCK_CAP;
-var peer: [SOCK_CAP]usize = [_]usize{0} ** SOCK_CAP;
-var rxbuf: [SOCK_CAP][BUF_CAP]u8 = [_][BUF_CAP]u8{[_]u8{0} ** BUF_CAP} ** SOCK_CAP;
-var rxlen: [SOCK_CAP]usize = [_]usize{0} ** SOCK_CAP;
+var state: [SOCK_CAP]u8 = @splat(ST_CLOSED);
+var port_arr: [SOCK_CAP]u16 = @splat(0);
+var peer: [SOCK_CAP]usize = @splat(0);
+var rxbuf: [SOCK_CAP][BUF_CAP]u8 = @splat(@splat(0));
+var rxlen: [SOCK_CAP]usize = @splat(0);
 // Linear-scan port-to-sock map to avoid Zig's codegen bug on large
 // global @memset (a 65536-entry table tripped "emit MIR failed:
 // InvalidInstruction"). With only SOCK_CAP sockets we can never have
 // more than SOCK_CAP active ports anyway.
-var pmap_port: [SOCK_CAP]u16 = [_]u16{0} ** SOCK_CAP;
-var pmap_sock: [SOCK_CAP]usize = [_]usize{0} ** SOCK_CAP;
+var pmap_port: [SOCK_CAP]u16 = @splat(0);
+var pmap_sock: [SOCK_CAP]usize = @splat(0);
 var pmap_count: usize = 0;
 var next_free: usize = 1;
 
@@ -61,12 +61,12 @@ fn pmap_remove(p: u16) void {
 }
 
 fn net_init() void {
-    state = [_]u8{ST_CLOSED} ** SOCK_CAP;
-    port_arr = [_]u16{0} ** SOCK_CAP;
-    peer = [_]usize{0} ** SOCK_CAP;
-    rxlen = [_]usize{0} ** SOCK_CAP;
-    pmap_port = [_]u16{0} ** SOCK_CAP;
-    pmap_sock = [_]usize{0} ** SOCK_CAP;
+    state = @splat(ST_CLOSED);
+    port_arr = @splat(0);
+    peer = @splat(0);
+    rxlen = @splat(0);
+    pmap_port = @splat(0);
+    pmap_sock = @splat(0);
     pmap_count = 0;
     next_free = 1;
 }

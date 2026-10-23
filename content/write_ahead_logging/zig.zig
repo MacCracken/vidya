@@ -20,12 +20,12 @@ const OP_SET: i64 = 1;
 const OP_DEL: i64 = 2;
 const STORE_KEYS: usize = 16;
 
-var log_buf: [LOG_CAP_BYTES]u8 = [_]u8{0} ** LOG_CAP_BYTES;
+var log_buf: [LOG_CAP_BYTES]u8 = @splat(0);
 var log_offset: usize = 0;
 var log_committed: usize = 0;
 
-var data_vals: [STORE_KEYS]i64 = [_]i64{0} ** STORE_KEYS;
-var data_present: [STORE_KEYS]u8 = [_]u8{0} ** STORE_KEYS;
+var data_vals: [STORE_KEYS]i64 = @splat(0);
+var data_present: [STORE_KEYS]u8 = @splat(0);
 
 fn logReset() void {
     log_offset = 0;

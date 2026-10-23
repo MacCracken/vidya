@@ -107,7 +107,7 @@ fn speed(distance: Meters, time: Seconds) f64 {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -159,7 +159,9 @@ pub fn main() !void {
     const info = @typeInfo(Point);
     switch (info) {
         .@"struct" => |s| {
-            try expect(s.fields.len == 2);
+            // 0.17: parallel `field_names` / `field_types` slices
+            try expect(s.field_names.len == 2);
+            try expect(s.field_types[0] == f64);
         },
         else => unreachable,
     }

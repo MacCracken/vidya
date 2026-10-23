@@ -9,13 +9,13 @@ const QUORUM: usize = 2;
 const Role = enum(u8) { follower = 0, candidate = 1, leader = 2 };
 
 const Cluster = struct {
-    role: [N_NODES]Role = [_]Role{.follower} ** N_NODES,
-    term: [N_NODES]i64 = [_]i64{0} ** N_NODES,
-    voted_for: [N_NODES]i32 = [_]i32{-1} ** N_NODES,
-    log_count: [N_NODES]usize = [_]usize{0} ** N_NODES,
-    log_terms: [N_NODES][MAX_LOG]i64 = [_][MAX_LOG]i64{[_]i64{0} ** MAX_LOG} ** N_NODES,
-    log_values: [N_NODES][MAX_LOG]i64 = [_][MAX_LOG]i64{[_]i64{0} ** MAX_LOG} ** N_NODES,
-    commit_idx: [N_NODES]i32 = [_]i32{-1} ** N_NODES,
+    role: [N_NODES]Role = @splat(.follower),
+    term: [N_NODES]i64 = @splat(0),
+    voted_for: [N_NODES]i32 = @splat(-1),
+    log_count: [N_NODES]usize = @splat(0),
+    log_terms: [N_NODES][MAX_LOG]i64 = @splat(@splat(0)),
+    log_values: [N_NODES][MAX_LOG]i64 = @splat(@splat(0)),
+    commit_idx: [N_NODES]i32 = @splat(-1),
 
     fn lastLogIndex(self: *const Cluster, n: usize) i32 {
         return @as(i32, @intCast(self.log_count[n])) - 1;

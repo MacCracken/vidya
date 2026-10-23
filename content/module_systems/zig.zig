@@ -144,7 +144,7 @@ const platform = struct {
 
     pub fn pageSize() usize {
         // comptime switch on build target — like Rust's cfg!
-        return switch (@import("builtin").os.tag) {
+        return switch (@import("builtin").target.os.tag) {
             .linux => 4096,
             .macos => 16384, // Apple Silicon uses 16K pages
             .windows => 4096,
@@ -153,7 +153,7 @@ const platform = struct {
     }
 
     pub fn pathSeparator() u8 {
-        return if (@import("builtin").os.tag == .windows) '\\' else '/';
+        return if (@import("builtin").target.os.tag == .windows) '\\' else '/';
     }
 };
 
