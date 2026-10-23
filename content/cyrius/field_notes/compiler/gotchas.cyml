@@ -19,6 +19,10 @@
 #   the prefix used to mean. Live paths were repaired at the v6.6.1 audit; remaining
 #   mentions are inside narratives about bugs found when the file was called that.
 #
+# 208 entries at 6.7.18 (DERIVED, the same grep). 6.7.18 (the full security audit + the refactor / optimization review)
+# added TWO — an_optimization_must_keep_the_slow_paths_fault_surface_v6718 (the optimize lane's FINDLOCAL, found by the
+# merged tree's check.sh) and a_target_specific_row_must_say_skip_by_name_v6718 (two rows that compiled into nothing on
+# ecb). 6.7.17's bump added a_per_name_check_must_ask_its_cheap_question_first_v6717 after the count below was taken.
 # 205 entries at 6.7.17 (DERIVED, the same grep). 6.7.17 (the cleanup: seventeen lanes over four waves) added THREE,
 # each a CLASS entry — one_writer_for_every_diagnostic_mutes_a_read_and_holds_the_order_v6717 (feg's writer sweep + ZR1),
 # an_effect_summary_that_wins_back_a_copy_is_an_allow_list_read_through_the_real_resolution_v6717 (GA1),
@@ -11682,3 +11686,43 @@ value's own tokens, `_hl_amp_sid`) gives the same answer and walks only for the 
 RULE: a check that runs per statement or per name must lead with the question that is O(1) (a table lookup, the
 value's own tokens) and walk the token stream only for what survives it. A gate measuring compile time against the
 global count is what catches the other order — read its ratio, not its absolute time, before calling a red "load".
+
+[[entries]]
+name = "an_optimization_must_keep_the_slow_paths_fault_surface_v6718"
+description = "6.7.18's optimize lane gave FINDLOCAL a masked-word fast path (4ee8da87d) that read the looked-up name's length and first word at ENTRY, where the STREQ walk it replaced read the name only once a live slot was compared. A NUMBER token where a declared name belongs (`var 140737488355327 = 1;` in a fn) hands in a value that is no name-pool offset, and cycc SIGSEGV'd (rc 139). The lane's review missed it; the merged tree's check.sh found it (intrinsic_names_reserved.sh); fixed 0f5d18c2b by reading lazily, the speedup kept."
+tags = ["v6.7.18", "optimize", "fast path", "FINDLOCAL", "STREQ", "SIGSEGV", "fault surface", "hoisted read", "intrinsic_names_reserved", "check.sh", "perf"]
+category = "cyrius"
+---
+FOUND: intrinsic_names_reserved.sh's row "a number as a declared name" went RED in the merged tree's check.sh (rc 139 at
+09c0e1bb1) — after the optimize lane had passed its own gates and its one review. hot_path_call_counts.sh, the lane's
+gate, pinned the call counts and stayed green: it measured the speedup, not the inputs the slow path tolerated.
+
+THE SHAPE: the old FINDLOCAL walked a fn's local slots backward and called STREQ per live slot, so the looked-up name was
+read only when a live slot was compared — a malformed name (a NUMBER token's value, not a name-pool offset) with no live
+slot to compare was never dereferenced. The fast path compares the slot's offset, then the name's first word masked to
+its length, and calls STREQ only for a match of 8 bytes or more — but it loaded that word and length once, up front, so
+every call dereferenced the name. Same answers on every valid input; a fault on the one the slow path
+survived. The fix reads the length and first word on the first live slot compared: the old fault surface exactly.
+
+RULE: a fast path that hoists a read must read only what the slow path was guaranteed to read, on the same inputs — an
+optimization changes speed, never which inputs fault. Run the WHOLE gate suite on a perf change, not only its own gates:
+the regressions a speedup makes are on the inputs nobody measured.
+
+[[entries]]
+name = "a_target_specific_row_must_say_skip_by_name_v6718"
+description = "Two new 6.7.18 rows — inline_asm_frame_any_return_type.tcyr (x86 inline asm) and thread_local_foreign_one_owner.tcyr (Linux foreign-TLS) — compiled into nothing on targets they do not cover and failed the release gate's full corpus on ecb (arm64 macOS) with \"assert summary reports 0 assertions\": the corpus counts zero assertions as a failure. Fixed fa81222a4 with the at_family_dirfd_relative.tcyr idiom: every arm runs its rows or prints a SKIP by name and sets an armed flag, then `assert_eq(_armed, 1, ..)`."
+tags = ["v6.7.18", "tcyr", "corpus", "cross-OS", "ecb", "0 assertions", "SKIP", "_armed", "#ifdef", "target-specific", "release gate"]
+category = "cyrius"
+---
+FOUND: the first release-gate run (b9b11e19a) was RED on ecb's full-corpus leg. On x86 Linux both rows ran and passed;
+on arm64 (ecb, pi) the inline-asm row's `#ifdef` left an empty program, and on macOS / Windows the foreign-TLS row did
+the same. An empty `.tcyr` still calls `assert_summary()` — with zero assertions, which the corpus runner reports as a
+failure ("assert summary reports 0 assertions") so a test that silently tests nothing is never read as a pass.
+
+THE SHAPE: a row written and reviewed on one target is green there; the targets it does not cover only show up on the
+hosts. "Compiles everywhere" is not "says something everywhere".
+
+RULE: every arm of a target-specific test either runs its rows or prints `SKIP: <why>` by name and sets `_armed = 1`;
+the file ends `assert_eq(_armed, 1, "a target arm ran: the rows, or a SKIP by name")` (tests/tcyr/crossos/
+at_family_dirfd_relative.tcyr). A missing arm is then one named failure, not zero assertions. Build and run a new row
+for aarch64 (qemu-aarch64) and PE (wine) before the gate, as the fix was verified, or the hosts find it for you.

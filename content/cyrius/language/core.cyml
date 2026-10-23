@@ -1,6 +1,9 @@
 # Cyrius — Core Reference
 # Overview, syntax, compiler architecture, dev loop, current limitations,
 # porting guide, stdlib catalog.
+# 2026-10-23 at v6.7.18: overview re-stamped (cycc 2,929,832 B, .text 2,762,608; cycc-native-aarch64 3,155,368 B;
+# modules 100 — the frontend in src/frontend/lex/ and src/frontend/parse/ folders; counts DERIVED on the 6.7.18 tree;
+# heapmap.sh's 115 regions unchanged; the 6.7.18 release gate, GREEN on fa81222a4); the moved files' current paths.
 # 2026-10-21 at v6.7.16: overview version/size line re-stamped (cycc 2,822,280 B, .text 2,592,616 from readelf;
 # cycc-native-aarch64 3,084,584 B; modules 37, unchanged; .tcyr / crossos / lib / programs / shell-gate counts and
 # api-surface 5,892 DERIVED on the 6.7.16 tree; heapmap.sh's 115 regions unchanged; dead-code floor 51 fns / 10,408 B;
@@ -123,13 +126,18 @@ THE COMPILER BINARY:
 - Windows PE32+ self-hosts natively byte-identical (`cycc_win.exe`
   on Windows 11 produces output matching Linux cross-build
   byte-for-byte).
-- 37 compiler modules (frontend lex/lex_attr/lex_pp/parse +
-  parse_{cov,ctrl,decl,expr,fn,fn_def,types},
+- 100 compiler modules (frontend/lex/{lex,attr} +
+  frontend/lex/pp/ (8: the preprocessor) + frontend/parse/ (14: parse,
+  state, prog, stmt, ctrl, switch, assign, ..) + frontend/parse/{decl,
+  expr,fn,types}/ (12 / 12 / 15 / 11),
   frontend/ts/{lex,parse,driver,driver_args,driver_flags,driver_input},
   backend/{x86,aarch64,macho,pe,cx,js,common},
   common/{heap_regions,util,ir,syscall_xlat}) + 7 per-target main
   forks (derive: `find src -name '*.cyr' | grep -v /main | grep -v
-  version_str | wc -l`; 37 at 6.7.15 and 6.7.16 — 6.7.16 moved
+  version_str | wc -l`; 100 at 6.7.18 — 6.7.18 moved the frontend into
+  src/frontend/lex/ and src/frontend/parse/ and split lex_pp.cyr,
+  parse.cyr and parse_{decl,expr,fn,types}.cyr into folders, the moves
+  byte-identical; 37 at 6.7.15 – 6.7.17 — 6.7.16 moved
   parse_fn.cyr's wave-4 fns into parse_fn_def.cyr for cyrfmt's /
   cyrlint's read-cap headroom, adding no module; 32 at 6.7.11 – 6.7.14 — 6.7.15 added
   `frontend/parse_fn_def.cyr` (parse_fn.cyr split at cyrfmt's /
@@ -138,6 +146,18 @@ THE COMPILER BINARY:
   compiler, PL-13, 6.7.15's D38); 31 at 6.7.10 — 6.7.11 added the
   pure `frontend/lex_attr.cyr` the lexer and six tools include — and
   28 at 6.6.19).
+- As of 6.7.18 (2026-10-23, the full security audit + the refactor /
+  optimization review; the user tags; 6.7.17 is the last tag): `cycc`
+  self-hosts byte-identical at 2,929,832 B (.text 2,762,608), +6,296 B
+  over 6.7.17's 2,923,536; `build/cycc-native-aarch64` 3,155,368 B
+  (1.077x); dead-code floor 51 fns / 10,376 B; 708 .tcyr (391 in
+  crossos/); 106 lib/*.cyr; 85 programs/*.cyr; 596 shell gate scripts;
+  heap map 115 regions (unchanged); api-surface 5,932. Release gate
+  GREEN 2026-10-23 on fa81222a4: check.sh 128 / 128 driver rows, 600 /
+  600 shell gates, 0 SKIPs; ecb, ach, cass and pi SELFHOST_OK +
+  LIBTEST_OK on the full corpus; self_compile 978 ms (same-box 6.7.17
+  1,566 -> 6.7.18 984 ms, -37.2 %). types.cyml has the 6.7.17 and
+  6.7.18 deltas.
 - As of 6.7.16 (2026-10-21, Break 2 repair 6 — what 6.7.15 filed,
   103 issues triaged at the open, and what 6.7.16's own lanes found;
   the user tags; 6.7.15 is the last tag, at ce23de59e): `cycc` (the
@@ -726,7 +746,7 @@ name = "type_names_v6616"
 description = "The one type-name vocabulary: every annotation, sizeof and #assert sizeof match WHOLE names; a non-type is refused by name (6.6.16)"
 category = "cyrius"
 ---
-THE VOCABULARY (src/frontend/parse_types.cyr `_tn_resolve`, struct lookup first):
+THE VOCABULARY (src/frontend/parse/types/type.cyr `_tn_resolve`, struct lookup first):
     i8 i16 i32 i64 / u8 u16 u32 u64    1 2 4 8      (u128: a keyword, 16)
     f32 f64                            4 8
     bool cstring Result Option Tagged  8            plain words (Result / Option / Tagged
@@ -956,24 +976,25 @@ MODULES (included by src/main.cyr and the 6 other per-target forks):
     backend/js/*             — TS/TSX -> JS emitter (`--emit-js`)
     backend/common/          — runtime.cyr, tokens.cyr, env.cyr (shared
                                by every fork)
-    frontend/lex.cyr         — tokenizer
-    frontend/lex_pp.cyr      — preprocessor (include / ifdef / derive /
-                               macros)
-    frontend/parse.cyr + parse_{cov,ctrl,decl,expr,fn,fn_def,types}.cyr
-                             — parser + codegen. parse_fn_def.cyr (6.7.15,
-                               W0-2, 6.7.15's D25 A) holds the top-level
-                               scans (pass 1 / pass 2, the directive
-                               dispatcher, `use`, the declaration-after-
-                               the-first-statement rule), the definition
-                               identity / duplicate checks and
-                               `_PARSE_FN_DEF_IMPL`, moved unchanged out of
-                               parse_fn.cyr, which had grown to 3,347 B
-                               under cyrfmt's / cyrlint's 1,052,672 B read
-                               cap; parse.cyr includes it right after
-                               parse_fn.cyr, the token stream is the same,
-                               and every fork built byte-identical. The
-                               6.7.16 wave-4 integration moved parse_fn.cyr's
-                               new fns there too (the headroom row)
+    frontend/lex/lex.cyr     — tokenizer (lex/attr.cyr: the one list of
+                               `#` attribute words, which the lexer and
+                               six source-scanning tools include)
+    frontend/lex/pp/*        — preprocessor (include / ifdef / derive /
+                               macros; lex_pp.cyr until 6.7.18)
+    frontend/parse/parse.cyr — parser + codegen: the hub that includes,
+                               in the old order, the pieces beside it
+                               (state, vis, pair_scan / pair_check, ctrl,
+                               cov, switch, builtin, assign, deref_store,
+                               assign_copy, stmt, prog) and the folders
+                               parse/types/, parse/expr/, parse/decl/ and
+                               parse/fn/ (fn/def.cyr: the top-level scans,
+                               pass 1 / pass 2, the directive dispatcher,
+                               `use`, the definition identity checks and
+                               `_PARSE_FN_DEF_IMPL` — parse_fn_def.cyr in
+                               6.7.15 – 6.7.17). 6.7.18 split parse.cyr,
+                               parse_{decl,expr,fn,types}.cyr and
+                               lex_pp.cyr along their seams, each piece
+                               moved unchanged, every fork byte-identical
     frontend/ts/*            — TypeScript-syntax lexer + parser, and since
                                6.7.15 (D38) the driver pieces main.cyr's TS
                                modes moved into, token for token, at its own
