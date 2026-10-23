@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-10-23 (v2.8.7 ship; see the 2.8.7 block below, and the 2.8.6 sweep from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
+> **Last refresh**: 2026-10-23 (v2.9.0 ship; see the 2.9.0 block below, and the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -17,6 +17,22 @@ type: state
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
+
+## 2026-10-23 (v2.9.0) — cyrius 6.7.15
+
+| Doc | Updated for 2.9.0 |
+|---|---|
+| `CHANGELOG.md` | 2.9.0 entry: the three-build output-equivalence table, the size split (compiler / stdlib / vyakarana), the `gcd` shadow, four Fixed items (the missing-`id` segfault, the 8× top-level arrays, the em dash, the log byte), and the benchmark table with its harness-free follow-up. |
+| `cyrius.cyml` | `[deps]` comment gains a 6.7.15 block (folds, `math` / `unicode/`, the `gcd` shadow, the `hashmap_fast` footprint note, never two cyrius commands at once); the vyakarana block covers 2.4.3 → 2.9.1. |
+| `CLAUDE.md` | Aggregate-scripts table: run nothing else cyrius in the tree while `validate-content.sh` runs. |
+| `docs/development/state.md` | Version, pin, binary size, bench-baseline note (now covers hits too), the warnings paragraph, dep rows, stdlib count (75), 2.9.0 posture. |
+| `docs/development/roadmap.md` | Header → 2.9.0 / 6.7.15; 2.8.x row closed, 2.9.x row opened; P5's target moved 2.8.x → 2.9.x in its three mentions; "Current pin" → 6.7.15. |
+| `docs/sources.md` | Cyrius pin row → 6.7.15. |
+
+**Correction carried**: 2.8.6 said a `reg_get_hit` "holds at ~85–87 ns … as
+expected for a hit on the first probe". 2.9.0's harness-free runs show hits
+reaching 130–394 ns on some seeds at both pins. The 2.8.6 entry stays as
+written, as history, and the 2.9.0 entry records the correction.
 
 ## 2026-10-23 (v2.8.7) — Zig 0.17 stamps
 

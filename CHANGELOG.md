@@ -7,6 +7,182 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.0] — 2026-10-23
+
+Toolchain minor. **cyrius 6.6.20 → 6.7.15**, the move onto cyrius's 6.7
+language line, and **vyakarana 2.4.3 → 2.9.1**, the newest tag on that pin.
+The folded stdlib leaves move with the snapshot: bayan 1.5.12 → 1.9.0,
+sandhi 1.10.8 → 1.13.1, sigil 3.13.10 → 3.13.12, sakshi 2.5.7 → 2.5.10. No
+content added (77 topics / 847 examples, 0 gaps). `cyrius test` **140/0**
+(+1, a regression test), 12 benchmarks, and content gate **847/847**, strict,
+zero skips.
+
+vidya's own source needed **no change for 6.7**. It built and passed its tests
+first time, despite 6.7's reserved words (`trait`, `const`, `true`, `false`,
+`do`, `dyn`), `!` as an operator, and arity-checked forward calls. A separate
+audit read the migration guide's 6.7.0–6.7.15 sections against every line of
+vidya's Cyrius and found no silent semantic change either: vidya uses no typed
+pointers, structs, generics or f64. Of the 316 stdlib functions it calls,
+those that changed did so in ways it cannot observe: `exec_cmd` children now
+start with default signal dispositions, and sandhi's server internals moved
+while its return contract held. The source edits in this release are **four
+pre-existing bugs** that the bump's verification surfaced (see Fixed). The
+worst is a segfault that took down `serve`.
+
+### Verified — the toolchain move is output-neutral; vyakarana changes colour only
+
+Every observable output was dumped from three builds and byte-compared: `info`
+for all 77 topics, `code` for all 847 examples, `list` / `stats` / `gaps` /
+`languages`, five searches, and 11 `serve` endpoints.
+
+| Build | vs previous | Result |
+|---|---|---|
+| cyrius 6.6.20 + vyakarana 2.4.3 (2.8.7) | — | baseline |
+| cyrius **6.7.15** + vyakarana 2.4.3 | baseline | **byte-identical everywhere** |
+| cyrius 6.7.15 + vyakarana **2.9.1** (2.9.0) | middle build | CLI and `serve` identical. `code` differs in **287 of 847** examples, all in colour; plain text is byte-identical in every one |
+
+The colour changes are vyakarana's intended token fixes. 2.7.0 makes a decimal
+one `number` token (`2.0`, not `2` `.` `0`), which reaches all 77 OpenQASM
+files and every float literal elsewhere. 2.7.1 makes byte strings one token
+(`b"…"`), and 2.6.0 does the same for shell positionals (`$1`). By language:
+openqasm 77, shell 63, python 52, rust 35, typescript 17, zig 16, go 15, c 10,
+cyrius 2.
+
+### Changed — cyrius 6.6.20 → 6.7.15
+
+**Binary 2,683,032 → 2,820,176 B (+137,144, +5.1 %) from the dependencies
+alone.** The shipped 2.9.0 binary is 2,762,208 B, after the array fix under
+Fixed. Split with two scratch
+builds: the 6.7.15 compiler over the *6.6.20* lib is 2,674,840 B (**compiler
+−8,192**); the 6.7.15 snapshot with vyakarana 2.4.3 is 2,897,752 B (**stdlib
++222,912**); and vyakarana 2.9.1 takes **77,576** back (see below). The
+stdlib growth is again mostly `bayan` (+180,407 B of source). bayan now also
+pulls in `lib/math.cyr` and a `lib/unicode/` directory of casefold, category
+and normalisation tables (353 KB of source), so `lib/` went **73 → 75
+entries**. Static data went the other way, **515,728 → 193,664 B**: sigil's
+256 KiB crypto-bank buffer is no longer in `.bss`, and its build warning is
+gone.
+
+**`lib/math.cyr` broke one content example.** It defines `gcd`, and `cyrius run`
+prepends this manifest's stdlib to every content example, so
+`algorithms/cyrius.cyr`'s own `fn gcd` became a duplicate-fn shadow. The gate
+fails on that since 2.8.3, and it was the gate's only failure. The shadow was
+real. That `gcd` returns −6 for `gcd(48, -18)` (verified), where the stdlib's
+makes signs positive first. Last-definition-wins would have handed the wrong
+one to the stdlib's own `lcm`. Renamed to `gcd_euclid`, with a comment saying
+why.
+
+A new resolve note now prints on every resolve: `lib/hashmap_fast.cyr` "is
+outside the declared footprint". `cyrius lib sync` still copies it as a
+declared-subset sibling, but `cyrius deps` no longer resolves it. It is
+harmless, because `lib/` is gitignored and CI recreates the same state.
+
+**Never run two cyrius commands in one tree.** Every `cyrius run` / `build`
+re-resolves the vyakarana git dep and moves `lib/vyakarana.cyr` out and back
+(absent in 486 of the polls taken during one `cyrius run`, then back on the
+same inode). A `cyrius build` alongside the content gate failed with "cannot
+hash lib/vyakarana.cyr (errno 2)". Recorded in `CLAUDE.md` and `cyrius.cyml`.
+
+### Changed — vyakarana 2.4.3 → 2.9.1
+
+Five minors. The public API is unchanged throughout (`tokenize_stream_*`,
+`tokenbuf_*`, `kind_name`, `has_grammar`), so no call site moved. The minors
+are earned by token-boundary fixes: 2.6.0 (shell), 2.7.0 (number literals),
+2.7.1 (12 grammars), and 2.9.1 (markdown fences, closeout audit). The effect
+on vidya is the colour-only `code` difference above. 2.9.0 compacted the
+embedded grammars, so the bundle is 38,978 B smaller as source and vidya's
+binary 77,576 B smaller. 2.8.0's chunk-invariance work is inert here, as
+2.4.0's was, because `render_code` feeds each file in one
+`tokenize_stream_feed`. 2.5.2 also fixed a segfault in
+`has_grammar(0)` / `tokenize_stream_new(0)` (an unknown language). vidya
+was never exposed: `render_code` passes a fixed per-language stem from
+`lang_stem`, never 0, and asks `has_grammar` before it opens a stream.
+
+### Fixed
+
+- **A `concept.toml` without an `id` crashed every command, and `serve` on hot
+  reload.** `load_concept` joins each example's file name onto the topic id,
+  and with no `id` it passed 0 to `path_join`, which dereferenced it: exit
+  139. That covers a file truncated mid-save, a typo'd key, or junk. Under
+  `serve` the hot reloader fires on exactly that mid-save state. The reload
+  path was *designed* to refuse a bad topic and keep the live registry, but
+  it never got the chance. Verified on the 6.6.20 build: one bad file killed
+  `serve` on its next request. Now `load_concept` refuses a topic without an
+  `id` (return 0), so `load_all` skips the topic and a reload keeps the live
+  registry. That was checked by breaking a file under a running `serve`: it
+  stays up, `/stats` still reports 77 topics, and `/info/strings` still
+  answers 200. A crash matrix also ran 8 CLI commands and 7 endpoints against
+  four broken files (no `id`, `id` only, an empty table, junk), with no
+  crash. The new `missing_id` test group (`tests/fixtures/missing_id/`: no
+  `id`, one example file) **segfaults on the old source** and passes on the
+  new. A defensive `sections == 0` check was added beside it, because
+  `toml_parse` returns 0 on an allocation failure. The audit that surfaced
+  this misattributed it to `toml_parse` returning 0 on malformed input. It
+  does not: it returned a vec for every input tried, junk included.
+- **Two top-level arrays were 8× their intended size.** A bare `var x[N]` is
+  N *bytes* inside a fn but N *i64 slots* at top level (cyrius documents the
+  trap in `content/cyrius/language/agents.cyml`). `_tool_probe[88]`, whose
+  comment said "`var buf[N]` is N BYTES — LANG_COUNT × 8 B", reserved 704 B
+  for 88 B of use. `_inotify_buf[8192]` reserved 64 KiB for an 8,192-byte
+  read. Both now use the position-independent typed form, `i64[11]` and
+  `u8[8192]`, sizes measured at 6.7.15. This is harmless over-reservation,
+  not an overflow, but it sat in the file's static data: **the binary is
+  57,968 B smaller** for it (2,820,176 → 2,762,208), with static data at
+  193,664 → 135,696 B.
+- **`vidya search` dropped the space after the em dash** on every result line
+  (`networking_fundamentals —TCP and UDP…`). `src/main.cyr` wrote `" — "` with
+  length 4, but the em dash is 3 bytes of UTF-8, so the literal is 5. The bug
+  dates from 2026-04-08. It was invisible to the tests, because the CLI
+  printer lives in `main.cyr`, outside the `vidya_core.cyr` layer the tests
+  include. 6.7.15's `cyrius lint` found it ("write length 4, but its literal
+  is 5 bytes"). The other 49 literal writes in `src/` and `tests/` were
+  checked by script and are exact. `serve`'s JSON was never affected.
+- **The "no content found" log line dropped its last byte.**
+  `sakshi_error("no content found in content/", 27)` wrote 27 bytes of a
+  28-byte literal, so the log read `content` instead of `content/`. This is
+  the same class as the em dash, but in a call the lint does not check. A
+  wider scan of every `"literal", N` call in `src/` and `tests/` (70) found no
+  others.
+
+### Benchmarks — no real change
+
+The harness is byte-identical across these pins (`lib/bench.cyr`), so unlike
+2.8.6 the rows compare directly. Interleaved A/B on one machine, three
+rounds. This measures the dependency bump on its own, before the Fixed items.
+Of those, only the `id` check touches a benchmarked path (one comparison per
+`load_concept`):
+
+| Bench | 6.6.20 | 6.7.15 | Δ mean | per-round Δ |
+|---|---|---|---|---|
+| load_concept | 51.196 µs | 50.476 µs | −1.4 % | −1 / −1 / −2 % |
+| load_all | 8.045 ms | 8.143 ms | +1.2 % | +1 / +1 / +1 % |
+| reg_get_hit | 91 ns | 162 ns | (+77.0 %) | −1 / +91 / +142 % |
+| reg_get_miss | 165 ns | 120 ns | (−27.5 %) | −73 / +151 / +23 % |
+| search_text | 5.693 µs | 5.689 µs | −0.1 % | +0 / −0 / −0 % |
+| search_text_exact | 11.236 µs | 11.228 µs | −0.1 % | +0 / +0 / −1 % |
+| toml_sections | 2.095 µs | 1.975 µs | −5.7 % | −6 / −6 / −5 % |
+| json_info_response | 9.236 µs | 9.297 µs | +0.7 % | −1 / +1 / +2 % |
+| json_search_response | 249.155 µs | 250.488 µs | +0.5 % | +0 / +1 / +1 % |
+| json_list_response | 113.070 µs | 114.797 µs | +1.5 % | +3 / +1 / +1 % |
+| field_escaped | 3.429 µs | 3.364 µs | −1.9 % | −6 / −0 / +0 % |
+| field_raw_splice | 581 ns | 572 ns | −1.6 % | −7 / +1 / +2 % |
+
+Three rows looked like they moved, and a harness-free loop (six processes per
+pin) settles each:
+
+- **`reg_get_hit` / `reg_get_miss` are a seed lottery at both pins.**
+  `hashmap.cyr` and `hashseed.cyr` differ between the pins *only in comments*.
+  A hit sits at ~87–88 ns, but with outliers at both pins (130 ns at 6.6.20;
+  394 and 183 ns at 6.7.15), and misses range 50–726 ns. **Correction to
+  2.8.6**, which said a hit "holds at ~85–87 ns … as expected for a hit on
+  the first probe". That is only true when the seed puts no collision on the
+  key's probe path. Both rows carry the per-process `getrandom` seed, and
+  neither is a regression signal.
+- **`toml_sections` is flat.** Harness-free, it reads 1.93–1.95 µs vs
+  1.95–1.99 µs, +1–2 %, the opposite sign to the bench's −5.7 %. The
+  consistent bench delta is code-layout variance between two different
+  binaries, not a bayan speed-up.
+
 ## [2.8.7] — 2026-10-23
 
 Content toolchain cut: **Zig 0.16.0 → 0.17.0**, for the corpus and the CI pin

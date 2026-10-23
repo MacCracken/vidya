@@ -2,7 +2,7 @@
 
 > **Status**: Active | **Last Updated**: 2026-10-23
 >
-> **Version**: 2.8.7 (content toolchain cut — Zig 0.16 → 0.17 across the corpus; 2.8.6 took cyrius 6.6.20 + vyakarana 2.4.3; P5 content opens in a later 2.8.x) | **Cyrius**: 6.6.20 (Zig content pin: 0.17.0)
+> **Version**: 2.9.0 (toolchain minor — cyrius 6.7.15, the 6.7 language line, + vyakarana 2.9.1; P5 content opens in a later 2.9.x) | **Cyrius**: 6.7.15 (Zig content pin: 0.17.0)
 > **Topics**: 77 (77 fully covered) — **P0 → P4 complete** 🎉
 > **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
 > **Examples**: 847 source files; concept files: 77
@@ -26,7 +26,8 @@ This table is one row per minor for navigation only.
 | 2.5.x | **P2 distributed systems** | +3 → 69 | 759/759 | 2026-05-03 |
 | 2.6.x | **P3 audio + AI/ML** | +5 → 74 | 814/814 | 2026-05-03 |
 | 2.7.x | **P4 build systems** (2.7.0–2.7.2 infra-only; 2.7.3 content) | +3 → 77 | 847/847 | 2026-06-12 |
-| 2.8.x | **Infra + correctness** — cyrius 6.1.41 → 6.4.2 (2.8.0), → 6.5.29 + sakshi stdlib fold-in (2.8.1), five user-visible defect fixes + the `src/vidya_core.cyr` split (2.8.2), then → 6.5.31 + a corpus-wide example review and four new gate checks (2.8.3), then → 6.5.35 + vyakarana 2.4.0 (2.8.4), → 6.6.2 (2.8.5), → 6.6.20 + vyakarana 2.4.3 (2.8.6), then Zig 0.16 → 0.17 across the corpus (2.8.7). P5 opens later in the series. | 77 | 847/847 | in progress |
+| 2.8.x | **Infra + correctness** — cyrius 6.1.41 → 6.4.2 (2.8.0), → 6.5.29 + sakshi stdlib fold-in (2.8.1), five user-visible defect fixes + the `src/vidya_core.cyr` split (2.8.2), then → 6.5.31 + a corpus-wide example review and four new gate checks (2.8.3), then → 6.5.35 + vyakarana 2.4.0 (2.8.4), → 6.6.2 (2.8.5), → 6.6.20 + vyakarana 2.4.3 (2.8.6), then Zig 0.16 → 0.17 across the corpus (2.8.7). Closed without P5, which moved to 2.9.x. | 77 | 847/847 | 2026-10-23 |
+| 2.9.x | **Toolchain 6.7 line** — cyrius 6.6.20 → 6.7.15 + vyakarana 2.4.3 → 2.9.1 (2.9.0; no source change, output byte-identical apart from `code` colouring). P5 opens later in the series. | 77 | 847/847 | in progress |
 
 ---
 
@@ -37,7 +38,7 @@ This table is one row per minor for navigation only.
 `vidya stats` reports `Topics: 77, Complete: 77 (all 11 languages),
 Examples: 847`; validator 847/847 green. No partial topics. P4
 (build_systems, package_resolution, reproducible_builds) closed; the
-next minor (2.8.x) opens P5 functional / type theory.
+next content cycle (now 2.9.x; planned as 2.8.x, which closed as infra) opens P5 functional / type theory.
 
 ---
 
@@ -55,7 +56,7 @@ zig 0.16, bayan consolidation).
 | **package_resolution** | ✅ landed — 11/11 | Semver as a comparable triple + caret constraint ranges + diamond intersection + highest-version selection + bounded backtracking + cycle detection. |
 | **reproducible_builds** | ✅ landed — 11/11 | SOURCE_DATE_EPOCH timestamp clamping + sorted iteration + content-addressed artifacts + byte-identical rebuild verification. |
 
-After P4 closes, next minor (2.8.x) opens **P5 functional /
+After P4 closes, the next content cycle (2.9.x; 2.8.x went to infra) opens **P5 functional /
 type theory**.
 
 ---
@@ -107,7 +108,7 @@ component needs vidya support next.
 | Minor | Theme | Topics | Notes |
 |---|---|---|---|
 | 2.7.x | **P4 build systems** ✅ complete | build_systems, package_resolution, reproducible_builds | Aligns with cyrius/zugot tooling. Landed in the 2.7.3 content cycle. |
-| 2.8.x | **P5 functional / type theory** | functional_patterns, effect_systems, dependent_types | More research-flavored; lowest priority. |
+| 2.9.x | **P5 functional / type theory** | functional_patterns, effect_systems, dependent_types | More research-flavored; lowest priority. |
 | 2.9.x | **P6 Cyrius-specific concepts** | cyrius_basics, cyrius_bootstrap, cyrius_agents, cyrius_capabilities, cyrius_ipc | Programming-concept slots that document Cyrius patterns the way other topics document general patterns. Distinct from `content/cyrius/` (the language reference + field notes). |
 
 ---
@@ -157,7 +158,7 @@ language-feature alignment. The cadence:
 5. CHANGELOG patch entry summarises the bump
 6. zugot recipe (in the upstream repo) tracks the same version
 
-Current pin: **6.6.20** (vidya 2.8.6). `lib/` and `cyrius.lock`
+Current pin: **6.7.15** (vidya 2.9.0). `lib/` and `cyrius.lock`
 are build artifacts (gitignored, rehydrated via `rm -rf lib cyrius.lock`,
 then `cyrius lib sync`, then `cyrius deps`, with the clean wipe required
 from 6.6.20. Do **not** use `cyrius update`, which ignores the

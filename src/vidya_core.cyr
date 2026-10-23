@@ -238,7 +238,7 @@ var _reload_count = 0;          # successful reload counter (for sakshi)
 var _reload_failures = 0;       # failed reload counter
 var _reg_entries_next = 0;      # staging registry — built then swapped
 var _reg_index_next = 0;
-var _inotify_buf[8192];         # static drain buffer (one-shot read)
+var _inotify_buf: u8[8192];     # static drain buffer (one-shot read)
 
 fn reg_init() {
     _reg_entries = vec_new();
@@ -353,6 +353,10 @@ fn load_concept(topic_dir) {
     var _toml_n = file_read_all(str_data(toml_path), _toml_buf, 262144);
     if (_toml_n <= 0) { return 0; }
     var sections = toml_parse(str_new(_toml_buf, _toml_n));
+    # toml_parse returns 0 only when an allocation fails; vec_len(0) would
+    # dereference it. Returning 0 is the contract both callers handle:
+    # load_all skips the topic, build_next_registry keeps the live registry.
+    if (sections == 0) { return 0; }
     if (vec_len(sections) == 0) { return 0; }
 
     var concept = concept_new();
@@ -362,6 +366,11 @@ fn load_concept(topic_dir) {
     var pairs = toml_section_pairs(top);
 
     var id = toml_get(pairs, "id");
+    # No id, no topic. The example loop below joins every file name onto
+    # the id, and with id 0 that segfaulted. Until 2.9.0 a concept.toml
+    # missing its `id` (truncated mid-save, a typo) killed every command,
+    # and `serve` on hot reload, instead of being skipped.
+    if (id == 0) { return 0; }
     var title = toml_get(pairs, "title");
     var topic = toml_get(pairs, "topic");
     var desc = toml_get(pairs, "description");
@@ -990,9 +999,11 @@ fn cmd_code(topic_id, lang_str) {
 var VALIDATE_SKIP = 0 - 1;      # no example on disk / no command template
 var VALIDATE_NO_TOOL = 0 - 2;   # language toolchain not installed
 
-# Toolchain probe cache, one slot per Lang: 0 = unprobed, 1 = present,
-# 2 = missing. `var buf[N]` is N BYTES — LANG_COUNT × 8 B.
-var _tool_probe[88];
+# Toolchain probe cache, one i64 slot per Lang: 0 = unprobed, 1 = present,
+# 2 = missing. Typed so the size is the same wherever it is declared: a bare
+# `var x[N]` is N BYTES inside a fn but N i64 SLOTS at top level, so the bare
+# `var _tool_probe[88]` this replaced reserved 704 B for 88 B of use.
+var _tool_probe: i64[11];
 
 # Shell command that exits 0 iff this language's toolchain is installed.
 # A missing toolchain is a SKIP, not a FAIL — same contract as
