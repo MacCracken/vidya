@@ -7,6 +7,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.1] — 2026-10-27
+
+Dependency patch. **cyrius 6.7.15 → 6.7.18** and **vyakarana 2.9.1 →
+2.10.0**, the newest tag of each. The folded stdlib leaves move with the
+snapshot: bayan 1.9.0 → 1.11.1, sandhi 1.13.1 → 1.13.7, sigil 3.13.12 →
+3.13.15. sakshi stays at 2.5.10, byte-identical. No content added (77 topics
+/ 847 examples, 0 gaps). `cyrius test` **140/0**, 12 benchmarks, and content
+gate **847/847**, strict, zero skips.
+
+The only source change is an API rename. bayan 1.11.0 deprecated the bare
+TOML lookups (see Changed). The CLI and `serve` output is byte-identical to
+2.9.0. Only `code` colouring moves, from vyakarana's token fixes.
+
+### Verified — output-neutral apart from `code` colour
+
+Every observable output was dumped from the 2.9.0 and 2.9.1 binaries and
+byte-compared: `list` / `stats` / `gaps` / `languages` / `help`, five
+searches, `info` for all 77 topics, `code` for every example, a `compare`,
+and 12 `serve` endpoints (including two 404s).
+
+- **Identical:** everything except `code`, all 12 `serve` endpoints included.
+- **`code`:** 78 of 847 examples differ (rust 37, typescript 22, c 18,
+  python 1). With the colour codes stripped, the text is byte-identical in
+  every one. Two vyakarana changes account for every differing span:
+  - **2.9.7, type suffixes (874 spans).** A literal and its suffix are now one
+    `number` token: `0u64`, `0usize`, `0x…ULL`, `0j`, `0x40_0078n`. The
+    suffix used to be plain text.
+  - **2.9.3, block comments (26 spans).** The typescript grammar had no
+    `/* … */` rule, so a `/** … */` doc comment came back as operators. It is
+    now a comment. That hit 26 doc comments in 7 TypeScript files.
+
+### Changed — cyrius 6.7.15 → 6.7.18
+
+**`toml_get` / `toml_get_sections` → `bayan_toml_get_by_cstr` /
+`bayan_toml_get_sections_by_cstr`.** bayan 1.11.0 (cyrius 6.7.17) made the
+flat lookups name their key type, and the 13 bare names now warn on every
+call. vidya had 35 such calls: 20 in `src/vidya_core.cyr` (the loader), 11 in
+`tests/vidya.tcyr`, and 4 in `tests/vidya.bcyr`. Each key is a C-string
+literal, so `_by_cstr` is the right form. The old names are one-line
+pass-throughs to the new ones, so behaviour and binary size are unchanged
+(the two aliases become dead code: unreachable fns 3,662 → 3,664). The build
+now prints no deprecation warnings. `toml_parse` and `toml_section_pairs` are
+plain aliases and stay. bayan 1.11.1's other new refusals cannot reach vidya:
+duplicate JSON keys, malformed JSON numbers, and non-canonical base64. vidya
+parses only TOML; its JSON is built, never parsed.
+
+The migration guide says a hand-written include list needs `lib/slice.cyr`
+and `lib/hashseed.cyr` ahead of `lib/bayan.cyr`, and `lib/slice.cyr` ahead of
+`lib/sandhi.cyr`. vidya builds through the manifest's `[deps] stdlib`, which
+resolves them, so `src/main.cyr`'s include lines needed nothing. The rest of
+the 6.7.16–6.7.18 guide covers networking deadlines, WebSocket and TLS
+hardening, crypto lanes and X.509 nameConstraints. None of it touches a path
+vidya runs: `serve` is plaintext, synchronous, and localhost.
+
+**Binary 2,762,208 → 2,937,144 B (+174,936, +6.3 %).** Split with two
+scratch builds:
+
+| Build | Size | Δ |
+|---|---|---|
+| 2.9.0 (cyrius 6.7.15, 6.7.15 lib, vyakarana 2.9.1) | 2,762,208 B | — |
+| 6.7.18 compiler over the 6.7.15 lib | 2,762,208 B | **compiler 0** (15 bytes differ) |
+| 6.7.18 snapshot, vyakarana 2.9.1 | 2,863,424 B | **stdlib +101,216** |
+| 6.7.18 snapshot, vyakarana 2.10.0 (2.9.1) | 2,937,144 B | **vyakarana +73,720** |
+
+The stdlib growth is spread more widely than at 2.9.0. By source size: bayan
++81,966 B, sigil +45,117, sandhi +42,200, and the two TLS handshake files
++22,909. `lib/` keeps the same 75 entries: 39 files changed and 42 are
+byte-identical. Static data 135,696 → 136,336 B. Unreachable code (cyrius
+does not DCE by default) 3,502 → 3,664 fns, 1,270,715 → 1,354,583 B. A
+`CYRIUS_DCE=1` build is 1,585,464 B (1,550,416 at 2.9.0). A second build of
+the same tree in a scratch copy is byte-identical to `build/vidya`.
+
+The pin bump used the clean rehydrate (`rm -rf lib cyrius.lock && cyrius lib
+sync && cyrius deps`), and `cyrius deps --verify` reports 81 verified. The
+`hashmap_fast.cyr` footprint note still prints, and every `cyrius run` /
+`build` still moves `lib/vyakarana.cyr` aside while it re-resolves (absent
+in 31 polls of one build), so the one-cyrius-command-per-tree rule stands.
+The clean rehydrate matters for the git dep too. In a scratch tree, changing
+the vyakarana tag in place and running `cyrius deps` left the old tag's commit
+line in `cyrius.lock` next to the new one. Every resolve after that printed
+"cyrius.lock keeps vyakarana@2.9.1's pin … fail-closed", even though the
+vendored file was the new tag's. The main tree's lock, rehydrated clean, has
+the one 2.10.0 line.
+
+### Changed — vyakarana 2.9.1 → 2.10.0
+
+Eleven patch tags and one minor, all pinned to cyrius 6.7.18 (2.9.2 onward).
+**No token kind, `Token` layout or public-API change**, so no call site
+moved. 2.9.11 adds a document API (`tokenize_doc_*`, incremental
+retokenization), which vidya does not call. `render_code` still makes one
+`tokenize_stream_feed` per file, so the streaming fixes in 2.9.10–2.9.12 are
+inert here. The visible effect is the colour change above. The bundle grew
+362,193 → 473,365 B of source (+111,172) for new grammars, number shapes and
+the document API, and vidya's binary grew by 73,720 B.
+
+### Benchmarks — one row slower, attributed
+
+Interleaved A/B of the two bench binaries on one machine, three rounds. The
+harness `lib/bench.cyr` is unchanged across these pins.
+
+| Bench | 2.9.0 | 2.9.1 | Δ mean | per-round Δ |
+|---|---|---|---|---|
+| load_concept | 49.974 µs | 49.094 µs | −1.8 % | −2 / −1 / −2 % |
+| load_all | 8.048 ms | 7.861 ms | −2.3 % | −2 / −3 / −2 % |
+| reg_get_hit | 105 ns | 117 ns | (+10.8 %) | +0 / +30 / −5 % |
+| reg_get_miss | 232 ns | 131 ns | (−43.5 %) | −72 / −23 / +176 % |
+| search_text | 5.865 µs | 5.699 µs | −2.8 % | −3 / −3 / −3 % |
+| search_text_exact | 11.048 µs | 11.102 µs | +0.5 % | +1 / +1 / +0 % |
+| toml_sections | 1.955 µs | 2.122 µs | **+8.5 %** | +9 / +9 / +8 % |
+| json_info_response | 9.161 µs | 9.079 µs | −0.9 % | −2 / +0 / −1 % |
+| json_search_response | 257.784 µs | 251.514 µs | −2.4 % | −3 / −2 / −3 % |
+| json_list_response | 113.028 µs | 111.561 µs | −1.3 % | −0 / −1 / −2 % |
+| field_escaped | 3.320 µs | 3.309 µs | −0.3 % | −0 / −0 / −0 % |
+| field_raw_splice | 562 ns | 560 ns | −0.4 % | −0 / +0 / −1 % |
+
+- **`toml_sections` +8.5 % is real, and it is bayan's code.** bayan 1.9.0's
+  `get_sections` called `str_eq_cstr` on each section name directly. 1.11.x
+  goes through `_toml_find_sections` → `_toml_key_eq` → `str_eq_cstr`, one
+  more call per section. A scratch bench timed the 1.9.0 body against the
+  1.11.1 path in **one** 6.7.18 binary, with the same fixture
+  (`content/strings/concept.toml`, 14 sections × 3 lookups) over three
+  processes. The old body ran 1.77–1.86 µs and the new path 1.93–1.99 µs
+  (+9 %), with no overlap between the ranges. That is about 4 ns per section
+  compared, roughly 0.15 µs per topic load. `load_concept` is net faster
+  anyway.
+- **The 1–3 % improvements are not claimed.** At 2.9.0, a `toml_sections`
+  delta of −5.7 % that held in every round turned out to be code layout
+  between two binaries. These deltas have no mechanism behind them yet.
+- **`reg_get_hit` / `reg_get_miss` remain a per-process hash-seed lottery**
+  (see 2.9.0). They are not a signal in either direction.
+
+### Docs
+
+- `cyrius.cyml`: a 6.7.18 block (folds, the size split, the TOML rename, the
+  include-list note) and a vyakarana 2.10.0 block.
+- `docs/architecture/overview.md` point 5 and the
+  `stdlib_str_to_cstr_key_migration` field note: the typed lookup names.
+- `docs/development/state.md`, `roadmap.md`, `docs/sources.md`,
+  `docs/doc-health.md`: pins, sizes and posture for 2.9.1.
+
 ## [2.9.0] — 2026-10-23
 
 Toolchain minor. **cyrius 6.6.20 → 6.7.15**, the move onto cyrius's 6.7

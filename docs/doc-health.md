@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-10-23 (v2.9.0 ship; see the 2.9.0 block below, and the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
+> **Last refresh**: 2026-10-27 (v2.9.1 ship; see the 2.9.1 block below). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -17,6 +17,23 @@ type: state
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
+
+## 2026-10-27 (v2.9.1) — cyrius 6.7.18, vyakarana 2.10.0
+
+| Doc | Updated for 2.9.1 |
+|---|---|
+| `CHANGELOG.md` | 2.9.1 entry: the two-binary output comparison (`code` colour only, 78 of 847, each change traced to vyakarana 2.9.7 or 2.9.3), the TOML lookup rename, the size split (compiler 0 / stdlib +101,216 / vyakarana +73,720), the in-place lock note, and the benchmark table with `toml_sections` isolated to bayan's code. |
+| `cyrius.cyml` | `[deps]` comment gains a 6.7.18 block (folds, size split, the rename, the include-list note); the vyakarana block covers 2.9.1 → 2.10.0; the "never two cyrius commands" note re-checked at 6.7.18. |
+| `CLAUDE.md` | Aggregate-scripts row: the re-resolve note re-checked at 6.7.18. |
+| `docs/development/state.md` | Version, pin (the wrapper now equals the pin), binary size, `vidya_core.cyr` line count (1,573 → 1,584, stale since 2.9.0), bench note (`toml_sections`), dep rows, `lib/` count, the build-notes paragraph, 2.9.1 posture, zugot staleness (ten releases), the unbumped field-notes verification header. |
+| `docs/development/roadmap.md` | Header → 2.9.1 / 6.7.18, tests 139 → 140 (stale since 2.9.0), 2.9.x row extended, "Current pin" → 6.7.18. |
+| `docs/sources.md` | Cyrius pin row → 6.7.18. |
+| `docs/architecture/overview.md` | Design point 5: the typed lookup names. |
+| `content/cyrius/field_notes/language/stdlib_format.cyml` | `stdlib_str_to_cstr_key_migration`: the 6.7.17+ shape and 6.7.18's compile-time warning for a `Str` passed to a `cstring` key (verified with a probe: warning, and still 0 at runtime). |
+
+**Left as written**: `content/cyrius/field_notes/index.cyml` still reads
+"Verified on Cyrius 2.2 → 6.6.19". The roadmap cadence says to bump it, but
+only one entry was re-verified at 6.7.18, so the range would overclaim.
 
 ## 2026-10-23 (v2.9.0) — cyrius 6.7.15
 

@@ -285,8 +285,11 @@ succeeds). Reload latency: 17–22ms, measured at 60 topics (pre-2.5; the corpus
 5. **TOML keys are bare cstr literals.** Cyrius 5.x stdlib
    `toml_get*` helpers compare via `str_eq_cstr`; passing a `Str`
    silently returns 0 (the v2.3.0 dangling-pointer bug). All
-   lookups in `src/vidya_core.cyr` use `toml_get(pairs, "key")`, never
-   `toml_get(pairs, str_from("key"))`. See field note
+   lookups in `src/vidya_core.cyr` use
+   `bayan_toml_get_by_cstr(pairs, "key")`, never a `str_from("key")`
+   key. Since bayan 1.11.0 (cyrius 6.7.17) the name says which key
+   type it takes, and the bare `toml_get` / `toml_get_sections` are
+   deprecated; vidya moved at 2.9.1. See field note
    `stdlib_str_to_cstr_key_migration`.
 
 6. **Sentinel returns, not exceptions.** Cyrius has no

@@ -101,7 +101,7 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 
 | Script | What it does |
 |---|---|
-| `scripts/validate-content.sh` | Runs every example in every language; prints `X/Y green` summary; non-zero exit on any failure. ⚠ **Run nothing else cyrius in the same tree while it runs.** Every `cyrius run` / `build` (6.7.15) re-resolves `[deps.vyakarana]` and briefly moves `lib/vyakarana.cyr` aside, so a concurrent build fails with "cannot hash lib/vyakarana.cyr". Use a scratch copy for parallel work. |
+| `scripts/validate-content.sh` | Runs every example in every language; prints `X/Y green` summary; non-zero exit on any failure. ⚠ **Run nothing else cyrius in the same tree while it runs.** Every `cyrius run` / `build` (6.7.15, re-checked at 6.7.18) re-resolves `[deps.vyakarana]` and briefly moves `lib/vyakarana.cyr` aside, so a concurrent build fails with "cannot hash lib/vyakarana.cyr". Use a scratch copy for parallel work. |
 | `scripts/bench-history.sh` | Snapshots `cyrius bench` output to `target/bench-history/<ts>-<sha>.txt` for diff. |
 | `scripts/version-bump.sh` | Bumps `VERSION` — single source of truth; `cyrius.cyml` reads `${file:VERSION}`. |
 
