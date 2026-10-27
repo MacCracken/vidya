@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-10-27 (v2.9.1 ship; see the 2.9.1 block below). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
+> **Last refresh**: 2026-10-27 (roadmap cleanup, and the v2.9.1 ship; see the two blocks below). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -17,6 +17,16 @@ type: state
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
+
+## 2026-10-27 — roadmap cleanup (post-2.9.1)
+
+| Doc | Change |
+|---|---|
+| `docs/development/roadmap.md` | Rewritten as future work only, 315 → 186 lines. Removed: the release-history table (CHANGELOG), current state and stats (state.md), P4, the done dep-track rows (hashmap DCE noise gone, OpenQASM grammar shipped, aarch64 cross-build fixed, bench-history audit), the per-feed-drain item (no example exceeds 21 KB), the pin-maintenance cadence and the AGNOS relationship list (CLAUDE.md and overview.md), the renderer integration status and its answered questions, and a footer stamped 2.8.2. Added items that had no roadmap entry: `serve` memory (overview.md's known limit), the stale renderer comments, the stale content-grouping spec, the loader's silent 64 KB truncation, and the field-notes verification stamp. |
+| `CLAUDE.md` | The roadmap is described as future-only, and work loop step 10 removes shipped items. Two facts moved here from the roadmap: the field-notes verification stamp on a pin bump, and "not `cyrius update`" (marked not re-checked at 6.7.18). |
+| `docs/development/state.md` | Three links to removed roadmap sections repointed; the "Next" line (it said 2.8.x) now gives the 2.9.x → 3.0.0 sequence. |
+| `docs/architecture/overview.md` | Consumer list gains vyakarana; the serve-memory limit says "planned" instead of "no roadmap entry yet". |
+| `README.md`, `docs/development/content-format.md`, `docs/adr/README.md`, ADR 0002 | Roadmap references updated. ADR 0002 gets a dated note that its drain follow-up was dropped; its decision text is unchanged. |
 
 ## 2026-10-27 (v2.9.1) — cyrius 6.7.18, vyakarana 2.10.0
 
@@ -237,7 +247,7 @@ Numbers approximate; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-16 | ✅ Fresh | **New 2026-05-16** — tier index. Currently lists `overview.md` as the only entry; numbered architecture notes (`NNN-*.md`) added as invariants surface. |
-| `overview.md` | 2026-05-02 | ✅ Fresh | Module map, data flow, consumer list. Touched early v2.7.x; verify consumer list (agnoshi / hoosh / cyrius / sandhi / sakshi) matches roadmap "Relationship to AGNOS" section. Spot-check at next minor closeout. |
+| `overview.md` | 2026-10-27 | ✅ Fresh | Module map, data flow, consumer list. 2.9.1: design point 5 names the typed TOML lookups; the consumer list gains vyakarana (its corpus snapshot is path-dependent); the serve-memory known limit points at the roadmap. Its 60-topic serve figures are queued for re-measurement (roadmap 2.9.x hygiene). |
 
 ---
 
@@ -272,10 +282,10 @@ Numbers approximate; rolls up from the per-tier tables below.
 
 | File | Last touched | Status | Action |
 |---|---|---|---|
-| `roadmap.md` | 2026-05-16 | ✅ Fresh | **Rotates every release.** Rewritten at v2.7.1: pin refreshed (5.9.43 → 5.11.55), vyakarana section rewritten for the 2.x streaming-API migration, slot drift noted (2.7.0 + 2.7.1 were infra-only — build_systems et al. unpinned from specific patch slots), new "2.7.x dep-track follow-ups" section. |
+| `roadmap.md` | 2026-10-27 | ✅ Fresh | **Future work only** since 2026-10-27. Shipped work, current state and process were removed (CHANGELOG, state.md and CLAUDE.md hold them). Now: release sequence 2.9.x → 3.0.0 → after, triggers, cross-repo asks. Remove items as they ship. |
 | `state.md` | 2026-05-16 | ✅ Fresh | **New 2026-05-16** — volatile-state ledger split out of CLAUDE.md per first-party-documentation standards. Refreshed every release. |
 | `content-format.md` | 2026-05-08 | ✅ Fresh | Content directory specification. Touched at v2.7.0 (extended to document the two non-topic entries — `cyrius/` language reference + `qelib1.inc`). Stable; verify per minor closeout. |
-| `content-grouping.md` | 2026-05-01 | ✅ Fresh | Subdir reorg trigger condition (~50 topics). Currently at 74 — reorg overdue, called out in roadmap. Spec itself is current. |
+| `content-grouping.md` | 2026-05-01 | ⚠ Stale | Written at 36 topics: the proposed tree places only those 36 of today's 77, and its "Current Topic Count: 36" footer is wrong. Rewriting it is the first 3.0.0 step (roadmap). |
 | `learning-paths.md` | 2026-05-16 | ✅ Fresh | **Refreshed during 2026-05-16 sweep.** 5 original paths preserved + 7 new paths added (Networked Service / Database Internals / Distributed Systems / Audio / AI-ML / Graphics / Game Systems / Observability). 65 unique topic IDs verified against `content/` — zero broken references. |
 
 ---

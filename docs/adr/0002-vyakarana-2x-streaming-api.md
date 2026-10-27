@@ -62,7 +62,7 @@ The 1.x line would receive no further development — pinning there meant accept
 ### Neutral
 
 - The migration recipe is mechanical and reversible — should the project ever need to fork its own vyakarana branch, both 1.x and 2.x interfaces are well-documented.
-- Drain semantics for 2.0.1+ are a tracked follow-up (`docs/development/roadmap.md` 2.7.x dep-track), not blocking work.
+- Drain semantics for 2.0.1+ are a tracked follow-up (`docs/development/roadmap.md` 2.7.x dep-track), not blocking work. *(2.9.1: dropped from the roadmap. vyakarana ships drain and a pull adapter, but no example exceeds 21 KB, so a single feed stays the right shape.)*
 
 ## Alternatives considered
 

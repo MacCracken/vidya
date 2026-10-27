@@ -233,8 +233,8 @@ succeeds). Reload latency: 17–22ms, measured at 60 topics (pre-2.5; the corpus
   reload's staging registry accumulates. Long-running serve
   processes will eventually exhaust the heap. Mitigation today:
   restart on a cron, or front with a process supervisor that
-  cycles after N reloads or N requests. An arena/pool allocator
-  is future work (no roadmap entry yet).
+  cycles after N reloads or N requests. A per-request arena is
+  planned (roadmap, 2.9.x "`serve` longevity").
 - **Single-threaded accept.** Sandhi 1.0.0's `sandhi_server_run`
   serves one connection at a time. Adequate for the local
   agnoshi/hoosh use case; not for public exposure.
@@ -310,5 +310,8 @@ succeeds). Reload latency: 17–22ms, measured at 60 topics (pre-2.5; the corpus
   mabda's field notes feed back into
   `content/cyrius/field_notes/mabda_v3_gpu/`.
 - **sandhi** — vidya's HTTP service runs on sandhi (cyrius stdlib).
+- **vyakarana** — tokenizes examples for `code` and `/code/...`, and
+  snapshots `content/lexing_and_parsing/<lang>` as its own test corpus
+  (vyakarana ADR 0001), so moving that directory affects it.
 - **sakshi** — vidya uses sakshi for structured tracing (stderr-only
   profile today).

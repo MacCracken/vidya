@@ -16,7 +16,7 @@ This directory captures the *why* behind structural choices in vidya — decisio
 - *How the code is* (invariants, quirks) → `docs/architecture/`
 - *How to do X* → `docs/usage.md` and the README quick-start (the project is small enough that a single guide covers it)
 - *What changed in version N* → `CHANGELOG.md`
-- *What's done / next / future* → `docs/development/roadmap.md`
+- *What's next* → `docs/development/roadmap.md`; *what's done* → `CHANGELOG.md`
 
 ## Index
 

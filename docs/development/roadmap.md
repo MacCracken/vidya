@@ -1,315 +1,186 @@
-# Vidya — Development Roadmap
+# Vidya — Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-10-27
+> **Future work only.** Shipped work is in [CHANGELOG.md](../../CHANGELOG.md).
+> The current version, pins, sizes and gate counts are in [state.md](state.md).
+> Process, toolchains and gates are in [CLAUDE.md](../../CLAUDE.md).
 >
-> **Version**: 2.9.1 (dependency patch — cyrius 6.7.18 + vyakarana 2.10.0; P5 content opens in a later 2.9.x) | **Cyrius**: 6.7.18 (Zig content pin: 0.17.0)
-> **Topics**: 77 (77 fully covered) — **P0 → P4 complete** 🎉
-> **Languages**: 11 (Rust, Python, C, Go, TypeScript, Shell, Zig, x86_64 ASM, AArch64 ASM, OpenQASM, Cyrius)
-> **Examples**: 847 source files; concept files: 77
-> **Validator**: 847/847 green (`VIDYA_STRICT=1`, zero skipped; now also --test/vet/gofmt/tsc/encoding/duplicate-fn checked) | **Tests**: 140 | **Benchmarks**: 12
->
-> Vidya is the library's reference shelf — every programming concept with implementations,
-> best practices, gotchas, and performance notes across 11 languages.
+> **Last updated**: 2026-10-27, at 2.9.1.
 
----
+## Sequence
 
-## Release History
-
-Per-release detail lives in [CHANGELOG.md](../../CHANGELOG.md).
-This table is one row per minor for navigation only.
-
-| Minor | Theme | Topics | Validator | Closed |
-|---|---|---|---|---|
-| 2.0–2.2 | **P0 originals** + P0A infrastructure | 36 | (pre-counter) | 2026-04-08 |
-| 2.3.x | **P0B service layer** + **P0C content infill** (games + database + systems + graphics) | +24 → 60 | 660/660 | 2026-05-02 |
-| 2.4.x | **P1 networking & infrastructure** | +6 → 66 | 726/726 | 2026-05-02 |
-| 2.5.x | **P2 distributed systems** | +3 → 69 | 759/759 | 2026-05-03 |
-| 2.6.x | **P3 audio + AI/ML** | +5 → 74 | 814/814 | 2026-05-03 |
-| 2.7.x | **P4 build systems** (2.7.0–2.7.2 infra-only; 2.7.3 content) | +3 → 77 | 847/847 | 2026-06-12 |
-| 2.8.x | **Infra + correctness** — cyrius 6.1.41 → 6.4.2 (2.8.0), → 6.5.29 + sakshi stdlib fold-in (2.8.1), five user-visible defect fixes + the `src/vidya_core.cyr` split (2.8.2), then → 6.5.31 + a corpus-wide example review and four new gate checks (2.8.3), then → 6.5.35 + vyakarana 2.4.0 (2.8.4), → 6.6.2 (2.8.5), → 6.6.20 + vyakarana 2.4.3 (2.8.6), then Zig 0.16 → 0.17 across the corpus (2.8.7). Closed without P5, which moved to 2.9.x. | 77 | 847/847 | 2026-10-23 |
-| 2.9.x | **Toolchain 6.7 line** — cyrius 6.6.20 → 6.7.15 + vyakarana 2.4.3 → 2.9.1 (2.9.0; no source change, output byte-identical apart from `code` colouring), then → 6.7.18 + vyakarana 2.10.0 (2.9.1; bayan's typed TOML lookup names, again `code` colouring only). P5 opens later in the series. | 77 | 847/847 | in progress |
-
----
-
-## Current State
-
-**77 topics fully covered (11/11 languages) — P0 → P4 complete.**
-
-`vidya stats` reports `Topics: 77, Complete: 77 (all 11 languages),
-Examples: 847`; validator 847/847 green. No partial topics. P4
-(build_systems, package_resolution, reproducible_builds) closed; the
-next content cycle (now 2.9.x; planned as 2.8.x, which closed as infra) opens P5 functional / type theory.
-
----
-
-## P4 — Build Systems ✅ COMPLETE (shipped 2.7.3)
-
-3 topics × 11 langs = 33 new examples (72 → 77 topics; 814 → 847
-examples). Aligns with cyrius/zugot tooling work; each primitive has a
-direct cyrius-toolchain counterpart. All three landed in the 2.7.3
-content cycle (after the 2.7.0–2.7.2 infra-only cycles: cyrius 5→6,
-zig 0.16, bayan consolidation).
-
-| Topic | Status | What it covers |
+| Release | Theme | Consumer-visible |
 |---|---|---|
-| **build_systems** | ✅ landed — 11/11 | DAG of build targets + content-signature dirty-tracking + Kahn topological order + ninja-style incremental rebuild + cycle detection. |
-| **package_resolution** | ✅ landed — 11/11 | Semver as a comparable triple + caret constraint ranges + diamond intersection + highest-version selection + bounded backtracking + cycle detection. |
-| **reproducible_builds** | ✅ landed — 11/11 | SOURCE_DATE_EPOCH timestamp clamping + sorted iteration + content-addressed artifacts + byte-identical rebuild verification. |
+| 2.9.x | Hygiene, `serve` longevity, content review, P5 | No. Content grows 77 → 80 topics. |
+| **3.0.0** | Content reorganization | **Yes**: `content/` paths change |
+| after 3.0.0 | Renderer surface, P6 Cyrius concepts | Additive |
 
-After P4 closes, the next content cycle (2.9.x; 2.8.x went to infra) opens **P5 functional /
-type theory**.
+Toolchain patches (cyrius, vyakarana, Zig) land between these whenever
+upstream moves. They follow CLAUDE.md's work loop.
+
+Why this order:
+
+- **P5 before the reorg** keeps the corpus near 80 topics when it moves.
+- **P6 after the reorg.** Where Cyrius concept topics sit next to
+  `content/cyrius/` is a reorg decision, so P6 should land once, in its
+  final place.
+- **Renderer after 3.0.0.** It is additive (opt-in flags), and it adds the
+  third and fourth tokenize call sites. Those are what justify adopting
+  vyakarana's pull adapter.
 
 ---
 
-## 2.7.x dep-track follow-ups
+## 2.9.x
 
-Items surfaced by the 2.7.0 / 2.7.1 infra cycles. None gate
-content work, but each closes a loose end opened by the dep
-churn. Ordered by trigger condition, not by patch slot.
+Each item is its own patch unless noted, in this order.
 
-### Waiting on upstream
+### Hygiene (next patch)
 
-| Item | Trigger | Action on vidya side |
-|---|---|---|
-| **Cyrius transitive-stdlib arc** | cyrius closes the v5.10.x SLOT 19 follow-through (enum/constant references not pulled transitively) | Prune `tls`, `base64`, `fdlopen` from `cyrius.cyml` `[deps] stdlib` — they're explicit today only because sandhi's transitives don't fan out. Mirrors the gap-list sit's `cyrius.cyml` documents. |
-| **sandhi `hashmap_*` rename** | upstream sandhi (or cyrius stdlib) reconciles `hashmap_new_a` / `hashmap_get` / `hashmap_set_a` / `hashmap_len` against the current `map_*` API | Drop the `(will crash at runtime)` DCE noise from `cyrius build` output. Today the references are dead-code-eliminated so the binary works; if sandhi ever stops DCE'ing them, vidya would crash. |
-| **vyakarana 2.0.1+ per-feed drain** | vyakarana ships the scanner refactor (per ADR 0017 "When to revisit") | Convert the two streaming sites (`src/main.cyr:877` and `:1569`) to a feed-drain loop for large sources. Today both are buffer-then-finish; benefit only when source > 1 MB. |
-| **vyakarana pull adapter** (`tokenize_stream_next`) | vyakarana exports the thin iterator wrapper queued in ADR 0017 | Collapse the five-call dance back to a one-liner. Cosmetic but reduces the cognitive cost at each new call site. |
-| **vyakarana OpenQASM grammar** | vyakarana ships a `.qasm` grammar (none through 2.2.1 by design) | Drop the `has_grammar("openqasm") == 0` fallback in `cmd_code`. Update the comment at `src/main.cyr:870`. |
-| **Cyrius aarch64 cross-build** | ~~cc5_aarch64 stops dying on stdlib syscall-table gaps~~ — **RESOLVED at 2.8.1, and it was never upstream's fault.** | The release.yml probe tested for `cc5_aarch64`, renamed `cycc_aarch64` at cyrius 6.0.0 (back-compat symlink dropped at 6.1.0), so from the 6.1.x pin on the guard was permanently false: the job warned, went green, and shipped x86_64-only. 2.7.1 shipped an aarch64 artifact; 2.7.3 and 2.8.0 silently did not. ⚠ "Just monitor the CI warning" is what let this hide for two releases — the warning being emitted *was* the bug. Probe fixed and the cross-build verified at 6.5.29 (working 3.0 MB static aarch64 ELF, runs under qemu). |
+- [ ] **Promote the dep shadow-override gotcha to a field note.** A
+  `[deps.<name>]` git block silently replaces a module that the toolchain
+  folded into its stdlib, and `cyrius deps --verify` cannot see it (the lock
+  is hashed from disk). It has hit sit, patra, sigil, kavach and vidya
+  (2.8.1), which is past CLAUDE.md's three-port bar. It is not yet in
+  `content/cyrius/field_notes/`.
+- [ ] **Stale renderer comments.** `src/vidya_core.cyr:882` and `:936` say
+  OpenQASM has no vyakarana grammar, which was true of 2.2.1. It has one now
+  (2.9.0 recoloured all 77 `.qasm` files). Keep the generic `has_grammar`
+  fallback.
+- [ ] **Re-measure the serve figures** in `docs/architecture/overview.md`
+  that were taken at 60 topics (reload 17–22 ms, full rescan ~20 ms).
+- [ ] **Field-notes verification stamp.** `content/cyrius/field_notes/index.cyml`
+  says "Verified on Cyrius 2.2 → 6.6.19". Re-verify at the current pin and
+  bump it, or reword it to say what was verified.
 
-### Vidya-side opportunities (not blocked)
+### `serve` longevity
 
-| Item | Why now | Notes |
-|---|---|---|
-| **`sakshi_clock_recalibrate()` in `cmd_serve`** | sakshi 2.2.1+ exposes it for long-running consumers. `cmd_serve` runs for days under sandhi. | Call once per N minutes (or on a `kill -USR1`); cycle-counter drift is the failure mode if we don't. |
-| **Theme externalization** | renderer is past wire-up; per-kind ANSI palette is hard-coded inline at `src/main.cyr:827` | Move palettes to `content/theme/*.toml`; expose `--theme=<name>` on `code`, `theme=<name>` on `GET /code/...`. Decouples vidya's style from CLI-vs-HTTP consumers. |
-| **Renderer wider scope** | streaming API is live, byte-identical to 2.7.0 | Wire `info <topic>` to render inline; add `compare <topic> rust go` side-by-side view. |
-| **sigil (content integrity)** | sit/owl already pull it for SHA hashing | Hash `content/` at startup, expose via `/integrity` HTTP route. Lets hoosh/agnoshi verify the corpus they're querying matches a known-good snapshot. Speculative — only worth doing if a consumer actually asks. |
-| **Field-note promotion** | per CLAUDE.md "field-note recurring pain — when the same gotcha bites in 3+ ports" | Two candidates now. (1) The `cyrius update` vs `cyrius lib sync` rehydration gotcha — hit vidya, documented in sit's `.gitignore` comment. (2) **A `[deps.<name>]` git block silently shadow-overriding a stdlib-folded module** — hit sit (sakshi/sankoch/sigil/patra), patra (4 levels deep), sigil, kavach, and vidya at 2.8.1. That is 5+ instances and `deps --verify` cannot detect it; this one has earned promotion to `content/cyrius/field_notes/`. |
+`serve` is meant to run for days under agnoshi and hoosh. Two things stand
+in the way.
 
-### CI / release plumbing
+- [ ] **Memory.** Every response, and every hot reload's staging registry,
+  allocates from the bump heap and is never freed. A long-running `serve`
+  eventually exhausts it (overview.md, "Known limits"). `lib/alloc.cyr` now
+  has arenas (`arena_new` / `arena_reset` / `arena_free`). Give each request
+  an arena and reset it after the response, and free a replaced registry's
+  arena on reload. Check first whether the response path (`str_builder_*`,
+  bayan, sandhi's server) can allocate from an arena. If it can't, that is
+  an upstream ask. Done when a test serves N requests with flat heap use and
+  the "Known limits" bullet is gone.
+- [ ] **Clock drift.** sakshi stamps spans from a calibrated cycle counter.
+  `sakshi_clock_recalibrate()` exists for long-running processes, and sakshi
+  recommends calling it hourly. `cmd_serve` never calls it. Call it from the
+  accept loop once an hour has passed. It requires a single thread, which
+  `serve` is.
+
+### Content review
+
+This has been queued ahead of P5 since 2.8.x. The last full pass was 2.8.3,
+which found 80 verified defects behind a green gate. Since then the corpus
+has had the Zig 0.17 port (45 files), C23, and the cyrius 6.7 line.
+
+- [ ] Review every example for what the gate cannot see (CLAUDE.md lists the
+  blind spots): false comments, tests that cannot fail, and examples that
+  teach the opposite of their subject.
+- [ ] Close one blind spot while there. For example: simulate the OpenQASM
+  circuits and assert their documented outcomes, since today they are only
+  parsed. Any new check goes into both validators (CLAUDE.md's
+  byte-equivalence rule).
+
+### P5 — functional / type theory (77 → 80 topics)
+
+`functional_patterns`, `effect_systems`, `dependent_types`. One topic per
+patch: each is large effort, Cyrius reference first, then the other ten.
+
+- [ ] Before starting, settle `dependent_types`' scope. Most of the 11
+  languages have no dependent types, so the topic will mostly teach
+  encodings (phantom types, const generics, runtime-checked refinements)
+  and say plainly where a language cannot express the idea.
+
+---
+
+## 3.0.0 — content reorganization
+
+**Why it's a major release**: two consumers depend on `content/` paths.
+hoosh reads `content/` directly, and vyakarana snapshots
+`content/lexing_and_parsing/<lang>` as its test corpus (vyakarana ADR 0001).
+
+The spec is [`content-grouping.md`](content-grouping.md), and it is stale.
+It was written at 36 topics and places only those 36. The other 41,
+including all of P1–P4, have no group. Rewriting it is the first step.
+
+**Decide first:**
+
+- [ ] **Topic IDs stay flat and unique** (`strings`, not
+  `fundamentals/strings`)? Recommended, because then CLI arguments and HTTP
+  paths don't change; only filesystem paths do.
+- [ ] **Back-compat**: symlink the old paths for one minor
+  (content-grouping.md, rule 6), or make a clean break?
+- [ ] Where `content/cyrius/` and the P6 topics sit.
+
+**Work** (one atomic change):
+
+- [ ] `load_all()` and the hot-reload watcher recurse.
+- [ ] `scripts/validate-content.sh` and `validate_command` change together.
+- [ ] CI's "Verify concept.toml in topic directories" loop.
+- [ ] Tests, fixtures, and every output that carries a path (check `/info`
+  and `code`).
+- [ ] Docs that name paths: `content-format.md`, `usage.md`,
+  `guides/getting-started.md`, `learning-paths.md`.
+
+**Coordinate before tagging:**
+
+- hoosh: reads `content/` directly.
+- vyakarana: its corpus sync names `content/lexing_and_parsing/<lang>`.
+- agnoshi: uses only the CLI and HTTP, so it is unaffected if IDs stay flat.
+
+Any other breaking change found during 2.9.x also goes in 3.0.0. None is
+queued.
+
+---
+
+## After 3.0.0
+
+### Renderer surface (additive)
+
+- [ ] **Themes.** The ANSI palette is hard-coded in `ansi_open_for_kind`
+  (`src/vidya_core.cyr:893`). Move palettes to `content/theme/*.toml`,
+  keyed by vyakarana `kind_name` (its architecture note 004). Add
+  `--theme=<name>` to `code` and `theme=<name>` to `GET /code/...`.
+- [ ] **Wider scope, opt-in** so existing output is unchanged:
+  `info <topic> --code <lang>` renders the example inline, and
+  `compare <topic> <l1> <l2>` renders both sides.
+- [ ] Those add the third and fourth tokenize call sites. Use vyakarana's
+  `tokenize_stream_next` pull adapter there (it shipped upstream), rather
+  than a third hand-written loop.
+- Rule: if vyakarana mistokenizes a sample, file the bug at vyakarana. Never
+  patch tokens in vidya's renderer.
+- Start from vyakarana's
+  [consumer integration guide](https://github.com/MacCracken/vyakarana/blob/main/docs/guides/consumer-integration.md)
+  and
+  [theme-palette contract](https://github.com/MacCracken/vyakarana/blob/main/docs/architecture/004-theme-palette-contract.md).
+
+### P6 — Cyrius-specific concepts
+
+`cyrius_basics`, `cyrius_bootstrap`, `cyrius_agents`, `cyrius_capabilities`,
+`cyrius_ipc`. These are concept slots that document Cyrius patterns the way
+other topics document general ones. They are distinct from `content/cyrius/`
+(the language reference and field notes), and they land in the 3.0.0 layout.
+
+---
+
+## Waiting on a trigger
 
 | Item | Trigger | Action |
 |---|---|---|
-| **Zugot recipe SHA backfill** | first 2.7.1 release tarball builds on GitHub Actions | Compute `sha256sum vidya-2.7.1-src.tar.gz` from the release artifact; fill the `sha256 = ""` placeholder in `zugot/marketplace/vidya.cyml`. |
-| **Content-validation matrix** | observed CI wallclock for the new `scripts/validate-content.sh` step | If the 847-example sweep exceeds ~15 min, split the content job per-language (matrix strategy) for parallelism. The script's per-language stages are independent. |
-| **Zig pin maintenance** | observed failures on `content/*/zig.zig` examples | Track zig's release cadence; bump the CI install pin (`0.17.0` today, matching `docs/sources.md` / `README.md`) when content needs newer language features or a dev host moves ahead of it. The 0.15→0.16 bump at v2.7.2 migrated all 14 zig examples then in the corpus to `std.Io` (Threaded backend, Writer "Writergate", `DebugAllocator`). The 0.16→0.17 bump at v2.8.7 was forced by a host upgrade: 37 of 77 examples stopped compiling (`**` removed, struct reflection reshaped), and the port also moved `DebugAllocator` → `SafeAllocator`, `fmt.allocPrint` / `fmt.bufPrint` → `Allocator.print` / `mem.print`, and `builtin.os` → `builtin.target.os`. CI now checks the tarball's sha256. |
-| ~~**`scripts/bench-history.sh` audit**~~ | **DONE at 2.8.1** | Verified working: it drove the 6.4.2 → 6.5.29 A/B and the 2.8.2 regeneration. Its dead `cargo bench` line was removed at 2.8.0 and it now passes the explicit `tests/vidya.bcyr` path. Nothing outstanding. |
+| Redundant stdlib declarations | cyrius makes transitive follow-through contractual | Drop `ct`, `keccak` and `sigil` from `[deps] stdlib`. They have been redundant since 6.5.29 and are kept because an undeclared module fails at runtime (see `cyrius.cyml`). |
+| Split the content CI job | Content Validation passes ~15 min (8.1 min on 2026-10-27) | A per-language matrix; the script's stages are independent. |
+| Zig pin | The dev host or an example needs a newer Zig | Bump CI's `ZIG_VER` and its sha256, plus README and `docs/sources.md`. |
+| Loader buffer | An example nears 64 KB (largest today: 20.5 KB) | `load_concept` reads each example into 64 KB and truncates the rest silently. Raise the cap or size the read from the file. |
+| Rehydration field note | A third port hits it (vidya and sit so far) | Promote `cyrius lib sync` vs `cyrius update`, plus the clean-rehydrate requirement, to a field note. |
+| Content integrity route | A consumer asks for it | Hash `content/` at startup with sigil and serve the result at `/integrity`. |
 
----
+## Cross-repo (not vidya's to edit)
 
-## Future minor versions
-
-Each minor is one thematic cluster, sized similarly to P2/P3
-(3–5 topics). Order is rough; sequencing depends on which AGNOS
-component needs vidya support next.
-
-| Minor | Theme | Topics | Notes |
-|---|---|---|---|
-| 2.7.x | **P4 build systems** ✅ complete | build_systems, package_resolution, reproducible_builds | Aligns with cyrius/zugot tooling. Landed in the 2.7.3 content cycle. |
-| 2.9.x | **P5 functional / type theory** | functional_patterns, effect_systems, dependent_types | More research-flavored; lowest priority. |
-| 2.9.x | **P6 Cyrius-specific concepts** | cyrius_basics, cyrius_bootstrap, cyrius_agents, cyrius_capabilities, cyrius_ipc | Programming-concept slots that document Cyrius patterns the way other topics document general patterns. Distinct from `content/cyrius/` (the language reference + field notes). |
-
----
-
-## Future major (3.0.0) — Content reorganization
-
-Trigger condition (from `docs/development/content-grouping.md`):
-**when topic count exceeds ~50, reorganize `content/` into
-subdirectories.** We're at 77. The reorg is overdue and should
-land before topic count crosses ~80 (likely during 2.8.x or
-2.9.x).
-
-Planned shape (per content-grouping.md):
-
-```
-content/
-├── fundamentals/        — strings, error_handling, concurrency, ...
-├── compiler/            — lexing, IR, optimization, codegen, ...
-├── systems/             — boot, virtual_memory, syscalls, ...
-├── languages/           — ownership, traits, macros, modules
-├── networking/          — (post-P1)
-├── data/                — (post-P0C-3)
-├── graphics/            — (post-P0C-2)
-├── games/               — (post-P0C-1)
-├── distributed/         — (post-P2)
-├── ai/                  — (post-P3)
-├── build/               — (post-P4)
-└── cyrius/              — corpus + field notes (already a subdir)
-```
-
-Migration is a single atomic move: update `load_all()` to recurse,
-update `source_path` references, update tests. Backward compat via
-symlinks for one minor.
-
----
-
-## Cyrius pin maintenance
-
-Every Cyrius minor drives a vidya patch bump for stdlib +
-language-feature alignment. The cadence:
-
-1. Cyrius minor lands upstream
-2. `cyrius.cyml` bumps `cyrius = "X.Y.Z"`
-3. Field notes capture surfaced gotchas in
-   `content/cyrius/field_notes/compiler/`
-4. `content/cyrius/field_notes/index.cyml` verification range bumped
-5. CHANGELOG patch entry summarises the bump
-6. zugot recipe (in the upstream repo) tracks the same version
-
-Current pin: **6.7.18** (vidya 2.9.1). `lib/` and `cyrius.lock`
-are build artifacts (gitignored, rehydrated via `rm -rf lib cyrius.lock`,
-then `cyrius lib sync`, then `cyrius deps`, with the clean wipe required
-from 6.6.20. Do **not** use `cyrius update`, which ignores the
-manifest pin under wrapper drift.) `cyrius lint` / `cyrius fmt`
-are per-file from 5.7+. See CHANGELOG 2.7.1 for the full call-out, including the
-transitive-stdlib gap (sandhi pulls `TLS_EARLY_DATA_*`,
-`fdlopen_*`, `base64_encode` via enum/constant refs that v5.10.x
-SLOT 19 doesn't follow) — vidya's `[deps] stdlib` mirrors sit's
-explicit list until the transitive arc closes upstream.
-
-**Carried from the 2.8.4 dep sweep** — the four AGNOS sibling repos (sit,
-sakshi, sandhi, hoosh) and vyakarana are still on CI action majors 3–4
-versions behind; vidya migrated at 2.8.4 and the per-repo migration is written
-up in [`ecosystem-action-pins.md`](ecosystem-action-pins.md). vyakarana is the
-one needing a hand check (download-all + consolidate coupling). Not vidya's to
-change; tracked so it is not rediscovered a third time.
-
-Upstream cyrius issues filed during 2.6.x — see
-`cyrius/docs/development/issues/`.
-
----
-
-## Renderer integration — vyakarana (live)
-
-> **Status**: Live on **vyakarana 2.2.1** as of 2026-05-16
-> (migrated from 1.11.1 in 2.7.1; the only scheduled API break
-> in the vyakarana roadmap landed at 2.0.0 — see ADR 0017).
-> `vidya code <topic> <lang>` (CLI, ANSI-colored) and
-> `GET /code/{topic}/{lang}` (HTTP, JSON tokens) both flow
-> through the streaming primitives: `tokenize_stream_new` /
-> `_feed` / `_finish` / `_free` → `tokenbuf_*` / `kind_name`.
-> Theme contract per vyakarana ADR 0004 (palette indexed by
-> kind-name string, never integer). OpenQASM falls back to
-> `tokens:[]` — no grammar in vyakarana 2.2.1 by design.
-> Output is byte-identical to the 1.x integration: 2187 tokens
-> on the rust track of `content/lexing_and_parsing/` (8829
-> source bytes) — same numbers as the 2.7.0 reference.
-
-vyakarana ships 38 bundled grammars covering every language in
-vidya's reference shelf (the 11 vidya tracks plus 27 more). It
-also ships a stable public API and a written contract for
-how renderers integrate with it. Vidya can swap its current
-code-rendering path over to vyakarana whenever a renderer
-rewrite is planned.
-
-**Open work on the vidya side** (the wire-up steps from 2.7.0
-and the streaming-API migration from 2.7.1 are both done):
-
-1. **Pick a wider rendering scope.** Today `code` is per-topic
-   per-language — one example at a time. Suggested next users:
-   - **Topic concept pages** — `info <topic>` could render the
-     example for the requested language inline rather than just
-     printing the file path.
-   - **Cross-language compare view** — `compare <topic> rust go`
-     could render both side-by-side with shared theming.
-2. **Decide on a theme.** Today the ANSI palette in
-   `ansi_open_for_kind` (`src/main.cyr`) is hard-coded inline.
-   vyakarana's bundled `default` theme is the reference palette;
-   for vidya's HTTP / web rendering, a named theme (or a couple
-   — light/dark) externalised into `content/theme/*.toml` would
-   let consumers pick.
-3. **OpenQASM grammar.** `has_grammar("openqasm") == 0` in
-   vyakarana 2.2.1 — vidya's `code` command falls back to plain
-   source. Watch for the version that adds it; until then the
-   fallback is the right behavior.
-4. **Future per-feed drain.** Vidya currently buffers the whole
-   source then `tokenize_stream_finish`. vyakarana 2.0.1+ plans
-   to emit tokens per-feed (per ADR 0017 "When to revisit");
-   when that ships, `cmd_serve`'s per-request `/code/...` path
-   could drain incrementally for large sources. Not load-bearing
-   today (all examples fit well under the 1 MB stream cap).
-
-**Required reading (in order):**
-
-- [Consumer integration guide](https://github.com/MacCracken/vyakarana/blob/main/docs/guides/consumer-integration.md)
-  — full setup + API walkthrough. **Start here.**
-- [Architecture note 004 — theme-palette contract](https://github.com/MacCracken/vyakarana/blob/main/docs/architecture/004-theme-palette-contract.md)
-  — how to bind vidya's renderer styles to the 10 token kinds
-  via stable `kind_name` strings.
-- [Architecture note 001 — coverage invariant](https://github.com/MacCracken/vyakarana/blob/main/docs/architecture/001-coverage-invariant.md)
-  — guarantees you can rely on. Every input byte produces
-  exactly one token; never partial state.
-- [Architecture overview](https://github.com/MacCracken/vyakarana/blob/main/docs/architecture/overview.md)
-  "Frozen public contracts" — the names / signatures that
-  don't change across the 1.x line.
-
-**API stability**: 2.0.0 was the only scheduled API break in
-the vyakarana roadmap — `tokenize_source` removed, streaming
-primitives added (ADR 0017). Vidya migrated in 2.7.1. The 2.x
-public surface (`tokenize_stream_*`, `tokenbuf_*`, `kind_name`,
-`has_grammar`, the kind-name palette contract) is stable across
-the 2.x line.
-
-**Reciprocal corpus relationship**: Vidya's
-`content/lexing_and_parsing/<lang>` files are vyakarana's test
-corpus for those languages. When vidya updates a sample, the
-vyakarana repo can re-snapshot it (manual, per
-[vyakarana ADR 0001](https://github.com/MacCracken/vyakarana/blob/main/docs/adr/0001-corpus-sync-policy.md)).
-Vidya doesn't need to coordinate the snapshot — vyakarana
-pulls when it wants. New language tracks vidya adds eventually
-flow into vyakarana grammars (already happened in
-vyakarana 1.9.0 for cyrius via `content/cyrius/`).
-
-**Bugs to file upstream, not work around**: If vyakarana
-mistokenizes a sample, file the issue at vyakarana's repo —
-don't add per-token corrections in vidya's renderer. The
-tokenizer's `error` kind is a real signal, and silent
-work-arounds would mask grammar bugs that affect every
-consumer.
-
-**Ahead-of-time questions for whoever picks this up:**
-
-- Does vidya's HTTP service (sandhi-based) render content
-  per-request, at build time, or both? That affects whether
-  the tokenize path is hot.
-- Does vidya already have a renderer-style schema for code
-  blocks, or will the integration also define the styling
-  vocabulary?
-- Should the cutover be a single replace-the-renderer cut, or
-  an opt-in flag (e.g. a `vidya stats --renderer=vyakarana`
-  comparison mode) before flipping the default?
-
-These are vidya design calls; the integration guide handles
-the vyakarana side regardless of the answers.
-
----
-
-## Relationship to AGNOS
-
-Vidya feeds directly into the ecosystem:
-- **agnoshi** — shell uses vidya for programming help responses
-- **hoosh** — LLM uses vidya corpus for grounded programming advice
-- **Cyrius** — vidya documents compiler patterns being implemented
-  in real-time; field notes capture the gotchas as they surface
-- **mabda** — vidya documents the GPU patterns mabda implements
-- **naad** — vidya `audio_dsp` + `audio_synthesis` are the
-  educational portable counterparts to naad's production f32 +
-  PolyBLEP synth
-- **sakshi** — vidya uses sakshi for tracing; documents tracing patterns
-- **sandhi** — vidya's HTTP service runs on sandhi
-- **vyakarana** — source-code tokenizer; ready for vidya to
-  adopt as the code-rendering layer (see "Renderer integration"
-  above). 38 bundled grammars covering all 11 vidya language
-  tracks plus 27 more. Reciprocal: vidya's
-  `content/lexing_and_parsing/<lang>` files are vyakarana's
-  test corpus for those languages.
-- **`docs/sources.md`** standard — vidya IS the source citation for
-  programming knowledge
-
-Every science crate cites papers. Vidya cites implementations.
-
----
-
-*Last Updated: 2026-08-20 (v2.8.2) — **P0–P4 complete; 77/77 at 11/11; 847/847 validator with zero skips. 2.8.2 correctness cut: `search` case-insensitivity + tag search restored, `/info` section counts un-collapsed, `/search?q=` JSON injection closed, and `vidya validate` fixed after reporting 462 false FAILs of 847 (empty envp, under-reserved stack buffers, asm templates masking exit status). All five shared a root cause — nothing tested the code that had them — so the domain + JSON layer split into `src/vidya_core.cyr` and the suite went 41 → 139 assertions, benchmarks 6 → 12. sakshi 2.4.10 → 2.4.11 arrived with no manifest change, vindicating the 2.8.1 stdlib-leaf shape. Preceding 2.8.1 infra cut: cyrius 6.4.2 → 6.5.29, vyakarana 2.2.3 → 2.3.2, binary 14.66 MB → 2.56 MB, plus the release aarch64 probe / content-gate qemu probe / `continue-on-error` / empty-input benchmark repairs. See "2.7.x dep-track follow-ups" for queued cleanup items.***
+- **zugot**: `marketplace/vidya.cyml` still pins 2.7.3, and its
+  `make = "cyrius build"` fails. Details are in [state.md](state.md).
+- **Sibling repos' CI action majors**: see
+  [ecosystem-action-pins.md](ecosystem-action-pins.md).

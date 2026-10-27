@@ -44,7 +44,7 @@ build/vidya serve 8080                     # HTTP service: GET /stats, /code/{to
 
 ## Content Topics
 
-77 topics, complete across all 11 languages (847 examples). Browse `content/` directly or run `vidya list` to see the index. Roadmap and per-priority breakdown live in [`docs/development/roadmap.md`](docs/development/roadmap.md).
+77 topics, complete across all 11 languages (847 examples). Browse `content/` directly or run `vidya list` to see the index. Planned work lives in [`docs/development/roadmap.md`](docs/development/roadmap.md).
 
 ## Languages
 

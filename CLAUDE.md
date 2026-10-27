@@ -63,7 +63,7 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 
 | Action | Command | Notes |
 |---|---|---|
-| Sync stdlib | `cyrius lib sync` | Vendors the `[deps] stdlib` subset from the pinned snapshot into `lib/`. As of 6.5.29 (still true at 6.6.20) this **does** overwrite a stale `lib/<mod>.cyr` (verified 2.8.1 by staging a 6.4.2 `fmt.cyr` into a 6.5.29 tree — both `lib sync` and `deps` restored it). The older "treats an existing file as satisfied and never refreshes" behavior — which vyakarana's 2.3.0 entry documented at 6.5.4 — no longer applies. ⚠ **But a pin bump needs a clean rehydrate again as of 6.6.20**: `rm -rf lib cyrius.lock && cyrius lib sync && cyrius deps`. In place, `lib sync` refreshes only the declared subset and re-locks at the new pin, then `cyrius deps` refuses every transitive leaf still holding the old pin's content ("cyrius.lock and the pinned stdlib snapshot DISAGREE" — 15 leaves at 6.6.2 → 6.6.20). `cyrius deps --relock` gets past it but leaves an orphaned old-pin module (`assert.cyr`) vendored and locked |
+| Sync stdlib | `cyrius lib sync` | Vendors the `[deps] stdlib` subset from the pinned snapshot into `lib/`. As of 6.5.29 (still true at 6.6.20) this **does** overwrite a stale `lib/<mod>.cyr` (verified 2.8.1 by staging a 6.4.2 `fmt.cyr` into a 6.5.29 tree — both `lib sync` and `deps` restored it). The older "treats an existing file as satisfied and never refreshes" behavior — which vyakarana's 2.3.0 entry documented at 6.5.4 — no longer applies. ⚠ **But a pin bump needs a clean rehydrate again as of 6.6.20**: `rm -rf lib cyrius.lock && cyrius lib sync && cyrius deps`. In place, `lib sync` refreshes only the declared subset and re-locks at the new pin, then `cyrius deps` refuses every transitive leaf still holding the old pin's content ("cyrius.lock and the pinned stdlib snapshot DISAGREE" — 15 leaves at 6.6.2 → 6.6.20). `cyrius deps --relock` gets past it but leaves an orphaned old-pin module (`assert.cyr`) vendored and locked. Rehydrate with those commands, not `cyrius update`: it ignored the manifest pin under wrapper drift when last checked, and has not been re-checked at 6.7.18 |
 | Resolve deps | `cyrius deps` | Reads `cyrius.cyml`, resolves the `[deps.<name>]` git deps (vyakarana) alongside the synced stdlib |
 | Verify lock | `cyrius deps --verify` | Checks `cyrius.lock` SHAs. ⚠ **Cannot catch a shadowed stdlib module** — the lock is written *from disk*, so a git dep overlaying a folded module records the overlay's hash and reports clean (this is how sakshi sat downgraded through 2.8.0) |
 | Build binary | `cyrius build src/main.cyr build/vidya` | Output: static ELF — current size in [`docs/development/state.md`](docs/development/state.md) |
@@ -108,7 +108,7 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 ## Key Types
 
 - `Concept` — A programming topic with examples, best practices, gotchas, performance notes
-- `Topic` — Programming topic IDs (count in [`docs/development/state.md`](docs/development/state.md); status in `docs/development/roadmap.md`)
+- `Topic` — Programming topic IDs (count in [`docs/development/state.md`](docs/development/state.md); planned topics in `docs/development/roadmap.md`)
 - `Gotcha` — Common mistake with bad/good example (teaches what NOT to do)
 - `PerformanceNote` — Optimization insight with evidence (benchmark numbers)
 - `BestPractice` — The right way, with explanation of why
@@ -152,7 +152,7 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 7. Deeper tests from review
 8. Run benchmarks again — prove the wins
 9. If review heavy → return to step 5
-10. Documentation — update CHANGELOG, roadmap, ADRs for design decisions, source citations for algorithms/references, update `docs/sources.md`, verify recipe version in zugot
+10. Documentation — update CHANGELOG, roadmap (remove what shipped; it holds future work only), ADRs for design decisions, source citations for algorithms/references, update `docs/sources.md`, verify recipe version in zugot. On a cyrius pin bump, also the verification stamp in `content/cyrius/field_notes/index.cyml`, moved only as far as was actually re-verified
 11. Version check — `VERSION`, `cyrius.cyml` (via `${file:VERSION}`), zugot recipe all in sync
 12. Return to step 1
 
@@ -197,7 +197,7 @@ Root files (required):
 
 docs/ (required):
   architecture/overview.md — module map, data flow, consumers
-  development/roadmap.md — completed, backlog, future, v1.0 criteria
+  development/roadmap.md — future work only: release sequence, triggers, cross-repo asks
   development/content-format.md — content directory specification
 
 docs/ (when earned):

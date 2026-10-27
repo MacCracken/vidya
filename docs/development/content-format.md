@@ -14,7 +14,7 @@ content/
 └── qelib1.inc                # Shared OpenQASM 2.0 stdlib include
 ```
 
-`vidya stats` and the roadmap topic count refer to the topic directories
+`vidya stats` and the topic count in `state.md` refer to the topic directories
 only — `cyrius/` is the language-reference subtree (loaded separately
 by the field-notes path), and `qelib1.inc` is a load-bearing OpenQASM
 resource (every topic's `openqasm.qasm` resolves it via
