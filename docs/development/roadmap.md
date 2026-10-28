@@ -4,13 +4,13 @@
 > The current version, pins, sizes and gate counts are in [state.md](state.md).
 > Process, toolchains and gates are in [CLAUDE.md](../../CLAUDE.md).
 >
-> **Last updated**: 2026-10-27, at 2.9.1.
+> **Last updated**: 2026-10-28, at 2.9.2.
 
 ## Sequence
 
 | Release | Theme | Consumer-visible |
 |---|---|---|
-| 2.9.x | Hygiene, `serve` longevity, content review, P5 | No. Content grows 77 → 80 topics. |
+| 2.9.x | `serve` longevity, content review, P5 | No. Content grows 77 → 80 topics. |
 | **3.0.0** | Content reorganization | **Yes**: `content/` paths change |
 | after 3.0.0 | Renderer surface, P6 Cyrius concepts | Additive |
 
@@ -32,24 +32,6 @@ Why this order:
 ## 2.9.x
 
 Each item is its own patch unless noted, in this order.
-
-### Hygiene (next patch)
-
-- [ ] **Promote the dep shadow-override gotcha to a field note.** A
-  `[deps.<name>]` git block silently replaces a module that the toolchain
-  folded into its stdlib, and `cyrius deps --verify` cannot see it (the lock
-  is hashed from disk). It has hit sit, patra, sigil, kavach and vidya
-  (2.8.1), which is past CLAUDE.md's three-port bar. It is not yet in
-  `content/cyrius/field_notes/`.
-- [ ] **Stale renderer comments.** `src/vidya_core.cyr:882` and `:936` say
-  OpenQASM has no vyakarana grammar, which was true of 2.2.1. It has one now
-  (2.9.0 recoloured all 77 `.qasm` files). Keep the generic `has_grammar`
-  fallback.
-- [ ] **Re-measure the serve figures** in `docs/architecture/overview.md`
-  that were taken at 60 topics (reload 17–22 ms, full rescan ~20 ms).
-- [ ] **Field-notes verification stamp.** `content/cyrius/field_notes/index.cyml`
-  says "Verified on Cyrius 2.2 → 6.6.19". Re-verify at the current pin and
-  bump it, or reword it to say what was verified.
 
 ### `serve` longevity
 
@@ -121,8 +103,9 @@ including all of P1–P4, have no group. Rewriting it is the first step.
 - [ ] `load_all()` and the hot-reload watcher recurse.
 - [ ] `scripts/validate-content.sh` and `validate_command` change together.
 - [ ] CI's "Verify concept.toml in topic directories" loop.
-- [ ] Tests, fixtures, and every output that carries a path (check `/info`
-  and `code`).
+- [ ] Tests, fixtures, and every output that carries a path: `/code/...` and
+  `/compare` return a `path` field, and the CLI's `info` and `compare` print
+  `file:` lines.
 - [ ] Docs that name paths: `content-format.md`, `usage.md`,
   `guides/getting-started.md`, `learning-paths.md`.
 

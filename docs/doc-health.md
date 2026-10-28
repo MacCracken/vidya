@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-10-27 (roadmap cleanup, and the v2.9.1 ship; see the two blocks below). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
+> **Last refresh**: 2026-10-28 (the v2.9.2 ship; with the 2026-10-27 roadmap cleanup and v2.9.1 ship below it). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -17,6 +17,15 @@ type: state
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
+
+## 2026-10-28 (v2.9.2) — hygiene patch
+
+| Doc | Change |
+|---|---|
+| `CHANGELOG.md` | 2.9.2 entry: the field note, the index stamp and counts, the re-measured serve figures, the renderer comments. |
+| `docs/architecture/overview.md` | Four figures that were taken at 60 topics, re-measured at 77 from vidya's own log lines: `load_all`, per-endpoint request latency, reload, full rescan. |
+| `docs/development/roadmap.md` | The four hygiene items removed; the 3.0.0 path item names the outputs that carry a path (`/code`, `/compare`, CLI `info` / `compare`). |
+| `docs/development/state.md` | Version → 2.9.2, the 2.9.2 posture line, zugot staleness (eleven releases), the field-notes-stamp loose end removed. |
 
 ## 2026-10-27 — roadmap cleanup (post-2.9.1)
 
@@ -247,7 +256,7 @@ Numbers approximate; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-16 | ✅ Fresh | **New 2026-05-16** — tier index. Currently lists `overview.md` as the only entry; numbered architecture notes (`NNN-*.md`) added as invariants surface. |
-| `overview.md` | 2026-10-27 | ✅ Fresh | Module map, data flow, consumer list. 2.9.1: design point 5 names the typed TOML lookups; the consumer list gains vyakarana (its corpus snapshot is path-dependent); the serve-memory known limit points at the roadmap. Its 60-topic serve figures are queued for re-measurement (roadmap 2.9.x hygiene). |
+| `overview.md` | 2026-10-27 | ✅ Fresh | Module map, data flow, consumer list. 2.9.1: design point 5 names the typed TOML lookups; the consumer list gains vyakarana (its corpus snapshot is path-dependent); the serve-memory known limit points at the roadmap. 2.9.2: the serve figures re-measured at 77 topics (load ~19 ms, reload 22–27 ms, per-endpoint request medians). |
 
 ---
 

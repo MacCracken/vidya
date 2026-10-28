@@ -93,8 +93,8 @@ main()
   ├─ load_all()            # iterate content/*/, parse concept.toml + read
   │                        # each language file, build Concept records,
   │                        # push into _reg_entries, key by id in _reg_index.
-  │                        # ~2.4ms for 60 topics × 11 langs
-  │                        # (measured pre-2.5; corpus is now 77).
+  │                        # ~19ms per process start at 77 topics
+  │                        # (847 examples; 2.9.2, median of 7).
   └─ command dispatch      # streq() chain on argv(1)
 ```
 
@@ -150,9 +150,12 @@ detects a content change — see "Hot-reload contract" below.
 
 **What the contract guarantees.**
 
-- Sub-millisecond per-request latency on the no-events path
-  (verified at v2.3.5: 20µs–139µs across all endpoints). No
-  TOML parse, no `dir_list`, no `read_file` on the hot path.
+- Sub-millisecond per-request latency on the no-events path. Re-measured
+  at 2.9.2 (77 topics, server-side from the access log, median of 20):
+  `/stats` 45µs, `/compare` 48µs, `/info` 53µs, `/list` 208µs,
+  `/search` 418µs, `/code` 911µs (it tokenizes; one run took 2.7ms).
+  It was 20µs–139µs at v2.3.5. No TOML parse, no `dir_list`, no
+  `read_file` on the hot path.
 - Single-threaded vidya means the registry pointer pair
   (`_reg_entries`, `_reg_index`) is observed atomically — a
   request either sees the entire pre-swap registry or the
@@ -225,7 +228,8 @@ idempotent (closes the prior fd first).
 Verified end-to-end at v2.3.6 across five scenarios: baseline,
 add a topic dir, remove a topic dir, corrupt a concept.toml
 (reload aborts, live registry survives), restore (reload
-succeeds). Reload latency: 17–22ms, measured at 60 topics (pre-2.5; the corpus is 77 today — figure not re-measured).
+succeeds). Reload latency: 22–27ms at 77 topics (2.9.2, seven reloads,
+median 26ms), from the `reload OK` log line. It was 17–22ms at 60 topics.
 
 ### Known limits (serve mode)
 
@@ -245,7 +249,7 @@ succeeds). Reload latency: 17–22ms, measured at 60 topics (pre-2.5; the corpus
   edit" semantics are needed, drive a periodic curl (e.g. a
   10s `curl -s /stats > /dev/null` in another terminal).
 - **No partial reload.** A single touched file triggers a full
-  re-scan of the whole corpus. ~20ms at 60 topics; not worth optimising until
+  re-scan of the whole corpus. ~26ms at 77 topics; not worth optimising until
   topic count crosses ~500.
 
 ## Key Design Decisions

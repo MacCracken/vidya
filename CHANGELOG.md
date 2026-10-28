@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.2] — 2026-10-28
+
+Hygiene patch, the roadmap's first 2.9.x item. No dependency, behaviour or
+output change: the binary is byte-identical to 2.9.1 (the one source edit is
+a comment). `cyrius test` 140/0, 12 benchmarks, and content gate 847/847,
+strict, zero skips.
+
+### Added — field note: a git dep on a stdlib-folded module
+
+`compiler/gotchas.cyml` gains a CLASS entry,
+`a_git_dep_on_a_stdlib_folded_module_downgraded_silently_now_it_pins_nothing_v6718`,
+promoted under CLAUDE.md's three-port rule. Five repos hit it: sit, patra,
+sigil, kavach and vidya (2.8.1). It was written from a re-run at 6.7.18
+rather than from the old records, and that changed what it says:
+
+- **Through 6.5.38** the git block overlaid the snapshot's copy on every
+  build. That was a silent downgrade, and `deps --verify` could not see it,
+  because the lock is hashed from disk.
+- **Since 6.5.39** the overwrite is refused, on every `deps` and `build`:
+  `warning: refusing to overwrite stdlib leaf 'sakshi'`. Re-running vidya's
+  own 2.8.0 block (`[deps.sakshi]` tag 2.4.4) over 6.7.18's sakshi 2.5.10
+  builds a binary byte-identical to the tree without the block. The pin is
+  inert, but `cyrius.lock` still carries a `sakshi … 2.4.4` commit row and
+  `deps --verify` passes, so the manifest and lock name a version the build
+  never uses.
+- The warning's advice ("declare it in [deps] stdlib OR depend on the
+  package") does not rescue the pin either. With `sakshi` also removed from
+  `[deps] stdlib`, another stdlib module still vendored it, and the git
+  artifact was refused the same way.
+
+### Changed — field-notes index
+
+- `field_notes/index.cyml` claimed "Verified on Cyrius 2.2 → 6.6.19". It now
+  says what the stamp means: entries span 2.2 → 6.7.18, each was verified on
+  the version it names, and none is re-verified when the pin moves. Bumping
+  the old stamp would have claimed a re-verification that never happened.
+- Its counts were re-derived with the `grep -c` the file prescribes. They had
+  drifted again: language/ read 81 against 166, compiler/ 257 against 336,
+  and nine per-file lines were stale (gotchas 139 → 209, platform_abi 16 →
+  41, semantics_runtime 33 → 64, …). `compiler/index.cyml` had kept up with
+  its own counts, apart from its gotchas section line (205 → 209); it also
+  lists the new entry.
+
+### Changed — docs
+
+- **`docs/architecture/overview.md`'s serve figures, re-measured at 77
+  topics.** They had been taken at 60. Each comes from vidya's own sakshi log
+  lines, running the 2.9.1 binary:
+  - `load_all` is **~19 ms** per process start (18.5–20.3 ms over 7 runs).
+    The old figure was ~2.4 ms. The bench's `load_all` (~7.8 ms) is a
+    repeated load inside one warm process, which is not the same
+    measurement.
+  - Reload is **22–27 ms** (median 26 ms over 7 reloads), up from 17–22 ms,
+    in line with 77 / 60 topics.
+  - Per-request latency is still sub-millisecond at the median on every
+    endpoint: `/stats` 45 µs, `/compare` 48 µs, `/info` 53 µs, `/list`
+    208 µs, `/search` 418 µs, `/code` 911 µs. `/code` tokenizes, and one of
+    its 20 runs took 2.7 ms.
+- **Stale renderer comments** in `src/vidya_core.cyr`. They still said
+  OpenQASM has no vyakarana grammar, which was true of 2.2.1; vyakarana has
+  shipped one since 2.3.5. The section header also still described the
+  pre-2.7.0 plan ("vidya does not currently render source code anywhere").
+  Comment-only; the `has_grammar` fallback stays.
+
 ## [2.9.1] — 2026-10-27
 
 Dependency patch. **cyrius 6.7.15 → 6.7.18** and **vyakarana 2.9.1 →
