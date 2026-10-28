@@ -257,6 +257,18 @@ fn to_cstr(s) {
     return buf;
 }
 
+# to_cstr from Allocator `a` (the request path passes `rq_alloc()`).
+# `to_cstr` keeps its own direct `alloc`: going through the vtable cost
+# a measured 5 % on the search_text_exact bench.
+fn to_cstr_a(a, s) {
+    if (s == 0) { return ""; }
+    var len = str_len(s);
+    var buf = alloc_via(a, len + 1);
+    memcpy(buf, str_data(s), len);
+    store8(buf + len, 0);
+    return buf;
+}
+
 fn reg_add(concept) {
     vec_push(_reg_entries, concept);
     var id = concept_id(concept);
@@ -341,16 +353,69 @@ fn extract_explanation(code, prefix) {
 # Loader — parse concept.toml + discover language files
 # ================================================================
 
+# Largest concept.toml or example the loader accepts. A bigger file is
+# refused (-EFBIG), never cut short. The largest example is ~20 KB.
+var LOAD_FILE_MAX = 1048576;
+
+# The read buffer every load shares, as file_read_whole_into's { ptr, cap }
+# pair. It grows to the largest file once and is then reused.
+var _load_rb: i64[2];
+
+# memcpy, 8 bytes at a time. lib/string.cyr's memcpy copies one byte
+# per iteration, and the loader copies the whole corpus (6.3 MB) on
+# every load: ~8 ms of a ~27 ms cold load, measured at 2.9.3.
+fn copy_bytes8(dst, src, n) {
+    var i = 0;
+    var w = n - (n % 8);
+    while (i < w) {
+        store64(dst + i, load64(src + i));
+        i = i + 8;
+    }
+    while (i < n) {
+        store8(dst + i, load8(src + i));
+        i = i + 1;
+    }
+    return dst;
+}
+
+# Read a whole file into a bump allocation of exactly its size, plus a
+# NUL. Returns the buffer with the length in *len_out, or 0 with a
+# negative errno in *len_out (-EFBIG past `max`, -ENOMEM).
+#
+# Through 2.9.2 the loader read every concept.toml into a fixed 256 KiB
+# buffer and every example into 64 KiB, whatever the file's size. That
+# was ~75 MB of heap per load for a 6.4 MB corpus, paid again on every
+# hot reload because the bump heap never frees. An example over 65,535
+# bytes was also cut short without a word. Reading through one kept
+# buffer leaves only the exact copy on the bump heap. A fresh buffer per
+# file (file_read_whole_a's 4 KiB start, doubled) made a load ~80 %
+# slower in a cold process.
+fn read_file_exact(path, max, len_out) {
+    var n = file_read_whole_into(&_load_rb, path, max);
+    if (n < 0) {
+        store64(len_out, n);
+        return 0;
+    }
+    var buf = alloc(n + 1);
+    if (buf == 0) {
+        store64(len_out, 0 - 12);
+        return 0;
+    }
+    copy_bytes8(buf, load64(&_load_rb), n);
+    store8(buf + n, 0);
+    store64(len_out, n);
+    return buf;
+}
+
 fn load_concept(topic_dir) {
     var toml_path = path_join(topic_dir, str_from("concept.toml"));
     if (file_exists(str_data(toml_path)) == 0) { return 0; }
 
-    # Read then parse manually — lib/toml.cyr toml_parse_file uses
-    # var buf[N] (static data, not stack) so consecutive calls clobber
-    # each other's Str backing memory. Heap-alloc per call to keep
-    # parsed Str values alive across topics. (Tracked: stdlib gotcha.)
-    var _toml_buf = alloc(262144);
-    var _toml_n = file_read_all(str_data(toml_path), _toml_buf, 262144);
+    # Each topic gets its own buffer, because the parsed Str values
+    # point into it and must stay alive after the next topic is read.
+    var _toml_n = 0;
+    var _toml_buf = read_file_exact(str_data(toml_path), LOAD_FILE_MAX, &_toml_n);
+    if (_toml_buf == 0) { return 0; }
     if (_toml_n <= 0) { return 0; }
     var sections = toml_parse(str_new(_toml_buf, _toml_n));
     # toml_parse returns 0 only when an allocation fails; vec_len(0) would
@@ -459,10 +524,11 @@ fn load_concept(topic_dir) {
         var fname = lang_filename(li);
         var fpath = path_join(topic_dir, fname);
         if (file_exists(str_data(fpath)) == 1) {
-            # Read file contents
-            var buf = alloc(65536);
-            var n = file_read_all(str_data(fpath), buf, 65535);
-            if (n > 0) {
+            # An unreadable, empty or over-LOAD_FILE_MAX example is
+            # skipped, and shows up as a gap in `vidya gaps`.
+            var n = 0;
+            var buf = read_file_exact(str_data(fpath), LOAD_FILE_MAX, &n);
+            if (buf != 0 && n > 0) {
                 var code = str_new(buf, n);
                 var explanation = extract_explanation(code, lang_comment(li));
                 var rel_path = path_join(concept_id(concept), fname);
@@ -506,9 +572,11 @@ fn load_all() {
 # All-or-nothing: a partial-reload failure (one bad concept.toml)
 # leaves the live registry untouched.
 #
-# Bump-allocator note: each reload doubles registry memory, which
-# never frees. Acceptable for a local dev tool reloaded a handful
-# of times per session; document for long-running deployments.
+# Bump-allocator note: the replaced registry is never freed. Since
+# 2.9.3 the loader reads each file at its own size, so a reload costs
+# ~9.4 MB (6.3 MB of it the corpus files), down from ~77 MB. Freeing the
+# old registry needs it built on an arena, and bayan's toml_parse takes
+# no allocator (roadmap, "Waiting on a trigger").
 
 # IN_NONBLOCK + watch mask constants — referenced numerically because
 # the cyrius stdlib's InotifyEvent enum is in syscalls_x86_64_linux
@@ -702,7 +770,7 @@ fn ascii_fold(b) {
 fn cstr_lower(c) {
     if (c == 0) { return ""; }
     var len = strlen(c);
-    var buf = alloc(len + 1);
+    var buf = alloc_via(rq_alloc(), len + 1);
     var i = 0;
     while (i < len) {
         store8(buf + i, ascii_fold(load8(c + i)));
@@ -754,7 +822,7 @@ fn str_has_ci(s, folded) {
 # same query. This was previously a byte-exact scan, and the tag
 # branch was commented out entirely.
 fn search(query) {
-    var results = vec_new();
+    var results = vec_new_a(rq_alloc());
     var folded = cstr_lower(query);
     var entries = reg_list();
     var count = vec_len(entries);
@@ -785,7 +853,7 @@ fn search(query) {
                 }
             }
         }
-        if (found == 1) { vec_push(results, c); }
+        if (found == 1) { vec_push_a(rq_alloc(), results, c); }
         i = i + 1;
     }
     return results;
@@ -900,6 +968,27 @@ fn ansi_open_for_kind(kname) {
     return "";
 }
 
+# One token buffer for every /code render, emptied before use and
+# kept at its high-water capacity. It lives on the default allocator.
+# A fresh tokenbuf per request left its arrays on the bump heap, ~45 %
+# of what a /code request still leaves (24–98 KB a request, measured
+# at 2.9.3). The stream itself is still new per render, because
+# vyakarana has no way to reuse one or to take an allocator.
+#
+# ⚠ `tokenbuf_drop_front` is exported and documented, but it is not on
+# vyakarana's public-API list. The rq_arena_code test renders twice,
+# so a rename shows up there as a failure on the bump.
+var _render_tb = 0;
+
+fn render_tokenbuf() {
+    if (_render_tb == 0) {
+        _render_tb = tokenbuf_new();
+        return _render_tb;
+    }
+    tokenbuf_drop_front(_render_tb, tokenbuf_count(_render_tb));
+    return _render_tb;
+}
+
 # Read example source for (concept, lang) into a freshly null-
 # terminated cstr. Returns 0 if the example is missing.
 fn read_example_cstr(concept, lang) {
@@ -907,7 +996,7 @@ fn read_example_cstr(concept, lang) {
     if (ex == 0) { return 0; }
     var code = example_code(ex);
     if (code == 0) { return 0; }
-    return to_cstr(code);
+    return to_cstr_a(rq_alloc(), code);
 }
 
 # CLI: `vidya code <topic> <lang>`
@@ -1218,12 +1307,78 @@ fn cmd_validate(topic_filter) {
 }
 
 # ================================================================
+# Request allocator — what the response path allocates from
+# ================================================================
+# The JSON builders, `search` and the code renderer allocate through
+# `rq_alloc()`. Outside `serve` that is the default (bump) allocator,
+# so the CLI, the tests and the benches allocate exactly as before.
+# `serve` brackets each request with `rq_enter` / `rq_leave`: the
+# response is built on a growable arena that is reset afterwards, so
+# the next request reuses that memory. Through 2.9.2 every request
+# left its allocations on the bump heap, which never frees: 0.5 KB
+# for /stats, 44 KB for /list, up to 688 KB for /code.
+#
+# Anything that must outlive the request stays on the default
+# allocator: the registry and a hot reload (both before `rq_enter`),
+# the reused token buffer, and every cache a library fills on first
+# use (vyakarana's compiled grammars). Never store an `rq_alloc()`
+# pointer anywhere that outlives the request.
+var _rq_alloc = 0;
+var _rq_arena = 0;
+
+fn rq_alloc() {
+    if (_rq_alloc == 0) { _rq_alloc = default_alloc(); }
+    return _rq_alloc;
+}
+
+# Start a request. The arena is created on first use; if that fails,
+# requests fall back to the default allocator, as before 2.9.3.
+fn rq_enter() {
+    if (_rq_arena == 0) { _rq_arena = arena_allocator_growable(262144); }
+    if (_rq_arena != 0) { _rq_alloc = _rq_arena; }
+    return 0;
+}
+
+# End a request. Every `rq_alloc()` pointer it handed out is dead.
+fn rq_leave() {
+    if (_rq_arena != 0) { reset_via(_rq_arena); }
+    _rq_alloc = default_alloc();
+    return 0;
+}
+
+# ================================================================
+# Clock recalibration — `serve` only
+# ================================================================
+# sakshi stamps spans and log lines from a calibrated cycle counter,
+# and recommends recalibrating hourly in a long-running process: the
+# counter's true rate drifts from the kernel's (up to ~0.1 s an hour
+# on x86_64). `serve` asks after each request. The call pauses ~10 ms
+# (up to ~80 ms on a coarse clock), so it runs after the response has
+# gone out and outside the logged latency. An idle server makes no
+# timestamps, so it recalibrates on the first request after an hour.
+var CLOCK_RECAL_NS = 3600000000000;
+var _clock_cal_at = 0;
+
+# Record a calibration at `now` (ns on sakshi's clock).
+fn clock_recal_done(now) {
+    _clock_cal_at = now;
+    return 0;
+}
+
+# 1 when the last calibration is at least CLOCK_RECAL_NS old.
+fn clock_recal_due(now) {
+    if (now - _clock_cal_at < CLOCK_RECAL_NS) { return 0; }
+    return 1;
+}
+
+# ================================================================
 # JSON emission helpers
 # ================================================================
 # Every user- and content-derived string goes out through
-# sandhi_json_escape. It returns a *fully quoted* JSON string literal
-# (it emits its own surrounding quotes), so callers must not wrap the
-# result in quotes of their own.
+# json_escape_a (sandhi_json_escape's rules, on the request allocator;
+# see below). It returns a *fully quoted* JSON string literal (it emits
+# its own surrounding quotes), so callers must not wrap the result in
+# quotes of their own.
 #
 # Skipping this is a structure-injection hole, not a cosmetic one:
 # sandhi percent-decodes query params before we ever see them
@@ -1235,14 +1390,77 @@ fn cmd_validate(topic_filter) {
 # Static enum literals (lang_name / lang_extension / lang_stem /
 # kind_name) are still emitted with bare quotes: they are compile-time
 # constants with no escapable byte in them, and routing them through
-# the escaper would allocate once per element on /list and /gaps (the
-# serve-path bump allocator never resets between requests).
+# the escaper would allocate once per element on /list and /gaps.
 #
 # cstr variant — input must be NUL-terminated (query params, static
 # literals). 0 renders as an empty JSON string.
 fn json_add_cstr(sb, c) {
-    if (c == 0) { return str_builder_add_cstr(sb, "\"\""); }
-    return str_builder_add_cstr(sb, sandhi_json_escape(c));
+    var a = rq_alloc();
+    if (c == 0) { return str_builder_add_cstr_a(a, sb, "\"\""); }
+    return str_builder_add_cstr_a(a, sb, json_escape_a(a, c));
+}
+
+# Escaped length of one byte, under sandhi_json_escape's rules.
+fn _json_esc_len(c) {
+    if (c == 34 || c == 92) { return 2; }
+    if (c == 8 || c == 9 || c == 10 || c == 12 || c == 13) { return 2; }
+    if (c < 32) { return 6; }
+    return 1;
+}
+
+# `c` as a fully quoted JSON string literal, allocated from `a`: the
+# same bytes as sandhi_json_escape(c), which the json_escape_matches_sandhi
+# test checks. vidya has its own because sandhi_json_escape_a (sandhi
+# 1.13.7) builds its result with a plain str_builder_new(), i.e. on the
+# global bump heap whatever `a` is. Under a request arena that left
+# every escaped string behind, ~19 KB per /list. This sizes the output
+# first and fills one allocation from `a`.
+fn json_escape_a(a, c) {
+    var n = 2;
+    var i = 0;
+    while (load8(c + i) != 0) {
+        n = n + _json_esc_len(load8(c + i));
+        i = i + 1;
+    }
+    var out = alloc_via(a, n + 1);
+    if (out == 0) { return "\"\""; }
+    store8(out, 34);
+    var o = 1;
+    i = 0;
+    while (load8(c + i) != 0) {
+        var b = load8(c + i);
+        if (b == 34 || b == 92) {
+            store8(out + o, 92); store8(out + o + 1, b); o = o + 2;
+        } elif (b == 8) {
+            store8(out + o, 92); store8(out + o + 1, 98); o = o + 2;
+        } elif (b == 9) {
+            store8(out + o, 92); store8(out + o + 1, 116); o = o + 2;
+        } elif (b == 10) {
+            store8(out + o, 92); store8(out + o + 1, 110); o = o + 2;
+        } elif (b == 12) {
+            store8(out + o, 92); store8(out + o + 1, 102); o = o + 2;
+        } elif (b == 13) {
+            store8(out + o, 92); store8(out + o + 1, 114); o = o + 2;
+        } elif (b < 32) {
+            # \u00XX, lowercase hex, as sandhi writes it (RFC 8259).
+            var hi = (b >> 4) & 0xF;
+            var lo = b & 0xF;
+            var h1 = 48 + hi;
+            if (hi >= 10) { h1 = 87 + hi; }
+            var h2 = 48 + lo;
+            if (lo >= 10) { h2 = 87 + lo; }
+            store8(out + o, 92); store8(out + o + 1, 117);
+            store8(out + o + 2, 48); store8(out + o + 3, 48);
+            store8(out + o + 4, h1); store8(out + o + 5, h2);
+            o = o + 6;
+        } else {
+            store8(out + o, b); o = o + 1;
+        }
+        i = i + 1;
+    }
+    store8(out + o, 34);
+    store8(out + o + 1, 0);
+    return out;
 }
 
 # Str variant — a Str is a borrowed (data, len) pair and is NOT
@@ -1250,7 +1468,7 @@ fn json_add_cstr(sb, c) {
 # buffer; see the tags note in `search`), so bridge through to_cstr
 # before escaping. 0 renders as an empty JSON string.
 fn json_add_str(sb, s) {
-    return json_add_cstr(sb, to_cstr(s));
+    return json_add_cstr(sb, to_cstr_a(rq_alloc(), s));
 }
 
 # vec_len with a null-vec guard.
@@ -1285,24 +1503,26 @@ fn json_stats_response() {
         if (nex >= LANG_COUNT) { complete = complete + 1; }
         i = i + 1;
     }
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"topics\":");
-    str_builder_add_int(sb, total);
-    str_builder_add_cstr(sb, ",\"complete\":");
-    str_builder_add_int(sb, complete);
-    str_builder_add_cstr(sb, ",\"examples\":");
-    str_builder_add_int(sb, total_examples);
-    str_builder_add_cstr(sb, ",\"languages\":");
-    str_builder_add_int(sb, LANG_COUNT);
-    str_builder_add_cstr(sb, "}");
-    return str_builder_build(sb);
+    var a = rq_alloc();
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "{\"topics\":");
+    str_builder_add_int_a(a, sb, total);
+    str_builder_add_cstr_a(a, sb, ",\"complete\":");
+    str_builder_add_int_a(a, sb, complete);
+    str_builder_add_cstr_a(a, sb, ",\"examples\":");
+    str_builder_add_int_a(a, sb, total_examples);
+    str_builder_add_cstr_a(a, sb, ",\"languages\":");
+    str_builder_add_int_a(a, sb, LANG_COUNT);
+    str_builder_add_cstr_a(a, sb, "}");
+    return str_builder_build_a(a, sb);
 }
 
 fn json_list_response() {
     var entries = reg_list();
     var total = vec_len(entries);
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "[");
+    var a = rq_alloc();
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "[");
     var i = 0;
     while (i < total) {
         var c = vec_get(entries, i);
@@ -1311,57 +1531,58 @@ fn json_list_response() {
         var examples = concept_examples(c);
         var nex = 0;
         if (examples != 0) { nex = vec_len(examples); }
-        if (i > 0) { str_builder_add_cstr(sb, ","); }
-        str_builder_add_cstr(sb, "{\"id\":");
+        if (i > 0) { str_builder_add_cstr_a(a, sb, ","); }
+        str_builder_add_cstr_a(a, sb, "{\"id\":");
         json_add_str(sb, id);
-        str_builder_add_cstr(sb, ",\"topic\":");
+        str_builder_add_cstr_a(a, sb, ",\"topic\":");
         json_add_str(sb, topic);
-        str_builder_add_cstr(sb, ",\"languages\":");
-        str_builder_add_int(sb, nex);
-        str_builder_add_cstr(sb, "}");
+        str_builder_add_cstr_a(a, sb, ",\"languages\":");
+        str_builder_add_int_a(a, sb, nex);
+        str_builder_add_cstr_a(a, sb, "}");
         i = i + 1;
     }
-    str_builder_add_cstr(sb, "]");
-    return str_builder_build(sb);
+    str_builder_add_cstr_a(a, sb, "]");
+    return str_builder_build_a(a, sb);
 }
 
 fn json_info_response(topic_id) {
     var concept = reg_get(topic_id);
     if (concept == 0) { return 0; }
 
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"id\":");
+    var a = rq_alloc();
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "{\"id\":");
     json_add_str(sb, concept_id(concept));
-    str_builder_add_cstr(sb, ",\"title\":");
+    str_builder_add_cstr_a(a, sb, ",\"title\":");
     json_add_str(sb, concept_title(concept));
-    str_builder_add_cstr(sb, ",\"topic\":");
+    str_builder_add_cstr_a(a, sb, ",\"topic\":");
     json_add_str(sb, concept_topic(concept));
-    str_builder_add_cstr(sb, ",\"description\":");
+    str_builder_add_cstr_a(a, sb, ",\"description\":");
     json_add_str(sb, concept_desc(concept));
 
     # Tags
-    str_builder_add_cstr(sb, ",\"tags\":[");
+    str_builder_add_cstr_a(a, sb, ",\"tags\":[");
     var tags = concept_tags(concept);
     if (tags != 0) {
         var ti = 0;
         while (ti < vec_len(tags)) {
-            if (ti > 0) { str_builder_add_cstr(sb, ","); }
+            if (ti > 0) { str_builder_add_cstr_a(a, sb, ","); }
             json_add_str(sb, vec_get(tags, ti));
             ti = ti + 1;
         }
     }
 
     # Languages
-    str_builder_add_cstr(sb, "],\"languages\":[");
+    str_builder_add_cstr_a(a, sb, "],\"languages\":[");
     var examples = concept_examples(concept);
     if (examples != 0) {
         var ei = 0;
         while (ei < vec_len(examples)) {
             var ex = vec_get(examples, ei);
-            if (ei > 0) { str_builder_add_cstr(sb, ","); }
-            str_builder_add_cstr(sb, "\"");
-            str_builder_add_cstr(sb, lang_name(example_lang(ex)));
-            str_builder_add_cstr(sb, "\"");
+            if (ei > 0) { str_builder_add_cstr_a(a, sb, ","); }
+            str_builder_add_cstr_a(a, sb, "\"");
+            str_builder_add_cstr_a(a, sb, lang_name(example_lang(ex)));
+            str_builder_add_cstr_a(a, sb, "\"");
             ei = ei + 1;
         }
     }
@@ -1370,55 +1591,57 @@ fn json_info_response(topic_id) {
     var bps = concept_best_practices(concept);
     var gotchas = concept_gotchas(concept);
     var pnotes = concept_perf_notes(concept);
-    str_builder_add_cstr(sb, "],\"best_practices\":");
-    str_builder_add_int(sb, vec_count(bps));
-    str_builder_add_cstr(sb, ",\"gotchas\":");
-    str_builder_add_int(sb, vec_count(gotchas));
-    str_builder_add_cstr(sb, ",\"performance_notes\":");
-    str_builder_add_int(sb, vec_count(pnotes));
-    str_builder_add_cstr(sb, "}");
-    return str_builder_build(sb);
+    str_builder_add_cstr_a(a, sb, "],\"best_practices\":");
+    str_builder_add_int_a(a, sb, vec_count(bps));
+    str_builder_add_cstr_a(a, sb, ",\"gotchas\":");
+    str_builder_add_int_a(a, sb, vec_count(gotchas));
+    str_builder_add_cstr_a(a, sb, ",\"performance_notes\":");
+    str_builder_add_int_a(a, sb, vec_count(pnotes));
+    str_builder_add_cstr_a(a, sb, "}");
+    return str_builder_build_a(a, sb);
 }
 
 fn json_search_response(query) {
     var results = search(query);
     var count = vec_len(results);
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"query\":");
+    var a = rq_alloc();
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "{\"query\":");
     json_add_cstr(sb, query);
-    str_builder_add_cstr(sb, ",\"count\":");
-    str_builder_add_int(sb, count);
-    str_builder_add_cstr(sb, ",\"results\":[");
+    str_builder_add_cstr_a(a, sb, ",\"count\":");
+    str_builder_add_int_a(a, sb, count);
+    str_builder_add_cstr_a(a, sb, ",\"results\":[");
     var i = 0;
     while (i < count) {
         var c = vec_get(results, i);
-        if (i > 0) { str_builder_add_cstr(sb, ","); }
-        str_builder_add_cstr(sb, "{\"id\":");
+        if (i > 0) { str_builder_add_cstr_a(a, sb, ","); }
+        str_builder_add_cstr_a(a, sb, "{\"id\":");
         json_add_str(sb, concept_id(c));
-        str_builder_add_cstr(sb, ",\"description\":");
+        str_builder_add_cstr_a(a, sb, ",\"description\":");
         json_add_str(sb, concept_desc(c));
-        str_builder_add_cstr(sb, "}");
+        str_builder_add_cstr_a(a, sb, "}");
         i = i + 1;
     }
-    str_builder_add_cstr(sb, "]}");
-    return str_builder_build(sb);
+    str_builder_add_cstr_a(a, sb, "]}");
+    return str_builder_build_a(a, sb);
 }
 
 fn json_languages_response() {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "[");
+    var a = rq_alloc();
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "[");
     var li = 0;
     while (li < LANG_COUNT) {
-        if (li > 0) { str_builder_add_cstr(sb, ","); }
-        str_builder_add_cstr(sb, "{\"name\":\"");
-        str_builder_add_cstr(sb, lang_name(li));
-        str_builder_add_cstr(sb, "\",\"extension\":\"");
-        str_builder_add_cstr(sb, lang_extension(li));
-        str_builder_add_cstr(sb, "\"}");
+        if (li > 0) { str_builder_add_cstr_a(a, sb, ","); }
+        str_builder_add_cstr_a(a, sb, "{\"name\":\"");
+        str_builder_add_cstr_a(a, sb, lang_name(li));
+        str_builder_add_cstr_a(a, sb, "\",\"extension\":\"");
+        str_builder_add_cstr_a(a, sb, lang_extension(li));
+        str_builder_add_cstr_a(a, sb, "\"}");
         li = li + 1;
     }
-    str_builder_add_cstr(sb, "]");
-    return str_builder_build(sb);
+    str_builder_add_cstr_a(a, sb, "]");
+    return str_builder_build_a(a, sb);
 }
 
 fn json_compare_response(topic_id, lang1_str, lang2_str) {
@@ -1431,40 +1654,41 @@ fn json_compare_response(topic_id, lang1_str, lang2_str) {
     if (l1 < 0) { return 0 - 1; }
     if (l2 < 0) { return 0 - 1; }
 
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"topic\":");
+    var a = rq_alloc();
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "{\"topic\":");
     json_add_str(sb, concept_id(concept));
-    str_builder_add_cstr(sb, ",\"title\":");
+    str_builder_add_cstr_a(a, sb, ",\"title\":");
     json_add_str(sb, concept_title(concept));
-    str_builder_add_cstr(sb, ",");
+    str_builder_add_cstr_a(a, sb, ",");
 
     # left
-    str_builder_add_cstr(sb, "\"left\":{\"language\":\"");
-    str_builder_add_cstr(sb, lang_name(l1));
-    str_builder_add_cstr(sb, "\",");
+    str_builder_add_cstr_a(a, sb, "\"left\":{\"language\":\"");
+    str_builder_add_cstr_a(a, sb, lang_name(l1));
+    str_builder_add_cstr_a(a, sb, "\",");
     var ex1 = get_example(concept, l1);
     if (ex1 != 0) {
-        str_builder_add_cstr(sb, "\"present\":true,\"path\":");
+        str_builder_add_cstr_a(a, sb, "\"present\":true,\"path\":");
         json_add_str(sb, example_path(ex1));
     } else {
-        str_builder_add_cstr(sb, "\"present\":false");
+        str_builder_add_cstr_a(a, sb, "\"present\":false");
     }
-    str_builder_add_cstr(sb, "},");
+    str_builder_add_cstr_a(a, sb, "},");
 
     # right
-    str_builder_add_cstr(sb, "\"right\":{\"language\":\"");
-    str_builder_add_cstr(sb, lang_name(l2));
-    str_builder_add_cstr(sb, "\",");
+    str_builder_add_cstr_a(a, sb, "\"right\":{\"language\":\"");
+    str_builder_add_cstr_a(a, sb, lang_name(l2));
+    str_builder_add_cstr_a(a, sb, "\",");
     var ex2 = get_example(concept, l2);
     if (ex2 != 0) {
-        str_builder_add_cstr(sb, "\"present\":true,\"path\":");
+        str_builder_add_cstr_a(a, sb, "\"present\":true,\"path\":");
         json_add_str(sb, example_path(ex2));
     } else {
-        str_builder_add_cstr(sb, "\"present\":false");
+        str_builder_add_cstr_a(a, sb, "\"present\":false");
     }
-    str_builder_add_cstr(sb, "}}");
+    str_builder_add_cstr_a(a, sb, "}}");
 
-    return str_builder_build(sb);
+    return str_builder_build_a(a, sb);
 }
 
 fn json_code_response(topic_id, lang_str) {
@@ -1479,58 +1703,60 @@ fn json_code_response(topic_id, lang_str) {
     if (src == 0) { return 0; }
     var stem = lang_stem(l);
 
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"topic\":");
+    var a = rq_alloc();
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "{\"topic\":");
     json_add_str(sb, concept_id(concept));
-    str_builder_add_cstr(sb, ",\"language\":");
+    str_builder_add_cstr_a(a, sb, ",\"language\":");
     json_add_cstr(sb, stem);
-    str_builder_add_cstr(sb, ",\"path\":");
+    str_builder_add_cstr_a(a, sb, ",\"path\":");
     json_add_str(sb, example_path(ex));
-    str_builder_add_cstr(sb, ",\"source\":");
-    # sandhi_json_escape returns a fully-quoted JSON string literal.
-    str_builder_add_cstr(sb, sandhi_json_escape(src));
-    str_builder_add_cstr(sb, ",\"tokens\":[");
+    str_builder_add_cstr_a(a, sb, ",\"source\":");
+    # json_escape_a returns a fully quoted JSON string literal.
+    str_builder_add_cstr_a(a, sb, json_escape_a(a, src));
+    str_builder_add_cstr_a(a, sb, ",\"tokens\":[");
 
     if (has_grammar(stem) == 1) {
         var stream = tokenize_stream_new(stem);
         if (stream != 0) {
-            var tb = tokenbuf_new();
+            var tb = render_tokenbuf();
             tokenize_stream_feed(stream, src, strlen(src));
             tokenize_stream_finish(stream, tb);
             tokenize_stream_free(stream);
             var n = tokenbuf_count(tb);
             var i = 0;
             while (i < n) {
-                if (i > 0) { str_builder_add_cstr(sb, ","); }
+                if (i > 0) { str_builder_add_cstr_a(a, sb, ","); }
                 var k  = tokenbuf_kind(tb, i);
                 var s  = tokenbuf_start(tb, i);
                 var lt = tokenbuf_len(tb, i);
-                str_builder_add_cstr(sb, "{\"kind\":\"");
-                str_builder_add_cstr(sb, kind_name(k));
-                str_builder_add_cstr(sb, "\",\"start\":");
-                str_builder_add_int(sb, s);
-                str_builder_add_cstr(sb, ",\"len\":");
-                str_builder_add_int(sb, lt);
-                str_builder_add_cstr(sb, "}");
+                str_builder_add_cstr_a(a, sb, "{\"kind\":\"");
+                str_builder_add_cstr_a(a, sb, kind_name(k));
+                str_builder_add_cstr_a(a, sb, "\",\"start\":");
+                str_builder_add_int_a(a, sb, s);
+                str_builder_add_cstr_a(a, sb, ",\"len\":");
+                str_builder_add_int_a(a, sb, lt);
+                str_builder_add_cstr_a(a, sb, "}");
                 i = i + 1;
             }
         }
     }
 
-    str_builder_add_cstr(sb, "]}");
-    return str_builder_build(sb);
+    str_builder_add_cstr_a(a, sb, "]}");
+    return str_builder_build_a(a, sb);
 }
 
 fn json_gaps_response() {
     var entries = reg_list();
     var total = vec_len(entries);
     var total_missing = 0;
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "{\"topics\":");
-    str_builder_add_int(sb, total);
-    str_builder_add_cstr(sb, ",\"languages\":");
-    str_builder_add_int(sb, LANG_COUNT);
-    str_builder_add_cstr(sb, ",\"gaps\":[");
+    var a = rq_alloc();
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "{\"topics\":");
+    str_builder_add_int_a(a, sb, total);
+    str_builder_add_cstr_a(a, sb, ",\"languages\":");
+    str_builder_add_int_a(a, sb, LANG_COUNT);
+    str_builder_add_cstr_a(a, sb, ",\"gaps\":[");
 
     var first_gap = 1;
     var i = 0;
@@ -1541,15 +1767,15 @@ fn json_gaps_response() {
         if (examples != 0) { nex = vec_len(examples); }
 
         if (nex < LANG_COUNT) {
-            if (first_gap == 0) { str_builder_add_cstr(sb, ","); }
+            if (first_gap == 0) { str_builder_add_cstr_a(a, sb, ","); }
             first_gap = 0;
-            str_builder_add_cstr(sb, "{\"id\":");
+            str_builder_add_cstr_a(a, sb, "{\"id\":");
             json_add_str(sb, concept_id(c));
-            str_builder_add_cstr(sb, ",\"covered\":");
-            str_builder_add_int(sb, nex);
-            str_builder_add_cstr(sb, ",\"of\":");
-            str_builder_add_int(sb, LANG_COUNT);
-            str_builder_add_cstr(sb, ",\"missing\":[");
+            str_builder_add_cstr_a(a, sb, ",\"covered\":");
+            str_builder_add_int_a(a, sb, nex);
+            str_builder_add_cstr_a(a, sb, ",\"of\":");
+            str_builder_add_int_a(a, sb, LANG_COUNT);
+            str_builder_add_cstr_a(a, sb, ",\"missing\":[");
 
             var first_lang = 1;
             var li = 0;
@@ -1563,21 +1789,21 @@ fn json_gaps_response() {
                     }
                 }
                 if (found == 0) {
-                    if (first_lang == 0) { str_builder_add_cstr(sb, ","); }
+                    if (first_lang == 0) { str_builder_add_cstr_a(a, sb, ","); }
                     first_lang = 0;
-                    str_builder_add_cstr(sb, "\"");
-                    str_builder_add_cstr(sb, lang_name(li));
-                    str_builder_add_cstr(sb, "\"");
+                    str_builder_add_cstr_a(a, sb, "\"");
+                    str_builder_add_cstr_a(a, sb, lang_name(li));
+                    str_builder_add_cstr_a(a, sb, "\"");
                     total_missing = total_missing + 1;
                 }
                 li = li + 1;
             }
-            str_builder_add_cstr(sb, "]}");
+            str_builder_add_cstr_a(a, sb, "]}");
         }
         i = i + 1;
     }
-    str_builder_add_cstr(sb, "],\"total_missing\":");
-    str_builder_add_int(sb, total_missing);
-    str_builder_add_cstr(sb, "}");
-    return str_builder_build(sb);
+    str_builder_add_cstr_a(a, sb, "],\"total_missing\":");
+    str_builder_add_int_a(a, sb, total_missing);
+    str_builder_add_cstr_a(a, sb, "}");
+    return str_builder_build_a(a, sb);
 }

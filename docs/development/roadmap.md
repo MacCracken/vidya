@@ -4,13 +4,13 @@
 > The current version, pins, sizes and gate counts are in [state.md](state.md).
 > Process, toolchains and gates are in [CLAUDE.md](../../CLAUDE.md).
 >
-> **Last updated**: 2026-10-28, at 2.9.2.
+> **Last updated**: 2026-10-28, at 2.9.3.
 
 ## Sequence
 
 | Release | Theme | Consumer-visible |
 |---|---|---|
-| 2.9.x | `serve` longevity, content review, P5 | No. Content grows 77 → 80 topics. |
+| 2.9.x | Content review, P5 | No. Content grows 77 → 80 topics. |
 | **3.0.0** | Content reorganization | **Yes**: `content/` paths change |
 | after 3.0.0 | Renderer surface, P6 Cyrius concepts | Additive |
 
@@ -32,26 +32,6 @@ Why this order:
 ## 2.9.x
 
 Each item is its own patch unless noted, in this order.
-
-### `serve` longevity
-
-`serve` is meant to run for days under agnoshi and hoosh. Two things stand
-in the way.
-
-- [ ] **Memory.** Every response, and every hot reload's staging registry,
-  allocates from the bump heap and is never freed. A long-running `serve`
-  eventually exhausts it (overview.md, "Known limits"). `lib/alloc.cyr` now
-  has arenas (`arena_new` / `arena_reset` / `arena_free`). Give each request
-  an arena and reset it after the response, and free a replaced registry's
-  arena on reload. Check first whether the response path (`str_builder_*`,
-  bayan, sandhi's server) can allocate from an arena. If it can't, that is
-  an upstream ask. Done when a test serves N requests with flat heap use and
-  the "Known limits" bullet is gone.
-- [ ] **Clock drift.** sakshi stamps spans from a calibrated cycle counter.
-  `sakshi_clock_recalibrate()` exists for long-running processes, and sakshi
-  recommends calling it hourly. `cmd_serve` never calls it. Call it from the
-  accept loop once an hour has passed. It requires a single thread, which
-  `serve` is.
 
 ### Content review
 
@@ -157,7 +137,9 @@ other topics document general ones. They are distinct from `content/cyrius/`
 | Redundant stdlib declarations | cyrius makes transitive follow-through contractual | Drop `ct`, `keccak` and `sigil` from `[deps] stdlib`. They have been redundant since 6.5.29 and are kept because an undeclared module fails at runtime (see `cyrius.cyml`). |
 | Split the content CI job | Content Validation passes ~15 min (8.1 min on 2026-10-27) | A per-language matrix; the script's stages are independent. |
 | Zig pin | The dev host or an example needs a newer Zig | Bump CI's `ZIG_VER` and its sha256, plus README and `docs/sources.md`. |
-| Loader buffer | An example nears 64 KB (largest today: 20.5 KB) | `load_concept` reads each example into 64 KB and truncates the rest silently. Raise the cap or size the read from the file. |
+| Leak-free hot reload | bayan's `toml_parse` takes an allocator (it hard-codes `default_alloc()`) | Build each registry on one of two alternating arenas and reset the spare before the next reload. A reload then holds at two registries instead of adding ~9.4 MB (2.9.3). |
+| `/code` leaves nothing | vyakarana can reuse a stream, or create one from an allocator | Render on the request arena. Each `/code` still leaves its stream on the bump heap, 29–119 KB (2.9.3). Also ask for `tokenbuf_drop_front` (which vidya relies on) to be added to the public list. |
+| Back to sandhi's escaper | `sandhi_json_escape_a` builds on its `a` (it uses a plain `str_builder_new()` through sandhi 1.13.7) | `json_escape_a` can go, and `json_add_cstr` can call sandhi again. Keep the `json_escape_matches_sandhi` test until then. |
 | Rehydration field note | A third port hits it (vidya and sit so far) | Promote `cyrius lib sync` vs `cyrius update`, plus the clean-rehydrate requirement, to a field note. |
 | Content integrity route | A consumer asks for it | Hash `content/` at startup with sigil and serve the result at `/integrity`. |
 

@@ -7,6 +7,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.3] — 2026-10-28
+
+`serve` longevity, the roadmap's next 2.9.x item. A long-running `serve`
+kept everything it ever allocated: 81 MB at startup, ~77 MB more per hot
+reload, and every response it built. Now it starts at 13.4 MB and adds
+~9.4 MB per reload. Requests add nothing, except `/code`'s tokenizer
+stream. It also recalibrates sakshi's clock hourly. Output is
+byte-identical to 2.9.2 in every command and endpoint (954 dumps compared).
+`cyrius test` **158/0** (+18), 12 benchmarks.
+
+### Fixed — memory a long-running `serve` never gave back
+
+Resident memory of one `serve` process, measured from `/proc` on the same
+corpus:
+
+| | 2.9.2 | 2.9.3 |
+|---|---|---|
+| after startup | 80.9 MB | **13.4 MB** |
+| per hot reload | +77.2 MB | **+9.4 MB** |
+| 500 × `/code/lexing_and_parsing/c` | +336 MB | **+59.5 MB** |
+| 500 × `/list` | +22.5 MB | **0** |
+
+- **The loader read every file into a fixed-size buffer.** Each
+  `concept.toml` got 256 KiB and each example 64 KiB, whatever its size:
+  ~75 MB of heap for a 6.4 MB corpus, paid again on every hot reload,
+  because the bump heap never frees. `read_file_exact` now reads through
+  one buffer kept across files (`file_read_whole_into`) and keeps an
+  exact-size copy. An example over 65,535 bytes was also **cut short with
+  no error**. It now loads whole, up to 1 MiB (`LOAD_FILE_MAX`); beyond
+  that it is refused and shows up as a gap. New tests `load_sized` and
+  `load_big_example` both fail on 2.9.2, which returned the 70,000-byte
+  example as 65,535 bytes.
+  - The first cut made a cold load **slower**: 35 ms against 19 ms. Two
+    causes. Each file started a fresh 4 KiB buffer and doubled it, and the
+    copy went through `lib/string.cyr`'s `memcpy`, which moves one byte per
+    iteration (6.3 MB per load, ~8 ms). With one kept buffer and an
+    8-byte copy (`copy_bytes8`), a cold load is 18.7–18.8 ms against
+    2.9.2's 19.1–19.2 ms (two interleaved rounds of seven).
+- **Every response stayed on the bump heap.** `handle_request` now wraps
+  each request in `rq_enter` / `rq_leave` (`src/vidya_core.cyr`): the JSON
+  builders, `search`, the escaper, sandhi's request parsing and the
+  response itself allocate from a growable arena, which is reset
+  afterwards. Outside `serve`, `rq_alloc()` is the default allocator, so
+  the CLI, the tests and the benches allocate exactly as before. The
+  reload, the registry and every library cache stay on the default heap.
+  Measured global-heap growth per request, before and after:
+  `/stats` 0.5 KB → 0, `/list` 44 KB → 0, `/info` 3.6 KB → 0, `/search`
+  0.8–8 KB → 0, `/compare` 1.6 KB → 0, `/code` 154–688 KB → **29–119 KB**.
+  - What `/code` still leaves is vyakarana's stream: a fresh one per
+    render, with no reuse or allocator API. The token buffer is now
+    reused (`render_tokenbuf`), which removed ~45 % of what was left.
+    `tokenbuf_drop_front`, which the reuse needs, is exported but not on
+    vyakarana's public-API list. The `rq_arena_code` test renders twice,
+    so a rename would fail there.
+  - New tests: `rq_arena_flat` (20 rounds of every non-`/code` response
+    leave the global heap at exactly 0 bytes of growth) and
+    `rq_arena_code` (a second `/code` render stays under 40 KB).
+- **`sandhi_json_escape_a` ignores its allocator** (sandhi 1.13.7, also
+  current upstream). It builds its result with a plain `str_builder_new()`,
+  so it leaks on the global heap whatever arena it is handed: ~19 KB per
+  `/list` under the request arena. vidya now escapes with its own
+  `json_escape_a`, which sizes the output and fills one allocation from
+  the arena. Because the 2.8.2 injection fix rests on those rules, the
+  new `json_escape_matches_sandhi` test requires byte-identical output
+  to sandhi's escaper for every byte value 1–255, a string mixing every
+  escaped class, and all 847 examples. With sandhi's escaper put back,
+  `rq_arena_flat` fails: 493,440 B over 20 rounds.
+- **Not fixed: the replaced registry on a hot reload (~9.4 MB, 6.3 MB of
+  it the corpus files).** Freeing it means building each registry on an
+  arena, and bayan's `toml_parse` hard-codes `default_alloc()`, so the
+  parse trees the registry points into cannot move there. On the roadmap
+  under "Waiting on a trigger", with the vyakarana stream.
+
+### Added — hourly clock recalibration in `serve`
+
+sakshi stamps spans and log lines from a calibrated cycle counter, and
+recommends recalibrating hourly in a long-running process (the counter
+drifts up to ~0.1 s an hour on x86_64). `cmd_serve` never did. After each
+request, once an hour has passed (`CLOCK_RECAL_NS`), `serve_recalibrate`
+runs `sakshi_clock_recalibrate()` and logs `clock recalibrated: <Hz> Hz`.
+The call pauses ~10–80 ms, so it runs after the response has gone out and
+outside the logged latency. An idle server makes no timestamps, so it
+recalibrates on the first request after the hour. Checked end to end with
+the period cut to 1 s: no recalibration inside the second, one after the
+request that crossed it, and a hot reload in the same run served normally.
+New test `clock_recal` covers the due-check.
+
+### Performance
+
+Interleaved A/B of the two bench binaries, three rounds:
+
+| Bench | 2.9.2 | 2.9.3 | Δ mean | per-round Δ |
+|---|---|---|---|---|
+| load_concept | 48.871 µs | 50.467 µs | +3.3 % | +0 / +1 / +9 % |
+| load_all | 7.857 ms | 7.901 ms | +0.6 % | +0 / −0 / +2 % |
+| reg_get_hit | 129 ns | 104 ns | (−19.1 %) | +1 / −47 / +4 % |
+| reg_get_miss | 100 ns | 239 ns | (+139.3 %) | −73 / +1055 / −2 % |
+| search_text | 5.709 µs | 6.017 µs | **+5.4 %** | +5 / +6 / +5 % |
+| search_text_exact | 11.135 µs | 11.256 µs | +1.1 % | +1 / +0 / +2 % |
+| toml_sections | 2.140 µs | 2.199 µs | +2.8 % | +6 / +1 / +1 % |
+| json_info_response | 9.118 µs | 7.500 µs | **−17.7 %** | −17 / −19 / −18 % |
+| json_search_response | 252.384 µs | 246.588 µs | −2.3 % | −2 / −4 / −1 % |
+| json_list_response | 112.001 µs | 94.115 µs | **−16.0 %** | −17 / −14 / −16 % |
+| field_escaped | 3.311 µs | 2.721 µs | **−17.8 %** | −17 / −18 / −18 % |
+| field_raw_splice | 560 ns | 560 ns | +0.0 % | +0 / −1 / +0 % |
+
+- **The escape-heavy rows are 16–18 % faster**, every round. The cause is
+  `json_escape_a`, which sizes the output once and fills one allocation,
+  where sandhi appended one byte at a time to a builder.
+- **`search_text` is 5.4 % slower**, every round. The bench makes one
+  `cstr_lower` call, which now allocates through `rq_alloc()` and the
+  Allocator vtable, so that `/search` stays flat under the arena. It is
+  ~0.3 µs per search, and the end-to-end `json_search_response` row is
+  net −2.3 %. `to_cstr` went the same way at first (`search_text_exact`
+  +4.9 %). Nothing on the request path needs it, so it keeps its direct
+  `alloc`, and that row is flat.
+- **The load rows are flat** in this warm, in-process bench. The cold
+  load figure is under Fixed.
+- `reg_get_*` remain the per-process hash-seed lottery (see 2.9.0).
+
+`serve` latency, server-side from the access log, median of 20 at 77
+topics: `/stats` 45 → 39 µs, `/compare` 48 → 43 µs, `/info` 53 → 49 µs,
+`/list` 208 → 183 µs, `/search` 418 → 430 µs, `/code` 911 → 852 µs. Hot
+reload median 26 → 22 ms (seven reloads each).
+
 ## [2.9.2] — 2026-10-28
 
 Hygiene patch, the roadmap's first 2.9.x item. No dependency, behaviour or

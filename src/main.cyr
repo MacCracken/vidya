@@ -329,19 +329,21 @@ var _serve_status = 0;
 
 fn send_json(cfd, body, body_len) {
     _serve_status = HTTP_OK;
-    return sandhi_server_send_response(cfd, HTTP_OK, "OK", "application/json", body, body_len, 0);
+    return sandhi_server_send_response_a(rq_alloc(), cfd, HTTP_OK, "OK", "application/json", body, body_len, 0);
 }
 
 fn send_404(cfd) {
     _serve_status = HTTP_NOT_FOUND;
     var body = "{\"error\":\"not found\"}";
-    return sandhi_server_send_response(cfd, HTTP_NOT_FOUND, "Not Found", "application/json", body, strlen(body), 0);
+    return sandhi_server_send_response_a(rq_alloc(), cfd, HTTP_NOT_FOUND, "Not Found", "application/json",
+      body, strlen(body), 0);
 }
 
 fn send_400(cfd) {
     _serve_status = HTTP_BAD_REQUEST;
     var body = "{\"error\":\"bad request\"}";
-    return sandhi_server_send_response(cfd, HTTP_BAD_REQUEST, "Bad Request", "application/json", body, strlen(body), 0);
+    return sandhi_server_send_response_a(rq_alloc(), cfd, HTTP_BAD_REQUEST, "Bad Request", "application/json",
+      body, strlen(body), 0);
 }
 
 # Route a parsed path to a JSON response
@@ -363,14 +365,14 @@ fn http_route(cfd, path) {
     }
     # GET /search?q=...
     if (memeq(path, "/search", 7) == 1) {
-        var q = sandhi_server_get_param(path, "q");
+        var q = sandhi_server_get_param_a(rq_alloc(), path, "q");
         if (q == 0) { return send_400(cfd); }
         var body = json_search_response(q);
         return send_json(cfd, str_data(body), str_len(body));
     }
     # GET /info/{topic} — segment 0 is "info", segment 1 is the topic id
     if (memeq(path, "/info/", 6) == 1) {
-        var topic_id = sandhi_server_path_segment(path, 1);
+        var topic_id = sandhi_server_path_segment_a(rq_alloc(), path, 1);
         if (topic_id == 0) { return send_400(cfd); }
         var body = json_info_response(topic_id);
         if (body == 0) { return send_404(cfd); }
@@ -378,9 +380,9 @@ fn http_route(cfd, path) {
     }
     # GET /compare?topic=...&left=...&right=...
     if (memeq(path, "/compare", 8) == 1) {
-        var topic_id = sandhi_server_get_param(path, "topic");
-        var left = sandhi_server_get_param(path, "left");
-        var right = sandhi_server_get_param(path, "right");
+        var topic_id = sandhi_server_get_param_a(rq_alloc(), path, "topic");
+        var left = sandhi_server_get_param_a(rq_alloc(), path, "left");
+        var right = sandhi_server_get_param_a(rq_alloc(), path, "right");
         if (topic_id == 0) { return send_400(cfd); }
         if (left == 0) { return send_400(cfd); }
         if (right == 0) { return send_400(cfd); }
@@ -396,8 +398,8 @@ fn http_route(cfd, path) {
     }
     # GET /code/{topic}/{lang} — tokenized source body
     if (memeq(path, "/code/", 6) == 1) {
-        var topic_id = sandhi_server_path_segment(path, 1);
-        var lang_str = sandhi_server_path_segment(path, 2);
+        var topic_id = sandhi_server_path_segment_a(rq_alloc(), path, 1);
+        var lang_str = sandhi_server_path_segment_a(rq_alloc(), path, 2);
         if (topic_id == 0) { return send_400(cfd); }
         if (lang_str == 0) { return send_400(cfd); }
         var body = json_code_response(topic_id, lang_str);
@@ -412,19 +414,20 @@ fn http_route(cfd, path) {
 #   GET <path> -> <status> (<elapsed_ns>ns)
 # Status routes the level: 2xx = info, 4xx = warn, 5xx/other = error.
 fn _serve_log(path, plen, status, elapsed_ns) {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "GET ");
+    var a = rq_alloc();
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "GET ");
     if (plen > 0) {
-        str_builder_add_cstr(sb, path);
+        str_builder_add_cstr_a(a, sb, path);
     } else {
-        str_builder_add_cstr(sb, "(no-path)");
+        str_builder_add_cstr_a(a, sb, "(no-path)");
     }
-    str_builder_add_cstr(sb, " -> ");
-    str_builder_add_int(sb, status);
-    str_builder_add_cstr(sb, " (");
-    str_builder_add_int(sb, elapsed_ns);
-    str_builder_add_cstr(sb, "ns)");
-    var line = str_builder_build(sb);
+    str_builder_add_cstr_a(a, sb, " -> ");
+    str_builder_add_int_a(a, sb, status);
+    str_builder_add_cstr_a(a, sb, " (");
+    str_builder_add_int_a(a, sb, elapsed_ns);
+    str_builder_add_cstr_a(a, sb, "ns)");
+    var line = str_builder_build_a(a, sb);
     var data = str_data(line);
     var dlen = str_len(line);
     if (status >= 200 && status < 300) {
@@ -442,22 +445,47 @@ fn _serve_log(path, plen, status, elapsed_ns) {
 # P0B-4: drain pending inotify events; if any, full-rebuild + swap
 # the registry inline before serving. The swap happens between two
 # requests so the in-flight one always sees a consistent registry.
+# 2.9.3: everything after the reload is built on the request arena
+# (`rq_enter` / `rq_leave`, src/vidya_core.cyr) and reclaimed at the
+# end. The reload stays outside it, because the registry persists.
 fn handle_request(ctx, cfd, buf, blen) {
     inotify_drain();
     if (_reload_pending == 1) { do_reload(); }
 
+    rq_enter();
     var t0 = _sk_now_ns();
     _serve_status = 0;
-    var path = sandhi_server_get_path(buf, blen);
+    var rc = 0;
+    var path = sandhi_server_get_path_a(rq_alloc(), buf, blen);
     var plen = strlen(path);
     if (plen == 0) {
-        var rc0 = send_400(cfd);
-        _serve_log(path, 0, _serve_status, _sk_now_ns() - t0);
-        return rc0;
+        rc = send_400(cfd);
+    } else {
+        rc = http_route(cfd, path);
     }
-    var rc = http_route(cfd, path);
     _serve_log(path, plen, _serve_status, _sk_now_ns() - t0);
+    rq_leave();
+    if (clock_recal_due(_sk_now_ns()) == 1) { serve_recalibrate(); }
     return rc;
+}
+
+# Hourly sakshi clock recalibration (see clock_recal_due in
+# src/vidya_core.cyr). Logs the new frequency, or that the previous
+# calibration was kept because no measuring window gave one.
+fn serve_recalibrate() {
+    var hz = sakshi_clock_recalibrate();
+    clock_recal_done(_sk_now_ns());
+    if (hz == 0) {
+        sakshi_warn("clock recalibration found no window; previous calibration kept", 62);
+        return 0;
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "clock recalibrated: ");
+    str_builder_add_int(sb, hz);
+    str_builder_add_cstr(sb, " Hz");
+    var line = str_builder_build(sb);
+    sakshi_info(str_data(line), str_len(line));
+    return 0;
 }
 
 fn cmd_serve(port) {
@@ -471,6 +499,7 @@ fn cmd_serve(port) {
     sakshi_info("server started", 14);
 
     inotify_init_watches();
+    clock_recal_done(_sk_now_ns());
 
     var rc = sandhi_server_run(INADDR_ANY(), _http_port, &handle_request, 0);
     if (rc != 0) {

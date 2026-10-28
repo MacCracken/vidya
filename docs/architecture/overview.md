@@ -94,7 +94,7 @@ main()
   │                        # each language file, build Concept records,
   │                        # push into _reg_entries, key by id in _reg_index.
   │                        # ~19ms per process start at 77 topics
-  │                        # (847 examples; 2.9.2, median of 7).
+  │                        # (847 examples; 2.9.3, median of 7).
   └─ command dispatch      # streq() chain on argv(1)
 ```
 
@@ -150,11 +150,11 @@ detects a content change — see "Hot-reload contract" below.
 
 **What the contract guarantees.**
 
-- Sub-millisecond per-request latency on the no-events path. Re-measured
-  at 2.9.2 (77 topics, server-side from the access log, median of 20):
-  `/stats` 45µs, `/compare` 48µs, `/info` 53µs, `/list` 208µs,
-  `/search` 418µs, `/code` 911µs (it tokenizes; one run took 2.7ms).
-  It was 20µs–139µs at v2.3.5. No TOML parse, no `dir_list`, no
+- Sub-millisecond per-request latency on the no-events path. Measured
+  at 2.9.3 (77 topics, server-side from the access log, median of 20):
+  `/stats` 39µs, `/compare` 43µs, `/info` 49µs, `/list` 183µs,
+  `/search` 430µs, `/code` 852µs (it tokenizes; one run took 2.7ms).
+  2.9.2 read 45 / 48 / 53 / 208 / 418 / 911µs; v2.3.5, 20µs–139µs. No TOML parse, no `dir_list`, no
   `read_file` on the hot path.
 - Single-threaded vidya means the registry pointer pair
   (`_reg_entries`, `_reg_index`) is observed atomically — a
@@ -174,10 +174,12 @@ detects a content change — see "Hot-reload contract" below.
 - Mutation of `_reg_entries` / `_reg_index` from inside a route
   handler. The handler observes whatever the most recent
   `do_reload` swapped in.
-- `alloc()` is allowed for response building — but the bump
-  allocator never frees, so be aware that long-running serve
-  processes accumulate per-response allocations until restart.
-  See "Known limits" below.
+- Response building allocates through `rq_alloc()`, never bare
+  `alloc()`. `handle_request` brackets each request with `rq_enter` /
+  `rq_leave`, so the response is built on a growable arena that is
+  reset afterwards (2.9.3). A bare `alloc()` here lands on the bump
+  heap, which never frees, and accumulates for the life of the
+  process. The `rq_arena_flat` test catches it.
 
 **Verified by** `grep -E "read_file|file_read|dir_list|load_concept|fopen|open\(" src/main.cyr src/vidya_core.cyr` over the line range of `http_route` and `json_*_response` — empty match as of 2.8.1 (the builders moved to `src/vidya_core.cyr`; `/code` reads its source from the in-memory `Example`, never from disk). (`handle_request` itself does call `inotify_drain`/`do_reload`, but those are explicitly part of the contract; the prohibition is on the routing branches that follow.) Re-run after any edit to the serve path.
 
@@ -228,17 +230,25 @@ idempotent (closes the prior fd first).
 Verified end-to-end at v2.3.6 across five scenarios: baseline,
 add a topic dir, remove a topic dir, corrupt a concept.toml
 (reload aborts, live registry survives), restore (reload
-succeeds). Reload latency: 22–27ms at 77 topics (2.9.2, seven reloads,
-median 26ms), from the `reload OK` log line. It was 17–22ms at 60 topics.
+succeeds). Reload latency: 22–26ms at 77 topics (2.9.3, seven reloads,
+median 22ms), from the `reload OK` log line. It was 22–27ms (median 26ms)
+at 2.9.2 and 17–22ms at 60 topics.
 
 ### Known limits (serve mode)
 
-- **Bump allocator never frees.** Each response alloc and each
-  reload's staging registry accumulates. Long-running serve
-  processes will eventually exhaust the heap. Mitigation today:
-  restart on a cron, or front with a process supervisor that
-  cycles after N reloads or N requests. A per-request arena is
-  planned (roadmap, 2.9.x "`serve` longevity").
+- **What still accumulates.** The bump allocator never frees, and two
+  things still land on it (2.9.3, resident memory):
+  - **Each hot reload, ~9.4 MB**: the replaced registry, 6.3 MB of it
+    the corpus files. It was ~77 MB before the loader sized its reads.
+    Freeing it needs the registry on an arena, which waits on an
+    allocator-taking bayan `toml_parse`.
+  - **Each `/code` request, ~29–119 KB**: vyakarana's tokenizer stream,
+    which has no reuse or allocator API. It was 154–688 KB before the
+    request arena.
+
+  Every other request leaves nothing behind (startup 13.4 MB, flat
+  after that). A server that runs for days under heavy `/code` traffic
+  or frequent edits still wants a periodic restart.
 - **Single-threaded accept.** Sandhi 1.0.0's `sandhi_server_run`
   serves one connection at a time. Adequate for the local
   agnoshi/hoosh use case; not for public exposure.
@@ -249,7 +259,7 @@ median 26ms), from the `reload OK` log line. It was 17–22ms at 60 topics.
   edit" semantics are needed, drive a periodic curl (e.g. a
   10s `curl -s /stats > /dev/null` in another terminal).
 - **No partial reload.** A single touched file triggers a full
-  re-scan of the whole corpus. ~26ms at 77 topics; not worth optimising until
+  re-scan of the whole corpus. ~22ms at 77 topics; not worth optimising until
   topic count crosses ~500.
 
 ## Key Design Decisions

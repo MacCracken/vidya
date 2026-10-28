@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-10-28 (the v2.9.2 ship; with the 2026-10-27 roadmap cleanup and v2.9.1 ship below it). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
+> **Last refresh**: 2026-10-28 (the v2.9.3 and v2.9.2 ships; the 2026-10-27 roadmap cleanup and v2.9.1 ship below them). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -17,6 +17,15 @@ type: state
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
+
+## 2026-10-28 (v2.9.3) — `serve` longevity
+
+| Doc | Change |
+|---|---|
+| `CHANGELOG.md` | 2.9.3 entry: the RSS table, the loader's sized reads (and the slower first cut), the request arena, sandhi's allocator-ignoring escaper, what is not fixed, the clock recalibration, the A/B table. |
+| `docs/architecture/overview.md` | The route contract says responses allocate through `rq_alloc()`; the "Bump allocator never frees" known limit is now "What still accumulates" (reload ~9.4 MB, `/code` 29–119 KB); serve figures re-measured at 2.9.3. |
+| `docs/development/roadmap.md` | `serve` longevity removed; three trigger rows added (leak-free reload on bayan, `/code` on vyakarana, back to sandhi's escaper); the loader-buffer row removed (fixed). |
+| `docs/development/state.md` | Version → 2.9.3, binary size (2,945,504 B), source line counts, gate count (158), the 2.9.3 posture line; "Next" no longer lists `serve` longevity. |
 
 ## 2026-10-28 (v2.9.2) — hygiene patch
 
@@ -256,7 +265,7 @@ Numbers approximate; rolls up from the per-tier tables below.
 | File | Last touched | Status | Action |
 |---|---|---|---|
 | `README.md` | 2026-05-16 | ✅ Fresh | **New 2026-05-16** — tier index. Currently lists `overview.md` as the only entry; numbered architecture notes (`NNN-*.md`) added as invariants surface. |
-| `overview.md` | 2026-10-27 | ✅ Fresh | Module map, data flow, consumer list. 2.9.1: design point 5 names the typed TOML lookups; the consumer list gains vyakarana (its corpus snapshot is path-dependent); the serve-memory known limit points at the roadmap. 2.9.2: the serve figures re-measured at 77 topics (load ~19 ms, reload 22–27 ms, per-endpoint request medians). |
+| `overview.md` | 2026-10-28 | ✅ Fresh | Module map, data flow, consumer list. 2.9.1: design point 5 names the typed TOML lookups; the consumer list gains vyakarana (its corpus snapshot is path-dependent); the serve-memory known limit points at the roadmap. 2.9.2: the serve figures re-measured at 77 topics (load ~19 ms, reload 22–27 ms, per-endpoint request medians). 2.9.3: the request arena in the route contract, the known limit narrowed to what still accumulates, figures re-measured. |
 
 ---
 

@@ -145,6 +145,20 @@ fn built(sb) {
 }
 
 # Escape a cstr the way the JSON builders do, and hand back the bytes.
+# One of every non-/code response, plus the search helpers they use:
+# the rq_arena_flat group runs this under the request arena.
+fn rq_round() {
+    json_stats_response();
+    json_list_response();
+    json_info_response("strings");
+    json_search_response("tcp");
+    json_languages_response();
+    json_compare_response("strings", "rust", "cyrius");
+    json_gaps_response();
+    search("hash map");
+    return 0;
+}
+
 fn escaped_cstr(c) {
     var sb = str_builder_new();
     json_add_cstr(sb, c);
@@ -307,6 +321,48 @@ fn main() {
     # example's name onto the missing id and this group segfaulted.
     test_group("missing_id");
     assert_eq(load_concept(str_from("tests/fixtures/missing_id")), 0, "concept.toml without an id is refused, not a crash");
+
+    # Each read is sized to its file. Through 2.9.2 the loader took a fixed
+    # 256 KiB per concept.toml and 64 KiB per example, so this 1.9 KB topic
+    # cost ~330 KB of heap that is never freed, again on every hot reload.
+    # Measured on a second load, so one-time setup (the scratch arena) is
+    # not counted.
+    test_group("load_sized");
+    load_concept(str_from("tests/fixtures/json_golden"));
+    var ls_u0 = alloc_used();
+    var ls_c = load_concept(str_from("tests/fixtures/json_golden"));
+    var ls_used = alloc_used() - ls_u0;
+    assert(ls_c != 0, "fixture loads");
+    assert(ls_used < 65536, "a 1.9 KB topic costs well under 64 KiB of heap");
+
+    # An example over 64 KiB loads whole. It was cut at 65,535 bytes with
+    # no error.
+    test_group("load_big_example");
+    var be_dir = "/tmp/vidya_tcyr_big_example";
+    var be_toml = "/tmp/vidya_tcyr_big_example/concept.toml";
+    var be_rs = "/tmp/vidya_tcyr_big_example/rust.rs";
+    xmkdir(be_dir, 0x1ED);
+    var be_meta = "id = \"big_example\"\ntitle = \"Big\"\n";
+    file_write_all(be_toml, be_meta, strlen(be_meta));
+    var be_n = 70000;
+    var be_src = alloc(be_n);
+    var be_i = 0;
+    while (be_i < be_n) {
+        store8(be_src + be_i, 97);
+        if (be_i % 64 == 63) { store8(be_src + be_i, 10); }
+        be_i = be_i + 1;
+    }
+    file_write_all(be_rs, be_src, be_n);
+    var be_c = load_concept(str_from(be_dir));
+    assert(be_c != 0, "topic with a 70,000-byte example loads");
+    var be_ex = get_example(be_c, RUST);
+    assert(be_ex != 0, "the 70,000-byte example is present");
+    if (be_ex != 0) {
+        assert_eq(str_len(example_code(be_ex)), be_n, "a 70,000-byte example loads whole, not cut at 65,535");
+    }
+    xunlink(be_rs);
+    xunlink(be_toml);
+    xrmdir(be_dir);
 
     # --- Search (substring matching) ---
     test_group("search");
@@ -570,6 +626,81 @@ fn main() {
     assert(json_wellformed(str_data(json_stats_response())) == 1, "corpus /stats well-formed");
     assert(json_wellformed(str_data(json_list_response())) == 1, "corpus /list well-formed");
     assert(json_wellformed(str_data(json_gaps_response())) == 1, "corpus /gaps well-formed");
+
+    # json_escape_a must write exactly what sandhi_json_escape writes,
+    # because the 2.8.2 injection fix rests on those rules. Checked on
+    # every single byte, a string mixing every escaped class, and every
+    # example in the corpus.
+    test_group("json_escape_matches_sandhi");
+    var em_one = alloc(2);
+    var em_bad = 0;
+    var em_b = 1;
+    while (em_b < 256) {
+        store8(em_one, em_b);
+        store8(em_one + 1, 0);
+        if (streq(json_escape_a(default_alloc(), em_one), sandhi_json_escape(em_one)) == 0) { em_bad = em_bad + 1; }
+        em_b = em_b + 1;
+    }
+    assert_eq(em_bad, 0, "every byte 1-255 escapes as sandhi escapes it");
+    assert_streq(json_escape_a(default_alloc(), ""), sandhi_json_escape(""), "empty string matches sandhi");
+    var em_mix = "q\"b\\s\x08t\tn\nf\x0cr\rc\x01\x1f d\x7f u\xc3\xa9 </script>";
+    assert_streq(json_escape_a(default_alloc(), em_mix), sandhi_json_escape(em_mix), "mixed string matches sandhi");
+    var em_src_bad = 0;
+    var em_src_n = 0;
+    var em_ci = 0;
+    while (em_ci < vec_len(entries)) {
+        var em_exs = concept_examples(vec_get(entries, em_ci));
+        var em_ei = 0;
+        while (em_exs != 0 && em_ei < vec_len(em_exs)) {
+            var em_src = to_cstr(example_code(vec_get(em_exs, em_ei)));
+            var em_mine = json_escape_a(default_alloc(), em_src);
+            if (streq(em_mine, sandhi_json_escape(em_src)) == 0) { em_src_bad = em_src_bad + 1; }
+            em_src_n = em_src_n + 1;
+            em_ei = em_ei + 1;
+        }
+        em_ci = em_ci + 1;
+    }
+    assert(em_src_n > 800, "the corpus sweep saw every example");
+    assert_eq(em_src_bad, 0, "every corpus example escapes as sandhi escapes it");
+
+    # Under the request arena a response leaves nothing on the global
+    # heap: rq_leave reclaims it. One warm-up round runs first, so the
+    # arena's chunk chain exists before measuring. Through 2.9.2 these
+    # seven responses left ~60 KB a round.
+    test_group("rq_arena_flat");
+    rq_enter(); rq_round(); rq_leave();
+    var rq_u0 = alloc_used();
+    var rq_k = 0;
+    while (rq_k < 20) {
+        rq_enter(); rq_round(); rq_leave();
+        rq_k = rq_k + 1;
+    }
+    assert_eq(alloc_used() - rq_u0, 0, "20 rounds of every non-/code response leave the global heap flat");
+    assert(rq_alloc() == default_alloc(), "rq_leave hands back the default allocator");
+
+    # /code still leaves vyakarana's per-render stream on the global heap
+    # (vyakarana has no allocator-taking or reusable stream), but no
+    # longer the response, the escaped source or the token buffer. The
+    # second render also exercises the token-buffer reuse.
+    test_group("rq_arena_code");
+    rq_enter(); json_code_response("strings", "rust"); rq_leave();
+    var rc_u0 = alloc_used();
+    rq_enter(); var rc_body = json_code_response("strings", "rust");
+    var rc_ok = 0;
+    if (rc_body != 0 && rc_body != 0 - 1) { rc_ok = json_wellformed(str_data(rc_body)); }
+    rq_leave();
+    var rc_used = alloc_used() - rc_u0;
+    assert_eq(rc_ok, 1, "a second /code render is well-formed");
+    assert(rc_used < 40000, "a /code render leaves under 40 KB on the global heap (~154 KB through 2.9.2)");
+
+    # `serve` recalibrates sakshi's clock once CLOCK_RECAL_NS (an hour)
+    # has passed since the last calibration, and not before.
+    test_group("clock_recal");
+    clock_recal_done(1000);
+    assert_eq(clock_recal_due(1000), 0, "not due right after a calibration");
+    assert_eq(clock_recal_due(1000 + CLOCK_RECAL_NS - 1), 0, "not due 1 ns short of the hour");
+    assert_eq(clock_recal_due(1000 + CLOCK_RECAL_NS), 1, "due once the hour has passed");
+    assert_eq(CLOCK_RECAL_NS, 3600000000000, "the period is one hour");
 
     # --- Subprocess contract behind `vidya validate` ---
     # validate_one shells out through exec_cmd; every false-FAIL bug it
