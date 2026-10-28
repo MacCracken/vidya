@@ -164,59 +164,70 @@ assert_eq "$(( svr_value & 0xFF ))" "255" "spurious vector = 0xFF"
 # ── Read /proc/interrupts ────────────────────────────────────────────
 # Shows hardware interrupt counts per CPU on a running Linux system.
 
-# Count total CPUs from the header line
-cpu_count=$(head -1 /proc/interrupts | awk '{print NF}')
-if (( cpu_count < 1 )); then
-    echo "FAIL: could not determine CPU count from /proc/interrupts" >&2
-    exit 1
-fi
-
-# Count interrupt sources (lines that start with a number or name)
-irq_source_count=$(tail -n +2 /proc/interrupts | wc -l)
-if (( irq_source_count < 1 )); then
-    echo "FAIL: no interrupt sources found" >&2
-    exit 1
-fi
-
-# Sum all interrupt counts for the first CPU
-total_irqs=0
-while IFS= read -r line; do
-    # Skip the header line
-    count=$(echo "$line" | awk '{print $2}')
-    if [[ "$count" =~ ^[0-9]+$ ]]; then
-        total_irqs=$(( total_irqs + count ))
+check_proc_interrupts() {
+    # Count total CPUs from the header line
+    cpu_count=$(head -1 /proc/interrupts | awk '{print NF}')
+    if (( cpu_count < 1 )); then
+        echo "FAIL: could not determine CPU count from /proc/interrupts" >&2
+        exit 1
     fi
-done < <(tail -n +2 /proc/interrupts)
 
-# A running system must have processed some interrupts
-if (( total_irqs < 1 )); then
-    echo "FAIL: total IRQ count is zero — impossible on a running system" >&2
-    exit 1
-fi
+    # Count interrupt sources (lines that start with a number or name)
+    irq_source_count=$(tail -n +2 /proc/interrupts | wc -l)
+    if (( irq_source_count < 1 )); then
+        echo "FAIL: no interrupt sources found" >&2
+        exit 1
+    fi
 
-# ── Look for specific interrupt types ─────────────────────────────────
-# Common interrupt sources visible in /proc/interrupts
+    # Sum all interrupt counts for the first CPU
+    total_irqs=0
+    while IFS= read -r line; do
+        # Skip the header line
+        count=$(echo "$line" | awk '{print $2}')
+        if [[ "$count" =~ ^[0-9]+$ ]]; then
+            total_irqs=$(( total_irqs + count ))
+        fi
+    done < <(tail -n +2 /proc/interrupts)
 
-declare -A found_irqs
+    # A running system must have processed some interrupts
+    if (( total_irqs < 1 )); then
+        echo "FAIL: total IRQ count is zero — impossible on a running system" >&2
+        exit 1
+    fi
 
-# `case` takes the FIRST matching pattern, so LOC must come before the
-# generic *timer* arm: x86's line is "LOC: ... Local timer interrupts".
-while IFS= read -r line; do
-    case "$line" in
-        *"LOC:"*)               found_irqs["local_timer"]=1 ;;
-        *"timer"*|*"Timer"*)    found_irqs["timer"]=1 ;;
-        *"NMI"*)                found_irqs["nmi"]=1 ;;
-        *"RES"*)                found_irqs["reschedule"]=1 ;;
-        *"TLB"*)                found_irqs["tlb"]=1 ;;
-    esac
-done < /proc/interrupts
+    # ── Look for specific interrupt types ─────────────────────────────────
+    # Common interrupt sources visible in /proc/interrupts
 
-# Every running kernel has a timer interrupt: LOC (x86 local APIC timer),
-# or a "timer" line (x86 IO-APIC IRQ 0, arm64 arch_timer). Single-CPU VMs
-# may lack LOC, so accept either.
-if [[ -z "${found_irqs[local_timer]+x}" && -z "${found_irqs[timer]+x}" ]]; then
-    echo "FAIL: no timer interrupt source in /proc/interrupts" >&2
-    exit 1
+    declare -A found_irqs
+
+    # `case` takes the FIRST matching pattern, so LOC must come before the
+    # generic *timer* arm: x86's line is "LOC: ... Local timer interrupts".
+    while IFS= read -r line; do
+        case "$line" in
+            *"LOC:"*)               found_irqs["local_timer"]=1 ;;
+            *"timer"*|*"Timer"*)    found_irqs["timer"]=1 ;;
+            *"NMI"*)                found_irqs["nmi"]=1 ;;
+            *"RES"*)                found_irqs["reschedule"]=1 ;;
+            *"TLB"*)                found_irqs["tlb"]=1 ;;
+        esac
+    done < /proc/interrupts
+
+    # Every running kernel has a timer interrupt: LOC (x86 local APIC timer),
+    # or a "timer" line (x86 IO-APIC IRQ 0, arm64 arch_timer). Single-CPU VMs
+    # may lack LOC, so accept either.
+    if [[ -z "${found_irqs[local_timer]+x}" && -z "${found_irqs[timer]+x}" ]]; then
+        echo "FAIL: no timer interrupt source in /proc/interrupts" >&2
+        exit 1
+    fi
+}
+
+# Containers often mask /proc/interrupts, so it can read as empty even on
+# a running system (it does in GitHub Actions' job containers). An empty
+# file says nothing about the kernel: skip these checks and say why.
+if [[ -n "$(head -1 /proc/interrupts 2>/dev/null)" ]]; then
+    check_proc_interrupts
+else
+    echo "skip: /proc/interrupts is empty here (masked, as in many containers)"
 fi
 
 # ── Interrupt descriptor table sizing ─────────────────────────────────

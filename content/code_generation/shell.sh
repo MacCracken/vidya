@@ -34,19 +34,23 @@ assert_eq() {
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
+# Hex of a file's bytes, lowercase, no separators. od is POSIX and ships
+# in coreutils; xxd comes with vim and is missing on minimal systems.
+hexof() { od -An -v -tx1 "$1" | tr -d ' \n'; }
+
 # NOP instruction: 0x90
 printf '\x90' > "$tmpdir/nop.bin"
-nop_hex=$(xxd -p "$tmpdir/nop.bin")
+nop_hex=$(hexof "$tmpdir/nop.bin")
 assert_eq "$nop_hex" "90" "NOP = 0x90"
 
 # RET instruction: 0xC3
 printf '\xc3' > "$tmpdir/ret.bin"
-ret_hex=$(xxd -p "$tmpdir/ret.bin")
+ret_hex=$(hexof "$tmpdir/ret.bin")
 assert_eq "$ret_hex" "c3" "RET = 0xC3"
 
 # INT3 breakpoint: 0xCC
 printf '\xcc' > "$tmpdir/int3.bin"
-int3_hex=$(xxd -p "$tmpdir/int3.bin")
+int3_hex=$(hexof "$tmpdir/int3.bin")
 assert_eq "$int3_hex" "cc" "INT3 = 0xCC"
 
 # ── MOV rax, imm64 ──────────────────────────────────────────────────
@@ -65,11 +69,11 @@ emit_mov_rax_imm64() {
 }
 
 emit_mov_rax_imm64 1 > "$tmpdir/mov_rax.bin"
-mov_hex=$(xxd -p "$tmpdir/mov_rax.bin" | tr -d '\n')
+mov_hex=$(hexof "$tmpdir/mov_rax.bin")
 assert_eq "$mov_hex" "48b80100000000000000" "MOV rax, 1"
 
 emit_mov_rax_imm64 255 > "$tmpdir/mov_rax_ff.bin"
-mov_ff=$(xxd -p "$tmpdir/mov_rax_ff.bin" | tr -d '\n')
+mov_ff=$(hexof "$tmpdir/mov_rax_ff.bin")
 assert_eq "$mov_ff" "48b8ff00000000000000" "MOV rax, 255"
 
 # ── Instruction size table ───────────────────────────────────────────
@@ -193,11 +197,11 @@ emit_add_reg_reg() {
 }
 
 emit_add_reg_reg rax rbx > "$tmpdir/add.bin"
-add_hex=$(xxd -p "$tmpdir/add.bin" | tr -d '\n')
+add_hex=$(hexof "$tmpdir/add.bin")
 assert_eq "$add_hex" "4801d8" "ADD rax,rbx = 48 01 D8"
 
 emit_add_reg_reg rcx rdx > "$tmpdir/add2.bin"
-add2_hex=$(xxd -p "$tmpdir/add2.bin" | tr -d '\n')
+add2_hex=$(hexof "$tmpdir/add2.bin")
 assert_eq "$add2_hex" "4801d1" "ADD rcx,rdx = 48 01 D1"
 
 # ── Jump offset calculation ──────────────────────────────────────────

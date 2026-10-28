@@ -66,7 +66,17 @@ Python, tsx and qiskit before any content changed.
   3.15 from uv, and qiskit with its OpenQASM 3 importer and aer from a
   venv. A new step prints every toolchain's version, so a break caused by a
   new upstream release can be attributed. Zig moved from the
-  sha256-checked tarball to Arch's signed package.
+  sha256-checked tarball to Arch's signed package. The container's first
+  run failed two Shell examples that had leaned on Ubuntu's image:
+  - `code_generation/shell.sh` called `xxd`, which ships with vim, and Arch's
+    base image has no vim (exit 127). It now uses `od`, which coreutils
+    guarantees, the way `binary_formats/shell.sh` already did.
+  - `interrupt_handling/shell.sh` failed when `/proc/interrupts` reads empty,
+    as it does in GitHub Actions' job container. It now runs those checks
+    when the file has a header line, and otherwise prints why it skipped.
+
+  Both failures reproduced in a local `archlinux:latest` container, and the
+  fixed scripts pass there.
 - **The authoring rules for OpenQASM changed.** `content-format.md` used to
   say "Use OPENQASM 2.0 (not 3.0)" and "do not use `swap` or `cp`". The
   second rule was a limitation of qiskit's 2.0 parser, not of the language.
