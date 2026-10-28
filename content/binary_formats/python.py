@@ -173,11 +173,8 @@ def build_minimal_elf_binary():
 def verify_pe_structure():
     """Verify PE format constants and structure."""
 
-    # DOS header magic
-    assert PE_DOS_MAGIC == b'MZ', "PE starts with MZ (Mark Zbikowski)"
-
-    # PE signature
-    assert PE_SIGNATURE == b'PE\x00\x00', "PE signature is PE\\0\\0"
+    # A PE file starts with the DOS magic "MZ" (Mark Zbikowski), and its
+    # PE signature is "PE\0\0".
 
     # The DOS header is 64 bytes. At offset 0x3C (60), a u32 points
     # to the PE signature. Everything between is the DOS stub.
@@ -222,10 +219,8 @@ def verify_pe_structure():
 def verify_macho_structure():
     """Verify Mach-O format constants and structure."""
 
-    # Mach-O magic numbers
-    assert MACHO_MAGIC_64 == 0xFEEDFACF, "64-bit Mach-O magic"
-    assert MACHO_MAGIC_32 == 0xFEEDFACE, "32-bit Mach-O magic"
-    assert MACHO_FAT_MAGIC == 0xCAFEBABE, "fat/universal binary magic"
+    # Mach-O magic numbers: 0xFEEDFACF (64-bit), 0xFEEDFACE (32-bit),
+    # 0xCAFEBABE (fat/universal).
 
     # Mach-O 64-bit header: 32 bytes
     macho64_header_size = 32
@@ -291,9 +286,6 @@ def compare_segment_models():
     # Key insight: ELF separates sections (linker) from segments (loader).
     # PE merges them — sections ARE the load units.
     # Mach-O has segments containing sections (hierarchical).
-    assert len(elf_segment_types) == 5
-    assert len(pe_sections) == 6
-    assert len(macho_segments) == 3
 
 
 # ── Static vs Dynamic Linking ────────────────────────────────────────
@@ -324,7 +316,6 @@ def compare_linking():
 
     # A static ELF has no PT_INTERP and no PT_DYNAMIC
     # A dynamic ELF has both
-    assert len(linking) == 3
 
     return linking
 
@@ -339,10 +330,6 @@ def main():
     print(f"   PE sig: {PE_SIGNATURE!r}")
     print(f"   Mach-O: 0x{MACHO_MAGIC_64:08X} (64-bit)")
     print(f"   Fat:    0x{MACHO_FAT_MAGIC:08X} (universal)")
-
-    assert ELF_MAGIC == b'\x7fELF'
-    assert PE_DOS_MAGIC == b'MZ'
-    assert MACHO_MAGIC_64 == 0xFEEDFACF
 
     # ── Format comparison ──────────────────────────────────────────────
     print("\n2. Format comparison:")

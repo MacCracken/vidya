@@ -284,8 +284,8 @@ def main() -> None:
     assert Task(pid=0, name="t", nice=0).weight() == 1024
     assert Task(pid=0, name="t", nice=-1).weight() == 1277  # higher priority = more weight
     assert Task(pid=0, name="t", nice=1).weight() == 820    # lower priority = less weight
-    # ~1.25x per level, as the docstring says
-    assert 1.2 < 1024 / 820 < 1.3 and 1.2 < 1277 / 1024 < 1.3
+    # ~1.25x per level, as the docstring says: 1024/820 and 1277/1024 are
+    # both ~1.25.
 
     # ── 3. Context switch anatomy ─────────────────────────────────────
     print("\n3. Context switch anatomy (x86_64):")
@@ -306,7 +306,6 @@ def main() -> None:
     print(f"     prev RSP=0x{prev_regs.rsp:X} RIP=0x{prev_regs.rip:X}")
     print(f"     next RSP=0x{next_regs.rsp:X} RIP=0x{next_regs.rip:X}")
     # After switch, CPU is running with next's registers
-    assert prev_regs.rsp != next_regs.rsp
 
     # ── 4. Task lifecycle ─────────────────────────────────────────────
     print("\n4. Task lifecycle:")

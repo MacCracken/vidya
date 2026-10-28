@@ -133,7 +133,6 @@ def main():
     # Basic span
     with Span("compute") as span:
         total = sum(range(1000))
-        assert total == 499_500
 
     assert span.elapsed_ns >= 0
     print(f"[SPAN] compute: {span.elapsed_ns}ns")

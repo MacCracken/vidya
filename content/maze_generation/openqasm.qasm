@@ -28,10 +28,11 @@
 //
 // The maze-adjacent uses of quantum walks are faster-than-classical
 // *connectivity* and *spanning-tree* sampling, where the known gains
-// are polynomial: Aharonov, Ambainis, Kempe and
-// Vazirani (2001) showed a quantum walk on the n-cycle mixes in
-// O(n log n) steps against Θ(n²) for the classical walk, and that on
-// bounded-degree graphs the mixing speedup is at most quadratic. The structural
+// are polynomial: Aharonov, Ambainis, Kempe and Vazirani showed a
+// quantum walk on the n-cycle mixes almost quadratically faster than the
+// classical walk (O(n log n) steps against Θ(n²)), and that on general
+// graphs a quantum walk can be at most polynomially faster ("Quantum
+// Walks On Graphs", STOC 2001, arXiv:quant-ph/0012090). The structural
 // mapping to recursive backtracker is inexact (backtracker carves
 // walls; the quantum walk doesn't carve, it navigates), but both share
 // the same goal: visit every node of the grid.
@@ -113,7 +114,8 @@ walls_c = measure walls;
 //   - Walker amplitude evolves under the graph Laplacian
 //   - Mixing/hitting time can be quadratically faster than classical
 //
-// Where the two regimes meet: Magniez-Nayak-Roland-Santha (2007)
+// Where the two regimes meet: Magniez-Nayak-Roland-Santha (2007,
+// "Search via Quantum Walk", arXiv:quant-ph/0608026)
 // search builds a quantum walk from a classical random walk and finds
 // a marked vertex in about the square root of that walk's hitting
 // time. Its scaffolding is the classical walk's transition matrix —

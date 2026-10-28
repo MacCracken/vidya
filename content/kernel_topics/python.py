@@ -13,7 +13,6 @@ def main():
     test_virtual_address_decompose()
     test_mmio_register()
     test_interrupt_descriptor_table()
-    test_abi_calling_convention()
     test_gdt_entry()
     test_elf_header_parsing()
 
@@ -183,24 +182,14 @@ def test_interrupt_descriptor_table():
 
 
 # ── ABI / Calling Convention ──────────────────────────────────────────
+# SysV AMD64: the first 6 integer args go in registers.
 SYSV_INT_REGS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+# Linux syscall: number in rax, args in rdi/rsi/rdx/r10/r8/r9. r10 replaces
+# rcx because the syscall instruction overwrites rcx with the return RIP.
 SYSCALL_REGS = ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"]
-
-
-def test_abi_calling_convention():
-    # SysV AMD64: first 6 integer args in registers
-    assert SYSV_INT_REGS[0] == "rdi"
-    assert SYSV_INT_REGS[5] == "r9"
-    assert len(SYSV_INT_REGS) == 6
-
-    # Linux syscall: number in rax, args in rdi/rsi/rdx/r10/r8/r9
-    # Note: r10 replaces rcx (clobbered by syscall instruction)
-    assert SYSCALL_REGS[0] == "rax"  # syscall number
-    assert SYSCALL_REGS[4] == "r10"  # NOT rcx
-
-    # AArch64 AAPCS: x0-x7 for args, x8 for syscall number
-    aarch64_regs = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
-    assert len(aarch64_regs) == 8  # more register args than x86_64
+# AArch64 AAPCS: x0-x7 for args (two more than x86_64), x8 for the syscall
+# number.
+AARCH64_ARG_REGS = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
 
 
 # ── GDT Entry ──────────────────────────────────────────────────────────

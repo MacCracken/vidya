@@ -24,7 +24,10 @@
 // The closest real pattern is teleportation in distributed quantum
 // computing: a consumer can use its half of a shared entangled pair
 // only after the producer's measurement result reaches it over a
-// classical channel — that classical message is the "signal".
+// classical channel — that classical message is the "signal". Without
+// the two classical bits, the consumer's qubit is maximally mixed and
+// carries no information (Bennett et al., "Teleporting an Unknown
+// Quantum State…", Phys. Rev. Lett. 70, 1895, 1993).
 
 OPENQASM 3.1;
 include "stdgates.inc";

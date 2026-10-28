@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-10-28 (the v2.9.4, v2.9.3 and v2.9.2 ships; the 2026-10-27 roadmap cleanup and v2.9.1 ship below them). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
+> **Last refresh**: 2026-10-28 (the v2.9.5, v2.9.4, v2.9.3 and v2.9.2 ships; the 2026-10-27 roadmap cleanup and v2.9.1 ship below them). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -17,6 +17,15 @@ type: state
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
+
+## 2026-10-28 (v2.9.5) — the review's follow-ups
+
+| Doc | Change |
+|---|---|
+| `CHANGELOG.md` | 2.9.5 entry: the Cyrius array conversion and its canary verification, the three sourced OpenQASM claims, the Python literal-assert rewrite. |
+| `docs/development/content-format.md` | New per-example rule: every check must be able to fail when the code it demonstrates is wrong. |
+| `docs/development/roadmap.md` | The "Follow-ups from the 2.9.4 review" section removed (all three done); P5 is next. |
+| `docs/development/state.md` | Version → 2.9.5, the 2.9.5 posture line, "Next". |
 
 ## 2026-10-28 (v2.9.4) — content review and language versions
 

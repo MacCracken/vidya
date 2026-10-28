@@ -89,9 +89,10 @@ vy_c = measure vy_sign;
 //   Each step is a unitary U_step that evolves the entire amplitude
 //   vector. Over T steps the trajectory is U_step^T |ψ_0⟩. Measuring
 //   collapses to one classical outcome; running the circuit many times
-//   samples the trajectory distribution. Quantum-simulation research
-//   (Hamiltonian simulation, variational time evolution) follows this
-//   same evolve-then-sample shape.
+//   samples the trajectory distribution. Quantum simulation follows the
+//   same evolve-then-sample shape: Hamiltonian simulation (Lloyd,
+//   "Universal Quantum Simulators", Science 273, 1996) and variational
+//   time evolution (Li and Benjamin, Phys. Rev. X 7, 021050, 2017).
 //
 // The takeaway: classical fixed-point physics and quantum-amplitude
 // physics share the same skeleton — a small unitary (or arithmetic)

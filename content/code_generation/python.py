@@ -448,12 +448,10 @@ def main():
     assert layout8["param_7"] == 24, "param 8 at [rbp+24] (stack arg)"
     print(f"  8 params: param_6=[rbp+{layout8['param_6']}], param_7=[rbp+{layout8['param_7']}]")
 
-    # ── Verify calling convention constants ─────────────────────────
-    assert len(SYSV_ARG_REGS) == 6, "System V has 6 integer arg registers"
-    assert SYSV_ARG_REGS[0] == "rdi", "first arg in rdi"
-    assert SYSV_RETURN_REG == "rax", "return value in rax"
-    assert SYSCALL_ARG_REGS[3] == "r10", "syscall arg 4 in r10 (not rcx!)"
-    assert SYSV_ARG_REGS[3] == "rcx", "function arg 4 in rcx"
+    # ── Calling convention constants ─────────────────────────────────
+    # System V passes the first 6 integer args in rdi, rsi, rdx, rcx, r8,
+    # r9 and returns in rax. A syscall takes its 4th argument in r10, not
+    # rcx, because the syscall instruction overwrites rcx.
 
     print("\nAll code generation examples passed.")
 

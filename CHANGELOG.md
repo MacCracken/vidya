@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.5] — 2026-10-28
+
+The three follow-ups the 2.9.4 review left on the roadmap. No vidya source
+change. The content changes in 40 files.
+
+### Fixed — 129 Cyrius arrays declared 8× too large
+
+A top-level bare `var x[N]` reserves N i64 **slots**, but 129 declarations
+in 29 Cyrius ports were written as byte counts (`var node_term[24]; # 3 ×
+i64`). Each was 8× too big. That was safe, but wasteful, and it taught the
+rule backwards. Each one is now typed at its intended size: `i64[N/8]` for
+slot access, `u8[N]` for byte access. Across those 29 programs the arrays
+reserve **104 KB instead of 830 KB** (−710 KB; `networking_fundamentals`
+alone −475 KB).
+
+Shrinking an array can turn a latent overrun into real corruption. Cyrius's
+bounds-checked mode checks only `a[i]` subscripts, and these ports use
+`store64(&a + i*8, …)`. So each conversion was verified with a canary
+instead. A guard word placed right after every shrunken array, which is
+contiguous in declaration order, was set before `main` and checked at exit,
+in a scratch copy of each program. No guard was hit in any of the 29
+programs. A deliberate mutant that shrank `node_term` below its use
+corrupted the guard and failed the example's own tests. A bare and a typed
+array read the same through their name, so no expression changed meaning.
+All 77 Cyrius examples pass the gate.
+
+### Fixed — three OpenQASM claims without a source
+
+The 2.9.4 review left three OpenQASM claims PLAUSIBLE. Each now cites its
+source, and one is reworded to match it:
+
+- `maze_generation`: the claim now matches Aharonov, Ambainis, Kempe and
+  Vazirani's abstract ("Quantum Walks On Graphs", arXiv:quant-ph/0012090).
+  The walk on the cycle mixes almost quadratically faster (O(n log n)
+  against Θ(n²)), and in general a quantum walk is at most *polynomially*
+  faster. The file had said "at most quadratic on bounded-degree graphs",
+  which is stronger than the paper's abstract claims. MNRS 2007 is cited
+  as arXiv:quant-ph/0608026.
+- `explicit_gpu_synchronization`: the teleportation analogy cites Bennett
+  et al. 1993. It also says why the classical bits are the "signal":
+  without them the consumer's qubit is maximally mixed.
+- `projectile_physics`: Hamiltonian simulation (Lloyd 1996) and variational
+  time evolution (Li and Benjamin 2017) are cited for the evolve-then-sample
+  shape.
+
+### Changed — Python asserts that could only check literals
+
+The review's PY-77 flagged asserts that cannot fail. A Python `ast` pass
+then found every assert whose inputs are all literals, or names bound once
+to a literal. The pass skipped `assert False` after a call that must raise,
+and checks of the language's own behaviour. 34 such sites in 8 files were
+changed:
+
+- A constant re-checked against the literal it was defined as
+  (`CR0_PE == 0x0000_0001`, the PE and Mach-O magics, the SysV register
+  tables) became a comment carrying the assert's message.
+- `len()` of a list written just above, and arithmetic on literals, were
+  removed.
+- Two-literal comparisons (`prev_regs.rsp != next_regs.rsp`, dict values
+  set just above) were removed.
+- `kernel_topics`' `test_abi_calling_convention`, which checked nothing,
+  became comments on the register tables, and its call was removed.
+- `strings`' `"hello" == "hello"  # case-sensitive` became
+  `"hello" != "Hello"`, which actually shows case-sensitivity.
+
+The rule is now in `content-format.md`: every check must be able to fail
+when the code it demonstrates is wrong.
+
 ## [2.9.4] — 2026-10-28
 
 The roadmap's content review, on the latest version of every content

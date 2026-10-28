@@ -331,7 +331,6 @@ def main():
     assert total == 0, f"checksum failed: sum = 0x{total:08X}"
 
     # Response magic is what GRUB puts in EAX
-    assert MULTIBOOT1_MAGIC_RESPONSE == 0x2BADB002
 
     print(f"\nMultiboot header:")
     print(f"  Magic:    0x{header.magic:08X}")
@@ -353,9 +352,9 @@ def main():
     assert final_efer & EFER_LMA, "LMA must be set after PG+LME"
 
     # Verify control register bit positions
-    assert CR0_PE == 0x0000_0001, "PE is bit 0 of CR0"
-    assert CR0_PG == 0x8000_0000, "PG is bit 31 of CR0"
-    assert CR4_PAE == 0x0000_0020, "PAE is bit 5 of CR4"
+    # PE is bit 0 of CR0
+    # PG is bit 31 of CR0
+    # PAE is bit 5 of CR4
 
     print("\nMode transition (protected -> long mode):")
     for desc, cr0, cr4, efer in steps:

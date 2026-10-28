@@ -85,7 +85,7 @@ line two"""
     assert decoded == text
 
     # ── String comparison ───────────────────────────────────────────
-    assert "hello" == "hello"  # case-sensitive
+    assert "hello" != "Hello"  # comparison is case-sensitive
     assert "Hello".lower() == "hello".lower()  # case-insensitive
     assert "hello".casefold() == "HELLO".casefold()  # Unicode-aware
 

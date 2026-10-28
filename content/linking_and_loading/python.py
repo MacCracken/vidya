@@ -446,10 +446,6 @@ def main():
         "plt_overhead": True,          # indirect calls through GOT/PLT
     }
 
-    assert static_props["self_contained"] is True
-    assert dynamic_props["shared_memory"] is True
-    assert static_props["faster_startup"] is True
-    assert dynamic_props["plt_overhead"] is True
     print("   Static: self-contained, larger binary, faster startup")
     print("   Dynamic: shared memory, smaller binary, PLT overhead")
 

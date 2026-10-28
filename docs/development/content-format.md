@@ -102,6 +102,14 @@ Requirements:
 - Should demonstrate all concepts described in `concept.toml`
 - Must be self-contained (no external dependencies beyond stdlib)
 - Must end by printing "All {topic} examples passed." (except OpenQASM)
+- Every check must be able to fail when the code it demonstrates is wrong.
+  An assert that can only compare literals is a comment in a test's clothes,
+  and it pads the count of what the example proves. Examples: a constant
+  against the literal it was defined as, `len()` of a list written just
+  above, arithmetic on literals. Write the fact as a comment beside the
+  definition. Checks of the language's or the platform's own behaviour (an
+  f-string format, `logging.DEBUG == 10`) are real, and so is an
+  `assert False` reached only when a call that must raise did not.
 
 ### Language-Specific Notes
 

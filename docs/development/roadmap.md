@@ -4,13 +4,13 @@
 > The current version, pins, sizes and gate counts are in [state.md](state.md).
 > Process, toolchains and gates are in [CLAUDE.md](../../CLAUDE.md).
 >
-> **Last updated**: 2026-10-28, at 2.9.4.
+> **Last updated**: 2026-10-28, at 2.9.5.
 
 ## Sequence
 
 | Release | Theme | Consumer-visible |
 |---|---|---|
-| 2.9.x | Review follow-ups, P5 | No. Content grows 77 → 80 topics. |
+| 2.9.x | P5 | No. Content grows 77 → 80 topics. |
 | **3.0.0** | Content reorganization | **Yes**: `content/` paths change |
 | after 3.0.0 | Renderer surface, P6 Cyrius concepts | Additive |
 
@@ -32,21 +32,6 @@ Why this order:
 ## 2.9.x
 
 Each item is its own patch unless noted, in this order.
-
-### Follow-ups from the 2.9.4 review
-
-Left open by the review, each small:
-
-- [ ] **Cyrius top-level arrays sized in bytes.** 133 top-level `var x[N]`
-  across the Cyrius ports were written as byte counts, but a top-level bare
-  array is N i64 slots, so each is 8× too big. They are safe, just wasteful.
-  Convert them to typed `u8[N]` / `i64[N]` (the Cyrius report lists them).
-- [ ] **Three PLAUSIBLE OpenQASM findings** that need a source: an invented
-  "quantum-fence" pattern (explicit_gpu_synchronization), "variational quantum
-  Euler" (projectile_physics), and a quantum-walk result attribution
-  (maze_generation). Cite a source or reword.
-- [ ] **Decorative asserts on literals** in the Python ports (PY-77): decide
-  whether to drop them, corpus-wide.
 
 ### P5 — functional / type theory (77 → 80 topics)
 
