@@ -1,6 +1,6 @@
 # Learning Paths
 
-> **Last Updated**: 2026-10-28 (v2.9.6 — P5). Every topic is on at least one path (80 of 80): 2.9.6 added the Language Fundamentals, Build & Release and Functional Programming & Type Theory paths and placed the ten topics that had none.
+> **Last Updated**: 2026-10-28 (v3.0.0 — topic ids are `<group>/<topic>`). Every topic is on at least one path (80 of 80): 2.9.6 added the Language Fundamentals, Build & Release and Functional Programming & Type Theory paths and placed the ten topics that had none.
 
 Ordered topic sequences for structured learning. Each path builds on the previous topic. Run `vidya list` for the full topic index.
 
@@ -9,11 +9,11 @@ Ordered topic sequences for structured learning. Each path builds on the previou
 The everyday material every other path assumes.
 
 ```
-strings                      — encodings, slicing, interning, the hidden complexity
-  → iterators                    — lazy sequences, adapters, fusion
-    → input_output                 — files, streams, buffering, composable readers/writers
-      → binary_formats               — headers, segments, how a program reaches the loader
-        → design_patterns              — builder, strategy, observer, RAII, dependency injection
+fundamentals/strings                    — encodings, slicing, interning, the hidden complexity
+  → fundamentals/iterators              — lazy sequences, adapters, fusion
+    → fundamentals/input_output         — files, streams, buffering, composable readers/writers
+      → compilers/binary_formats        — headers, segments, how a program reaches the loader
+        → fundamentals/design_patterns  — builder, strategy, observer, RAII, dependency injection
 ```
 
 **Prerequisite knowledge**: one programming language
@@ -24,48 +24,48 @@ strings                      — encodings, slicing, interning, the hidden compl
 From source text to running binary. The complete compilation pipeline.
 
 ```
-lexing_and_parsing           — tokenizer + recursive descent parser
-  → intermediate_representations  — SSA, CFG, basic blocks, phi nodes
-    → optimization_passes          — DCE, constant folding, inlining
-      → code_generation              — instruction selection, register alloc, stack frames
-        → instruction_encoding         — x86_64 ModR/M, SIB, REX, machine code bytes
-          → linking_and_loading          — symbol resolution, relocations, GOT/PLT
-            → elf_and_executable_formats   — ELF headers, sections, segments
-              → compiler_bootstrapping       — self-hosting, multi-stage, seed trust
+compilers/lexing_and_parsing                        — tokenizer + recursive descent parser
+  → compilers/intermediate_representations          — SSA, CFG, basic blocks, phi nodes
+    → compilers/optimization_passes                 — DCE, constant folding, inlining
+      → compilers/code_generation                   — instruction selection, register alloc, stack frames
+        → compilers/instruction_encoding            — x86_64 ModR/M, SIB, REX, machine code bytes
+          → compilers/linking_and_loading           — symbol resolution, relocations, GOT/PLT
+            → compilers/elf_and_executable_formats  — ELF headers, sections, segments
+              → compilers/bootstrapping             — self-hosting, multi-stage, seed trust
 ```
 
 **Prerequisite knowledge**: basic data structures, recursion
-**Capstone**: understand how Cyrius compiles itself (see `../cyrius/`)
+**Capstone**: understand how Cyrius compiles itself (see `content/cyrius/`, the language reference and the `field_notes/compiler/` arc)
 
 ## OS from Scratch
 
 From power-on to a running operating system with processes and files.
 
 ```
-boot_and_startup             — BIOS/UEFI, multiboot, GDT/IDT, long mode
-  → virtual_memory              — page tables, TLB, 4-level paging
-    → interrupt_handling           — IDT, exceptions, IRQ routing, PIC
-      → process_and_scheduling       — task structs, context switch, round-robin, CFS
-        → syscalls_and_abi             — SYSCALL/SYSRET, System V AMD64 ABI
-          → filesystems                  — VFS, inodes, block allocation, initrd
-            → kernel_topics                — MMIO, drivers, the full picture
+systems/boot_and_startup                — BIOS/UEFI, multiboot, GDT/IDT, long mode
+  → systems/virtual_memory              — page tables, TLB, 4-level paging
+    → systems/interrupt_handling        — IDT, exceptions, IRQ routing, PIC
+      → systems/process_and_scheduling  — task structs, context switch, round-robin, CFS
+        → systems/syscalls_and_abi      — SYSCALL/SYSRET, System V AMD64 ABI
+          → systems/filesystems         — VFS, inodes, block allocation, initrd
+            → systems/kernel_topics     — MMIO, drivers, the full picture
 ```
 
 **Prerequisite knowledge**: C, basic assembly, memory layout
-**Capstone**: understand how AGNOS boots and runs (see `../cyrius/kernel/`)
+**Capstone**: understand how AGNOS boots and runs (see `content/cyrius/field_notes/kernel.cyml`)
 
 ## Systems Programming Fundamentals
 
 Core concepts for writing any systems-level software.
 
 ```
-memory_management            — stack vs heap, allocation, deallocation
-  → allocators                   — bump, slab, buddy, arena patterns
-    → ownership_and_borrowing      — move semantics, lifetimes, borrow checking
-      → concurrency                  — threads, locks, channels, async
-        → error_handling               — Result types, error codes, propagation
-          → performance                  — benchmarking, profiling, optimization
-            → security                     — bounds checking, input validation, permissions
+fundamentals/memory_management           — stack vs heap, allocation, deallocation
+  → systems/allocators                   — bump, slab, buddy, arena patterns
+    → languages/ownership_and_borrowing  — move semantics, lifetimes, borrow checking
+      → fundamentals/concurrency         — threads, locks, channels, async
+        → fundamentals/error_handling    — Result types, error codes, propagation
+          → fundamentals/performance     — benchmarking, profiling, optimization
+            → fundamentals/security      — bounds checking, input validation, permissions
 ```
 
 **Prerequisite knowledge**: one programming language
@@ -76,12 +76,12 @@ memory_management            — stack vs heap, allocation, deallocation
 How programming languages are designed and implemented.
 
 ```
-type_systems                 — static vs dynamic, generics, inference
-  → trait_and_typeclass_systems  — monomorphization, vtables, coherence
-    → pattern_matching             — exhaustiveness, guards, destructuring
-      → ownership_and_borrowing      — Rust's key innovation in type safety
-        → macro_systems                — hygiene, declarative vs procedural
-          → module_systems               — namespacing, visibility, separate compilation
+languages/type_systems                     — static vs dynamic, generics, inference
+  → languages/trait_and_typeclass_systems  — monomorphization, vtables, coherence
+    → languages/pattern_matching           — exhaustiveness, guards, destructuring
+      → languages/ownership_and_borrowing  — Rust's key innovation in type safety
+        → languages/macro_systems          — hygiene, declarative vs procedural
+          → languages/module_systems       — namespacing, visibility, separate compilation
 ```
 
 **Prerequisite knowledge**: experience in 2+ languages
@@ -92,10 +92,10 @@ type_systems                 — static vs dynamic, generics, inference
 From pure functions to types that carry proofs.
 
 ```
-type_systems                 — static vs dynamic, generics, inference
-  → functional_patterns          — purity, closures, composition, persistent data, folds
-    → effect_systems               — effects as data, handlers, capabilities, pure core
-      → dependent_types              — length-indexed vectors, Fin, refinements, parse don't validate
+languages/type_systems             — static vs dynamic, generics, inference
+  → languages/functional_patterns  — purity, closures, composition, persistent data, folds
+    → languages/effect_systems     — effects as data, handlers, capabilities, pure core
+      → languages/dependent_types  — length-indexed vectors, Fin, refinements, parse don't validate
 ```
 
 **Prerequisite knowledge**: Language Design, or experience with closures in 2+ languages
@@ -106,8 +106,8 @@ type_systems                 — static vs dynamic, generics, inference
 From classical bits to quantum algorithms.
 
 ```
-algorithms                   — classical algorithm foundation
-  → quantum_computing           — qubits, gates, superposition, entanglement, Grover, Shor
+fundamentals/algorithms   — classical algorithm foundation
+  → quantum/fundamentals  — qubits, gates, superposition, entanglement, Grover, Shor
 ```
 
 **Prerequisite knowledge**: linear algebra basics
@@ -118,11 +118,11 @@ algorithms                   — classical algorithm foundation
 Build a service that survives the open internet.
 
 ```
-networking_fundamentals      — sockets, addressing, connection lifecycle
-  → dns                          — resolution, caching, RR types
-    → http_and_web_protocols       — request/response, parsing, headers, status codes
-      → tls_and_encryption           — TLS handshake, ALPN, session resumption
-        → ipc                          — Unix sockets, pipes, shared memory
+networking/fundamentals                  — sockets, addressing, connection lifecycle
+  → networking/dns                       — resolution, caching, RR types
+    → networking/http_and_web_protocols  — request/response, parsing, headers, status codes
+      → networking/tls_and_encryption    — TLS handshake, ALPN, session resumption
+        → networking/ipc                 — Unix sockets, pipes, shared memory
 ```
 
 **Prerequisite knowledge**: basic POSIX, OS fundamentals
@@ -133,15 +133,15 @@ networking_fundamentals      — sockets, addressing, connection lifecycle
 How storage engines work under the hood.
 
 ```
-serialization                — wire formats, varints, encoding choices
-  → jsonl_format                 — line-delimited streams, recovery, append semantics
-    → page_management              — fixed-size pages, free lists, the unit of I/O
-      → btree_indexing               — leaf vs internal nodes, splits, range queries
-        → sql_parsing                  — tokenizer, AST, plan basics
-          → transactions_and_acid        — isolation levels, MVCC, snapshot reads
-            → write_ahead_logging          — WAL records, recovery, checkpoints
-              → concurrent_file_access       — flock, shared readers, exclusive writers
-                → compression                  — LZ4, DEFLATE, dictionary methods
+data/serialization                           — wire formats, varints, encoding choices
+  → data/jsonl_format                        — line-delimited streams, recovery, append semantics
+    → data/page_management                   — fixed-size pages, free lists, the unit of I/O
+      → data/btree_indexing                  — leaf vs internal nodes, splits, range queries
+        → data/sql_parsing                   — tokenizer, AST, plan basics
+          → data/transactions_and_acid       — isolation levels, MVCC, snapshot reads
+            → data/write_ahead_logging       — WAL records, recovery, checkpoints
+              → data/concurrent_file_access  — flock, shared readers, exclusive writers
+                → data/compression           — LZ4, DEFLATE, dictionary methods
 ```
 
 **Prerequisite knowledge**: data structures, basic SQL
@@ -152,10 +152,10 @@ serialization                — wire formats, varints, encoding choices
 From a single node to a cluster that doesn't lie to you.
 
 ```
-ipc                          — single-host process communication primitives
-  → networking_fundamentals      — sockets across hosts
-    → consensus                    — Paxos, Raft, leader election, log replication
-      → distributed_systems          — partitioning, replication, CAP, failure modes
+networking/ipc                   — single-host process communication primitives
+  → networking/fundamentals      — sockets across hosts
+    → distributed/consensus      — Paxos, Raft, leader election, log replication
+      → distributed/foundations  — partitioning, replication, CAP, failure modes
 ```
 
 **Prerequisite knowledge**: networking, transactions, async
@@ -166,9 +166,9 @@ ipc                          — single-host process communication primitives
 DSP fundamentals through real-time synthesis.
 
 ```
-fixed_point_arithmetic       — Q-format, saturation, scale management
-  → audio_dsp                    — FIR/IIR filters, FFT, sample rates
-    → audio_synthesis              — oscillators, envelopes, PolyBLEP, voice allocation
+fundamentals/fixed_point_arithmetic  — Q-format, saturation, scale management
+  → audio/dsp                        — FIR/IIR filters, FFT, sample rates
+    → audio/synthesis                — oscillators, envelopes, PolyBLEP, voice allocation
 ```
 
 **Prerequisite knowledge**: complex numbers, basic signal processing intuition
@@ -179,9 +179,9 @@ fixed_point_arithmetic       — Q-format, saturation, scale management
 From the math to a deployable inference pipeline.
 
 ```
-neural_networks              — layers, gradients, backprop, training loop
-  → embeddings                   — vector spaces, similarity, projection
-    → inference                    — quantization, batching, KV-cache, attention
+ai/neural_networks  — layers, gradients, backprop, training loop
+  → ai/embeddings   — vector spaces, similarity, projection
+    → ai/inference  — quantization, batching, KV-cache, attention
 ```
 
 **Prerequisite knowledge**: linear algebra, calculus, probability
@@ -192,17 +192,17 @@ neural_networks              — layers, gradients, backprop, training loop
 From pixels to the GPU pipeline.
 
 ```
-framebuffer_rendering        — pixel buffers, blit, double-buffering
-  → line_rasterization           — Bresenham, antialiasing, sub-pixel
-    → sprite_rendering             — alpha, batching, tile maps
-      → collision_detection_2d       — AABB, swept, broad-phase
-        → projectile_physics           — integration schemes (Euler, Verlet)
-          → bloom_and_glow               — post-process passes, bloom, HDR
-            → render_graph_architecture    — pass graphs, transient resources, barriers
-              → gpu_memory_pooling           — pools, suballocation, freelists
-                → explicit_gpu_synchronization — fences, semaphores, barriers
-                  → direct_drm_gpu_compute       — DRM/KMS, compute dispatch, no swapchain
-                    → bindless_resources           — descriptor heaps, indexes-as-pointers
+graphics/framebuffer_rendering                           — pixel buffers, blit, double-buffering
+  → graphics/line_rasterization                          — Bresenham, antialiasing, sub-pixel
+    → graphics/sprite_rendering                          — alpha, batching, tile maps
+      → games/collision_detection_2d                     — AABB, swept, broad-phase
+        → games/projectile_physics                       — integration schemes (Euler, Verlet)
+          → graphics/bloom_and_glow                      — post-process passes, bloom, HDR
+            → graphics/render_graph_architecture         — pass graphs, transient resources, barriers
+              → graphics/gpu_memory_pooling              — pools, suballocation, freelists
+                → graphics/explicit_gpu_synchronization  — fences, semaphores, barriers
+                  → graphics/direct_drm_gpu_compute      — DRM/KMS, compute dispatch, no swapchain
+                    → graphics/bindless_resources        — descriptor heaps, indexes-as-pointers
 ```
 
 **Prerequisite knowledge**: 2D geometry, basic linear algebra
@@ -213,11 +213,11 @@ framebuffer_rendering        — pixel buffers, blit, double-buffering
 Game architecture from the inside out.
 
 ```
-game_loop_architecture       — fixed timestep, interpolation, decoupled update/render
-  → state_machines               — FSMs, transitions, hierarchical states
-    → grid_pathfinding             — A*, Dijkstra, JPS on lattices
-      → maze_generation              — DFS, Prim's, Wilson's, BSP
-        → game_ai_decisions            — behavior trees, GOAP, utility AI
+games/loop_architecture          — fixed timestep, interpolation, decoupled update/render
+  → fundamentals/state_machines  — FSMs, transitions, hierarchical states
+    → games/grid_pathfinding     — A*, Dijkstra, JPS on lattices
+      → games/maze_generation    — DFS, Prim's, Wilson's, BSP
+        → games/ai_decisions     — behavior trees, GOAP, utility AI
 ```
 
 **Prerequisite knowledge**: data structures, recursion
@@ -228,9 +228,9 @@ game_loop_architecture       — fixed timestep, interpolation, decoupled update
 From sources to an artifact anyone can rebuild and check.
 
 ```
-build_systems                — target DAGs, topological order, incremental rebuilds
-  → package_resolution           — semver constraints, solving, lockfiles
-    → reproducible_builds          — bit-for-bit artifacts, pinned inputs, independent rebuilds
+build/build_systems              — target DAGs, topological order, incremental rebuilds
+  → build/package_resolution     — semver constraints, solving, lockfiles
+    → build/reproducible_builds  — bit-for-bit artifacts, pinned inputs, independent rebuilds
 ```
 
 **Prerequisite knowledge**: graphs, one build tool used in anger
@@ -241,9 +241,9 @@ build_systems                — target DAGs, topological order, incremental reb
 How to know what your program is doing.
 
 ```
-tracing                      — structured logging, levels, spans, ring buffers
-  → performance                  — benchmarking, profiling, allocation, cache effects
-    → testing                      — unit, property, mocking, coverage
+fundamentals/tracing          — structured logging, levels, spans, ring buffers
+  → fundamentals/performance  — benchmarking, profiling, allocation, cache effects
+    → fundamentals/testing    — unit, property, mocking, coverage
 ```
 
 **Prerequisite knowledge**: one programming language

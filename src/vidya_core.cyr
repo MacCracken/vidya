@@ -126,15 +126,17 @@ fn lang_filename(lang) {
 # ================================================================
 # Concept — enriched data type
 # ================================================================
-# Layout: { id, title, topic, description, tags, best_practices,
+# Layout: { id, title, group, description, tags, best_practices,
 #            gotchas, perf_notes, examples }
+# Since 3.0.0 a topic lives at content/<group>/<topic>/, its id is that
+# path ("<group>/<topic>"), and `group` is the id's first part.
 # 9 fields x 8 bytes = 72 bytes
 
 fn concept_new() {
     var c = alloc(72);
     store64(c, 0);       # id: Str
     store64(c + 8, 0);   # title: Str
-    store64(c + 16, 0);  # topic: Str
+    store64(c + 16, 0);  # group: Str (the id up to its '/')
     store64(c + 24, 0);  # description: Str
     store64(c + 32, 0);  # tags: vec of Str
     store64(c + 40, 0);  # best_practices: vec of ptrs
@@ -146,7 +148,7 @@ fn concept_new() {
 
 fn concept_id(c) { return load64(c); }
 fn concept_title(c) { return load64(c + 8); }
-fn concept_topic(c) { return load64(c + 16); }
+fn concept_group(c) { return load64(c + 16); }
 fn concept_desc(c) { return load64(c + 24); }
 fn concept_tags(c) { return load64(c + 32); }
 fn concept_best_practices(c) { return load64(c + 40); }
@@ -227,6 +229,29 @@ fn example_explanation(e) { return load64(e + 16); }
 fn example_path(e) { return load64(e + 24); }
 
 # ================================================================
+# Group — a directory of topics under content/
+# ================================================================
+# Layout: { id, title, description, order }, read from
+# content/<id>/group.toml. `order` places the group in `list` and /groups
+# (reading order: fundamentals first); a group without one sorts last.
+
+var GROUP_ORDER_LAST = 1000000;
+
+fn group_new(id, title, desc) {
+    var g = alloc(32);
+    store64(g, id);
+    store64(g + 8, title);
+    store64(g + 16, desc);
+    store64(g + 24, GROUP_ORDER_LAST);
+    return g;
+}
+
+fn group_id(g) { return load64(g); }
+fn group_title(g) { return load64(g + 8); }
+fn group_desc(g) { return load64(g + 16); }
+fn group_order(g) { return load64(g + 24); }
+
+# ================================================================
 # Registry — indexed concept store
 # ================================================================
 
@@ -242,11 +267,14 @@ var _reload_count = 0;          # successful reload counter (for sakshi)
 var _reload_failures = 0;       # failed reload counter
 var _reg_entries_next = 0;      # staging registry — built then swapped
 var _reg_index_next = 0;
+var _groups = 0;                # vec of group ptrs, sorted by id (live)
+var _groups_next = 0;           # staging groups — swapped with the registry
 var _inotify_buf: u8[8192];     # static drain buffer (one-shot read)
 
 fn reg_init() {
     _reg_entries = vec_new();
     _reg_index = map_new();
+    _groups = vec_new();
     _content_dir = str_from("content");
     return 0;
 }
@@ -294,6 +322,32 @@ fn reg_count() {
 
 fn reg_list() {
     return _reg_entries;
+}
+
+fn group_list() {
+    return _groups;
+}
+
+# The group with this id (a cstring), or 0.
+fn group_get(gid) {
+    var i = 0;
+    while (i < vec_len(_groups)) {
+        var g = vec_get(_groups, i);
+        if (str_eq_cstr(group_id(g), gid) == 1) { return g; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# How many topics the live registry holds in group `g`.
+fn group_topic_count(g) {
+    var n = 0;
+    var i = 0;
+    while (i < vec_len(_reg_entries)) {
+        if (str_eq(concept_group(vec_get(_reg_entries, i)), group_id(g)) == 1) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
 }
 
 # ================================================================
@@ -417,7 +471,23 @@ fn read_file_exact(path, max, len_out) {
     return buf;
 }
 
+# The id a topic directory must declare: its last two path components,
+# "<group>/<topic>" for content/<group>/<topic>. 0 when the path has no
+# parent component.
+fn topic_id_for_dir(topic_dir) {
+    var d = str_data(topic_dir);
+    var n = str_len(topic_dir);
+    var k = n - 1;
+    while (k >= 0 && load8(d + k) != 47) { k = k - 1; }
+    if (k <= 0) { return 0; }
+    var j = k - 1;
+    while (j >= 0 && load8(d + j) != 47) { j = j - 1; }
+    return str_new(d + j + 1, n - j - 1);
+}
+
 fn load_concept(topic_dir) {
+    var want_id = topic_id_for_dir(topic_dir);
+    if (want_id == 0) { return 0; }
     var toml_path = path_join(topic_dir, str_from("concept.toml"));
     if (file_exists(str_data(toml_path)) == 0) { return 0; }
 
@@ -446,13 +516,16 @@ fn load_concept(topic_dir) {
     # missing its `id` (truncated mid-save, a typo) killed every command,
     # and `serve` on hot reload, instead of being skipped.
     if (id == 0) { return 0; }
+    # The id is the path. A topic whose concept.toml names another id
+    # (moved without editing it, or copied) is refused, the same as a
+    # missing id, so one id never resolves to two places.
+    if (str_eq(id, want_id) == 0) { return 0; }
     var title = bayan_toml_get_by_cstr(pairs, "title");
-    var topic = bayan_toml_get_by_cstr(pairs, "topic");
     var desc = bayan_toml_get_by_cstr(pairs, "description");
 
     store64(concept, id);
     store64(concept + 8, title);
-    store64(concept + 16, topic);
+    store64(concept + 16, str_sub(id, 0, str_index_of(id, 47)));
     store64(concept + 24, desc);
 
     # Parse tags (comma-separated in TOML array — toml.cyr gives us the raw value)
@@ -552,23 +625,153 @@ fn load_concept(topic_dir) {
     return concept;
 }
 
-# Load all concepts from content directory
-fn load_all() {
-    sakshi_span_enter("load_all", 8);
-    var dirs = dir_list(_content_dir);
-    var ndirs = vec_len(dirs);
+# ================================================================
+# Content walk — content/<group>/<topic>/ (3.0.0)
+# ================================================================
+# A group is a directory under content/ holding a group.toml. A topic is
+# a directory inside a group holding a concept.toml. Nothing else is
+# read, so content/cyrius/'s language/ and field_notes/ are reference
+# material, not topics. Groups come back in their group.toml `order`,
+# topics sorted by name: readdir order depends on the filesystem, and
+# `list` must not.
+
+# Byte-wise a < b for two Strs.
+fn vidya_name_lt(a, b) {
+    var ad = str_data(a);
+    var bd = str_data(b);
+    var al = str_len(a);
+    var bl = str_len(b);
     var i = 0;
-    while (i < ndirs) {
-        var dname = vec_get(dirs, i);
-        var dpath = path_join(_content_dir, dname);
-        if (is_dir(dpath) == 1) {
-            var concept = load_concept(dpath);
-            if (concept != 0) {
-                reg_add(concept);
-            }
+    while (i < al && i < bl) {
+        var x = load8(ad + i);
+        var y = load8(bd + i);
+        if (x != y) { return x < y; }
+        i = i + 1;
+    }
+    return al < bl;
+}
+
+# Insertion sort of a vec of Str, in place. A group holds tens of names.
+fn vidya_sort_names(v) {
+    var i = 1;
+    while (i < vec_len(v)) {
+        var cur = vec_get(v, i);
+        var j = i - 1;
+        while (j >= 0 && vidya_name_lt(cur, vec_get(v, j)) == 1) {
+            vec_set(v, j + 1, vec_get(v, j));
+            j = j - 1;
+        }
+        vec_set(v, j + 1, cur);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Sorted names of the subdirectories of `dir` that hold the file `marker`.
+fn subdirs_with(dir, marker) {
+    var out = vec_new();
+    var names = dir_list(dir);
+    var i = 0;
+    while (i < vec_len(names)) {
+        var name = vec_get(names, i);
+        var p = path_join(dir, name);
+        if (is_dir(p) == 1) {
+            var mp = path_join(p, str_from(marker));
+            if (file_exists(str_data(mp)) == 1) { vec_push(out, name); }
         }
         i = i + 1;
     }
+    vidya_sort_names(out);
+    return out;
+}
+
+# Read content/<name>/group.toml. 0 if it is unreadable, has no id, or
+# its id is not its directory's name.
+fn load_group(group_dir, name) {
+    var tp = path_join(group_dir, str_from("group.toml"));
+    var n = 0;
+    var buf = read_file_exact(str_data(tp), LOAD_FILE_MAX, &n);
+    if (buf == 0) { return 0; }
+    if (n <= 0) { return 0; }
+    var sections = toml_parse(str_new(buf, n));
+    if (sections == 0) { return 0; }
+    if (vec_len(sections) == 0) { return 0; }
+    var pairs = toml_section_pairs(vec_get(sections, 0));
+    var id = bayan_toml_get_by_cstr(pairs, "id");
+    if (id == 0) { return 0; }
+    if (str_eq(id, name) == 0) { return 0; }
+    var g = group_new(id, bayan_toml_get_by_cstr(pairs, "title"),
+                      bayan_toml_get_by_cstr(pairs, "description"));
+    var order = bayan_toml_get_by_cstr(pairs, "order");
+    if (order != 0) { store64(g + 24, str_to_int(order)); }
+    return g;
+}
+
+# Groups by `order`, then by id. Insertion sort, in place.
+fn vidya_sort_groups(v) {
+    var i = 1;
+    while (i < vec_len(v)) {
+        var cur = vec_get(v, i);
+        var j = i - 1;
+        while (j >= 0) {
+            var prev = vec_get(v, j);
+            var before = 0;
+            if (group_order(cur) < group_order(prev)) { before = 1; }
+            if (group_order(cur) == group_order(prev)) {
+                if (vidya_name_lt(group_id(cur), group_id(prev)) == 1) { before = 1; }
+            }
+            if (before == 0) { break; }
+            vec_set(v, j + 1, prev);
+            j = j - 1;
+        }
+        vec_set(v, j + 1, cur);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Load every group and topic into `groups`, `entries` and `index`. With
+# `strict` (hot reload), the first group or topic that fails to load
+# fails the whole scan and returns 0, so the live registry stays; without
+# it (startup), a bad one is skipped. Returns 1.
+fn scan_content(groups, entries, index, strict) {
+    var gnames = subdirs_with(_content_dir, "group.toml");
+    var gi = 0;
+    while (gi < vec_len(gnames)) {
+        var gname = vec_get(gnames, gi);
+        var g = load_group(path_join(_content_dir, gname), gname);
+        if (g == 0) {
+            if (strict == 1) { return 0; }
+        } else {
+            vec_push(groups, g);
+        }
+        gi = gi + 1;
+    }
+    vidya_sort_groups(groups);
+    gi = 0;
+    while (gi < vec_len(groups)) {
+        var gdir = path_join(_content_dir, group_id(vec_get(groups, gi)));
+        var tnames = subdirs_with(gdir, "concept.toml");
+        var ti = 0;
+        while (ti < vec_len(tnames)) {
+            var c = load_concept(path_join(gdir, vec_get(tnames, ti)));
+            if (c == 0) {
+                if (strict == 1) { return 0; }
+            } else {
+                vec_push(entries, c);
+                map_set(index, to_cstr(concept_id(c)), c);
+            }
+            ti = ti + 1;
+        }
+        gi = gi + 1;
+    }
+    return 1;
+}
+
+# Load all groups and topics from content/
+fn load_all() {
+    sakshi_span_enter("load_all", 8);
+    scan_content(_groups, _reg_entries, _reg_index, 0);
     sakshi_span_exit();
     return reg_count();
 }
@@ -597,7 +800,7 @@ fn _hot_reload_mask() { return 970; }
 fn _hot_reload_in_nonblock() { return 2048; }
 
 # Open inotify fd in non-blocking mode and add watches on content/
-# root + every topic subdir. Idempotent: closes any prior fd first.
+# root + every group and topic dir. Idempotent: closes any prior fd first.
 # Called once at serve start (cmd_serve) and again after each
 # successful reload (so newly-added topic dirs get watched).
 fn inotify_init_watches() {
@@ -616,31 +819,31 @@ fn inotify_init_watches() {
     var croot = to_cstr(_content_dir);
     sys_inotify_add_watch(fd, croot, mask);
 
-    var dirs = dir_list(_content_dir);
-    var n = vec_len(dirs);
+    # Watch each group (a topic added or removed) and each topic (an edit).
+    # content/cyrius/'s reference subtree holds no topic, so field-note
+    # edits trigger no reload.
     var watched = 0;
-    var i = 0;
-    while (i < n) {
-        var dn = vec_get(dirs, i);
-        var dp = path_join(_content_dir, dn);
-        if (is_dir(dp) == 1) {
-            # Only watch topic dirs (same filter as build_next_registry).
-            # Skips content/cyrius/ and any non-topic subdirs so edits to
-            # field notes don't trigger pointless reloads.
-            var tp = path_join(dp, str_from("concept.toml"));
-            if (file_exists(str_data(tp)) == 1) {
-                var cdp = to_cstr(dp);
-                sys_inotify_add_watch(fd, cdp, mask);
-                watched = watched + 1;
-            }
+    var gnames = subdirs_with(_content_dir, "group.toml");
+    var gi = 0;
+    while (gi < vec_len(gnames)) {
+        var gdir = path_join(_content_dir, vec_get(gnames, gi));
+        sys_inotify_add_watch(fd, to_cstr(gdir), mask);
+        var tnames = subdirs_with(gdir, "concept.toml");
+        var ti = 0;
+        while (ti < vec_len(tnames)) {
+            sys_inotify_add_watch(fd, to_cstr(path_join(gdir, vec_get(tnames, ti))), mask);
+            watched = watched + 1;
+            ti = ti + 1;
         }
-        i = i + 1;
+        gi = gi + 1;
     }
 
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "inotify watching ");
-    str_builder_add_int(sb, watched + 1);
+    str_builder_add_int(sb, watched + vec_len(gnames) + 1);
     str_builder_add_cstr(sb, " dirs (root + ");
+    str_builder_add_int(sb, vec_len(gnames));
+    str_builder_add_cstr(sb, " groups + ");
     str_builder_add_int(sb, watched);
     str_builder_add_cstr(sb, " topics)");
     var line = str_builder_build(sb);
@@ -667,36 +870,10 @@ fn inotify_drain() {
 fn build_next_registry() {
     _reg_entries_next = vec_new();
     _reg_index_next = map_new();
-    var dirs = dir_list(_content_dir);
-    var n = vec_len(dirs);
-    var i = 0;
-    while (i < n) {
-        var dn = vec_get(dirs, i);
-        var dp = path_join(_content_dir, dn);
-        if (is_dir(dp) == 1) {
-            # Match load_all's filter: a directory without
-            # concept.toml is not a topic, skip silently. Only
-            # treat "concept.toml present but load failed" as
-            # a hard reload failure.
-            var tp = path_join(dp, str_from("concept.toml"));
-            if (file_exists(str_data(tp)) == 1) {
-                var c = load_concept(dp);
-                if (c == 0) {
-                    # Malformed concept.toml mid-reload. Leak the
-                    # partial _reg_entries_next; live registry in
-                    # _reg_entries / _reg_index is unaffected.
-                    return 0;
-                }
-                vec_push(_reg_entries_next, c);
-                var id = concept_id(c);
-                if (id != 0) {
-                    map_set(_reg_index_next, to_cstr(id), c);
-                }
-            }
-        }
-        i = i + 1;
-    }
-    return 1;
+    _groups_next = vec_new();
+    # A malformed group.toml or concept.toml mid-reload leaks the partial
+    # staging registry; the live one is unaffected.
+    return scan_content(_groups_next, _reg_entries_next, _reg_index_next, 1);
 }
 
 # Atomic swap — two pointer assignments under the single accept
@@ -707,8 +884,10 @@ fn build_next_registry() {
 fn swap_registry() {
     _reg_entries = _reg_entries_next;
     _reg_index = _reg_index_next;
+    _groups = _groups_next;
     _reg_entries_next = 0;
     _reg_index_next = 0;
+    _groups_next = 0;
     return 0;
 }
 
@@ -721,11 +900,15 @@ fn do_reload() {
     if (ok != 1) {
         _reload_failures = _reload_failures + 1;
         var sb1 = str_builder_new();
-        str_builder_add_cstr(sb1, "reload aborted: a concept failed to load (failure #");
+        str_builder_add_cstr(sb1, "reload aborted: a group or concept failed to load (failure #");
         str_builder_add_int(sb1, _reload_failures);
         str_builder_add_cstr(sb1, "); live registry untouched");
         var line1 = str_builder_build(sb1);
         sakshi_warn(str_data(line1), str_len(line1));
+        # Re-watch anyway. A new topic that failed (a wrong id, a bad
+        # concept.toml) is not watched yet, and through 2.9.6 fixing it
+        # triggered nothing: the reload that would watch it never ran.
+        inotify_init_watches();
         _reload_pending = 0;
         return 0;
     }
@@ -886,13 +1069,34 @@ fn get_example(concept, lang) {
     return 0;
 }
 
+# CLI "topic not found", on stderr. Since 3.0.0 an id is
+# "<group>/<topic>", so a bare 2.x name like `strings` misses; when one
+# topic in some group has that name, say which.
+fn topic_not_found(topic_id) {
+    sys_write(STDERR_FD, "error: topic not found: ", 24);
+    sys_write(STDERR_FD, topic_id, strlen(topic_id));
+    var want = str_from(topic_id);
+    if (str_index_of(want, 47) < 0) {
+        var i = 0;
+        while (i < vec_len(_reg_entries)) {
+            var id = concept_id(vec_get(_reg_entries, i));
+            var slash = str_index_of(id, 47);
+            var leaf = str_sub(id, slash + 1, str_len(id) - slash - 1);
+            if (str_eq(leaf, want) == 1) {
+                sys_write(STDERR_FD, " (did you mean ", 15);
+                sys_write(STDERR_FD, str_data(id), str_len(id));
+                sys_write(STDERR_FD, "?)", 2);
+            }
+            i = i + 1;
+        }
+    }
+    sys_write(STDERR_FD, "\n", 1);
+    return 1;
+}
+
 fn cmd_compare(topic_id, lang1_str, lang2_str) {
     var concept = reg_get(topic_id);
-    if (concept == 0) {
-        sys_write(STDERR_FD, "error: topic not found: ", 24);
-        println(topic_id);
-        return 1;
-    }
+    if (concept == 0) { return topic_not_found(topic_id); }
     var l1 = lang_parse(lang1_str);
     var l2 = lang_parse(lang2_str);
     if (l1 < 0) {
@@ -1012,11 +1216,7 @@ fn read_example_cstr(concept, lang) {
 # CLI: `vidya code <topic> <lang>`
 fn cmd_code(topic_id, lang_str) {
     var concept = reg_get(topic_id);
-    if (concept == 0) {
-        sys_write(STDERR_FD, "error: topic not found: ", 24);
-        println(topic_id);
-        return 1;
-    }
+    if (concept == 0) { return topic_not_found(topic_id); }
     var l = lang_parse(lang_str);
     if (l < 0) {
         sys_write(STDERR_FD, "error: unknown language: ", 25);
@@ -1198,6 +1398,25 @@ fn validate_command(lang) {
     return 0;
 }
 
+# The scratch binary for one example: /tmp/vidya_test_<id>_<lang>, with
+# the id's '/' written as "--". Since 3.0.0 an id is "<group>/<topic>",
+# and a raw '/' named a directory under /tmp that does not exist, so every
+# compiled language failed `vidya validate` while the shell gate passed.
+fn validate_out_path(id, lang) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/vidya_test_");
+    var d = str_data(id);
+    var i = 0;
+    while (i < str_len(id)) {
+        if (load8(d + i) == 47) { str_builder_add_cstr(sb, "--"); }
+        else { str_builder_add(sb, str_new(d + i, 1)); }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "_");
+    str_builder_add_cstr(sb, lang_stem(lang));
+    return str_builder_build(sb);
+}
+
 fn validate_one(concept, lang) {
     var ex = get_example(concept, lang);
     if (ex == 0) { return VALIDATE_SKIP; }
@@ -1212,13 +1431,7 @@ fn validate_one(concept, lang) {
     # Build file path: content_dir / relative_path
     var file_path = path_join(_content_dir, path);
 
-    # Build output path
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "/tmp/vidya_test_");
-    str_builder_add(sb, concept_id(concept));
-    str_builder_add_cstr(sb, "_");
-    str_builder_add_cstr(sb, lang_stem(lang));
-    var out_path = str_builder_build(sb);
+    var out_path = validate_out_path(concept_id(concept), lang);
 
     # ... and the object file the two assembly templates emit next to it
     var sbo = str_builder_new();
@@ -1260,9 +1473,9 @@ fn cmd_validate(topic_filter) {
         var c = vec_get(entries, i);
         var id = concept_id(c);
 
-        # Filter by topic if specified
+        # Filter by topic id or by group, if specified
         if (topic_filter != 0) {
-            if (str_eq(id, str_from(topic_filter)) == 0) {
+            if (str_eq_cstr(id, topic_filter) == 0 && str_eq_cstr(concept_group(c), topic_filter) == 0) {
                 i = i + 1;
                 continue;
             }
@@ -1515,7 +1728,9 @@ fn json_stats_response() {
     }
     var a = rq_alloc();
     var sb = str_builder_new_a(a);
-    str_builder_add_cstr_a(a, sb, "{\"topics\":");
+    str_builder_add_cstr_a(a, sb, "{\"groups\":");
+    str_builder_add_int_a(a, sb, vec_len(_groups));
+    str_builder_add_cstr_a(a, sb, ",\"topics\":");
     str_builder_add_int_a(a, sb, total);
     str_builder_add_cstr_a(a, sb, ",\"complete\":");
     str_builder_add_int_a(a, sb, complete);
@@ -1527,27 +1742,85 @@ fn json_stats_response() {
     return str_builder_build_a(a, sb);
 }
 
-fn json_list_response() {
+# GET /list, or /list?group=<id> for one group's topics. `group_filter`
+# is a cstring or 0; an unknown group lists nothing (`[]`).
+fn json_list_response(group_filter) {
     var entries = reg_list();
     var total = vec_len(entries);
     var a = rq_alloc();
     var sb = str_builder_new_a(a);
     str_builder_add_cstr_a(a, sb, "[");
+    var emitted = 0;
     var i = 0;
     while (i < total) {
         var c = vec_get(entries, i);
         var id = concept_id(c);
-        var topic = concept_topic(c);
+        var group = concept_group(c);
+        if (group_filter != 0 && str_eq_cstr(group, group_filter) == 0) {
+            i = i + 1;
+            continue;
+        }
         var examples = concept_examples(c);
         var nex = 0;
         if (examples != 0) { nex = vec_len(examples); }
-        if (i > 0) { str_builder_add_cstr_a(a, sb, ","); }
+        if (emitted > 0) { str_builder_add_cstr_a(a, sb, ","); }
+        emitted = emitted + 1;
         str_builder_add_cstr_a(a, sb, "{\"id\":");
         json_add_str(sb, id);
-        str_builder_add_cstr_a(a, sb, ",\"topic\":");
-        json_add_str(sb, topic);
+        str_builder_add_cstr_a(a, sb, ",\"group\":");
+        json_add_str(sb, group);
         str_builder_add_cstr_a(a, sb, ",\"languages\":");
         str_builder_add_int_a(a, sb, nex);
+        str_builder_add_cstr_a(a, sb, "}");
+        i = i + 1;
+    }
+    str_builder_add_cstr_a(a, sb, "]");
+    return str_builder_build_a(a, sb);
+}
+
+# The request path after its first `skip` bytes, up to a '?' or the end,
+# as a cstring on allocator `a`; 0 when that is empty. A topic id has a
+# '/' in it (3.0.0), so it is the rest of the path, not one segment.
+fn path_rest_a(a, path, skip) {
+    var n = 0;
+    while (load8(path + skip + n) != 0 && load8(path + skip + n) != 63) { n = n + 1; }
+    if (n == 0) { return 0; }
+    var buf = alloc_via(a, n + 1);
+    memcpy(buf, path + skip, n);
+    store8(buf + n, 0);
+    return buf;
+}
+
+# Split "<id>/<last>" in place: the '/' before the last segment becomes a
+# NUL, so `s` reads as the id, and the last segment is returned. 0 when
+# there is no '/' or either side is empty. /code/{group}/{topic}/{lang}
+# uses it, since the id itself has a '/'.
+fn split_last_segment(s) {
+    var cut = strlen(s) - 1;
+    while (cut >= 0 && load8(s + cut) != 47) { cut = cut - 1; }
+    if (cut <= 0) { return 0; }
+    if (load8(s + cut + 1) == 0) { return 0; }
+    store8(s + cut, 0);
+    return s + cut + 1;
+}
+
+# GET /groups — every group with its title, description and topic count.
+fn json_groups_response() {
+    var a = rq_alloc();
+    var sb = str_builder_new_a(a);
+    str_builder_add_cstr_a(a, sb, "[");
+    var i = 0;
+    while (i < vec_len(_groups)) {
+        var g = vec_get(_groups, i);
+        if (i > 0) { str_builder_add_cstr_a(a, sb, ","); }
+        str_builder_add_cstr_a(a, sb, "{\"id\":");
+        json_add_str(sb, group_id(g));
+        str_builder_add_cstr_a(a, sb, ",\"title\":");
+        json_add_str(sb, group_title(g));
+        str_builder_add_cstr_a(a, sb, ",\"description\":");
+        json_add_str(sb, group_desc(g));
+        str_builder_add_cstr_a(a, sb, ",\"topics\":");
+        str_builder_add_int_a(a, sb, group_topic_count(g));
         str_builder_add_cstr_a(a, sb, "}");
         i = i + 1;
     }
@@ -1565,8 +1838,8 @@ fn json_info_response(topic_id) {
     json_add_str(sb, concept_id(concept));
     str_builder_add_cstr_a(a, sb, ",\"title\":");
     json_add_str(sb, concept_title(concept));
-    str_builder_add_cstr_a(a, sb, ",\"topic\":");
-    json_add_str(sb, concept_topic(concept));
+    str_builder_add_cstr_a(a, sb, ",\"group\":");
+    json_add_str(sb, concept_group(concept));
     str_builder_add_cstr_a(a, sb, ",\"description\":");
     json_add_str(sb, concept_desc(concept));
 

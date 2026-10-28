@@ -8,7 +8,7 @@ This directory is for examples of **using vidya as a consumer**, not examples *i
 
 - Shell scripts that wrap the CLI for common workflows (e.g. "show me every Rust example with allocation").
 - Curl recipes for the `vidya serve` HTTP routes.
-- Snippets demonstrating programmatic integration (a consumer reading `GET /code/{topic}/{lang}` to render syntax-highlighted source in a UI).
+- Snippets demonstrating programmatic integration (a consumer reading `GET /code/{group}/{topic}/{lang}` to render syntax-highlighted source in a UI).
 
 ## Current contents
 

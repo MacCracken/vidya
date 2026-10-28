@@ -11,7 +11,7 @@
 ```
 ┌─────────────────────────────────────────────────┐
 │  Content Layer (content/)                       │
-│  880 source files across 80 topics × 11 langs   │
+│  880 files: 80 topics in 14 groups × 11 langs   │
 │  Human-readable, AI-trainable, CI-tested        │
 └─────────────┬───────────────────────────────────┘
               │ load_all() at startup (one-shot)
@@ -24,18 +24,23 @@
 
 ### Content Layer
 
-Each topic is a directory under `content/` containing:
+Since 3.0.0 `content/` holds groups (`content/<group>/group.toml`), and
+each topic is a directory inside a group. Its id is its path,
+`<group>/<topic>`, and every surface takes that id. A topic contains:
 
-- `concept.toml` — structured metadata (parsed by the loader)
+- `concept.toml` — structured metadata (parsed by the loader; its `id`
+  must be its path)
 - 11 language files (`rust.rs`, `python.py`, `c.c`, `go.go`,
   `typescript.ts`, `shell.sh`, `zig.zig`, `asm_x86_64.s`,
   `asm_aarch64.s`, `openqasm.qasm`, `cyrius.cyr`) — each tested
   by `scripts/validate-content.sh` against its native toolchain.
 
-Plus `content/cyrius/` — the Cyrius language reference and field-notes
-corpus (CYML format: TOML header + markdown body, separated by `---`).
-This is content, not code: skipped by the topic loader, consumed by
-hoosh and human readers.
+`content/cyrius/` is a group too. Its root holds the Cyrius language
+reference and field-notes corpus (CYML format: TOML header + markdown
+body, separated by `---`), which has no `concept.toml` and so is not
+read as topics: it is consumed by hoosh and human readers. P6's Cyrius
+concept topics will be `cyrius/<topic>/`. Layout rules:
+[content-grouping.md](../development/content-grouping.md).
 
 See [content-format.md](../development/content-format.md) for the spec.
 
@@ -88,13 +93,17 @@ Bench: `cyrius bench`.
 main()
   ├─ alloc_init()          # bump allocator
   ├─ args_init()           # argv table
-  ├─ reg_init()            # _reg_entries (vec) + _reg_index (hashmap) + _content_dir
+  ├─ reg_init()            # _reg_entries (vec) + _reg_index (hashmap) + _groups + _content_dir
   ├─ (dispatch help/usage if argc < 2 — does NOT load content)
-  ├─ load_all()            # iterate content/*/, parse concept.toml + read
-  │                        # each language file, build Concept records,
-  │                        # push into _reg_entries, key by id in _reg_index.
+  ├─ load_all()            # scan_content(): every content/<group>/ with a
+  │                        # group.toml, sorted by its `order`; inside each,
+  │                        # every <topic>/ with a concept.toml, sorted by
+  │                        # name. Parse concept.toml + read each language
+  │                        # file, build Concept records, push into
+  │                        # _reg_entries, key by id in _reg_index.
   │                        # ~19ms per process start at 77 topics
-  │                        # (847 examples; 2.9.3, median of 7).
+  │                        # (847 examples; 2.9.3, median of 7). The walk
+  │                        # adds ~3 % (3.0.0, `load_all` bench A/B).
   └─ command dispatch      # streq() chain on argv(1)
 ```
 
@@ -110,7 +119,8 @@ by process teardown.
 ```
 cmd_serve(port)
   ├─ inotify_init_watches()                         # IN_NONBLOCK fd,
-  │                                                  # one watch per topic dir
+  │                                                  # one watch per group
+  │                                                  # and per topic dir
   └─ sandhi_server_run(INADDR_ANY(), port, &handle_request, 0)
        │       (blocking accept loop — process lifetime)
        │
@@ -120,13 +130,15 @@ cmd_serve(port)
             ├─ if _reload_pending: do_reload()       # rebuild + swap inline
             ├─ sandhi_server_get_path(buf, blen)
             └─ http_route(cfd, path)                 # streq() chain
-                 ├─ /stats     → json_stats_response()
-                 ├─ /list      → json_list_response()
-                 ├─ /languages → json_languages_response()
-                 ├─ /search    → json_search_response(q)
-                 ├─ /info/X    → json_info_response(X)
-                 ├─ /compare   → json_compare_response(X, l1, l2)
-                 └─ /gaps      → json_gaps_response()
+                 ├─ /stats       → json_stats_response()
+                 ├─ /groups      → json_groups_response()
+                 ├─ /list[?group=G] → json_list_response(G or 0)
+                 ├─ /languages   → json_languages_response()
+                 ├─ /search      → json_search_response(q)
+                 ├─ /info/G/T    → json_info_response("G/T")   # rest of the path
+                 ├─ /compare     → json_compare_response(X, l1, l2)
+                 ├─ /code/G/T/L  → json_code_response("G/T", L)  # last segment = L
+                 └─ /gaps        → json_gaps_response()
 ```
 
 Every JSON builder reads only from `reg_list()` / `reg_get()` /
@@ -189,10 +201,10 @@ Landed in v2.3.6. Replaces the prior "registry is immutable from
 serve start" invariant with a controlled mutation point.
 
 **Detection.** `inotify_init_watches()` opens a non-blocking
-inotify fd at `cmd_serve` start and adds a watch on each topic
-dir under `content/` (filtered to dirs that contain a
-`concept.toml`, so `content/cyrius/` and other non-topic dirs
-don't generate noise). Mask: `IN_MODIFY | IN_CLOSE_WRITE |
+inotify fd at `cmd_serve` start and adds a watch on `content/`,
+each group dir (a topic added or removed) and each topic dir (an
+edit), using the same walk as the loader, so `content/cyrius/`'s
+reference subtree generates no noise. Mask: `IN_MODIFY | IN_CLOSE_WRITE |
 IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE` (= 970).
 
 **Drain.** `inotify_drain()` runs at the top of every
@@ -204,16 +216,18 @@ events are present, the drain loop reads until EAGAIN and sets
 itself a full re-scan.
 
 **Build.** `build_next_registry()` populates a *staging*
-pair (`_reg_entries_next`, `_reg_index_next`) from a fresh
-`dir_list(_content_dir)` sweep. All-or-nothing: any topic dir
-that has a `concept.toml` but fails to load aborts the reload,
-leaks the partial staging pair (the bump allocator can't free
-it, but next reload allocates a fresh one), and leaves the
-live registry untouched. Topic dirs *without* a `concept.toml`
-are skipped silently — same filter as the original `load_all`.
+set (`_reg_entries_next`, `_reg_index_next`, `_groups_next`)
+by running `scan_content` in strict mode. All-or-nothing: any
+group whose `group.toml` fails to load, or topic whose
+`concept.toml` fails (including an `id` that is not its path),
+aborts the reload, leaks the partial staging set (the bump
+allocator can't free it, but next reload allocates a fresh
+one), and leaves the live registry untouched. Directories
+without a `group.toml` / `concept.toml` are skipped silently,
+the same filter `load_all` uses.
 
-**Swap.** `swap_registry()` is two pointer assignments
-(`_reg_entries = _reg_entries_next; _reg_index = _reg_index_next`).
+**Swap.** `swap_registry()` is three pointer assignments
+(`_reg_entries`, `_reg_index` and `_groups` take the staging set).
 Single-threaded means it's atomic by construction; no barrier
 or lock. The next request reads the new pair.
 
@@ -267,7 +281,7 @@ at 2.9.2 and 17–22ms at 60 topics.
 1. **CYML for the Cyrius corpus, TOML for concept metadata.**
    `content/cyrius/**` uses CYML (TOML header + markdown body) because
    field-note bodies are long-form prose with code blocks. The
-   per-topic `content/<topic>/concept.toml` files use plain TOML
+   per-topic `content/<group>/<topic>/concept.toml` files use plain TOML
    because they're pure structured metadata.
 
 2. **Sandhi over hand-rolled HTTP.** Pre-v2.3.0 vidya carried a
@@ -325,7 +339,7 @@ at 2.9.2 and 17–22ms at 60 topics.
   `content/cyrius/field_notes/mabda_v3_gpu/`.
 - **sandhi** — vidya's HTTP service runs on sandhi (cyrius stdlib).
 - **vyakarana** — tokenizes examples for `code` and `/code/...`, and
-  snapshots `content/lexing_and_parsing/<lang>` as its own test corpus
+  snapshots `content/compilers/lexing_and_parsing/<lang>` as its own test corpus
   (vyakarana ADR 0001), so moving that directory affects it.
 - **sakshi** — vidya uses sakshi for structured tracing (stderr-only
   profile today).

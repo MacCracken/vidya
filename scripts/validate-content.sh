@@ -10,7 +10,7 @@
 #   - On failure: `  ✗ <Lang> (exit=N)` + the combined stdout+stderr
 #     captured during the run, dumped inline. Combined capture matters:
 #     a program that prints to stdout then aborts loses that stdout
-#     under stderr-only capture (the bug that bit content/module_systems
+#     under stderr-only capture (the bug that bit the module_systems
 #     diagnosis in 2.7.1 CI).
 set -euo pipefail
 
@@ -148,11 +148,14 @@ run_lang() {
     rm -f "$logfile"
 }
 
-for topic_dir in "$CONTENT_DIR"/*/; do
-    topic=$(basename "$topic_dir")
-
-    # Skip directories without concept.toml
+# Since 3.0.0 a topic is content/<group>/<topic>/, inside a group that has
+# a group.toml: the same rule as the loader's scan_content. $topic is the
+# topic id, "<group>/<topic>".
+for topic_dir in "$CONTENT_DIR"/*/*/; do
+    topic_dir=${topic_dir%/}
     [[ -f "$topic_dir/concept.toml" ]] || continue
+    [[ -f "$(dirname "$topic_dir")/group.toml" ]] || continue
+    topic=${topic_dir#"$CONTENT_DIR"/}
 
     echo "--- $topic ---"
 

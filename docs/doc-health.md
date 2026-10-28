@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-10-28 (the v2.9.6, v2.9.5, v2.9.4, v2.9.3 and v2.9.2 ships; the 2026-10-27 roadmap cleanup and v2.9.1 ship below them). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
+> **Last refresh**: 2026-10-28 (the v3.0.0 reorganization, then the v2.9.6, v2.9.5, v2.9.4, v2.9.3 and v2.9.2 ships; the 2026-10-27 roadmap cleanup and v2.9.1 ship below them). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -17,6 +17,21 @@ type: state
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
+
+## 2026-10-28 (v3.0.0) — the content reorganization
+
+| Doc | Change |
+|---|---|
+| `CHANGELOG.md` | 3.0.0 entry: Breaking, Migration (all 80 ids), Added, Changed, Fixed, Performance (interleaved A/B). |
+| `docs/adr/0003-grouped-content-path-ids.md` | New: groups, the path as the id, the clean break, and the alternatives (flat ids, symlinks, nesting). Indexed in `docs/adr/README.md`. |
+| `docs/development/content-grouping.md` | Rewritten as the 3.0.0 spec: rules, the 14 groups (generated from the tree), adding a topic or group, the 2.x → 3.0.0 renames. The field-notes subfolder pattern kept. |
+| `docs/development/content-format.md` | Directory structure, `group.toml`, `id` = path, the `topic` field removed, `related_topics` as full ids. |
+| `docs/usage.md` | Topic ids, `list [group]`, `validate <group>`, the route table (adds `/groups`, `/list?group=`, `/compare`, `/languages`, which it lacked). |
+| `docs/guides/getting-started.md` | Full ids in the examples; the stats block; CI described as the Arch container it has been since 2.9.4. |
+| `docs/development/learning-paths.md` | Every id full and realigned; the two capstone links to `content/cyrius/` fixed (one named a `kernel/` directory that does not exist). |
+| `docs/architecture/overview.md`, `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`, `docs/examples/README.md` | The grouped layout, path ids, the new routes. |
+| `docs/development/roadmap.md` | The 3.0.0 plan removed (shipped); "Next" holds the renderer surface and P6, named as `cyrius/<topic>`; trigger rows' paths. |
+| `docs/development/state.md` | Version → 3.0.0, the 3.0.0 posture line, corpus (14 groups), gates (182 tests), binary size. |
 
 ## 2026-10-28 (v2.9.6) — P5 and the empty explanations
 

@@ -1,0 +1,701 @@
+id = "compilers/bootstrapping"
+title = "Compiler Bootstrapping"
+description = "How compilers build themselves — the bootstrap chain from seed to self-hosting. Covers multi-stage compilation, cross-compilation, and the trust problem. Every self-hosting compiler must solve the chicken-and-egg: you need a compiler to compile the compiler."
+tags = ["compiler", "bootstrapping", "self-hosting", "cross-compilation", "stage0", "stage1", "seed", "trust", "toolchain"]
+related_topics = ["compilers/lexing_and_parsing", "compilers/code_generation", "compilers/binary_formats", "compilers/instruction_encoding"]
+
+[[best_practices]]
+title = "Keep the seed small and auditable"
+explanation = "The seed compiler (stage 0) is the root of trust. It should be small enough for a human to read and verify. Thompson's 'Reflections on Trusting Trust' shows why: a malicious seed can inject backdoors that self-replicate through all future compiler generations."
+
+[[best_practices]]
+title = "Use a two-pass assembler for the seed"
+explanation = "A two-pass assembler (pass 1: collect labels, pass 2: emit code) is the simplest correct approach for a seed. Single-pass requires backpatching and is more complex. Two-pass keeps the seed auditable."
+
+[[best_practices]]
+title = "Each stage should only compile the next stage's subset"
+explanation = "Stage 0 doesn't need to compile the full language — just enough to build stage 1. Stage 1 compiles a richer subset. This keeps each stage small and focused. Early C bootstrapped this way: assembly → B → C."
+
+[[best_practices]]
+title = "Test each stage by comparing outputs"
+explanation = "A correctly bootstrapped compiler should produce identical output when compiled by stage N and stage N+1. If stage 2 compiles itself and produces a binary identical to what stage 1 produced, the bootstrap is stable."
+
+[[best_practices]]
+title = "Minimize external dependencies in the bootstrap chain"
+explanation = "Every external tool in the bootstrap chain (cmake, ninja, python) is a trust dependency. A sovereign toolchain minimizes these. Rust's bootstrap requires Python + a pre-built beta compiler — this is a dependency you can eliminate with a self-hosting seed."
+
+[[gotchas]]
+title = "Downloading a binary compiler is not building from source"
+explanation = "Rust's x.py downloads a pre-built beta rustc to compile the real compiler. This means 'building from source' actually means 'building from source + a binary someone else built.' For a sovereign toolchain, the seed must be auditable, not downloaded."
+bad_example = "x.py downloads beta rustc from CI, uses it to build stage 1"
+good_example = "Hand-written assembly seed → stage 0 → stage 1 → self-hosting"
+
+[[gotchas]]
+title = "Nested submodules make bootstrapping fragile"
+explanation = "Rust's repo has 12+ submodules (cargo, LLVM, gcc, docs). Each must be initialized separately. A missing or stale submodule breaks the build silently. Monorepos avoid this entirely."
+bad_example = "git submodule update --init --recursive (pulls 12+ repos, any can fail)"
+good_example = "Single repository with all components (compiler, stdlib, package manager)"
+
+[[gotchas]]
+title = "Cross-compilation stage confusion"
+explanation = "In a multi-stage bootstrap, it's easy to confuse which compiler compiled which binary. Stage 0 (the seed) compiles stage 1. Stage 1 compiles stage 2. Using the wrong stage compiler produces subtly wrong binaries."
+bad_example = "Building the stdlib with stage 0 instead of stage 1"
+good_example = "Clear stage labeling: stage0/bin/rustc, stage1/bin/rustc, stage2/bin/rustc"
+
+[[gotchas]]
+title = "Python as a bootstrap dependency"
+explanation = "Using Python for build orchestration (like Rust's x.py) adds a large, version-sensitive dependency to the toolchain. Python 2/3 differences, missing packages, and version mismatches are common build failures."
+bad_example = "Build system requires Python 3.8+ with specific packages installed"
+good_example = "Build system written in the language itself, or in portable shell"
+
+[[best_practices]]
+title = "Use brk for heap in no-libc compilers"
+explanation = "When writing a compiler with no libc (pure syscalls), use the brk syscall to allocate heap memory. Call brk(0) to get the current break, then brk(current + size) to extend. Store the base in a dedicated register (e.g., r15) and use fixed offsets for each data structure. This gives you a simple, predictable memory layout with zero dependencies."
+
+[[best_practices]]
+title = "Compile-time evaluation before runtime codegen"
+explanation = "If your language has no control flow yet (just expressions and assignments), evaluate everything at compile time. The compiler becomes an interpreter that emits a trivial exit-with-result program. This lets you build and test the lexer/parser infrastructure without the complexity of register allocation or instruction selection. Add runtime codegen only when control flow demands it."
+
+[[best_practices]]
+title = "Use qword-aligned slots when you lack byte-store instructions"
+explanation = "If your assembler only has 64-bit memory operations (mov [reg], reg stores 8 bytes), store all data in 8-byte-aligned slots. Token types, variable values, everything gets a full qword. Wastes memory but avoids byte-level store complexity. For reading individual bytes from input, load a qword and mask with AND 0xFF. Once the assembler supports byte stores (movb) and byte loads (movzx), transition to byte-level operations for I/O buffers and string data — but keep qword slots for token tables and variable metadata where alignment matters."
+
+[[gotchas]]
+title = "Recursive descent works in assembly — use push/pop"
+explanation = "Recursive descent parsing seems impossible in assembly, but it works naturally with push/pop. Each parse function saves its working registers on entry and restores before return. The call stack handles recursion. The key insight: you don't need stack frames or [rbp+offset] — just push the registers you need to preserve."
+bad_example = "Trying to implement parsing with a manual state machine and goto"
+good_example = "parse_expr calls parse_term, which calls parse_factor, using push/pop to save r8 across recursive calls"
+
+[[gotchas]]
+title = "imul and idiv clobber rdx — and idiv needs sign-extension, not zero-extension"
+explanation = "x86_64 one-operand imul reg multiplies rax by reg, putting the 128-bit result in rdx:rax. idiv reg divides rdx:rax by reg. Two issues: (1) imul leaves garbage in rdx that corrupts a later idiv, (2) idiv does SIGNED division, so you must sign-extend rax into rdx with CQO — not zero rdx. Using xor rdx,rdx before idiv works for positive dividends but silently produces wrong results for negative ones. Use the two-operand imul (imul rax, rcx) to avoid clobbering rdx entirely, and CQO before idiv for correct signed semantics."
+bad_example = "imul rcx; ... xor rdx, rdx; idiv rbx  # rdx clobbered by imul, then zero-extended instead of sign-extended"
+good_example = "imul rax, rcx; ... cqo; idiv rbx  # two-operand imul preserves rdx; cqo sign-extends for signed division"
+
+[[gotchas]]
+title = "String comparison needs null terminators in a qword world"
+explanation = "When all memory stores are 8-byte qwords, a 3-character identifier like 'var' gets stored as 8 bytes. The remaining bytes are whatever was in memory. String comparison must stop at null bytes, not after a fixed length. Store null terminators explicitly after each identifier, and compare byte-by-byte with masking."
+bad_example = "Comparing two identifiers by loading qwords and comparing — 'var\\0xxxx' != 'var\\0yyyy'"
+good_example = "Byte-by-byte comparison with AND 0xFF masking, stopping when either byte is 0"
+
+[[gotchas]]
+title = "stdin pipe closes after all data is read"
+explanation = "When piping source code to a compiler via echo | ./compiler, the read syscall returns the full input in one call (for small inputs). The compiler must track exactly how many bytes were read (the return value of read) and not scan past that boundary. Null bytes in the heap past the input are not guaranteed to be zero."
+bad_example = "Scanning input until a null byte — heap memory after input may not be zeroed"
+good_example = "Store read() return value in r12, check cursor against r12 in the lexer loop"
+
+[[performance_notes]]
+title = "A compiler in assembly can be tiny"
+explanation = "A complete compiler with bitwise operators, shifts, modulo, hex literals, comments, functions, syscalls, string literals, arrays, byte-level I/O, and full control flow fits in ~4000 lines of assembly and assembles to ~12KB. Generated programs support user-defined functions with up to 6 parameters, local variables, forward calls, and full System V AMD64 calling convention — enough to write an assembler in itself. No language runtime, no standard library, no linker — pure syscalls."
+evidence = "Cyrius bootstrap chain: stage1a (872 lines, 2641B, compile-time eval) -> stage1b (1725 lines, 5235B, if/else/while) -> stage1c (2470 lines, 7581B, syscalls + I/O) -> stage1d (3664 lines, 11187B, functions + stack frames) -> stage1e (3986 lines, 12344B, bitwise ops) -> stage1f (3986 lines, 12344B, token scaling) -> asm.cyr (1128 lines, self-hosting assembler). The full 7-stage chain achieves bootstrap closure with 11 byte-exact matches."
+
+[[performance_notes]]
+title = "brk is fast for single-allocation patterns"
+explanation = "For a compiler that allocates all its memory once at startup, brk is faster than mmap because it extends the existing data segment with no page table manipulation. A single brk call allocating 32KB takes <1 microsecond."
+evidence = "Stage1a brk(0) + brk(+32K): two syscalls, total ~200ns. Enough for tokenizer buffers, parse tables, variable storage, and output buffer."
+
+[[best_practices]]
+title = "Use a fixup table for forward references"
+explanation = "When a compiler emits code, variable addresses depend on total code size — which isn't known until codegen finishes. Emit placeholder addresses (zeros), record each placeholder's offset and variable index in a fixup table, then walk the table after codegen to patch in the real addresses. This is the same technique linkers use for relocations, applied at the single-file level."
+
+[[best_practices]]
+title = "Transition from interpreter to compiler incrementally"
+explanation = "Build the lexer and parser as a compile-time interpreter first (stage 1a), then convert it to a code emitter (stage 1b). The parser structure stays identical — recursive descent with the same grammar. Only the leaf actions change: instead of computing values, they emit instruction bytes. This lets you test the parsing infrastructure independently before tackling codegen."
+
+[[best_practices]]
+title = "Test codegen independently from the parser by hardcoding emit calls"
+explanation = "When writing a new compiler (like a self-hosting rewrite), validate the codegen infrastructure FIRST by bypassing the parser and directly calling emit functions from main. For 'var x = 42;', hardcode: EMOVI(S, 42); EVSTORE(S, 0); EVLOAD(S, 0); EEXIT(S); and compare output byte-for-byte with the reference compiler. This isolates codegen bugs from parser bugs. Once codegen is byte-exact, you know any remaining issues are in lexing or parsing. This technique caught the duplicate-var lexer bug in cc.cyr — the hardcoded bypass produced byte-exact output while the parser path failed, proving the codegen was correct and narrowing the bug to the lexer."
+
+[[best_practices]]
+title = "Use the stack for expression temporaries in generated code"
+explanation = "When generating code for nested expressions like (a + b) * (c - d), use push/pop to save intermediate results. The left operand is evaluated into rax and pushed. The right operand is evaluated into rax. Then pop the left into rcx and apply the operator. This naturally handles arbitrary nesting without register allocation."
+
+[[gotchas]]
+title = "Forward jump patching must use read-modify-write"
+explanation = "When patching a 4-byte rel32 in a conditional jump, a naive 8-byte store (mov [addr], val) overwrites the 4 bytes after the jump — which is the start of the body code. You must read the existing qword, mask in the low 4 bytes of the rel32, and write back. This is the #1 bug when building a compiler with only qword memory operations."
+bad_example = "mov [patch_addr], rel32_value  # overwrites 4 bytes of following code"
+good_example = "load qword at patch_addr; clear low 32 bits; OR in rel32; store back"
+
+[[gotchas]]
+title = "Condition inversion for if/while jumps"
+explanation = "An 'if (a == b) { body }' must jump PAST the body when the condition is FALSE. So '==' emits jne (jump if NOT equal), '<' emits jge, '>' emits jle, and so on. Getting the inversion wrong means the body executes when it shouldn't and vice versa. Every comparison operator maps to its logical opposite in the jump instruction."
+bad_example = "if (x == 1) emits je (jumps INTO body when true, falls through when false)"
+good_example = "if (x == 1) emits jne to skip body (falls INTO body when true, jumps past when false)"
+
+[[gotchas]]
+title = "While loops need two jumps — forward and backward"
+explanation = "A while loop has a condition check at the top with a forward jump to exit (patched after body), plus an unconditional backward jump at the bottom to re-check the condition. The backward jump's rel32 is negative (the target is before the current position). The forward jump uses the same patching mechanism as if statements."
+bad_example = "Only emitting the forward conditional jump — the loop body executes once then falls through"
+good_example = "Forward jcc to EXIT after condition; body code; backward jmp to LOOP_TOP; EXIT: (patch forward jcc here)"
+
+[[gotchas]]
+title = "If/else needs TWO forward jumps — one conditional, one unconditional"
+explanation = "An 'if (cond) { A } else { B }' requires two forward jumps: (1) a conditional jump past the if-body to the else-body (inverted condition, same as plain if), and (2) an unconditional jmp at the end of the if-body to skip the else-body. Both must be patched after their target code is emitted. The unconditional jump is what distinguishes if/else from plain if — without it, the if-body falls through into the else-body."
+bad_example = "if-body falls through into else-body because there's no jmp to skip it"
+good_example = "jcc ELSE after condition; if-body; jmp END; ELSE: else-body; END: (patch both jumps)"
+
+[[gotchas]]
+title = "Fix a bug in one stage, check all stages"
+explanation = "In a multi-stage bootstrap, each stage is typically built by copying and extending the previous stage's code. If you find a bug (like using xor rdx,rdx instead of cqo before idiv), the same bug likely exists in every stage that shares that lineage. After fixing stage1b's signed division, stage1a had the identical bug. Always grep all stages when you find a correctness issue."
+bad_example = "Fix idiv bug in stage1b, ship it, discover stage1a has the same bug weeks later"
+good_example = "Fix idiv bug in stage1b, immediately grep stage1a for the same pattern, fix both"
+
+[[gotchas]]
+title = "String literals and variables need different fixup types"
+explanation = "When a compiler generates binaries with both variables and string literals, both need address fixups — but they live at different offsets in the data section. Variables are interleaved by declaration order with cumulative sizing. String literals are appended after all variables. The fixup table needs a type field to distinguish them: type-0 fixups compute addresses from variable offsets, type-1 fixups compute addresses from string offsets past the variable area. Encoding the type in the high bits of the fixup entry (e.g., bit 56) avoids growing the fixup entry size."
+bad_example = "Single fixup type — string addresses computed as variable addresses, land in the wrong place"
+good_example = "Fixup entry = (codebuf_offset, type_bits | index). Type 0: var addr = base + cumulative_size. Type 1: str addr = base + total_var_bytes + string_offset."
+
+[[gotchas]]
+title = "The 'last variable' exit convention matters for control flow"
+explanation = "If your language exits with the last assigned variable's value, control flow complicates things. Assignments inside while/if bodies update the 'last assigned' tracker, but after the block ends, you want the outer scope's variable. Save and restore the last-variable tracker around control flow blocks, like saving callee-saved registers."
+bad_example = "while loop body assigns to counter variable; program exits with counter instead of result"
+good_example = "Save last_var_idx before while body, restore after — exit value reflects outer scope"
+
+[[gotchas]]
+title = "Functions need dual-mode variable access: globals via fixup, locals via rbp"
+explanation = "When adding functions to a bootstrap compiler that uses data-section variables (absolute addresses patched by fixup), function-local variables can't use the same mechanism — they must be stack-allocated at [rbp - offset] for correct scoping. This means the codegen needs an 'in_function' flag that switches emit_var_load/store between two modes: absolute-address fixup for globals, and rbp-relative addressing for locals. The compiler must save and restore the global variable table state (var_count, last_var_idx) around each function definition parse. Forgetting to switch modes means function locals alias global addresses — subtly wrong for any program with both functions and top-level code."
+bad_example = "Function locals use data-section addresses — two calls to the same function corrupt each other's variables"
+good_example = "in_function flag: 0 = emit fixup-based mov rcx,<addr>; mov rax,[rcx]. 1 = emit mov rax,[rbp-offset]"
+
+[[gotchas]]
+title = "Store complex parse state in heap scratch, not on the stack"
+explanation = "When parsing a function definition, the compiler must track many values across nested parse calls: frame size patch offset, parameter count, saved variable state. Storing these on the x86 stack with push/pop is fragile because nested parse_expr and parse_statement calls have their own push/pop sequences. Any imbalance corrupts the saved values. Using dedicated heap scratch locations (fixed offsets from the heap base register) is more reliable — the values persist regardless of call depth and can be read/written at any point without worrying about stack balance."
+bad_example = "push frame_size_patch; ... parse body with its own push/pop ...; pop frame_size_patch — stack corrupted"
+good_example = "mov [r15 + SCRATCH_OFFSET], frame_size_patch; ... parse body ...; mov rax, [r15 + SCRATCH_OFFSET]"
+
+[[performance_notes]]
+title = "Each compiler stage adds ~50% size for a major capability tier"
+explanation = "A bootstrap compiler grows predictably: each stage adds one capability tier (control flow, I/O, functions, bitwise ops) and increases binary size by roughly 50%. The growth is sublinear because infrastructure code (lexer, parser framework, ELF emitter) is shared across stages. Functions are the most expensive addition (~50% more code than I/O) because they require stack frame management, calling convention compliance, and a separate variable scoping mechanism. Capacity scaling (larger buffers) is nearly free in binary size because it only changes immediate constants, not code."
+evidence = "Cyrius stage1a: 2641B (eval). Stage1b: 5235B (+98%, control flow). Stage1c: 7581B (+45%, syscalls/I/O). Stage1d: 11187B (+48%, functions). Stage1e: 12344B (+10%, bitwise ops + 16x capacity scaling). The bitwise/shift stage is the cheapest because each operator is a single 3-byte x86 instruction — the emit helper + parser dispatch costs ~30 bytes each. Capacity scaling (4KB→64KB buffers) changes only immediate operands in existing code, adding zero new instructions."
+
+[[performance_notes]]
+title = "Sub-millisecond compilation for bootstrap compilers"
+explanation = "A 5KB compiler written in assembly compiles programs in ~500 microseconds — dominated by process startup (fork+exec+brk), not by compilation itself. Generated programs execute in ~360 microseconds, also dominated by kernel overhead. At these sizes, the compiler and its output are faster than the OS can spawn them."
+evidence = "Stage1b compile times: 499-607us per program. Execute times: 354-548us. The factorial program (5 vars, while loop, multiplication) compiles in 513us and runs in 367us. Process fork+exec alone accounts for ~300us."
+
+[[performance_notes]]
+title = "Generated binary size scales linearly with statement count"
+explanation = "Each variable declaration emits ~23 bytes (mov rax imm64 + mov rcx imm64 + mov [rcx] rax), each arithmetic op emits ~7 bytes (push + op + pop), each if/while emits ~20 bytes of condition + jump overhead. A program's binary size is predictable from its statement count."
+evidence = "Stage1b: literal=184B, arithmetic=216B, 3 vars=288B, if=264B, while+2vars=344B, nested if-in-while=384B. Roughly 20-30 bytes per statement."
+
+[[performance_notes]]
+title = "CI-built LLVM saves 50+ minutes"
+explanation = "Building LLVM from source takes 30-90 minutes. Using a pre-built LLVM from CI reduces a full rustc build from ~60 minutes to ~5 minutes. The tradeoff is trusting someone else's binary."
+evidence = "Rust bootstrap with CI LLVM: 5:19. Without: estimated 60+ minutes on 16 cores."
+
+[[performance_notes]]
+title = "Shallow clones reduce bootstrap setup time 10x"
+explanation = "A full clone of rust-lang/rust is multiple GB. With --depth 1, the initial clone is much smaller. Nested submodules (cargo, LLVM) also benefit from shallow cloning."
+evidence = "Full rust-lang/rust clone: ~2GB. Shallow clone: ~200MB. Cargo submodule: ~50MB shallow vs ~500MB full."
+
+[[performance_notes]]
+title = "Stage 1 is sufficient for most development"
+explanation = "Stage 2 (compiler compiled by itself) is needed for release builds but not for development. Stage 1 (compiled by the beta) is functionally identical for testing. Building only stage 1 halves build time."
+evidence = "Stage 1 build: ~5 minutes. Full stage 2 build: ~10-15 minutes. Stage 1 is sufficient for cargo, tests, and development."
+
+[[best_practices]]
+title = "Add bitwise operators before self-hosting, not during"
+explanation = "Writing an assembler requires extensive bit manipulation — REX prefixes, ModR/M bytes, register encoding all combine bit fields with AND/OR/shift. Add these operators to the bootstrap language as a dedicated stage before attempting self-hosting. Trying to implement an assembler without bitwise ops forces awkward workarounds (multiply/divide by powers of 2, manual bit extraction) that make the self-hosting code fragile and hard to audit."
+
+[[best_practices]]
+title = "Reuse the same token for unary and binary operators"
+explanation = "In a recursive-descent parser, the same token can serve dual roles without conflict: & as unary address-of (in parse_factor, prefix position) and & as binary bitwise AND (in parse_expr, infix position). The parser position disambiguates naturally — parse_factor only consumes & when it appears at the START of a factor, while parse_expr only sees & AFTER evaluating a full subexpression. No special lookahead or context flags needed."
+
+[[best_practices]]
+title = "Scale buffer capacities before self-hosting, not during"
+explanation = "A self-hosting assembler will be 10KB+ of source code with thousands of tokens. If the bootstrap compiler has 4KB input buffers and 128 token slots, it will silently truncate or overflow during the self-hosting attempt. Scale all buffers generously (16x or more) in a dedicated stage, verify backward compatibility, then attempt self-hosting. The cost is trivial — changing immediate operands in existing code adds zero new instructions."
+
+[[gotchas]]
+title = "shr is logical shift, not arithmetic — negative numbers lose their sign"
+explanation = "x86_64 shr (shift right) fills the high bits with zeros, discarding the sign bit. For unsigned operations (extracting byte fields, dividing by powers of 2), this is correct. But if you right-shift a negative number expecting sign preservation, you need sar (shift arithmetic right) instead. In a bootstrap compiler generating code for bit manipulation (REX prefixes, register encoding), all values are unsigned masks and fields — shr is correct. But document the choice."
+bad_example = "var x = 0 - 256; var hi = x >> 8;  # Gets 0x00FFFFFFFFFFFFFF, not -1"
+good_example = "var x = 0x1234; var hi = x >> 8;  # Gets 0x12 — correct for unsigned field extraction"
+
+[[gotchas]]
+title = "Modulo uses idiv which clobbers BOTH rax and rdx"
+explanation = "x86_64 idiv rcx divides rdx:rax by rcx, putting the quotient in rax and the remainder in rdx. For modulo, you need the remainder — but the idiv already overwrote rax with the quotient. You must emit an extra 'mov rax, rdx' after idiv to move the remainder into the accumulator. This is easy to forget because division and modulo share the same instruction but use different output registers."
+bad_example = "cqo; idiv rcx;  # rax now has quotient, not remainder — modulo returns wrong value"
+good_example = "cqo; idiv rcx; mov rax, rdx;  # explicitly move remainder into rax for modulo"
+
+[[gotchas]]
+title = "Hex literal parser must handle 0x without digits gracefully"
+explanation = "When the lexer sees '0x' followed by a non-hex character (like a space or semicolon), it must produce a valid token with value 0, not crash or enter an infinite loop. The hex accumulation loop should check for valid hex digits (0-9, a-f, A-F) and fall through to the number-done path when it encounters anything else. The edge case '0x' alone is unlikely in real code but will appear in test suites."
+bad_example = "Hex parser loops until it finds a hex digit — infinite loop on '0x;'"
+good_example = "Hex parser initializes accumulator to 0, loops on valid hex digits, exits on first non-hex character"
+
+[[gotchas]]
+title = "Operator precedence in a bootstrap compiler doesn't need to match C"
+explanation = "C has 15 precedence levels. A bootstrap compiler needs just 2-3: multiplicative (*/%/<</>>) and additive (+/-/&/|/^). This means 'a & 0xFF | b' parses left-to-right as '(a & 0xFF) | b' — which happens to work for the most common patterns. For the rare case where C precedence matters, use explicit parentheses. The 2-level approach adds 7 operators to the compiler with ~30 lines of assembly each, vs hundreds of lines for a C-compliant 15-level hierarchy."
+bad_example = "Implementing 15 precedence levels with 15 parse functions for a bootstrap compiler — thousands of lines of assembly for marginal benefit"
+good_example = "Two levels: parse_term handles * / % << >>, parse_expr handles + - & | ^. Use parentheses when needed."
+
+[[gotchas]]
+title = "Duplicate var names in a function are the #1 bootstrap compiler bug"
+explanation = "In a bootstrap compiler with flat function scoping, declaring `var val = 0` inside an if block and then `var val = 0` again later in the same function creates TWO separate stack slots both named `val`. The compiler allocates slots for all `var` declarations during parsing, regardless of runtime control flow. The second `val` gets a different stack slot than the first. This causes silent data corruption: the value stored in one slot is read from a different slot. This bug hit three times during Cyrius development — in SNUM (hex/decimal parsing), LEXNUM (same pattern), and DO_MOV (memory/register/immediate branches). Each time it produced values corrupted by heap addresses, different on every run, extremely hard to diagnose. The fix is always the same: split the function into separate functions, one per branch, so each has its own clean var namespace. Scan every function for duplicate var names before debugging anything else."
+bad_example = "fn parse(S) { if (is_hex) { var val = hex_parse(); return val; } var val = dec_parse(); return val; } — two 'val' slots, second may read from first's slot or vice versa"
+good_example = "fn parse_hex(S) { var val = ...; return val; } fn parse_dec(S) { var val = ...; return val; } fn parse(S) { if (is_hex) { return parse_hex(S); } return parse_dec(S); } — one var per function, no collision possible"
+
+[[gotchas]]
+title = "Functions cannot reference globals declared after them in a bootstrap compiler"
+explanation = "In a bootstrap compiler where the parser processes all fn definitions before any top-level var statements, functions cannot reference global variables because those variables don't exist yet during function body parsing. The workaround is to allocate all state in a heap block (via brk) and pass the heap pointer as the first parameter to every function. Functions read/write state through load8/store8 at fixed offsets from this pointer — the same pattern the bootstrap compiler itself uses (r15 + offset). This is verbose but systematic and avoids the ordering constraint entirely."
+bad_example = "var CP = 0; fn emit(b) { store8(&CODE + CP, b); CP = CP + 1; } — CP is undefined when emit is parsed"
+good_example = "fn emit(S, b) { var cp = L64(S + 8); store8(S + 256 + cp, b); S64(S + 8, cp + 1); } var S = brk_alloc(); emit(S, 0x90);"
+
+[[performance_notes]]
+title = "Bitwise operators are the cheapest language addition"
+explanation = "Each bitwise operator (AND, OR, XOR, SHL, SHR, NOT) is a single 3-byte x86_64 instruction. The full implementation cost per operator is: one 12-line emit helper (~30 bytes of seed code), plus 5-7 lines of parser dispatch. Adding all 7 operators (including modulo) costs ~320 lines of assembly and ~830 bytes of binary — less than a single if/else control flow implementation."
+evidence = "Stage1e adds % & | ^ ~ << >> (7 operators) plus hex literals, comments, uppercase identifiers, and 16x capacity scaling. Total cost: 322 new lines (3664→3986), 1157 new bytes (11187→12344). The operators themselves account for ~210 lines. Hex parsing adds ~55 lines. Comments add ~15 lines. The rest is capacity scaling (just changing immediate constants)."
+
+[[performance_notes]]
+title = "Capacity scaling is nearly free in binary size"
+explanation = "Scaling a compiler's internal buffers from 4KB to 64KB (16x) only changes the immediate operands in existing instructions — no new code paths, no new logic, just different numbers in 'add rsi, 0xNNNN' instructions. The binary size impact is dominated by new 5-byte hex immediates vs old 2-byte hex immediates (e.g., 0x29000 vs 0x2C00), adding ~3 bytes per offset reference."
+evidence = "Stage1e scales input (4KB→64KB), tokens (128→4096), codebuf (4KB→64KB), output (6KB→128KB), vars (64→256), functions (32→128). The brk allocation grows from 40KB to 448KB. All this changes only immediate values — zero new instructions. The binary grows by ~40 bytes from longer immediates."
+
+[[best_practices]]
+title = "Byte-exact comparison is the gold standard for assembler correctness"
+explanation = "When writing a self-hosting assembler, the strongest test is assembling the same file with both the reference assembler (seed) and the new assembler, then comparing output bytes. If they match exactly, every instruction encoding, label offset, displacement size, SIB byte, and ELF header field is correct. A single wrong bit in any of these produces a different binary. Build your test suite around this: assemble progressively larger programs, from 3-instruction exit programs to multi-thousand-line compilers."
+
+[[best_practices]]
+title = "Pass heap state as first parameter when functions can't see globals"
+explanation = "In a bootstrap language where all fn definitions must precede var declarations, functions cannot reference global variables. The workaround is to allocate all mutable state in a single heap block (via brk) and pass the block's base address as the first parameter to every function. State fields live at fixed offsets: L64(S + 8) for code position, S64(S + 16, val) for parse cursor, etc. This mirrors how the bootstrap compiler itself uses r15 + offsets — the same pattern at a higher abstraction level. It costs one parameter slot per function but gives uniform, predictable state access."
+
+[[gotchas]]
+title = "Return value -1 vs 0 for try-parse functions in a language without exceptions"
+explanation = "In a language without exceptions or option types, a 'try' function (like try-parse-register) must signal failure through its return value. Using 0 for failure is dangerous when 0 is a valid result (rax = register code 0). Using -1 (0 - 1) for failure is safe because register codes are 0-15 and instruction sizes are always positive. But the CALLER must check with `if (result < 0)` (signed comparison), not `if (result == 0)`. Getting this wrong means register rax (code 0) is treated as 'not a register', causing the parser to take the wrong path and silently produce corrupt output."
+bad_example = "fn try_reg() { ... return 0; } fn handle() { var r = try_reg(); if (r == 0) { /* immediate path */ } } — rax (code 0) takes the immediate path"
+good_example = "fn try_reg() { ... return 0 - 1; } fn handle() { var r = try_reg(); if (r < 0) { /* not a register */ } } — only -1 takes the non-register path"
+
+[[gotchas]]
+title = "Programs are better compiler fuzzers than test cases"
+explanation = "Test cases exercise isolated features: 'var x = 42' tests literals, 'if (x == 1) { }' tests conditionals. Programs exercise feature INTERACTIONS: a sort program combines arrays + load64/store64 + nested while + && conditions + functions. Every major compiler bug in Cyrius (VCNT restore, data section layout, bridge compiler syntax, heap offset collisions) was found by programs, not by test cases. Build real programs early and often — they find the bugs that matter."
+
+[[gotchas]]
+title = "The bridge compiler limits what syntax the source can use"
+explanation = "In a self-hosting compiler chain, cc2.cyr is first compiled by a BRIDGE compiler (build/cc). If the bridge doesn't understand a new syntax (like elif), using that syntax in cc2's source causes silent failure — the bridge can't parse it, produces a broken binary, and the convergence chain produces garbage. Always check: does the bridge support every syntax feature used in the source? If not, either rebuild the bridge first or use only syntax the bridge understands."
+bad_example = "Use elif in parse.cyr source when build/cc is compiled by stage1f (no elif) — silent compilation failure"
+good_example = "Rebuild bridge from cc2 (which has elif), THEN use elif in source. Or use else { if } until bridge is updated."
+
+[[gotchas]]
+title = "Investigate 'return fn()' vs 'var x = fn(); return x;' codegen differences"
+explanation = "In a bootstrap compiler, `return EJCC(S, 0x85)` and `var patch = EJCC(S, 0x85); return patch;` should produce identical results. If they don't, the codegen for local variable capture may be corrupting the return value. This manifests as: modifying a function to capture a return value in a local variable causes ALL programs to output 0, even programs that don't use the modified function. The likely cause: the extra local changes the stack frame size, which shifts the return value or corrupts the caller's saved registers. Debug by checking the generated code for both patterns side by side."
+
+[[best_practices]]
+title = "Keep an authoritative heap offset map — collisions cause silent corruption"
+explanation = "When a bootstrap compiler manages all state via fixed heap offsets (S + 0xNNNNN), every new feature adds offsets. Without a single authoritative map, it's easy to allocate an offset that collides with an existing table. The symptom: ALL programs produce wrong output (not just programs using the new feature), because the collision corrupts a table used by every compilation (like fn_local_names). The fix: maintain a HEAP MAP comment at the top of the main file listing every offset, its size, and purpose. Mark NEXT FREE OFFSET explicitly. Check the map before allocating. This documentation prevented 0 bugs when missing and caught 1 bug instantly when added."
+
+[[best_practices]]
+title = "Add elif as a keyword to eliminate nested brace chains"
+explanation = "In a language with only if/else and mandatory braces, a multi-way dispatch requires nested `else { if (...) { } }` — each branch opens a new brace level. A 20-way lexer dispatch needs 20 closing braces at the bottom. Adding one case means adding one `}` — miss it and the compiler gives an unhelpful syntax error. The fix: add `elif` as a keyword that the parser treats as `} else { if`. The source writes `elif (cond) { }` and the parser closes the previous branch and opens a new one at the same nesting level. This is the single highest-ROI language addition for a bootstrap compiler — it prevents the #2 bug class (after duplicate vars) with zero codegen change."
+
+[[gotchas]]
+title = "Deeply nested else-if chains need brace counting — off-by-one breaks everything"
+explanation = "In a language without else-if as a construct (only if/else with braces), a multi-way dispatch like a lexer token switch becomes: `if (c==59) { ... } else { if (c==43) { ... } else { if (c==45) { ... } else { ... } } }`. Each `else { if` opens a new brace pair. For N cases, you need N closing `}` at the bottom. Adding a new case (e.g., adding `{` and `}` token handling) means adding exactly one more `}` to each closing line. Miss one and the function body is unclosed — the compiler sees the next `fn` keyword inside the current function body and fails with a syntax error that gives no location information. Count braces programmatically: `tr -cd '{}' | fold -w1 | awk` should show final depth 0."
+bad_example = "16 else-if branches but only 14 closing braces — compiler error with no useful diagnostic"
+good_example = "After every edit to an if-else chain, verify: sed -n 'START,ENDp' file | tr -cd '{}' | awk ... shows depth 0"
+
+[[gotchas]]
+title = "Byte-exact testing catches alignment and padding differences"
+explanation = "A compiler can produce functionally correct output that differs from the reference in padding bytes. For example, aligning code to 8 bytes by emitting 0x90 (nop) vs leaving brk-zeroed memory (0x00) produces different bytes at the same offsets. The program runs correctly either way, but byte-exact comparison fails. Match the reference compiler's EXACT alignment behavior: if stage1f advances the code position counter without writing, the padding bytes are whatever brk returned (zeros). Don't emit explicit nops — just advance the counter."
+bad_example = "while (cp % 8 != 0) { emit(0x90); cp++; } — pads with nop (0x90), reference leaves zeros"
+good_example = "cp = (cp + 7) & ~7; — advances counter without writing, padding stays zeroed from brk"
+
+[[performance_notes]]
+title = "A self-hosting assembler fits in 1128 lines of bootstrap language"
+explanation = "A complete two-pass x86_64 assembler supporting 43 mnemonics (enough to assemble a 4000-line compiler) fits in ~1100 lines of a minimal language with only variables, functions, if/else, while, and byte-level memory access. The assembler uses packed 64-bit word comparison for mnemonic dispatch (same pattern as the bootstrap compiler's keyword matching), heap-based state passed to every function, and a single reusable memory operand encoder for all memory-accessing instructions. It produces byte-identical output to the Rust reference implementation for all test cases."
+evidence = "Cyrius asm.cyr: 1128 lines, 43 mnemonics, compiled by stage1f (12344-byte compiler). Produces byte-exact matches for 11 test programs including stage1a (2641B), stage1b (5235B), stage1c (7581B), stage1d (11187B), stage1e (12344B), and stage1f (12344B). Bootstrap closure verified: seed→stage1f→asm→stage1f_v2 byte-identical."
+
+[[performance_notes]]
+title = "The bootstrap loop closes at ~12KB"
+explanation = "The minimum viable self-hosting bootstrap requires a compiler that can compile the assembler that can assemble the compiler. In Cyrius, this loop closes at 12,344 bytes: the stage1f compiler (12344B) compiles asm.cyr (1128 lines) into an assembler binary, and that assembler produces a byte-identical copy of stage1f when given stage1f.cyr as input. The entire bootstrap chain from bare assembly to self-hosting closure spans 7 stages (seed + 1a through 1f) totaling ~20,000 lines of source code."
+evidence = "Cyrius bootstrap closure: seed (Rust, 2076 lines) → stage1f.cyr (3986 lines assembly) → stage1f (12344B binary) → asm.cyr (1128 lines high-level) → asm (29016B binary) → stage1f_v2 (12344B, byte-identical to seed output). Total source: seed(2076) + stages(3986*6≈24000) + asm(1128) ≈ 27,000 lines."
+
+[[best_practices]]
+title = "Commit the bootstrap binary, not the bootstrap compiler's source language"
+explanation = "Once a self-hosting bootstrap loop is verified (assembler assembles the compiler that compiles the assembler, byte-identical), commit the assembler BINARY as the root of trust. The binary is small (29KB), reproducible (SHA256 manifest + verification script), and eliminates the dependency on whatever language the original seed was written in. The original seed (e.g., Rust) becomes an archived verification artifact, not a build dependency. This is how you achieve true language independence: the committed binary bootstraps everything from source, and the source is in YOUR language."
+
+[[best_practices]]
+title = "Separate the bootstrap binary from build artifacts"
+explanation = "Put the committed bootstrap binary in its own directory (e.g., bootstrap/) separate from source (stage1/) and build output (build/). The bootstrap directory contains exactly three things: the binary, a SHA256 manifest, and a bootstrap script. This makes the trust boundary visible — reviewers know exactly what they're trusting (one binary) and how to verify it (one script). Build artifacts are gitignored and regenerated; the bootstrap binary is committed and immutable."
+
+[[gotchas]]
+title = "Archive the original seed — don't delete it"
+explanation = "When replacing a Rust/C seed with a self-hosted binary, archive the original seed source rather than deleting it. The original seed is the independent implementation that PROVES the committed binary is correct — without it, there's no way to verify the binary from scratch. A third party needs: (1) the original seed source, (2) its compiler (e.g., rustc), (3) the bootstrap source files, to reproduce the committed binary and verify the SHA256 hash. Deleting the seed destroys this verification path. The archived seed is small (240KB of Rust source) and costs nothing to keep."
+bad_example = "rm -rf seed/ — the only independent verifier is gone, the committed binary becomes trust-me-bro"
+good_example = "mv seed/ archive/seed/ — kept for verification, not in any build path, clearly labeled as historical"
+
+[[gotchas]]
+title = "Language extensions go INTO the bootstrap compiler, not into the host language"
+explanation = "When adding features like structs, type checking, or domain-specific attributes to a self-hosted language, add them to the bootstrap compiler itself — don't modify the host language (Rust, C) that was used for the original seed. If you add structs by modifying rustc, you're back to depending on Rust. Instead, write a new compiler (cc.cyr) in your bootstrap language that compiles a richer subset. Each feature is a compiler extension, not a fork of someone else's compiler. This is how you achieve true sovereignty: the entire toolchain, from binary seed to language features, is yours."
+bad_example = "Add struct support by modifying upstream rustc — now you maintain a 13GB fork of rust-lang/rust forever"
+good_example = "Write cc.cyr in stage1f's language that compiles structs → x86_64. The compiler IS the language definition. No external dependency."
+
+[[performance_notes]]
+title = "A modular self-hosting compiler with structs, pointers, includes, and inline asm fits in 1960 lines"
+explanation = "A self-hosting compiler that extends beyond its bootstrap compiler — adding structs, field access, and multi-width memory intrinsics (load16/32/64, store16/32/64) — fits in 1759 lines with 142 functions. It compiles its own 1759-line source into a 53912-byte binary, and the self-compiled version produces a byte-identical copy (cc2==cc3 verified). The compiler is the first tool in the chain that understands features the bootstrap compiler (stage1f) doesn't — structs only work in cc, not stage1f. This is the beginning of language evolution from within."
+evidence = "Cyrius cc2: 7 modules (1960 lines, 149 functions), 58656-byte binary. Features beyond stage1f: structs, pointers (*deref, *store), >6 params, load/store 16/32/64, include, inline asm, error messages with token position. Self-hosting: cc2==cc3 byte-identical. 53 tests (34 byte-exact + 17 feature + 2 error). Compile: 7ms self-compile."
+
+[[gotchas]]
+title = "Function table overflow silently corrupts the compiled binary"
+explanation = "When a bootstrap compiler has a fixed-size function table (e.g., 128 slots) and the source program declares more functions than the table holds, the compiler silently overflows into adjacent heap memory. The resulting binary contains corrupted function call offsets and segfaults on execution. The symptoms — segfault with no error message, even on trivial inputs like 'var x = 42;' — give no clue that the root cause is a table overflow in the COMPILER, not in the compiled program. Always check function count against the compiler's limit before debugging the generated binary."
+bad_example = "136 functions in source, 128-slot compiler → compiled binary segfaults, no error message"
+good_example = "Count functions (grep -c '^fn ' source.cyr), compare to compiler limit. If over: bump limit in BOTH the bootstrap compiler AND the self-hosting compiler, rebuild both."
+
+[[gotchas]]
+title = "Extending a self-hosting compiler breaks byte-identity with the bootstrap compiler"
+explanation = "When you add features to cc.cyr that stage1f doesn't have (like structs), cc.cyr compiled by stage1f and cc.cyr compiled by itself produce different binaries. This is expected: the two compilers have different internal function counts and table layouts, producing different code offsets for function calls. The fix is NOT to make stage1f and cc agree — it's to verify the cc→cc2→cc3 chain instead: cc compiles itself into cc2, cc2 compiles itself into cc3, cc2 must equal cc3. The stage1f→cc binary is the bootstrap bridge, not the self-hosting proof."
+bad_example = "Debugging why stage1f→cc differs from cc→cc2 — wrong question, they're different compilers"
+good_example = "Verify cc2==cc3 (second-generation self-hosting). Once cc2 and cc3 are byte-identical, cc is self-hosting. Also: when the self-compiled binary crashes, check that BOTH the bootstrap compiler AND the self-hosting compiler have adequate table sizes — bumping only the bootstrap compiler is not enough."
+
+[[gotchas]]
+title = "Underscore separators in hex literals are not universal — bootstrap compilers may reject them"
+explanation = "Languages like Rust and Python allow underscores in numeric literals for readability (0x0036_3164). But a bootstrap compiler's lexer typically only handles digits and a-f/A-F after 0x. Writing 0x0036316461_6F6C in source compiled by a bootstrap compiler causes a silent parse failure — the lexer stops at the underscore and produces a truncated value, or the parser sees an unexpected IDENT token after the number. This is particularly insidious because the hex literal looks correct to a human reader but the compiler treats _6F6C as a separate identifier."
+bad_example = "0x0036316461_6F6C in source compiled by stage1f — underscore stops hex parsing, produces wrong value"
+good_example = "0x003631646F6C — no separators, works in every lexer"
+
+[[gotchas]]
+title = "Capacity limits must be bumped in BOTH the bootstrap and self-hosting compiler"
+explanation = "When a self-hosting compiler outgrows a limit (function table, token slots), you must bump the limit in TWO places: the bootstrap compiler (stage1f) that first compiles it, AND the self-hosting compiler's own internal tables (cc.cyr). Bumping only stage1f produces a working cc binary (compiled with larger tables), but cc then tries to compile itself with its own smaller tables and overflows. The symptom is: cc works fine for small programs but crashes when self-compiling. The cc→cc2 binary has corrupted call targets because cc's own function table overflowed during self-compilation."
+bad_example = "Bump stage1f from 128→256 fn slots, forget to bump cc.cyr → cc works, cc2 crashes"
+good_example = "Bump BOTH stage1f.cyr AND cc.cyr fn tables to 256, rebuild chain: stage1f→cc→cc2→cc3, verify cc2==cc3"
+
+[[performance_notes]]
+title = "Full bootstrap in 41ms, self-compile in 9ms"
+explanation = "The complete Cyrius bootstrap — from committed 29KB binary to working compiler + assembler with verification — runs in 41ms. The self-hosting compiler compiles its own 1467-line source in 9ms. The assembler processes 3983 lines of assembly in 3ms (1.3 million lines/sec). These speeds are dominated by process startup (fork+exec), not compilation itself. At these sizes, the compiler is faster than the OS can spawn it."
+evidence = "Benchmarks on Linux x86_64: stage1f compiles cc.cyr (1467 lines → 43504B): 5ms. cc self-compiles cc.cyr: 9ms. asm assembles stage1f.cyr (3983 lines → 12344B): 3ms (19ms with pipe overhead). Full bootstrap (asm→stage1f + stage1f→asm + verify): 41ms. Throughput: stage1f ~367K lines/sec, cc ~163K lines/sec, asm ~1.3M lines/sec."
+
+[[best_practices]]
+title = "Real programs expose data layout bugs that test cases miss"
+explanation = "Toy test programs use 1-2 global variables. Real programs (wc, rev) use 5+ global arrays totaling thousands of bytes. The compiler's variable fixup must compute cumulative offsets correctly for all variables, including aligned arrays. A wc program with var buf[4096], var dbuf[24], etc. stresses the data section layout. The specific bug found: arrays declared inside function bodies were registered as globals during parsing, but the global counter was restored after function parsing — erasing the arrays from the fixup table. String literal addresses then overlapped with variable data. Fix: don't restore the global counter after function parsing. Build real programs early — they're the best fuzzer for your compiler's backend."
+
+[[best_practices]]
+title = "Track token position from the start — it's nearly free"
+explanation = "In a bootstrap compiler's lexer, recording the byte offset of each token costs one extra store per token (store the current input position alongside the token type and value). This enables: (1) 'error at byte N' messages that pinpoint the problem, (2) 'error near token X' messages that name the offending construct, (3) source line extraction by scanning backward for newline. Without position tracking, every error is 'syntax error' with no location — usable for the compiler author but hostile to users. Add position tracking when the compiler reaches 50+ ERR calls, not before."
+
+[[gotchas]]
+title = "Partial edits leave dead code that references undefined variables"
+explanation = "When refactoring a function body (e.g., replacing 8 lines of S64 with 1 line of store64), it's easy to replace the TOP of the function and leave the BOTTOM intact. The old `return v;` stays even though `var v` was removed. The compiler sees an undefined variable and reports 'syntax error' with no indication that the bug is a leftover from a previous version. Always delete the entire old body before writing the new one, or diff the function before and after to catch orphaned lines."
+bad_example = "fn L64(a) { return load64(a); return v; } — v is undefined, leftover from old 8-line body"
+good_example = "fn L64(a) { return load64(a); } — clean replacement, old body fully removed"
+
+[[best_practices]]
+title = "Rewrite incrementally: split first, then refactor, then restructure"
+explanation = "When rewriting a self-hosting compiler in its own extended language, don't restructure everything at once. Phase 1: split the monolithic file using `include` — same code, multiple files. Verify: same output. Phase 2: replace low-level patterns with new intrinsics (S64/L64 → store64/load64). Verify: same output. Phase 3: introduce structs ONLY where they reduce complexity — if accessor functions already provide clean abstraction (GCP/SCP), don't replace them with structs that require heap-allocation support. Each phase is independently testable via cc→cc2→cc3 byte-identity. If a refactor doesn't reduce bugs or improve readability, defer it."
+
+[[best_practices]]
+title = "Reuse existing tokens for pointer dereference — STAR as both multiply and deref"
+explanation = "In a bootstrap compiler, the `*` token already exists for multiplication (infix, in parse_term). Reusing it for dereference (prefix, in parse_factor) requires zero new tokens. The parser distinguishes by position: STAR at the start of a factor = dereference (`*ptr` emits load64), STAR between terms = multiply (`a * b` emits imul). Similarly, `*expr = val;` in statement position is a pointer store — check for STAR at the start of PARSE_STMT, parse the address, then `= val`. This dual use is exactly how C works and adds pointer operations with ~15 lines of compiler code."
+
+[[best_practices]]
+title = "Add file includes as a preprocessing pass, not a lexer feature"
+explanation = "The simplest module system for a bootstrap compiler is a text-substitution preprocessor that runs before lexing. Scan the raw input for `include \"path\"` lines. For each: extract the path, open the file (sys_open = syscall #2), read contents, splice into the output buffer. Then lex the expanded buffer as one stream. This keeps the lexer simple (no state for include stack), handles nested includes naturally (run preprocessing until no includes remain), and integrates with the existing stdin-based compilation model. Use a separate output buffer to avoid shifting data during insertion."
+
+[[gotchas]]
+title = "File include paths must be null-terminated for sys_open"
+explanation = "The Linux sys_open syscall expects a null-terminated C string for the pathname. When extracting a filename from `include \"path.cyr\"`, the compiler must explicitly write a 0 byte after the last character. If the path comes from a quoted string in the source, it's delimited by `\"` — NOT null-terminated. Copy the characters between quotes to a temp buffer and append a zero byte before passing to syscall(2, path, 0, 0). Forgetting the null terminator causes sys_open to read past the filename into garbage memory, opening the wrong file or returning ENOENT."
+bad_example = "Pass address of in-buffer '\"path.cyr\"' directly to sys_open — no null terminator, reads past end"
+good_example = "Copy chars to temp buffer, append store8(buf + len, 0), pass buf to sys_open"
+
+[[gotchas]]
+title = "The self-hosting compiler binary must be committed — not gitignored"
+explanation = "The self-hosting compiler binary (build/cc2) is the compiler seed, just as bootstrap/asm is the assembler seed. If the binary is lost and cc.cyr can't compile cc2 (due to feature gaps between the bridge compiler and cc2's source), the entire bootstrap chain breaks. The binary must be committed to git with an explicit gitignore exception. Update .gitignore to use `/build/*` with `!/build/cc2` so that build artifacts are ignored but the compiler seed is tracked. Without this, a fresh clone has no compiler capable of building the next generation, and the bootstrap chain requires manual reconstruction from an earlier stage."
+bad_example = "/build/ in .gitignore — cc2 is never committed, fresh clone can't self-host without rebuilding from stage1f"
+good_example = "/build/* and !/build/cc2 in .gitignore — cc2 is committed as the compiler seed, fresh clone bootstraps immediately"
+
+[[gotchas]]
+title = "The bridge compiler must support ALL features the source uses — not just defines"
+explanation = "The monolithic bridge compiler (cc.cyr) must support every syntax feature that cc2's source code uses in its own implementation — not just the features cc2 defines for its output programs. If cc2's source uses elif, &&, continue, or for loops in its own parser/codegen logic, cc.cyr must handle those tokens during compilation. Feature additions to cc2 must be accompanied by corresponding bridge compiler updates, or cc2's source must be written using only the syntax the bridge compiler already understands. The failure mode is silent: the bridge produces a broken cc2 binary that crashes or produces wrong output, with no error pointing back to the unsupported token."
+bad_example = "Add 'for' loops to cc2's codegen, then use 'for' in cc2's own lexer loop — bridge compiler (cc.cyr) doesn't know 'for', produces corrupt cc2"
+good_example = "Before using 'for' in cc2's source: add 'for' support to cc.cyr, rebuild bridge, verify cc→cc2→cc3 chain. Or use 'while' in cc2's source until the bridge catches up."
+
+[[gotchas]]
+title = "Mnemonic prefix collision — longer mnemonics must be checked before shorter ones"
+explanation = "When dispatching assembly mnemonics by packed-byte prefix matching, longer mnemonics must be checked BEFORE shorter ones that share a prefix. 'invlpg' starts with the bytes 0x6E69, which also matches 'in' when checked with a 2-byte mask. If 'in' is checked first, it matches 'invlpg' and dispatches to the wrong handler, silently encoding the wrong instruction. The same issue affects 'int' vs 'in', 'movzx' vs 'mov', and any pair where one mnemonic is a prefix of another. Always order dispatch checks from longest prefix to shortest, or use exact-length matching that compares the full mnemonic including the terminating delimiter."
+bad_example = "if (packed & 0xFFFF) == 0x6E69 { emit_in(); } — matches both 'in' and 'invlpg', 'int', 'inc'"
+good_example = "Check 'invlpg' (6 bytes) first, then 'int' (3 bytes), then 'inc' (3 bytes), then 'in' (2 bytes) — longest match wins"
+
+[[gotchas]]
+title = "Codebuf overflow mimics parse errors at high token numbers"
+explanation = "When the code buffer overflows into adjacent memory regions (str_data, tok_names), the symptoms look like parse errors at high token numbers — 'error at token 15XXX (type=N)' with seemingly random type values. The actual cause is memory corruption: generated code has written past the codebuf boundary and overwritten the token or string tables. The misleading error messages send you chasing parser bugs that don't exist. Always check codebuf headroom (current code position vs buffer end) before investigating parse errors that appear at high token numbers or report nonsensical token types. The fix is to increase the codebuf allocation and adjust all downstream heap offsets accordingly."
+bad_example = "See 'error at token 15234 (type=7)', spend hours debugging the parser — actual cause is codebuf overflow corrupting tok_types at offset 0x30000"
+good_example = "Check code_pos vs codebuf_end first. If code_pos is within 1KB of the boundary, increase codebuf size and rebuild before debugging anything else."
+
+[[performance_notes]]
+title = "Full language independence requires only a 29KB binary + shell"
+explanation = "A complete self-hosting toolchain — from committed binary to working compiler and assembler — requires only a 29KB ELF binary and a shell script. No Rust, no LLVM, no Python, no cmake, no package manager. The bootstrap produces a compiler that compiles programs with structs, multi-width memory access, file includes, functions, control flow, bitwise operations, syscalls, strings, and arrays — and that compiler compiles itself. The entire toolchain fits on a floppy disk."
+evidence = "Cyrius bootstrap: bootstrap/asm (29016 bytes) + bootstrap.sh. Produces build/stage1f (12344 bytes) and build/asm (29016 bytes). cc2 (7 modules, 1960 lines) compiles to 58656 bytes, self-hosts cc2==cc3. Compiled 6 real Linux programs: true (168B), false (168B), echo (240B), cat (440B), tee (488B), head (592B) — all under 1KB, 108-233x smaller than GNU equivalents. 81 total tests across compiler, assembler, and programs."
+
+[[gotchas]]
+title = "Codebuf offset split causes silent frame size corruption"
+explanation = "When multiple source modules reference a shared buffer (like codebuf), ALL modules must use the same offset. A split where emit.cyr writes to 0x10000 but parse.cyr patches at 0x59000 causes silent corruption — frame size patches go to dead memory, producing `sub rsp, 0` which works for simple programs but causes stack corruption in complex ones (like compilers). Always grep for buffer offset references across ALL modules after changing any offset."
+bad_example = "emit.cyr: codebuf at S + 0x10000; parse.cyr: patch frame size at S + 0x59000 — patches go to wrong memory, sub rsp gets 0"
+good_example = "grep -n 'codebuf\\|0x10000\\|0x59000' *.cyr — verify every module agrees on the same offset"
+
+[[gotchas]]
+title = "Two-step bootstrap needed when compiler source exceeds bridge capacity"
+explanation = "When the compiler source grows beyond the bridge compiler's capacity (token arrays, codebuf, function table), a two-step bootstrap is needed: (1) build an intermediate with ONLY the capacity expansion, (2) use the intermediate to compile the full feature set. The old compiler can compile the capacity expansion because it doesn't add much code, but can't compile the full feature because the old limits are exceeded."
+bad_example = "Add 30 new functions AND bump tables in one step — bridge compiler overflows compiling the combined source"
+good_example = "Step 1: compile capacity-only patch with old bridge → intermediate. Step 2: compile full source with intermediate → new compiler."
+
+[[gotchas]]
+title = "Frame size patch writing to wrong address produces invisible sub rsp, 0"
+explanation = "If function frame size patches write to the wrong memory address (codebuf split), the `sub rsp, N` immediate stays as zeros from the placeholder. `sub rsp, 0` is a no-op — local variables at [rbp-8], [rbp-16] etc still appear to work because they write to stack space below RBP. This makes the bug invisible in simple test programs but causes stack corruption with deep call stacks or many locals."
+bad_example = "Compiler self-compiles successfully, output passes 53 tests, but the output compiler crashes when compiling complex programs"
+good_example = "objdump -d cc2 | grep 'sub.*rsp' — verify every function's frame size is non-zero (unless truly zero locals)"
+
+[[gotchas]]
+title = "Bootstrap chain repair requires going back to last known-good link"
+explanation = "When a committed binary (build/cc2) can't be reproduced from its source, the bootstrap chain is broken. Fix requires going back to the last known-good link: stage1f → cc.cyr (monolithic, compilable by stage1f) → cc2 (modular). cc.cyr must support all features cc2's source uses (token types, builtins, etc)."
+bad_example = "Try to fix cc2 by editing cc2's source and recompiling with the broken cc2 — garbage in, garbage out"
+good_example = "Rebuild from stage1f: stage1f compiles cc.cyr → cc (known good). cc compiles modular source → cc2. cc2 compiles itself → cc3. Verify cc2==cc3."
+
+[[gotchas]]
+title = "Logical && and || short-circuit codegen requires extra patch storage"
+explanation = "Short-circuit && uses extra patches: first condition's false-jump stored in an array, second condition returns the main patch. All patches point to the same false target. For ||: first condition's non-inverted true-jump goes to body start (patched inline), second condition's false-jump returned to caller. Chaining (a && b && c) uses recursion. Extra patches stored at a heap offset, caller calls PATCHXP after EPATCH."
+bad_example = "&& returns only ONE patch — the first condition's false-jump is never patched, always jumps to offset 0"
+good_example = "EAND stores first condition's patch at S + XPATCH_OFF, returns second's patch. Caller: EPATCH(patch); PATCHXP(S) patches all stored extras to same target."
+
+[[gotchas]]
+title = "Input buffer silent truncation produces cryptic syntax errors"
+explanation = "When the preprocessed source exceeds the input buffer (65536 bytes), it silently truncates. The lexer then hits garbage or EOF mid-function, producing cryptic 'syntax error' at high token numbers. Always check preprocessed source size against input buffer capacity before adding new functions. The symptom is errors at token N > 15000 that appear to be in random locations."
+bad_example = "Add 20 new functions to cc2, get 'syntax error at token 16384' — spend hours debugging the parser when the source was truncated at read() time"
+good_example = "wc -c < preprocessed_source.cyr — if it exceeds 65536, increase INPUT_CAP in the compiler before adding more code"
+
+[[gotchas]]
+title = "For loop step expression uses token replay — no semicolon termination"
+explanation = "For loops use token replay for the step expression: save TI before step, skip to ), parse body, then rewind TI and re-parse step. The step is NOT terminated by semicolon (unlike normal statements), so it must be parsed as a raw assignment (IDENT = EXPR) without consuming ;. Inside functions, the step must use FINDLOCAL before FINDVAR for correct local variable lookup."
+bad_example = "Parse for-step as a normal statement — consumes ; that isn't there, eats the ) delimiter, body parse fails"
+good_example = "Save TI at step start. Skip tokens to matching ). Parse body. Restore TI. Parse step as raw IDENT = EXPR (no ;). Emit backward jump."
+
+[[gotchas]]
+title = "Capacity expansion must be a separate commit before feature additions"
+explanation = "When expanding compiler capacity (codebuf, input buffer, token arrays), do it as a SEPARATE commit before adding features. The old compiler compiles the capacity expansion (small change, fits in old limits). The new compiler then has room for feature additions. Combining expansion + features in one step fails because the old compiler can't handle both."
+bad_example = "One commit: double codebuf + add 500 lines of struct support — old compiler can't compile it because the new code exceeds old codebuf capacity"
+good_example = "Commit 1: increase CODEBUF_CAP from 64K to 128K (compiles fine with old compiler). Commit 2: add struct support (compiles fine with expanded compiler)."
+
+[[gotchas]]
+title = "qemu-system-i386 does NOT support 64-bit long mode"
+explanation = "qemu-system-i386 does NOT support 64-bit long mode — the paging enable step will triple-fault. Use qemu-system-x86_64 -kernel for kernels that transition from 32-bit to 64-bit. Both accept multiboot ELF32 via -kernel, but only x86_64 QEMU emulates the long mode transition correctly."
+bad_example = "qemu-system-i386 -kernel kernel.elf — triple-faults when enabling paging + long mode, no error output"
+good_example = "qemu-system-x86_64 -kernel kernel.elf — correctly emulates 32-bit multiboot entry → PAE → long mode transition"
+
+[[gotchas]]
+title = "Far jump offset calculation requires exact byte counting"
+explanation = "The call/pop/add trick for computing a far jump target requires EXACT byte counting. `call $+5; pop eax; add eax, N` — N must equal the total bytes between `pop eax` and the first 64-bit instruction. Count: pop(1) + add(3) + push(1) + push(2) + mov[esp](3) + mov[esp+4](8) + jmp_far(3) = 21 bytes. Getting N wrong by even 1 byte jumps into the middle of an instruction, causing an immediate triple fault with no debug output."
+bad_example = "call $+5; pop eax; add eax, 20 — off by 1 byte, far jump lands mid-instruction, triple fault with no diagnostic"
+good_example = "call $+5; pop eax; add eax, 21 — exactly pop(1)+add(3)+push(1)+push(2)+mov[esp](3)+mov[esp+4](8)+jmp_far(3)=21 bytes to the 64-bit entry point"
+
+[[gotchas]]
+title = "Paging enable order — LME must be set BEFORE PG"
+explanation = "The correct order for enabling long mode: (1) build page tables, (2) enable PAE in CR4 bit 5, (3) load PML4 physical address into CR3, (4) set LME in EFER MSR 0xC0000080 bit 8, (5) enable paging in CR0 bit 31. Setting CR3 before PAE works on most hardware but is technically wrong. The key constraint: LME must be set BEFORE PG is set, otherwise you get compatibility mode instead of long mode."
+bad_example = "Set CR0.PG first, then set EFER.LME — CPU enters compatibility mode (32-bit segments in 64-bit page tables), code appears to work but uses wrong instruction decoding"
+good_example = "CR4.PAE=1 → CR3=PML4 → EFER.LME=1 → CR0.PG=1 — long mode activates on the PG write because LME is already set"
+
+[[gotchas]]
+title = "Orphaned function references generate calls to address 0"
+explanation = "If cc2.cyr references functions (PARSE_GVAR_REG, EMIT_GVAR_INITS) that don't exist in parse.cyr, the compiler generates calls to address 0. Programs that don't trigger the code path work fine; programs that do hang or crash. Always grep for function names across ALL modules before committing."
+bad_example = "cc2 calls EMIT_GVAR_INITS in codegen, but the function was removed from parse.cyr — binary links silently, crashes only when a program uses global vars"
+good_example = "grep -rn 'EMIT_GVAR_INITS' stage1/*.cyr — verify every referenced function exists in exactly one module before building"
+
+[[gotchas]]
+title = "Two-pass declaration scanning needed for globals declared after functions"
+explanation = "Single-pass compilers that parse fn bodies during the declaration loop can't reference globals declared after the function. Fix: pass 1 scans ALL declarations (struct, fn headers, var names) without parsing fn bodies. Pass 2 parses fn bodies with all globals already registered. The fn-skip in pass 1 just counts braces to find the closing }. This is the standard approach for C-like languages without forward declarations."
+bad_example = "fn emit(b) { store8(CODE + cp, b); } var cp = 0; var CODE = brk_alloc(); — cp and CODE are undefined when emit's body is parsed in pass 1"
+good_example = "Pass 1: register fn emit, var cp, var CODE (skip emit's body by brace-counting). Pass 2: parse emit's body — cp and CODE are already in the global table."
+
+[[gotchas]]
+title = "Struct init in deferred global var replay needs special handling"
+explanation = "When replaying deferred global var inits, struct initializers (StructName { expr, ... }) need special handling — they can't be parsed by PARSE_EXPR. The replay must detect struct init by checking if the token after = is a known struct name, then emit field stores directly using the already-registered var index. Re-calling PARSE_STRUCT_INIT would re-register the variable, creating duplicate entries."
+bad_example = "Deferred replay calls PARSE_STRUCT_INIT for 'var p = Point { 1, 2 };' — re-registers p as a new variable, creating duplicate var slots and corrupted offsets"
+good_example = "Replay checks: is token after = a struct name? If yes, emit field stores using the existing var index from pass 1. No re-registration, no PARSE_STRUCT_INIT call."
+
+[[gotchas]]
+title = "Nested struct field offset folding for chained access"
+explanation = "For chained access like `outer.inner.field`, compute the total offset at compile time by summing: FIELDOFF(outer_struct, inner_field) + FIELDOFF(inner_struct, field). Emit a single `add rcx, combined_offset` instead of two adds. This produces optimal code and simplifies the implementation to just two FINDFIELD calls chained together."
+bad_example = "outer.inner.field emits: add rcx, offset_of_inner; mov rcx, [rcx]; add rcx, offset_of_field — extra dereference treats inner as a pointer, not an embedded struct"
+good_example = "outer.inner.field emits: add rcx, (offset_of_inner + offset_of_field) — single add, no dereference, correct for embedded (non-pointer) structs"
+
+[[gotchas]]
+title = "For loop var declarations leak into function scope"
+explanation = "In compilers without block scoping, `for (var i = 0; ...)` declares `i` in the enclosing function scope. Multiple for loops in the same function with `var i` cause duplicate variable errors. Users must use different names (a, b, c or i, j, k) for nested/sequential for loops in the same function. This is a known limitation — proper block scoping is a future enhancement."
+bad_example = "fn process() { for (var i = 0; i < 10; i = i + 1) { ... } for (var i = 0; i < 5; i = i + 1) { ... } } — duplicate variable 'i' error on second loop"
+good_example = "fn process() { for (var i = 0; i < 10; i = i + 1) { ... } for (var j = 0; j < 5; j = j + 1) { ... } } — different names, no collision"
+
+[[gotchas]]
+title = "String literal null termination in ELF data section"
+explanation = "String literals stored in the ELF data section must be null-terminated. Without null terminators, adjacent strings merge — strlen reads across boundaries, producing wrong lengths that increase with each subsequent literal. The fix is one line: store a 0 byte after each string in the lexer and increment spos, but DON'T count the null in slen (which is used for syscall output length). Symptom: strlen returns correct value for one string but wrong for multiple strings in the same program."
+bad_example = "Lexer stores 'hello' at spos, advances spos by 5, then stores 'world' at spos — strlen('hello') returns 10 because no null byte separates them"
+good_example = "Lexer stores 'hello' at spos, stores 0 at spos+5, advances spos by 6. slen = 5 (excludes null). Next string starts cleanly at new spos."
+
+[[gotchas]]
+title = "Exit code truncation modulo 256"
+explanation = "Linux exit codes are modulo 256. Testing arithmetic results via exit codes silently wraps values > 255 (e.g., 500 becomes 244, 555 becomes 43). This masquerades as a codegen bug. Always use print_num + explicit syscall(60, 0) for values that might exceed 255, or test with values under 256."
+bad_example = "fn main() { return 500; } — test expects exit code 500, gets 244, developer wastes hours debugging 'wrong' codegen"
+good_example = "fn main() { print_num(500); return 0; } — prints '500' to stdout, exits cleanly, test checks stdout not exit code"
+
+[[gotchas]]
+title = "Var inside loop body allocates a new slot each iteration"
+explanation = "In compilers without block scoping, `var x = expr;` inside a while/for body allocates a NEW stack slot each iteration. After N iterations, N slots are consumed, eventually overflowing the stack frame. The fix: declare variables OUTSIDE the loop body and assign inside. For for-loop init vars (the `var i` in `for (var i = ...)`), the token replay mechanism handles this correctly — the var is declared once and the step only reassigns."
+bad_example = "while (i < 1000) { var tmp = compute(i); use(tmp); i = i + 1; } — allocates 1000 stack slots for tmp, one per iteration, overflows stack frame"
+good_example = "var tmp = 0; while (i < 1000) { tmp = compute(i); use(tmp); i = i + 1; } — single slot for tmp, reassigned each iteration"
+
+[[gotchas]]
+title = "multiboot1_vs_multiboot2_grub_compat"
+explanation = "GRUB 2.14+ has strict ELF section header validation for multiboot2 that rejects ELFs with e_shoff=0 and e_shnum=0, even though the ELF spec allows it. Multiboot1 (magic 0x1BADB002) is simpler and has better compatibility. For first boot, use multiboot1 with flags=0x03 (page-align + meminfo). The header is only 12 bytes vs 24 for multiboot2. Switch to multiboot2 later when you need its advanced features."
+bad_example = "Use multiboot2 header with a minimal ELF (e_shoff=0, e_shnum=0) — GRUB 2.14+ rejects it with section header validation error"
+good_example = "Use multiboot1: magic=0x1BADB002, flags=0x03, checksum=-(magic+flags). 12 bytes, works on all GRUB versions. Upgrade to multiboot2 when you need framebuffer tags or module loading."
+
+[[gotchas]]
+title = "qemu_kernel_flag_version_sensitivity"
+explanation = "QEMU 10.x requires PVH ELF notes for `-kernel` on x86_64 (`Error loading uncompressed kernel without PVH ELF Note`). Workaround: use `qemu-system-i386 -kernel` directly for multiboot ELF32 kernels, or create a GRUB ISO with `grub-mkrescue`. The i386 QEMU variant handles multiboot1 ELFs correctly via direct `-kernel` loading."
+bad_example = "qemu-system-x86_64 -kernel kernel.elf — fails on QEMU 10.x with 'Error loading uncompressed kernel without PVH ELF Note'"
+good_example = "qemu-system-i386 -kernel kernel.elf — loads multiboot1 ELF32 directly. Or: grub-mkrescue -o boot.iso isodir/ && qemu-system-x86_64 -cdrom boot.iso"
+
+[[gotchas]]
+title = "elf32_for_multiboot_boot"
+explanation = "Multiboot kernels must use ELF32 (ELFCLASS32, e_machine=EM_386) even though the kernel will transition to 64-bit long mode. GRUB and QEMU multiboot loaders only understand 32-bit ELFs. The 32-to-64 transition happens in the kernel's boot shim AFTER the bootloader hands off control. ELF32 header = 52 bytes, PH32 = 32 bytes, total headers = 84 bytes."
+bad_example = "Emit ELF64 with multiboot header — GRUB says 'unsupported ELF file type' or silently ignores the multiboot header"
+good_example = "Emit ELF32 (e_ident[EI_CLASS]=1, e_machine=3) with multiboot1 header. Boot shim sets up page tables and jumps to long mode before calling 64-bit kernel code."
+
+[[gotchas]]
+title = "multiboot_header_8byte_alignment"
+explanation = "The multiboot2 header MUST be 8-byte aligned within the loaded image. If ELF32 headers total 84 bytes (52 + 32), the multiboot header at offset 84 is NOT 8-byte aligned (84 mod 8 = 4). Add 4 bytes of padding before the header. Multiboot1 has no alignment requirement — it just needs to be within the first 8192 bytes."
+bad_example = "Place multiboot2 header immediately after ELF32 headers at offset 84 — GRUB fails to find the header because 84 % 8 != 0"
+good_example = "Add 4 bytes of padding after ELF32 headers (offset 84), place multiboot2 header at offset 88 (88 % 8 == 0). Or use multiboot1 which has no alignment constraint."
+
+[[gotchas]]
+title = "serial_port_initialization_before_output"
+explanation = "Writing to COM1 (0x3F8) without initialization may work on some hardware/emulators but not others. The proper init sequence: disable interrupts (port+1=0x00), enable DLAB (port+3=0x80), set divisor (port+0=0x03 for 38400 baud, port+1=0x00), set 8N1 (port+3=0x03), enable FIFO (port+2=0xC7). Total: 7 out instructions before the first data write."
+bad_example = "mov dx, 0x3F8; mov al, 'H'; out dx, al — works on QEMU, hangs or produces garbage on real hardware and some emulators"
+good_example = "Init COM1: out 0x3F9,0x00; out 0x3FB,0x80; out 0x3F8,0x03; out 0x3F9,0x00; out 0x3FB,0x03; out 0x3FA,0xC7; then out 0x3F8,data"
+
+[[gotchas]]
+title = "isr_in_data_section"
+explanation = "When building ISR stubs by writing machine code bytes into a data buffer (var isr_stub[64]), the ISR code lives in the ELF data section, not the code section. The single PT_LOAD segment must have RWX permissions (p_flags=7) for the ISR to be executable. If the segment is RW only, executing the ISR will cause a page fault / triple fault."
+bad_example = "PT_LOAD with p_flags=6 (RW) — ISR stub in data section triggers page fault when CPU vectors to it, triple fault with no debug output"
+good_example = "PT_LOAD with p_flags=7 (RWX) — ISR stub in data section is executable, CPU vectors to it and runs the handler correctly"
+
+[[gotchas]]
+title = "retfq_rip_offset_64bit"
+explanation = "In 64-bit mode, the far return (retfq = 0x48 0xCB) for reloading CS after lgdt requires `lea rax, [rip+3]` (not +1). The offset must skip past: push rax (1 byte) + retfq (2 bytes) = 3 bytes. Using +1 jumps into the middle of the retfq instruction, causing #GP. The `rip` in `lea rax, [rip+N]` points to the END of the lea instruction itself."
+bad_example = "lea rax, [rip+1]; push 0x08; push rax; retfq — rip+1 lands inside the retfq opcode (0xCB), #GP fault"
+good_example = "lea rax, [rip+3]; push 0x08; push rax; retfq — rip+3 skips push(1) + retfq(2) = 3 bytes, lands at the next instruction after retfq"
+
+[[gotchas]]
+title = "pic_remap_before_idt"
+explanation = "The 8259 PIC must be remapped BEFORE enabling interrupts. By default, IRQ 0-7 map to INT 8-15 which overlap CPU exceptions (e.g., IRQ0=timer conflicts with INT8=double fault). Remap to INT 32+ with the standard ICW1-ICW4 sequence. Mask all IRQs except the ones you have handlers for."
+bad_example = "Load IDT and sti without remapping PIC — IRQ0 timer fires as INT 8 (double fault handler), kernel enters infinite exception loop"
+good_example = "Remap PIC: ICW1(0x11) to 0x20/0xA0, ICW2(0x20/0x28) for INT 32-47, ICW3(0x04/0x02), ICW4(0x01). Mask all except IRQ0. Then load IDT with handler at vector 32, then sti."
+
+[[gotchas]]
+title = "timer_isr_absolute_addressing"
+explanation = "When building a timer ISR as raw bytecode that accesses a global variable (timer_ticks), the ISR must use absolute addressing (48 A1 addr64 for load, 48 A3 addr64 for store). The address must be the RUNTIME address from &var, not a compile-time offset. Build the ISR at runtime after the kernel's data section addresses are known."
+bad_example = "Build ISR bytecode at compile time with hardcoded offset 0x1234 for timer_ticks — actual runtime address is different, ISR reads/writes wrong memory, counter never increments"
+good_example = "At runtime: addr = &timer_ticks; store8(isr_stub + 2, addr & 0xFF); ... store8(isr_stub + 9, addr >> 56); — ISR bytecode contains the actual runtime address of timer_ticks"
+
+[[gotchas]]
+title = "kernel_string_fixup_base"
+explanation = "In kernel mode, the FIXUP base address for string/variable addresses must match the ELF entry point calculation: base(0x100000) + ELF32_header(52) + PH32(32) + multiboot_header(12) = 0x100060. If FIXUP uses a different base than EMITELF_KERNEL, all string literals and global variable addresses will be offset by the difference, causing garbled output."
+bad_example = "EMITELF_KERNEL sets entry=0x100060 but FIXUP uses base=0x400078 (the userspace default) — all string addresses are wrong by 0x300018, serial output is garbage"
+good_example = "FIXUP and EMITELF_KERNEL both use base = 0x100000 + header_size. Verify: objdump -s kernel.elf shows string data at the addresses the code references."
+
+[[gotchas]]
+title = "codegen_backend_factoring"
+explanation = "When splitting a compiler into arch-independent frontend (lexer, parser) and arch-specific backend (emit, jump, fixup), the shared parser calls emit functions by NAME. Both backends implement the same function signatures. The entry point (cc2.cyr vs cc2_aarch64.cyr) just includes the right backend files. No vtable or function pointers needed — the linker resolves the names to whichever backend was included. This is the simplest factoring: one frontend source file, N backend source files, N entry points that each include the frontend + one backend."
+bad_example = "Frontend calls backend through function pointers stored in a vtable struct — unnecessary complexity, hard to debug, wastes heap slots"
+good_example = "cc2.cyr includes parser.cyr + emit_x86.cyr. cc2_aarch64.cyr includes parser.cyr + emit_aarch64.cyr. Both emit_*.cyr files define EMIT(), EJMP(), EFIXUP() with identical signatures."
+
+[[gotchas]]
+title = "cross_compiler_jmp_encoding"
+explanation = "The main compiler code's jmp-over-fn-bodies is emitted by the SHARED cc2.cyr using EB(S, 0xE9) — an x86 opcode. For cross-compilation, this must be replaced with the target arch's branch instruction. Either make cc2.cyr arch-aware (if target == AARCH64: emit B instruction instead of 0xE9) or have each backend provide an EJMPINIT function that the shared code calls. The second approach is cleaner — the shared code never contains architecture-specific opcodes, only calls to backend functions."
+bad_example = "Shared parser.cyr contains EB(S, 0xE9) directly — compiles x86 jump opcode even when targeting aarch64, producing garbage"
+good_example = "Shared parser.cyr calls EJMPOVER(S) — emit_x86.cyr implements it as EB(S, 0xE9), emit_aarch64.cyr implements it as B with imm26 forward branch, each backend owns its own opcodes"
+
+[[gotchas]]
+title = "aarch64_no_push_pop"
+explanation = "AArch64 has no push/pop instructions. Use STR with pre-decrement SP or STP for pairs. STR x0, [sp, #-16]! = push (pre-decrement SP by 16, store x0). LDR x0, [sp], #16 = pop (load x0, post-increment SP by 16). The 16-byte SP alignment requirement means a single register push wastes 8 bytes unless paired with STP. STP x0, x1, [sp, #-16]! pushes two registers in one instruction with no wasted space. A compiler backend that naively translates x86 push/pop to single STR/LDR will produce binaries 2x larger in prologue/epilogue code. Always pair saves: if you need to save an odd number of registers, pair the last one with XZR (zero register) or X29/X30."
+bad_example = "Push 3 regs: STR x0,[sp,#-16]!; STR x1,[sp,#-16]!; STR x2,[sp,#-16]! — 48 bytes of stack for 24 bytes of data, 3 instructions"
+good_example = "Push 3 regs: STP x0,x1,[sp,#-16]!; STP x2,x30,[sp,#-16]! — 32 bytes of stack, 2 instructions, x30 save is free"
+
+[[gotchas]]
+title = "switch_break_vs_flag"
+explanation = "The break keyword inside a switch case body can interact with the switch's case-skip jumps in a self-hosted compiler. When the compiler's own code uses break inside a while loop that terminates case body parsing, the generated break jump may conflict with the switch's conditional jumps. Use a flag variable (var cgo = 1; while (cgo == 1) { if (token == CASE) { cgo = 0; } else { PARSE_STMT; } }) instead of while/break for case body termination."
+bad_example = "while (PEEKT != CASE) { if (PEEKT == DEFAULT) { break; } PARSE_STMT; } — break may conflict with switch jumps"
+good_example = "var cgo = 1; while (cgo == 1) { if (PEEKT == CASE) { cgo = 0; } else { if (PEEKT == DEFAULT) { cgo = 0; } else { PARSE_STMT; } } }"
+
+[[gotchas]]
+title = "enum_init_after_jmp"
+explanation = "Enum variant values must be emitted AFTER the jmp-over-fn-bodies, not during pass-2 function parsing. Code emitted during pass 2 goes into the fn-body zone that gets jumped over and never executes. Solution: scan for ENUM tokens after the jmp patch and emit init code there (EMOVI + EVSTORE for each variant), alongside EMIT_GVAR_INITS."
+bad_example = "Pass 2: PARSE_ENUM_DEF(S, 1) emits init code in fn-body zone — jumped over, enums stay 0"
+good_example = "After jmp patch: scan tokens for ENUM (60), call PARSE_ENUM_DEF(S, 1) to emit init code in main section"
+
+[[gotchas]]
+title = "function_pointer_fixup_type3"
+explanation = "To support &fn_name (taking a function's address), add fixup type 3 for absolute function addresses. Type 2 patches relative call offsets (rel32 for CALL). Type 3 patches absolute addresses (imm64 for MOV) by computing entry_point + fn_code_offset. In PARSE_FACTOR, the &-handler checks FINDFN before FINDVAR — if the name matches a function, emit mov rax, <placeholder> with a type-3 fixup. In FIXUP, type 3: S64(codebuf + offset, entry + fn_offsets[idx])."
+bad_example = "Only type-2 fixups: can call functions but can't get their address"
+good_example = "Type 3 fixup: &add → mov rax, 0x400XXX (absolute address of add function)"
+
+[[gotchas]]
+title = "block_scoping_token_replay"
+explanation = "Block scoping (scope depth tracking) interacts badly with for-loop token replay. The step expression (i = i + 1) is replayed after the body. If the for-loop init var (var i) was declared in a for-scope that incremented depth, and the replay happens after the body's PARSE_PROG decremented depth, FINDLOCAL may not find i at the correct depth. Solutions: (1) pin for-init vars to the outer scope, (2) don't decrement depth until after step replay, (3) exempt step replay from depth checks."
+bad_example = "PARSE_FOR opens scope, PARSE_PROG opens/closes inner scope, step replay can't find i — returns 0"
+good_example = "Open for-scope BEFORE init, close AFTER step replay (not after body), or store for-init vars at outer depth"
+
+[[gotchas]]
+title = "global_var_as_loop_bound_reevaluated"
+explanation = "In Cyrius, `for (var i = 0; i < GLOBAL; ...)` re-evaluates GLOBAL each iteration. If the loop body modifies the global (directly or via function call), the loop count changes mid-iteration. This is expected behavior, not a bug, but surprises kernel developers who expect C-like single-evaluation semantics. Discovered in AGNOS kernel when PROC_SIZE and SLAB_CLASSES globals were modified by functions called within the loop body."
+bad_example = "var LIMIT = 8; for (var i = 0; i < LIMIT; ...) { fn_that_modifies_LIMIT(); } // stops early or runs forever"
+good_example = "var limit = LIMIT; for (var i = 0; i < limit; ...) { ... } // or just use literal: i < 8"
+
+[[gotchas]]
+title = "inline_asm_rbp_offsets_clobber_function_params"
+explanation = "In Cyrius, function parameters are stored starting at [rbp-0x08] (first param), [rbp-0x10] (second), etc. Locals declared with var start AFTER all params. If inline asm writes to [rbp-0x08], it overwrites the first parameter. Discovered in AGNOS ring 3 transition: run_in_ring3(entry, user_rsp) had asm writing to [rbp-0x08] which clobbered 'entry', causing iretq to jump to the wrong address."
+bad_example = "fn foo(a, b) { asm { mov [rbp-0x08], rax; } // clobbers param 'a'! }"
+good_example = "fn foo(a, b) { var dummy1 = 0; var dummy2 = 0; asm { mov [rbp-0x18], rax; } // writes to first local, not params }"
+
+[[gotchas]]
+title = "push_instructions_in_asm_blocks_conflict_with_compiler_stack"
+explanation = "The Cyrius compiler manages RSP for local variable storage. Inline asm push/pop instructions between var declarations will conflict with the compiler's stack layout, causing values to land at wrong offsets. Discovered in AGNOS when trying to build iretq frames with push instructions — the iretq popped wrong values every time because the compiler interleaved stack operations."
+bad_example = "var x = 0x1B; asm { push rax; } var y = rsp; asm { push rax; } // compiler moves RSP between pushes"
+good_example = "Write iretq frame to a fixed memory address (e.g., 0x7000) via store64, then: asm { mov rsp, 0x7000; iretq; }"
+
+[[gotchas]]
+title = "nested_for_loops_with_var_cause_parse_error"
+explanation = "Cyrius (as of v1.0) cannot handle nested for-loops where the inner loop declares variables. The parser produces 'unexpected token' errors. Workaround: factor the inner loop into a separate function. Discovered in AGNOS initrd name matching which needed a byte-compare loop inside a file-search loop."
+bad_example = "for (var i = 0; i < n; ...) { var match = 1; for (var j = 0; j < m; ...) { ... } } // parse error"
+good_example = "fn inner(a, b, m) { for (var j = 0; j < m; ...) { ... } return result; } for (var i = 0; i < n; ...) { inner(...); }"
+
+[[gotchas]]
+title = "codebuf_overflow_looks_like_parse_error"
+explanation = "The Cyrius compiler's code generation buffer (codebuf) is finite (~192KB in cc2). When it overflows, the compiler either segfaults or produces misleading parse errors at seemingly random lines. The error line number doesn't correspond to the actual problem — it's wherever the compiler happened to be when the buffer ran out. Use cyrb (the build tool) which may handle this better, or reduce source code size."
+bad_example = "2000+ line kernel source with many store8 calls → segfault or 'error:30: unexpected token'"
+good_example = "Factor large byte-array construction into helper functions, remove verbose boot tests, strip comments"
+
+[[gotchas]]
+title = "rdtsc inline asm rbp offset must match param count"
+explanation = "When writing rdtsc() with no parameters, the first local variable is at [rbp-0x08], not [rbp-0x10]. With one parameter, first local is at [rbp-0x10]. Getting this wrong means rdtsc returns 0 (reads from uninitialized stack slot). Every inline asm function must count: params occupy [rbp-0x08], [rbp-0x10], etc., then locals follow."
+
+[[gotchas]]
+title = "Global variable initializers don't persist in kernel mode"
+explanation = "In kernel mode (kernel; directive), global variables declared with 'var x = 1' may not retain their initial value by the time they're read. The BSS section may not be zeroed, or the initializer may not be emitted for kernel binaries. Always explicitly initialize globals in a boot-time init function."
+bad_example = "var cpu_count = 1; // may be garbage at runtime"
+good_example = "var cpu_count = 0; fn init() { cpu_count = 1; }"
+
+[[gotchas]]
+title = "APIC MMIO requires PDPT entry for addresses above 1GB"
+explanation = "The Local APIC at 0xFEE00000 (~4GB) requires a PDPT[3] entry pointing to a new PD. A kernel that only has PDPT[0] (covering 0-1GB) will page fault on APIC access even if vmm_map() reports success, because vmm_map only writes to the PD at 0x3000 which is under PDPT[0]."
+
+[[gotchas]]
+title = "CI installer scripts may fail silently in GitHub Actions"
+explanation = "Shell installer scripts (curl | sh) that install to ~/.cyrius/bin/ may fail in CI environments where HOME is /home/runner and symlinks don't resolve as expected. Direct tarball extraction (curl + tar + cp) is more reliable for CI. Use the installer for development, direct tarball for CI."
+
+[[gotchas]]
+title = "Compiler upgrades can regress kernel performance 2x"
+explanation = "Cyrius 1.9.0 → 1.11.1 regressed AGNOS heap_4096B from 24,478 to 54,961 cycles (+125%). The async/await feature additions changed register allocation in tight loops. Pin production compiler versions and benchmark every upgrade. New language features don't always improve all workloads."
+
+[[gotchas]]
+title = "A cross-compiler's output is only as validated as the target you actually run it on"
+explanation = "Cross-compilers hide codegen bugs that the host never exercises. A Linux x86_64 compiler that emits aarch64 Mach-O can produce a binary that looks correct (right header, right architecture, right size, passes `file`) but is functionally broken because the cross-path was never self-hosted on the real target. Latent bug classes: (1) encoding masks that wrap silently outside valid range, invisible until the codegen exercises an edge case on-host that was never triggered cross-host; (2) ABI conventions that differ from the host (errno signalling, register preservation, argument passing); (3) instruction encodings the host can't actually execute. Rule: don't claim self-host until the compiled-by-target binary has itself compiled something and exercised the emit path end-to-end. Testing the cross-output on the target hardware is necessary but not sufficient — you also need the target to compile itself from source, because only the self-compile exercises the full emit surface under real-world input (large functions, many locals, every constant range)."
+bad_example = "Ship v5.3.13 after `file cc5_macho` shows arm64 Mach-O and a trivial smoke program runs — declare 'Apple Silicon support shipped'."
+good_example = "Only claim self-host after: (a) Linux cross-compile → cc5_macho, (b) cc5_macho on Apple Silicon compiles the same source → cc5_macho_b, (c) cc5_macho_b compiles again → cc5_macho_c, and (d) cc5_macho_b == cc5_macho_c byte-identical. Anything less is 'the cross-target happens to run on this particular test input' — not self-host."
+evidence = "Cyrius 2026-04-18: aarch64 EFLLOAD had a 9-bit sign-bit typo + silent wrap for locals at idx >= 32. Cross-compiler `build/cc5_aarch64` on Linux never executed the emitted aarch64 code, so the bug was dormant. First Mac self-host run exposed it in PARSE_FN_DEF's LASE loop (36 locals) — the compiler hung for 30s reading wrong-memory stable values. Full closure on the issue required lldb attach to the hung process, reading the locals from the stack frame to see the pointer-sized values, and walking the Cyrius emit source to find `0xF85003A0` vs the correct `0xF84003A0`. No amount of cross-compile testing on Linux would have surfaced this."

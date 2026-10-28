@@ -10,7 +10,7 @@
 
 ## Adding a Topic
 
-1. Create `content/{topic}/concept.toml` with required fields: `id`, `title`, `topic`, `description`, `tags`, `related_topics`
+1. Pick its group (`docs/development/content-grouping.md`) and create `content/{group}/{topic}/concept.toml` with required fields: `id` (the path, `{group}/{topic}`), `title`, `description`, `tags`, `related_topics` (full ids). A new group needs a `content/{group}/group.toml` with `id`, `title` and `description`
 2. Add at least `[[best_practices]]`, `[[gotchas]]`, `[[performance_notes]]` sections
 3. Add language implementations (all 11 required for completion):
    - `rust.rs`, `python.py`, `c.c`, `go.go`, `typescript.ts`, `shell.sh`, `zig.zig`
@@ -22,7 +22,7 @@
 
 1. Follow the naming convention: `{lang_stem}.{extension}` (e.g. `rust.rs`, `cyrius.cyr`)
 2. Start with a comment header: `// Vidya — {Topic} in {Language}`
-3. Explain the concept in leading comments
+3. Explain the concept in leading **line** comments (no block comment or docstring); a blank line ends the header
 4. Include working, testable code
 5. Exit successfully (exit code 0)
 

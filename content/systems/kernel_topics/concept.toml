@@ -1,0 +1,195 @@
+id = "systems/kernel_topics"
+title = "Kernel Topics"
+description = "Systems programming at the hardware boundary — interrupts, page tables, MMIO, bootloaders, and calling conventions (ABIs). The primitives that operating systems are built from."
+tags = ["kernel", "interrupts", "page-tables", "mmio", "bootloader", "abi", "calling-convention", "virtual-memory", "trap", "exception", "idt", "gdt", "syscall"]
+related_topics = ["systems/boot_and_startup", "systems/interrupt_handling", "systems/syscalls_and_abi", "systems/virtual_memory"]
+
+[[best_practices]]
+title = "Use volatile for MMIO registers"
+explanation = "MMIO registers have side effects on read/write. Without volatile, the compiler may reorder, combine, or eliminate accesses — breaking hardware communication."
+
+[[best_practices]]
+title = "Keep interrupt handlers short"
+explanation = "Interrupts preempt everything. A slow handler increases latency for all other interrupts. Do the minimum (acknowledge, enqueue work), then return. Process in a bottom-half or deferred context."
+
+[[best_practices]]
+title = "Validate page table entries before use"
+explanation = "A page table entry with the present bit clear means 'not mapped.' Dereferencing it causes a page fault. Always check the present/valid bit before extracting the physical address."
+
+[[best_practices]]
+title = "Respect the ABI — don't clobber callee-saved registers"
+explanation = "The calling convention defines which registers a function may freely use (caller-saved) and which must be preserved (callee-saved). Violating this silently corrupts the caller's state."
+
+[[best_practices]]
+title = "Identity-map early boot memory"
+explanation = "When enabling paging, the instruction pointer still holds a physical address. If the current code isn't identity-mapped (virtual == physical), enabling paging causes an immediate fault."
+
+[[gotchas]]
+title = "Compiler reordering MMIO accesses"
+explanation = "Without volatile or memory barriers, the compiler assumes memory accesses have no side effects and may reorder them. Two writes to different MMIO registers in the wrong order can crash hardware."
+bad_example = "*status_reg = 0; *data_reg = payload;  // compiler may reorder"
+good_example = "write_volatile(status_reg, 0); barrier(); write_volatile(data_reg, payload);"
+
+[[gotchas]]
+title = "Forgetting to acknowledge an interrupt"
+explanation = "Many interrupt controllers (PIC, APIC, GIC) mask further interrupts until the handler sends an End-Of-Interrupt (EOI). Forgetting EOI means that interrupt never fires again."
+bad_example = "fn timer_handler() { update_tick(); }  // no EOI!"
+good_example = "fn timer_handler() { update_tick(); apic_eoi(); }"
+
+[[gotchas]]
+title = "Recursive page fault"
+explanation = "If the page fault handler itself touches unmapped memory, you get a double fault. If the double fault handler faults, you get a triple fault — which reboots the machine."
+bad_example = "Page fault handler allocates memory from a paged heap"
+good_example = "Page fault handler uses only pre-mapped, pinned memory"
+
+[[gotchas]]
+title = "Misaligned MMIO access"
+explanation = "Many hardware registers require naturally aligned access (4-byte register at 4-byte boundary). Misaligned access may silently read wrong data or cause a bus error."
+bad_example = "*(uint32_t*)0x40001001 = val;  // misaligned: addr not 4-byte aligned"
+good_example = "*(volatile uint32_t*)0x40001000 = val;  // aligned"
+
+[[gotchas]]
+title = "Stack overflow in interrupt context"
+explanation = "Interrupt handlers run on a separate (often small) stack. Deep call chains or large stack allocations in handlers overflow it, corrupting memory silently."
+bad_example = "void irq_handler() { char buf[4096]; process(buf); }"
+good_example = "void irq_handler() { enqueue_work(); }  // minimal stack use"
+
+[[best_practices]]
+title = "Save ALL caller-saved registers in ISRs"
+explanation = "x86_64 has 9 caller-saved registers (rax, rcx, rdx, rsi, rdi, r8-r11). An ISR that calls ANY function must save all of them — the called function is allowed to clobber them. Missing one causes silent corruption when the interrupted code resumes."
+
+[[best_practices]]
+title = "Use a fixed address for iretq frames"
+explanation = "When building an iretq frame to transition to ring 3, write the 5 values (RIP, CS, RFLAGS, RSP, SS) to a known fixed address (e.g., 0x7000) and set RSP to point there. Pushing to the current stack is fragile because the compiler manages RSP for local variables and will interleave stack operations between your pushes."
+
+[[best_practices]]
+title = "Set U/S bit at every page table level"
+explanation = "x86_64 checks the User/Supervisor bit at every level of the page walk (PML4, PDPT, PD, PT). If any level is missing the U/S bit, ring 3 code will page fault even if the final page entry has U/S set."
+
+[[best_practices]]
+title = "TSS RSP0 must point to a valid kernel stack"
+explanation = "When an interrupt fires in ring 3, the CPU loads RSP0 from the TSS to switch to the kernel stack. If RSP0 points to unmapped memory, you get a double fault → triple fault → reboot. Set RSP0 before every ring 3 transition."
+
+[[gotchas]]
+title = "SYSCALL doesn't switch the stack"
+explanation = "Unlike interrupts, the SYSCALL instruction does NOT switch RSP. The handler entry point runs with the user's RSP. You must immediately save the user RSP and switch to a kernel stack before touching any stack memory."
+bad_example = "syscall_entry: push rax  // pushes to user stack — security hole"
+good_example = "syscall_entry: mov [kernel_save], rsp; mov rsp, KERNEL_STACK; push rax"
+
+[[gotchas]]
+title = "SYSRET forces ring 3 — can't return to ring 0"
+explanation = "SYSRET always sets CS to user code segment (RPL 3). If you use SYSCALL from kernel mode and SYSRET back, you'll be in ring 3 accessing kernel pages — instant page fault. Use jmp rcx + popfq for kernel-to-kernel syscalls."
+bad_example = "kernel code: syscall → handler → sysretq → ring 3 in kernel code → fault"
+good_example = "kernel code: call ksyscall() directly, or use jmp rcx for ring 0 returns"
+
+[[gotchas]]
+title = "Per-process page tables must share kernel mappings"
+explanation = "When creating per-process address spaces, copy the kernel PD entries (e.g., first 16MB identity map) into each process's page directory. Otherwise, when the kernel runs with a process's CR3, it can't access its own code/data."
+
+[[gotchas]]
+title = "2MB huge pages mean PMM 4KB allocations share physical pages"
+explanation = "If your page tables use 2MB huge pages but your PMM allocates 4KB pages, two PMM allocations from the same 2MB region map to the same physical page. Memory isolation tests will fail. Use 2MB-aligned physical regions for isolation."
+bad_example = "phys1 = pmm_alloc(); phys2 = pmm_alloc(); // both in same 2MB page"
+good_example = "phys1 = 0xE00000; phys2 = 0x1000000; // different 2MB regions"
+
+[[gotchas]]
+title = "Context switch must save/restore CR3"
+explanation = "If processes have separate page tables, the context switch must load the new process's CR3. Forgetting this means the new process runs with the old process's address space — no isolation."
+
+[[performance_notes]]
+title = "TLB misses dominate page table walk cost"
+explanation = "A page table walk requires 4 memory accesses (4-level paging). The TLB caches recent translations, reducing this to ~1 cycle. TLB misses cost 10-100 cycles."
+evidence = "TLB hit: ~1 cycle. TLB miss with 4-level walk: ~40-100 cycles on modern x86"
+
+[[performance_notes]]
+title = "Huge pages reduce TLB pressure"
+explanation = "A single 2MB huge page replaces 512 regular 4KB pages in the TLB. For large contiguous allocations, huge pages can reduce TLB misses dramatically."
+evidence = "Linear scan of 1GB: 4KB pages ~12ms, 2MB huge pages ~8ms — 33% faster from TLB alone"
+
+[[performance_notes]]
+title = "Interrupt coalescing reduces overhead"
+explanation = "Each interrupt has overhead: save/restore registers, cache pollution, pipeline flush. High-rate devices (NICs) benefit from coalescing multiple events into one interrupt."
+evidence = "10Gbps NIC: per-packet interrupts = 14M IRQ/sec (100% CPU). Coalesced: ~50K IRQ/sec (<5% CPU)"
+
+[[performance_notes]]
+title = "MMIO is uncacheable — every access hits the bus"
+explanation = "MMIO regions are mapped as uncacheable (UC). Each read/write goes to the device, taking hundreds of nanoseconds. Batch operations and minimize MMIO round-trips."
+evidence = "MMIO register read: ~100-500ns. Cached memory read: ~1-4ns. 100x difference."
+
+[[best_practices]]
+title = "Use arch abstraction functions instead of inline asm in shared code"
+explanation = "Shared kernel code (VFS, syscall dispatch, shell) should never contain architecture-specific asm. Use arch_wait() and arch_halt() wrappers that each arch implements differently (x86: hlt/cli, aarch64: wfi). The aarch64 compiler validates asm mnemonics and rejects x86 instructions — this is actually good, it forces clean separation."
+
+[[best_practices]]
+title = "Factor signalfd/timerfd read into separate functions"
+explanation = "Complex VFS read handlers for special file types (signalfd, epoll, timerfd) should be in their own functions, not inline in the vfs_read switch. This avoids deep nesting, keeps each handler testable, and works around compiler limitations with complex expressions in nested blocks."
+
+[[gotchas]]
+title = "Cyrius ~ (bitwise NOT) in kernel mode requires care"
+explanation = "The ~ operator works in simple expressions but can produce 'unexpected unknown' in complex nested expressions within large if-chains. Workaround: use two's complement (0 - 1 - x) instead of ~x, or factor the expression into a local variable."
+
+[[gotchas]]
+title = "Global variable initializers don't persist in kernel mode"
+explanation = "var cpu_count = 1 may read as garbage at runtime. The kernel BSS may not be zeroed. Always explicitly initialize globals in a boot function."
+
+[[performance_notes]]
+title = "Sub-microsecond syscall dispatch in bare-metal kernel"
+explanation = "A minimal syscall dispatcher (switch on syscall number, direct function call) achieves ~188 cycles per syscall on QEMU-emulated x86_64. The overhead is dominated by the SYSCALL instruction itself (~100 cycles) plus function call overhead. No vDSO or fastpath needed at this scale."
+evidence = "AGNOS getpid syscall: 261 cycles/op (v1.21.0, correctly sized buffers). Was 188cy at v1.1.0 with undersized binary. Linux getpid: ~100-200 cycles native, ~500+ in VM."
+
+[[performance_notes]]
+title = "Slab allocator achieves microsecond-level alloc/free"
+explanation = "A simple slab allocator with 8 size classes (32-4096B) and free-list-per-class achieves ~1,207 cycles per alloc+free pair for 32B allocations. Larger sizes scale: 256B at 3,015 cycles, 4096B at 26,077 cycles. The key optimization: pop from free list (O(1)), zero only requested bytes (not full slab block)."
+evidence = "AGNOS v1.21.0: heap_32B 1,338cy, heap_256B 3,358cy, heap_4096B 28,097cy. PMM page alloc+free: 1,467cy. Numbers from correctly sized 220KB binary; earlier v1.1.0 numbers (1,207/3,015/26,077) were from undersized buffers."
+
+[[performance_notes]]
+title = "PMM next-free hint eliminates linear scan"
+explanation = "A bitmap PMM that scans from page 0 on every allocation is O(n) where n = total pages. Adding a 'next_free' hint that advances on alloc and retracts on free makes sequential allocations O(1). Only falls back to full scan on fragmentation."
+evidence = "AGNOS PMM: 1,467 cycles/alloc+free with hint (v1.21.0) vs ~4000+ without (scanning 512 used pages)."
+
+[[best_practices]]
+title = "Pin compiler version for kernel builds — benchmark every upgrade"
+explanation = "Compiler upgrades can regress performance in kernel-critical paths. AGNOS saw 125% slower heap allocation and 32% slower serial I/O when upgrading from Cyrius 1.9.0 to 1.11.1 (async/await and freelist changes bloated codegen). Always benchmark before pinning a new compiler version. CI should use a proven version, not latest."
+
+[[best_practices]]
+title = "Use GRUB for real hardware — multiboot1 for QEMU"
+explanation = "QEMU's -kernel flag works for development but doesn't emulate SIPI correctly for SMP. GRUB with a proper ISO (grub-mkrescue) boots the same multiboot1 kernel but provides correct AP initialization state. ELF section headers may need patching — GRUB requires e_shoff != 0 even though multiboot doesn't."
+
+[[best_practices]]
+title = "SMP trampoline code must not overflow section boundaries"
+explanation = "AP trampoline code at 0x8000 has three sections: 16-bit (0x8000), 32-bit (0x8040), 64-bit (0x80C0). Data structures (GDT/IDT pointers) go AFTER all code sections (0x8180+). Adding debug output or extra instructions can cause 32-bit code to overwrite 64-bit code — the AP silently crashes. Always calculate byte counts."
+
+[[gotchas]]
+title = "Self-hosted CI runners cache stale toolchain binaries"
+explanation = "Self-hosted GitHub Actions runners persist ~/.cyrius/ and ../cyrius/ between jobs. A stale cc2 or cyrb from a previous run can shadow the freshly installed one. Fix: rm -rf $HOME/.cyrius and ../cyrius at the start of every self-hosted job, and verify binary sizes/versions after install."
+
+[[gotchas]]
+title = "/tmp may be read-only on CI runners"
+explanation = "Some self-hosted GitHub Actions runners have /tmp mounted read-only or with restricted permissions. Scripts that write to /tmp (preprocessed source files, build artifacts, QEMU logs) fail silently. Use $ROOT/build/ or $HOME/.cyrius/staging/ instead."
+
+[[gotchas]]
+title = "Compiler release tarballs may ship stale binaries"
+explanation = "The cyrius binary in a release tarball may be compiled from an older source than the cc3 in the same tarball. Version strings can match while behavior differs (e.g., -D flag support missing). Always verify tarball binaries match expected behavior, not just version strings. Compare binary sizes."
+
+[[gotchas]]
+title = "var buf[N] is N BYTES, not N entries — the #1 kernel bug class"
+explanation = "In Cyrius, var buf[N] allocates N bytes. If each entry is 32 bytes and you want 16 entries, you need var buf[512], not var buf[16]. Three audit passes of AGNOS (v1.11.0 to v1.21.0) found 14 buffer overflow bugs — all from this same pattern. The kernel functioned because overflowed data landed in adjacent globals that happened to be writable. IDT was 512 bytes for 4096 needed. proc_table was 336 bytes for 2688 needed. The fix increased binary from 143KB to 220KB — the honest size."
+bad_example = "var proc_table[336];  # 336 bytes, fits only 2 procs (168B each), allows 16"
+good_example = "var proc_table[2688];  # 16 processes x 168 bytes each"
+
+[[gotchas]]
+title = "Stdlib modules use Linux syscalls — strip before vendoring into kernel"
+explanation = "Cyrius stdlib string.cyr, fmt.cyr etc. contain print_num(), println() and other functions that call syscall(1,1,...) for Linux write. Including unmodified stdlib in a kernel; build injects Linux syscall instructions into bare-metal code. Vendor kernel-safe subsets: copy the file, remove syscall-using functions, add kernel wrappers that output via serial_print()."
+
+[[best_practices]]
+title = "Gate test code behind #ifdef TEST to keep production binary clean"
+explanation = "A 106-assertion kernel test suite adds ~13KB to the binary and measurably increases cache pressure (5-18% benchmark regression). Use #ifdef TEST to conditionally include test code. Production builds compile without -D TEST. The test runner script (ktest.sh) passes -D TEST when building the test binary, runs on QEMU, and discards it."
+
+[[best_practices]]
+title = "Use version-bump.sh with auto-computed serial_println byte lengths"
+explanation = "Kernel boot banners use serial_println('AGNOS kernel vX.Y.Z', N) where N is the byte length of the string. When the version changes, N must change too. The version-bump.sh script computes this automatically: KSTR='AGNOS kernel v$NEW'; KLEN=${#KSTR}. One script updates 9 files atomically — VERSION, cyrius.toml, CLAUDE.md, kernel source, CHANGELOG.md, roadmap."
+
+[[performance_notes]]
+title = "Correctly sized buffers cost ~54% binary size but zero performance regression"
+explanation = "AGNOS v1.21.0 fixed 14 undersized buffers (IDT 512->4096, proc_table 336->2688, vfs_table 128->1024, etc.), growing the binary from 143KB to 220KB. Benchmark impact was within QEMU noise — no meaningful regression. The 143KB binary was only that small because data structures were silently overwriting each other."
+evidence = "AGNOS v1.21.0: 220KB binary, pmm_alloc_free 1,467cy (was 1,391), heap_32B 1,338cy (was 1,460 — actually faster), syscall_getpid 261cy (was 247). All within QEMU rdtsc variance."

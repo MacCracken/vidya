@@ -1,0 +1,97 @@
+id = "languages/type_systems"
+title = "Type Systems"
+description = "How languages classify values and enforce constraints at compile time — the foundation of correctness without runtime checks."
+tags = ["types", "generics", "traits", "interfaces", "type-inference", "polymorphism"]
+related_topics = ["languages/ownership_and_borrowing", "languages/trait_and_typeclass_systems", "languages/pattern_matching"]
+
+[[best_practices]]
+title = "Make illegal states unrepresentable"
+explanation = "Use enums and newtypes to encode constraints in the type system. If a function can't receive invalid input, it can't produce invalid output."
+
+[[best_practices]]
+title = "Use generics for code reuse, traits for abstraction"
+explanation = "Generics generate specialized code per type (zero-cost). Traits define shared behavior. Together they replace inheritance hierarchies."
+
+[[best_practices]]
+title = "Prefer impl Trait in argument position for simplicity"
+explanation = "fn process(items: impl Iterator<Item = i32>) is clearer than full generic bounds when you don't need to name the type parameter."
+
+[[best_practices]]
+title = "Use newtypes to distinguish semantically different values"
+explanation = "Wrapping primitives in structs prevents mixing up Meters and Seconds, even though both are f64 underneath."
+
+[[gotchas]]
+title = "Trait objects have dynamic dispatch overhead"
+explanation = "dyn Trait uses vtable dispatch — a pointer indirection per call. Use generics (impl Trait) for performance-sensitive code."
+bad_example = "fn process(items: &[Box<dyn Processor>]) // vtable dispatch per item"
+good_example = "fn process<P: Processor>(items: &[P]) // monomorphized, inlined"
+language = "Rust"
+
+[[gotchas]]
+title = "Orphan rule prevents implementing external traits on external types"
+explanation = "You can't impl Display for Vec<T> — either the trait or the type must be local. Use a newtype wrapper."
+bad_example = "impl fmt::Display for Vec<i32> { ... } // error: orphan rule"
+good_example = "struct MyVec(Vec<i32>); impl fmt::Display for MyVec { ... }"
+language = "Rust"
+
+[[gotchas]]
+title = "Type inference can't always determine collect type"
+explanation = "Rust infers types aggressively, but some contexts are ambiguous. collect() and parse() often need explicit type annotations."
+bad_example = "let v = items.collect(); // error: type annotations needed"
+good_example = "let v: Vec<_> = items.collect(); // explicit collection type"
+language = "Rust"
+
+[[gotchas]]
+title = "Generic type parameters are resolved at compile time"
+explanation = "Generics are monomorphized — a separate copy exists for each concrete type. This can increase binary size for types used with many different parameters."
+bad_example = "Using generic functions with 50+ different types → large binary"
+good_example = "Factor out non-generic inner functions that do the real work"
+language = "Rust"
+
+[[performance_notes]]
+title = "Monomorphization: zero-cost generics"
+explanation = "Rust compiles generic functions into specialized versions for each concrete type. No runtime dispatch, full inlining potential."
+evidence = "Generic sort<T>() is as fast as a hand-written sort for that specific T"
+language = "Rust"
+
+[[performance_notes]]
+title = "Newtypes are zero-cost"
+explanation = "A newtype struct like struct Meters(f64) has identical runtime representation to f64. The type safety is compile-time only."
+evidence = "Zero bytes overhead, identical assembly output"
+language = "Rust"
+
+[[best_practices]]
+title = "Start with untyped pointers — just addresses with explicit width on dereference"
+explanation = "The simplest pointer system for a bootstrap compiler: pointers are just 64-bit addresses (same as every other value). The dereference operation specifies the width: `load64(ptr)` reads 8 bytes, `load8(ptr)` reads 1 byte. Pointer arithmetic is manual: `ptr + 8` for the next i64, `ptr + 1` for the next byte. This works and is already how asm.cyr and cc.cyr operate. Typed pointers (`*i64`, `*Point`) add: (1) automatic scaling on `ptr + 1`, (2) implicit width on dereference (`*ptr` knows to load 8 bytes because ptr is `*i64`), (3) `->` for struct field access through pointer. Add types when manual arithmetic becomes a bug source, not before."
+
+[[gotchas]]
+title = "Dereference (*ptr) and address-of (&var) are syntactic mirrors but asymmetric in codegen"
+explanation = "The `&var` operation emits no memory access — it computes an address (via LEA or fixup). The `*ptr` operation emits a memory access — it loads/stores through an address (via MOV [reg]). They look symmetric in source (`*&x == x`) but are fundamentally different in codegen. `&` produces an address in a register (one instruction). `*` consumes an address from a register and accesses memory (one instruction). The common bug: treating `*ptr = val` like an assignment to a variable — it's actually a store through an address, requiring the pointer value in a register first."
+bad_example = "*ptr = 42 emits 'mov [ptr_stack_slot], 42' — stores 42 AT the pointer's stack slot, not THROUGH the pointer"
+good_example = "*ptr = 42 emits 'mov rcx, [rbp-8]; mov rax, 42; mov [rcx], rax' — loads pointer, then stores THROUGH it"
+
+[[performance_notes]]
+title = "Trait object call overhead"
+explanation = "Each method call on dyn Trait requires a vtable lookup (pointer indirection). This prevents inlining and adds ~2-5ns per call."
+evidence = "dyn Trait method call: ~2-5ns overhead vs direct/inlined call"
+language = "Rust"
+
+[[best_practices]]
+title = "Implement structs as compiler-computed fixed offsets, not runtime lookups"
+explanation = "In a minimal compiler, struct field access should compile to a constant offset from a base pointer — no hash table lookups, no field name resolution at runtime. The compiler stores struct definitions as (field_name, field_offset, field_size) tuples. When it sees `point.x`, it resolves `x` to offset 0 at compile time and emits `mov rax, [base + 0]`. This is how C compilers work and why struct access is zero-cost. The struct definition table lives in the compiler's metadata alongside the variable and function tables — it generates no runtime code."
+
+[[best_practices]]
+title = "Progressive typing: annotations inform, never block"
+explanation = "For a bootstrap compiler adding types incrementally, the type checker must accept untyped code unchanged. Type annotations are opt-in metadata: `var x: i64 = 42` means the compiler KNOWS x is i64, but `var x = 42` still works (inferred or untyped). Type mismatches produce warnings, not errors. This lets the compiler self-host with its existing untyped codebase while new code opts into safety. The key rule: removing all type annotations from a program must not change its compiled output. Types are assertions for the programmer, not requirements for the compiler."
+
+[[gotchas]]
+title = "Pointer arithmetic must scale by element size — not by 1"
+explanation = "When a language has typed pointers, `ptr + 1` must add sizeof(element), not 1. For `i64*`, ptr+1 adds 8 bytes. For `i32*`, ptr+1 adds 4. For `i8*` (byte pointer), ptr+1 adds 1. The compiler must track the pointed-to type and emit a multiply (or shift) before the addition. Getting this wrong is the classic C bug: `int* p = arr; p += 1;` advances by 4 bytes, not 1. In x86_64 codegen, use `lea rax, [rax + rcx*8]` (scale factor in SIB byte) for efficient scaling, or `shl rcx, 3; add rax, rcx` when the scale isn't a power of 2."
+bad_example = "ptr + 1 emits 'add rax, 1' — advances by 1 byte regardless of type, corrupts data alignment"
+good_example = "ptr + 1 emits 'add rax, 8' for i64*, 'add rax, 4' for i32* — correct element stride"
+
+[[gotchas]]
+title = "Struct field access through pointers requires two steps: load pointer, then offset"
+explanation = "For `ptr->field`, the compiler must: (1) load the pointer value into a register, (2) add the field offset, (3) load/store through the resulting address. This is two memory accesses for a read (load ptr, load field) or one load + one store for a write. Getting the order wrong — computing the offset before loading the pointer — produces garbage. In x86_64: `mov rax, [rbp-8]` (load ptr), then `mov rbx, [rax+16]` (load field at offset 16). The field offset is a compile-time constant from the struct definition."
+bad_example = "mov rax, [rbp-8 + 16] — adds field offset to stack offset, reads wrong memory entirely"
+good_example = "mov rax, [rbp-8]; mov rbx, [rax+16] — load pointer first, then dereference with field offset"

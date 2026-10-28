@@ -32,19 +32,20 @@ cyrius build src/main.cyr build/vidya
 Use it:
 
 ```bash
-build/vidya stats                          # 80 topics, 880 examples, 11 langs
-build/vidya list                           # browse all topics
-build/vidya search "quantum"               # text search across the corpus
-build/vidya info quantum_computing         # full record: practices, gotchas, perf notes
-build/vidya code quantum_computing rust    # ANSI-colored source via vyakarana
-build/vidya compare strings rust python    # side-by-side cross-language view
-build/vidya gaps                           # coverage gaps (currently none — 880/880)
-build/vidya serve 8080                     # HTTP service: GET /stats, /code/{topic}/{lang}, ...
+build/vidya stats                                 # 14 groups, 80 topics, 880 examples, 11 langs
+build/vidya list                                  # every topic, by group
+build/vidya list languages                        # one group's topics
+build/vidya search "quantum"                      # text search across the corpus
+build/vidya info quantum/fundamentals             # full record: practices, gotchas, perf notes
+build/vidya code quantum/fundamentals rust        # ANSI-colored source via vyakarana
+build/vidya compare fundamentals/strings rust python  # side-by-side cross-language view
+build/vidya gaps                                  # coverage gaps (currently none — 880/880)
+build/vidya serve 8080                            # HTTP: GET /groups, /info/{group}/{topic}, ...
 ```
 
 ## Content Topics
 
-80 topics, complete across all 11 languages (880 examples). Browse `content/` directly or run `vidya list` to see the index. Planned work lives in [`docs/development/roadmap.md`](docs/development/roadmap.md).
+80 topics in 13 groups, complete across all 11 languages (880 examples). A topic lives at `content/<group>/<topic>/`, and its id is that path (`fundamentals/strings`, `compilers/lexing_and_parsing`). The groups: `fundamentals`, `languages`, `compilers`, `systems`, `networking`, `data`, `distributed`, `build`, `audio`, `ai`, `graphics`, `games`, `quantum`, plus `cyrius`, which holds the Cyrius language reference and field notes. Run `vidya list` for the index, and see [`docs/development/content-grouping.md`](docs/development/content-grouping.md) for the layout. Planned work lives in [`docs/development/roadmap.md`](docs/development/roadmap.md).
 
 ## Languages
 
@@ -68,9 +69,10 @@ build/vidya serve 8080                     # HTTP service: GET /stats, /code/{to
 # The gate: validate all content examples across every installed toolchain
 ./scripts/validate-content.sh
 
-# The quick diagnostic: same commands, from the CLI, filterable by topic
+# The quick diagnostic: same commands, from the CLI, filterable by topic or group
 ./build/vidya validate
-./build/vidya validate compression
+./build/vidya validate data/compression
+./build/vidya validate audio
 
 # Run the Cyrius test suite for the CLI itself
 cyrius test

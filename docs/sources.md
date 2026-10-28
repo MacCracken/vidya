@@ -31,7 +31,7 @@ References for language specifications, algorithms, and standards used across vi
 
 ## Functional Programming & Type Theory
 
-Cited by `functional_patterns`, `effect_systems` and `dependent_types` (2.9.6).
+Cited by `languages/functional_patterns`, `languages/effect_systems` and `languages/dependent_types` (2.9.6).
 
 | Topic | Source |
 |-------|--------|

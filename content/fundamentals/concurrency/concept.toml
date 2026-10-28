@@ -1,0 +1,67 @@
+id = "fundamentals/concurrency"
+title = "Concurrency"
+description = "Running multiple computations simultaneously — threads, async, channels, and the synchronization primitives that keep them correct."
+tags = ["concurrency", "threads", "async", "channels", "mutex", "parallelism", "sync"]
+related_topics = ["systems/process_and_scheduling", "fundamentals/performance", "fundamentals/testing"]
+
+[[best_practices]]
+title = "Prefer message passing over shared state"
+explanation = "Channels (mpsc in Rust, channels in Go) eliminate data races by design. Shared mutable state requires careful locking and is error-prone."
+
+[[best_practices]]
+title = "Use scoped threads for borrowed data"
+explanation = "std::thread::scope lets spawned threads borrow from the parent stack frame. No need for Arc or 'static bounds."
+language = "Rust"
+
+[[best_practices]]
+title = "Use async for I/O-bound work, threads for CPU-bound work"
+explanation = "Async excels at waiting on many I/O operations. CPU-bound work needs real OS threads (or rayon) to utilize multiple cores."
+
+[[best_practices]]
+title = "Hold locks for the shortest time possible"
+explanation = "Long-held locks cause contention. Lock, copy the data you need, unlock. Don't do I/O or computation while holding a lock."
+
+[[gotchas]]
+title = "Mutex poisoning on panic"
+explanation = "If a thread panics while holding a Mutex, the Mutex is poisoned and later lock() calls return Err. lock().unwrap() turns that into a second panic; when the data is still valid, recover with into_inner() on the error (or Mutex::clear_poison)."
+bad_example = "let data = mutex.lock().unwrap(); // panics if poisoned"
+good_example = "let data = mutex.lock().unwrap_or_else(|e| e.into_inner()); // recover from poisoning"
+language = "Rust"
+
+[[gotchas]]
+title = "Deadlock from lock ordering"
+explanation = "Two threads locking A then B and B then A will deadlock. Always acquire locks in a consistent global order."
+bad_example = "Thread 1: lock(a), lock(b); Thread 2: lock(b), lock(a) // deadlock"
+good_example = "Both threads: lock(a), lock(b) // consistent order"
+
+[[gotchas]]
+title = "Send and Sync bound errors"
+explanation = "Types that aren't Send can't be moved to another thread: Rc and raw pointers are the common ones. Cell and RefCell are Send but not Sync, so they can move into a thread but cannot be shared by reference across threads. Use Arc instead of Rc, and Mutex/RwLock or atomics instead of RefCell/Cell for shared mutation."
+bad_example = "let rc = Rc::new(42); thread::spawn(move || use_rc(rc)); // error: Rc is not Send"
+good_example = "let arc = Arc::new(42); thread::spawn(move || use_arc(arc));"
+language = "Rust"
+
+[[gotchas]]
+title = "Async functions are lazy"
+explanation = "Calling an async fn returns a Future that does nothing until awaited or spawned. The compiler only WARNS when you forget .await (unused_must_use: futures do nothing unless you .await or poll them), and the warning disappears once the future is bound to a variable or to let _."
+bad_example = "async_operation(); // returns Future, does nothing!"
+good_example = "async_operation().await; // actually runs"
+language = "Rust"
+
+[[performance_notes]]
+title = "Channel throughput vs mutex throughput"
+explanation = "mpsc channels cost more per message than a mutex-guarded update, and both slow down under contention. Choose a channel for what it does to the design (ownership moves to the receiver, so there is no shared state to lock), not for raw throughput."
+evidence = "rustc 1.99.1 -O, x86-64: one thread, uncontended Mutex lock+unlock ~4-5 ns vs mpsc send+recv ~11-13 ns; four threads, Mutex ~20 ns per update vs mpsc four senders to one receiver ~56 ns per message"
+language = "Rust"
+
+[[performance_notes]]
+title = "Scoped threads avoid Arc overhead"
+explanation = "std::thread::scope lets threads borrow stack data directly, avoiding the atomic reference counting overhead of Arc."
+evidence = "Arc pays one atomic increment per clone and one atomic decrement per drop (lock inc / lock dec on x86-64); reads through an Arc are plain loads. Scoped threads borrow directly and skip both."
+language = "Rust"
+
+[[performance_notes]]
+title = "Rayon for data parallelism"
+explanation = "Rayon's par_iter() automatically distributes work across threads with work-stealing. Near-linear speedup for embarrassingly parallel operations."
+evidence = "par_iter().sum() on 1M elements: ~3.8x speedup on 4 cores vs sequential"
+language = "Rust"

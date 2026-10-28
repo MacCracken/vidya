@@ -46,30 +46,65 @@ include "src/vidya_core.cyr"
 # CLI commands
 # ================================================================
 
-fn cmd_list() {
-    var entries = reg_list();
-    var count = vec_len(entries);
-    var i = 0;
-    while (i < count) {
-        var c = vec_get(entries, i);
-        var id = concept_id(c);
-        var topic = concept_topic(c);
-        var examples = concept_examples(c);
-        var nex = 0;
-        if (examples != 0) { nex = vec_len(examples); }
-
-        syscall(1, 1, "  ", 2);
-        if (id != 0) { str_print(id); }
-        syscall(1, 1, " [", 2);
-        if (topic != 0) { str_print(topic); }
-        syscall(1, 1, "] (", 3);
-        fmt_int(nex);
-        println(" languages)");
-        i = i + 1;
+# `list` prints every group with its topics, or one group's topics when
+# `group_filter` (a cstring) is given.
+fn cmd_list(group_filter) {
+    if (group_filter != 0 && group_get(group_filter) == 0) {
+        sys_write(STDERR_FD, "error: group not found: ", 24);
+        sys_write(STDERR_FD, group_filter, strlen(group_filter));
+        sys_write(STDERR_FD, "\ngroups:", 8);
+        var k = 0;
+        while (k < vec_len(group_list())) {
+            var gk = group_id(vec_get(group_list(), k));
+            sys_write(STDERR_FD, " ", 1);
+            sys_write(STDERR_FD, str_data(gk), str_len(gk));
+            k = k + 1;
+        }
+        sys_write(STDERR_FD, "\n", 1);
+        return 1;
     }
-    println("");
-    fmt_int(count);
-    println(" topics");
+    var entries = reg_list();
+    var groups = group_list();
+    var shown = 0;
+    var gi = 0;
+    while (gi < vec_len(groups)) {
+        var g = vec_get(groups, gi);
+        if (group_filter == 0 || str_eq_cstr(group_id(g), group_filter) == 1) {
+            if (shown > 0) { println(""); }
+            str_print(group_id(g));
+            syscall(1, 1, " — ", 5);   # the em dash is 3 bytes of UTF-8
+            if (group_title(g) != 0) { str_print(group_title(g)); }
+            syscall(1, 1, " (", 2);
+            var gn = group_topic_count(g);
+            fmt_int(gn);
+            if (gn == 1) { println(" topic)"); } else { println(" topics)"); }
+            var i = 0;
+            while (i < vec_len(entries)) {
+                var c = vec_get(entries, i);
+                if (str_eq(concept_group(c), group_id(g)) == 1) {
+                    var examples = concept_examples(c);
+                    var nex = 0;
+                    if (examples != 0) { nex = vec_len(examples); }
+                    syscall(1, 1, "  ", 2);
+                    str_print(concept_id(c));
+                    syscall(1, 1, " (", 2);
+                    fmt_int(nex);
+                    println(" languages)");
+                    shown = shown + 1;
+                }
+                i = i + 1;
+            }
+            if (gn == 0) { shown = shown + 1; }
+        }
+        gi = gi + 1;
+    }
+    if (group_filter == 0) {
+        println("");
+        fmt_int(vec_len(entries));
+        syscall(1, 1, " topics in ", 11);
+        fmt_int(vec_len(groups));
+        println(" groups");
+    }
     return 0;
 }
 
@@ -109,18 +144,18 @@ fn cmd_search(query) {
 
 fn cmd_info(topic_id) {
     var concept = reg_get(topic_id);
-    if (concept == 0) {
-        sys_write(STDERR_FD, "error: topic not found: ", 24);
-        println(topic_id);
-        return 1;
-    }
+    if (concept == 0) { return topic_not_found(topic_id); }
 
     # Header
     var title = concept_title(concept);
     if (title != 0) { syscall(1, 1, "# ", 2); str_println(title); }
 
-    var topic = concept_topic(concept);
-    if (topic != 0) { syscall(1, 1, "Topic: ", 7); str_println(topic); }
+    var group = concept_group(concept);
+    syscall(1, 1, "Group: ", 7);
+    str_print(group);
+    var gr = group_get(to_cstr(group));
+    if (gr != 0 && group_title(gr) != 0) { syscall(1, 1, " — ", 5); str_print(group_title(gr)); }
+    println("");
 
     var desc = concept_desc(concept);
     if (desc != 0) { println(""); str_println(desc); }
@@ -247,6 +282,7 @@ fn cmd_stats() {
     }
 
     println("=== Vidya Corpus Stats ===");
+    syscall(1, 1, "  Groups:     ", 14); fmt_int(vec_len(group_list())); println("");
     syscall(1, 1, "  Topics:     ", 14); fmt_int(total); println("");
     syscall(1, 1, "  Complete:   ", 14); fmt_int(complete); syscall(1, 1, " (all ", 6); fmt_int(LANG_COUNT); println(" languages)");
     syscall(1, 1, "  Examples:   ", 14); fmt_int(total_examples); println("");
@@ -353,9 +389,20 @@ fn http_route(cfd, path) {
         var body = json_stats_response();
         return send_json(cfd, str_data(body), str_len(body));
     }
-    # GET /list
+    # GET /list, /list?group=<id>
     if (streq(path, "/list") == 1) {
-        var body = json_list_response();
+        var body = json_list_response(0);
+        return send_json(cfd, str_data(body), str_len(body));
+    }
+    if (memeq(path, "/list?", 6) == 1) {
+        var group = sandhi_server_get_param_a(rq_alloc(), path, "group");
+        if (group == 0) { return send_400(cfd); }
+        var body = json_list_response(group);
+        return send_json(cfd, str_data(body), str_len(body));
+    }
+    # GET /groups
+    if (streq(path, "/groups") == 1) {
+        var body = json_groups_response();
         return send_json(cfd, str_data(body), str_len(body));
     }
     # GET /languages
@@ -370,9 +417,9 @@ fn http_route(cfd, path) {
         var body = json_search_response(q);
         return send_json(cfd, str_data(body), str_len(body));
     }
-    # GET /info/{topic} — segment 0 is "info", segment 1 is the topic id
+    # GET /info/{group}/{topic} — the topic id is the rest of the path
     if (memeq(path, "/info/", 6) == 1) {
-        var topic_id = sandhi_server_path_segment_a(rq_alloc(), path, 1);
+        var topic_id = path_rest_a(rq_alloc(), path, 6);
         if (topic_id == 0) { return send_400(cfd); }
         var body = json_info_response(topic_id);
         if (body == 0) { return send_404(cfd); }
@@ -396,11 +443,12 @@ fn http_route(cfd, path) {
         var body = json_gaps_response();
         return send_json(cfd, str_data(body), str_len(body));
     }
-    # GET /code/{topic}/{lang} — tokenized source body
+    # GET /code/{group}/{topic}/{lang} — tokenized source body. The last
+    # segment is the language; everything before it is the topic id.
     if (memeq(path, "/code/", 6) == 1) {
-        var topic_id = sandhi_server_path_segment_a(rq_alloc(), path, 1);
-        var lang_str = sandhi_server_path_segment_a(rq_alloc(), path, 2);
+        var topic_id = path_rest_a(rq_alloc(), path, 6);
         if (topic_id == 0) { return send_400(cfd); }
+        var lang_str = split_last_segment(topic_id);
         if (lang_str == 0) { return send_400(cfd); }
         var body = json_code_response(topic_id, lang_str);
         if (body == 0 - 1) { return send_400(cfd); }
@@ -515,17 +563,19 @@ fn usage() {
     println("Usage: vidya <command> [args]");
     println("");
     println("Commands:");
-    println("  list                       list all topics");
+    println("  list [group]               list topics by group (or one group)");
     println("  search <query>             full-text search");
     println("  info <topic>               show concept details");
     println("  languages                  list supported languages");
     println("  compare <topic> <l1> <l2>  compare implementations");
     println("  code <topic> <lang>        print source with vyakarana token coloring");
-    println("  validate [topic]           compile/run examples");
+    println("  validate [topic|group]     compile/run examples");
     println("  gaps                       show missing implementations");
     println("  stats                      corpus statistics");
     println("  serve [port]               HTTP JSON API (default: 8390)");
     println("  help                       show this help");
+    println("");
+    println("A topic id is <group>/<topic>, e.g. fundamentals/strings.");
     return 0;
 }
 
@@ -553,7 +603,10 @@ fn main() {
 
     var cmd = argv(1);
 
-    if (streq(cmd, "list") == 1) { return cmd_list(); }
+    if (streq(cmd, "list") == 1) {
+        if (argc() >= 3) { return cmd_list(argv(2)); }
+        return cmd_list(0);
+    }
 
     if (streq(cmd, "search") == 1) {
         if (argc() < 3) {

@@ -7,6 +7,220 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-10-28
+
+The content reorganization. `content/` is now 14 groups, and a topic's id
+is its path: `content/fundamentals/strings/` is the topic
+`fundamentals/strings`, everywhere. This is a clean break, with no symlinks,
+aliases or old-id lookups. Decision record:
+[ADR 0003](docs/adr/0003-grouped-content-path-ids.md); layout:
+[`content-grouping.md`](docs/development/content-grouping.md).
+
+### Breaking
+
+- **Every topic id changed.** An id is now `<group>/<topic>`. Eight topics
+  were also renamed, because their name repeated their group's:
+  `networking_fundamentals` → `networking/fundamentals`, `audio_dsp` →
+  `audio/dsp`, `audio_synthesis` → `audio/synthesis`, `distributed_systems`
+  → `distributed/foundations`, `quantum_computing` → `quantum/fundamentals`,
+  `compiler_bootstrapping` → `compilers/bootstrapping`,
+  `game_loop_architecture` → `games/loop_architecture`, and
+  `game_ai_decisions` → `games/ai_decisions`. The full table is below.
+- **`content/` paths changed.** A topic is `content/<group>/<topic>/`.
+  Nothing is read at `content/<topic>/` any more, and a `concept.toml` left
+  there fails `cyrius test` and CI.
+- **CLI.** `info`, `compare`, `code` and `validate` take the full id
+  (`vidya info fundamentals/strings`). `list` prints groups with their
+  topics. `info` prints `Group:` where it printed `Topic:`.
+- **HTTP.**
+  - `/info/{group}/{topic}` and `/code/{group}/{topic}/{lang}`: the id is the
+    rest of the path, and for `/code` the language is the last segment.
+  - `/compare?topic=` takes the full id (`/` raw or as `%2F`).
+  - JSON: `/info` and `/list` carry `"group"` where they carried
+    `"topic"`; `/stats` gains `"groups"` first; every `path` is relative to
+    `content/` (`fundamentals/strings/rust.rs`).
+- **`concept.toml`.** `id` must be the topic's path, or the loader refuses
+  the topic. The `topic` field is removed: 59 of its 67 values belonged to
+  one topic each, so the group replaces it. `related_topics` take full ids.
+
+### Migration
+
+- **CLI and HTTP consumers (agnoshi):** map each stored id through the
+  table below. A bare 2.x name on the CLI fails with a hint, e.g. `error:
+  topic not found: strings (did you mean fundamentals/strings?)`. Read
+  `"group"` instead of `"topic"`.
+- **Readers of `content/` (hoosh):** walk `content/<group>/<topic>/`, taking
+  groups from directories that hold a `group.toml`. Don't read the dropped
+  `topic` field.
+- **vyakarana's corpus sync:** `content/lexing_and_parsing/<lang>` is now
+  `content/compilers/lexing_and_parsing/<lang>`.
+
+| 2.x id | 3.0.0 id |
+|---|---|
+| `algorithms` | `fundamentals/algorithms` |
+| `allocators` | `systems/allocators` |
+| `audio_dsp` | `audio/dsp` |
+| `audio_synthesis` | `audio/synthesis` |
+| `binary_formats` | `compilers/binary_formats` |
+| `bindless_resources` | `graphics/bindless_resources` |
+| `bloom_and_glow` | `graphics/bloom_and_glow` |
+| `boot_and_startup` | `systems/boot_and_startup` |
+| `btree_indexing` | `data/btree_indexing` |
+| `build_systems` | `build/build_systems` |
+| `code_generation` | `compilers/code_generation` |
+| `collision_detection_2d` | `games/collision_detection_2d` |
+| `compiler_bootstrapping` | `compilers/bootstrapping` |
+| `compression` | `data/compression` |
+| `concurrency` | `fundamentals/concurrency` |
+| `concurrent_file_access` | `data/concurrent_file_access` |
+| `consensus` | `distributed/consensus` |
+| `dependent_types` | `languages/dependent_types` |
+| `design_patterns` | `fundamentals/design_patterns` |
+| `direct_drm_gpu_compute` | `graphics/direct_drm_gpu_compute` |
+| `distributed_systems` | `distributed/foundations` |
+| `dns` | `networking/dns` |
+| `effect_systems` | `languages/effect_systems` |
+| `elf_and_executable_formats` | `compilers/elf_and_executable_formats` |
+| `embeddings` | `ai/embeddings` |
+| `error_handling` | `fundamentals/error_handling` |
+| `explicit_gpu_synchronization` | `graphics/explicit_gpu_synchronization` |
+| `filesystems` | `systems/filesystems` |
+| `fixed_point_arithmetic` | `fundamentals/fixed_point_arithmetic` |
+| `framebuffer_rendering` | `graphics/framebuffer_rendering` |
+| `functional_patterns` | `languages/functional_patterns` |
+| `game_ai_decisions` | `games/ai_decisions` |
+| `game_loop_architecture` | `games/loop_architecture` |
+| `gpu_memory_pooling` | `graphics/gpu_memory_pooling` |
+| `grid_pathfinding` | `games/grid_pathfinding` |
+| `http_and_web_protocols` | `networking/http_and_web_protocols` |
+| `inference` | `ai/inference` |
+| `input_output` | `fundamentals/input_output` |
+| `instruction_encoding` | `compilers/instruction_encoding` |
+| `intermediate_representations` | `compilers/intermediate_representations` |
+| `interrupt_handling` | `systems/interrupt_handling` |
+| `ipc` | `networking/ipc` |
+| `iterators` | `fundamentals/iterators` |
+| `jsonl_format` | `data/jsonl_format` |
+| `kernel_topics` | `systems/kernel_topics` |
+| `lexing_and_parsing` | `compilers/lexing_and_parsing` |
+| `line_rasterization` | `graphics/line_rasterization` |
+| `linking_and_loading` | `compilers/linking_and_loading` |
+| `macro_systems` | `languages/macro_systems` |
+| `maze_generation` | `games/maze_generation` |
+| `memory_management` | `fundamentals/memory_management` |
+| `module_systems` | `languages/module_systems` |
+| `networking_fundamentals` | `networking/fundamentals` |
+| `neural_networks` | `ai/neural_networks` |
+| `optimization_passes` | `compilers/optimization_passes` |
+| `ownership_and_borrowing` | `languages/ownership_and_borrowing` |
+| `package_resolution` | `build/package_resolution` |
+| `page_management` | `data/page_management` |
+| `pattern_matching` | `languages/pattern_matching` |
+| `performance` | `fundamentals/performance` |
+| `process_and_scheduling` | `systems/process_and_scheduling` |
+| `projectile_physics` | `games/projectile_physics` |
+| `quantum_computing` | `quantum/fundamentals` |
+| `render_graph_architecture` | `graphics/render_graph_architecture` |
+| `reproducible_builds` | `build/reproducible_builds` |
+| `security` | `fundamentals/security` |
+| `serialization` | `data/serialization` |
+| `sprite_rendering` | `graphics/sprite_rendering` |
+| `sql_parsing` | `data/sql_parsing` |
+| `state_machines` | `fundamentals/state_machines` |
+| `strings` | `fundamentals/strings` |
+| `syscalls_and_abi` | `systems/syscalls_and_abi` |
+| `testing` | `fundamentals/testing` |
+| `tls_and_encryption` | `networking/tls_and_encryption` |
+| `tracing` | `fundamentals/tracing` |
+| `trait_and_typeclass_systems` | `languages/trait_and_typeclass_systems` |
+| `transactions_and_acid` | `data/transactions_and_acid` |
+| `type_systems` | `languages/type_systems` |
+| `virtual_memory` | `systems/virtual_memory` |
+| `write_ahead_logging` | `data/write_ahead_logging` |
+
+### Added
+
+- **Groups.** Each group has a `group.toml` (`id`, `title`, `description`,
+  `order`), and `order` sets reading order: `fundamentals`, `languages`,
+  `compilers`, `systems`, `networking`, `data`, `distributed`, `build`,
+  `audio`, `ai`, `graphics`, `games`, `quantum`, `cyrius`. They are
+  surfaced through:
+  - `GET /groups`: id, title, description and topic count;
+  - `GET /list?group=<id>`;
+  - `vidya list [group]`;
+  - `vidya validate <group>`.
+- **`content/cyrius/` is a group.** Its language reference and field notes
+  stay at its root, since they have no `concept.toml`. The P6 Cyrius concept
+  topics will be `cyrius/<topic>/`.
+- **Tests (163 → 182).**
+  - A `content_layout` group checks:
+    - the id-is-path rule;
+    - a fixture whose id is not its path, which is refused;
+    - no stray or orphaned `concept.toml`.
+  - The corpus sweep checks that every topic loads under its path, the
+    order (groups by `order`, topics by name), and that every
+    `related_topics` entry names a real topic. A planted flat name and an
+    unsorted walk each fail it.
+  - `http_routes` now tests the route parsing (`path_rest_a`,
+    `split_last_segment`) instead of comparing string literals.
+  - Goldens for `/groups` and `/list?group=`.
+  - `validate_exec` checks that a compiled example's scratch binary is a
+    file in `/tmp`, and runs `validate_one` on a real C example. Before
+    that, the first version of this change wrote the id's `/` into
+    `/tmp/vidya_test_<id>_<lang>`, and `vidya validate` failed every
+    compiled language while the shell gate passed. It never shipped.
+- **CI.** "Verify the content layout" checks each group's `group.toml`
+  (fields, and `id` = directory) and refuses a stray `concept.toml`.
+  "Check required fields" checks that each topic's `id` is its path.
+
+### Changed
+
+- The loader, hot reload and inotify watches share one walk
+  (`scan_content`). Groups come in their `order` and topics sorted by name,
+  where 2.x took readdir order. Reload now also aborts on a malformed
+  `group.toml`, and the watches cover each group directory, so adding or
+  removing a topic triggers a reload.
+
+### Fixed
+
+- **Hot reload stayed blind to a new topic that first failed to load.**
+  Watches were re-armed only after a successful reload, so a new topic
+  whose first save had a bad `concept.toml` (or, now, a wrong id) was never
+  watched. Fixing it then triggered nothing, until some other edit did.
+  2.x had the same gap. A failed reload now re-arms the watches too.
+  Verified by running `serve`:
+  - a copy with the wrong id aborts;
+  - fixing its id reloads to 81 topics;
+  - removing it reloads to 80.
+- `scripts/validate-content.sh` walks `content/<group>/<topic>/` with the
+  loader's rule, and labels each topic by its id.
+- Docs: `content-grouping.md` is rewritten as the 3.0.0 spec; it was
+  written at 36 topics. Also updated: `content-format.md`, `usage.md` (its
+  route table also lacked `/compare` and `/languages`),
+  `getting-started.md` (which still described ubuntu-latest CI),
+  `learning-paths.md` (every id is full, and two links to `content/cyrius/`
+  were fixed), `overview.md`, README, CONTRIBUTING and CLAUDE.md.
+- `content/` comments and field notes that named a topic's path now name
+  its new one. The archived design log keeps its history.
+
+### Performance
+
+The baseline is an interleaved A/B against the 2.9.6 tree: three rounds
+each, alternating, medians. Two runs of one build spread about 8 % on this
+host, so only consistent moves are reported.
+
+- `load_all` +3.2 % (8.26 → 8.52 ms): the walk lists one more level and
+  sorts.
+- Ids are 52 % longer on average (15.8 → 24.1 bytes). The benches that scan
+  only ids moved with them: `search_text` +46 % and `search_text_exact`
+  +39 %. `reg_get_hit` went 90 → 135 ns, which is the hash over longer
+  keys.
+- Production search (`json_search_response`) is unchanged at −0.2 %.
+  `json_info_response` is +4.4 % and `json_list_response` +3.6 % (longer
+  ids and group names).
+- `toml_sections` −14 %: `concept.toml` has one key fewer.
+- The binary is 2,953,928 B, +8,456 B.
+
 ## [2.9.6] — 2026-10-28
 
 P5, the roadmap's last 2.9.x item: three topics on functional programming

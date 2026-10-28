@@ -2,27 +2,25 @@
 
 ## Directory Structure
 
-`content/` holds three kinds of entries — topic directories, the
-Cyrius language reference, and shared toolchain resources:
+Since 3.0.0, `content/` holds **groups**, and each group holds topics:
 
 ```
 content/
-├── {topic}/                  # 80× topic directories (see below)
-├── cyrius/                   # Cyrius language reference + field notes
-│   ├── language/             #   index, stdlib_modules, syntax notes
-│   └── field_notes/          #   recurring-pain notes (cyim, compiler, …)
+├── {group}/                  # 14 groups (see content-grouping.md)
+│   ├── group.toml            #   id, title, description, order
+│   └── {topic}/              #   a topic: its id is "{group}/{topic}"
+└── cyrius/                   # a group like the others, whose root also holds
+    ├── group.toml            #   the Cyrius language reference and field notes
+    ├── language/             #   index, stdlib_modules, syntax notes
+    └── field_notes/          #   recurring-pain notes (cyim, compiler, …)
 ```
 
-`vidya stats` and the topic count in `state.md` refer to the topic directories
-only — `cyrius/` is the language-reference subtree (loaded separately
-by the field-notes path). Through 2.9.3 a shared `qelib1.inc` sat at the
-content root for the OpenQASM 2.0 circuits; OpenQASM 3's `stdgates.inc`
-is built into the importer, so 2.9.4 removed it.
+The loader reads a directory under `content/` as a group only if it has a `group.toml`, and a directory inside a group as a topic only if it has a `concept.toml`. Nothing else is read, so `cyrius/language/` and `cyrius/field_notes/` are reference material, and the P6 Cyrius concept topics become `cyrius/<topic>/`. `cyrius test` and CI both fail on a `concept.toml` anywhere else (a 2.x-style `content/<topic>/`, or a topic in a directory with no `group.toml`), because the loader would skip it silently. Through 2.9.3 a shared `qelib1.inc` sat at the content root for the OpenQASM 2.0 circuits; OpenQASM 3's `stdgates.inc` is built into the importer, so 2.9.4 removed it.
 
-Each topic lives in its own directory under `content/`:
+Each topic directory:
 
 ```
-content/{topic}/
+content/{group}/{topic}/
 ├── concept.toml       # Required: structured metadata (parsed by loader)
 ├── rust.rs            # Rust implementation
 ├── python.py          # Python implementation
@@ -37,6 +35,15 @@ content/{topic}/
 └── cyrius.cyr         # Cyrius implementation (primary content language)
 ```
 
+## group.toml
+
+| Field         | Type    | Description |
+|---------------|---------|-------------|
+| `id`          | String  | The group directory's name. A mismatch refuses the group. |
+| `title`       | String  | Human-readable name (`list` and `/groups` print it). |
+| `description` | String  | One or two sentences on what the group covers. |
+| `order`       | Integer | Where the group appears in `list` and `/groups`. Fundamentals is 1; a group without one sorts last. |
+
 ## concept.toml
 
 Machine-readable metadata. This is the source of truth for the `Concept` struct.
@@ -45,23 +52,21 @@ Machine-readable metadata. This is the source of truth for the `Concept` struct.
 
 | Field         | Type   | Description                                    |
 |---------------|--------|------------------------------------------------|
-| `id`          | String | Unique identifier (lowercase, underscores)     |
+| `id`          | String | The topic's path under `content/`: `"{group}/{topic}"` (lowercase, underscores). The loader refuses a topic whose `id` is anything else, so one id never resolves to two places. |
 | `title`       | String | Human-readable title                           |
-| `topic`       | String | Topic enum variant (see below)                 |
 | `description` | String | One-paragraph description                      |
+
+Through 2.9.6 a `topic` field carried a CamelCase category (`DataTypes`, `Networking`, …). Most topics had a category of their own, so it grouped nothing. 3.0.0 removed it: the group is the category.
 
 ### Optional Fields
 
 | Field               | Type              | Description                         |
 |---------------------|-------------------|-------------------------------------|
 | `tags`              | Array of strings  | Search tags — matched case-insensitively by `vidya search`, alongside `id` / `title` / `description`. Use them for terms a reader would search for that the prose does not contain. |
+| `related_topics`    | Array of strings  | Full topic ids (`"fundamentals/strings"`). `cyrius test` fails on one that names no topic. |
 | `best_practices`    | Array of tables   | Best practice entries               |
 | `gotchas`           | Array of tables   | Gotcha entries                      |
 | `performance_notes` | Array of tables   | Performance note entries            |
-
-### Topic Values
-
-`DataTypes`, `Concurrency`, `ErrorHandling`, `MemoryManagement`, `InputOutput`, `Testing`, `Algorithms`, `Patterns`, `TypeSystems`, `Performance`, `Security`, `KernelTopics`, `QuantumComputing`
 
 ### Entry Formats
 

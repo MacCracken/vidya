@@ -14,20 +14,30 @@ The binary is statically linked with no runtime dependencies; the current size i
 
 ## Commands
 
+### Topic ids
+
+A topic lives at `content/<group>/<topic>/`, and its id is that path: `fundamentals/strings`, `compilers/lexing_and_parsing`. Every command and route takes the full id. A bare name such as `strings` (the 2.x id) is not found; the error names the topic it probably meant:
+
+```
+error: topic not found: strings (did you mean fundamentals/strings?)
+```
+
 ### List topics
 
 ```sh
-vidya list
+vidya list              # every group and its topics
+vidya list languages    # one group
 ```
 
-Shows all topics with their category and language count:
+Groups print in reading order, each with its title and topic count:
 
 ```
-  algorithms [Algorithms] (11 languages)
-  allocators [Allocators] (11 languages)
-  audio_dsp [Audio] (11 languages)
+fundamentals — Fundamentals (14 topics)
+  fundamentals/algorithms (11 languages)
+  fundamentals/concurrency (11 languages)
   ...
-80 topics
+
+80 topics in 14 groups
 ```
 
 ### Search
@@ -50,7 +60,7 @@ and `Tcp` are the same query. Bytes outside ASCII are compared exactly, so a
 non-ASCII query matches only an identical byte sequence.
 
 Tags are searched too, which is often the only route to a topic — `interpolation`
-is a tag on `strings` but appears in no id, title, or description:
+is a tag on `fundamentals/strings` but appears in no id, title, or description:
 
 ```sh
 vidya search interpolation
@@ -64,15 +74,15 @@ are listed in corpus order, not ranked.
 ### Topic info
 
 ```sh
-vidya info <topic>
+vidya info <group>/<topic>
 ```
 
 Full concept details: description, tags, languages, best practices, gotchas, performance notes:
 
 ```sh
-vidya info strings
+vidya info fundamentals/strings
 # # Strings
-# Topic: DataTypes
+# Group: fundamentals — Fundamentals
 # ...
 # Best Practices (5):
 #   * Know your encoding
@@ -98,13 +108,13 @@ vidya code lexing_and_parsing cyrius
 ### Compare implementations
 
 ```sh
-vidya compare <topic> <lang1> <lang2>
+vidya compare <group>/<topic> <lang1> <lang2>
 ```
 
 Side-by-side view of a concept in two languages:
 
 ```sh
-vidya compare strings rust python
+vidya compare fundamentals/strings rust python
 # --- Rust ---
 # Vidya — Strings in Rust
 # Rust has two primary string types...
@@ -119,8 +129,9 @@ Language names: `rust`, `python`, `c`, `go`, `typescript`, `shell`, `zig`, `x86_
 ### Validate examples
 
 ```sh
-vidya validate              # all topics, all languages (in-process)
-vidya validate strings      # single topic
+vidya validate                         # all topics, all languages (in-process)
+vidya validate fundamentals/strings    # one topic
+vidya validate audio                   # one group
 ```
 
 For full CI-grade validation across the 11-language toolchain matrix, run `./scripts/validate-content.sh` — installs are documented in `.github/workflows/ci.yml`.
@@ -167,12 +178,18 @@ Memory-resident HTTP service for programmatic consumers (agnoshi, hoosh). Loads 
 
 | Route | Returns |
 |---|---|
-| `GET /stats` | JSON corpus stats |
-| `GET /list` | JSON topic index |
-| `GET /info/{topic}` | Full concept JSON |
+| `GET /stats` (and `/`) | `{groups, topics, complete, examples, languages}` |
+| `GET /groups` | `[{id, title, description, topics}]`, in reading order |
+| `GET /list` | `[{id, group, languages}]` for every topic |
+| `GET /list?group={group}` | The same, for one group (`[]` for an unknown group) |
+| `GET /info/{group}/{topic}` | Full concept JSON: `{id, title, group, description, tags, languages, best_practices, gotchas, performance_notes}` (the last three are counts) |
 | `GET /search?q=...` | Search hits JSON |
-| `GET /code/{topic}/{lang}` | `{topic, language, path, source, tokens:[{kind, start, len}]}` — same vyakarana tokens as the CLI `code` command; theme is consumer's responsibility (palette indexed by kind-name string per vyakarana ADR 0004). |
+| `GET /languages` | The 11 languages and their extensions |
+| `GET /compare?topic={group}/{topic}&left={lang}&right={lang}` | Both sides' presence and paths (`/` in the id may be sent raw or as `%2F`) |
+| `GET /code/{group}/{topic}/{lang}` | `{topic, language, path, source, tokens:[{kind, start, len}]}` — same vyakarana tokens as the CLI `code` command; theme is consumer's responsibility (palette indexed by kind-name string per vyakarana ADR 0004). The last segment is the language; the rest is the topic id. |
 | `GET /gaps` | Coverage gaps JSON |
+
+Paths in responses (`path` in `/compare` and `/code`) are relative to `content/`: `fundamentals/strings/rust.rs`.
 
 ## Tracing
 
@@ -202,7 +219,7 @@ Auto-discovers `.tcyr` files in `tests/`. Tests cover: language enum, TOML loadi
 cyrius bench tests/vidya.bcyr
 ```
 
-Benchmarks: `load_concept`, `load_all`, `reg_get_hit`, `reg_get_miss`, `search_text`, `toml_sections`. See [`BENCHMARKS.md`](../BENCHMARKS.md) for current numbers.
+Benchmarks: `load_concept`, `load_all`, `reg_get_hit`, `reg_get_miss`, `search_text`, `search_text_exact`, `toml_sections`, and the JSON builders (`json_info_response`, `json_search_response`, `json_list_response`, `field_escaped`, `field_raw_splice`). See [`BENCHMARKS.md`](../BENCHMARKS.md) for current numbers.
 
 ## Quality
 
@@ -216,12 +233,14 @@ cyrius lint src/main.cyr     # static analysis (per-file in 5.7+)
 
 ## Content directory
 
-Vidya reads from `content/` relative to the working directory. Each topic is a subdirectory:
+Vidya reads from `content/` relative to the working directory. Each group is a directory with a `group.toml`, and each topic a directory inside it:
 
 ```
-content/strings/
-  concept.toml       # metadata: id, title, topic, description, tags,
-                     #   [[best_practices]], [[gotchas]], [[performance_notes]]
+content/fundamentals/
+  group.toml         # id, title, description, order
+content/fundamentals/strings/
+  concept.toml       # metadata: id ("fundamentals/strings"), title, description, tags,
+                     #   related_topics, [[best_practices]], [[gotchas]], [[performance_notes]]
   rust.rs            # Rust implementation
   python.py          # Python implementation
   cyrius.cyr         # Cyrius implementation

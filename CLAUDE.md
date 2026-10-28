@@ -33,8 +33,10 @@ Every code example in `content/` is a test. CI compiles/runs every implementatio
 
 ## Content Structure
 
+Since 3.0.0 every topic sits in a group: `content/<group>/<topic>/`, and the topic's id is that path (`fundamentals/strings`). A group is a directory holding a `group.toml` (`id`, `title`, `description`); a topic is a directory inside a group holding a `concept.toml` whose `id` is its path. The loader reads nothing else, so `content/cyrius/` keeps its `language/` and `field_notes/` reference subtrees at the group's root, and Cyrius concept topics (P6) are `cyrius/<topic>/`. Layout and the group list: [`docs/development/content-grouping.md`](docs/development/content-grouping.md).
+
 ```
-content/{topic}/
+content/{group}/{topic}/
 ├── concept.toml       # Structured metadata (parsed by loader)
 ├── rust.rs            # Tested Rust implementation
 ├── python.py          # Tested Python implementation
@@ -108,7 +110,8 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 ## Key Types
 
 - `Concept` — A programming topic with examples, best practices, gotchas, performance notes
-- `Topic` — Programming topic IDs (count in [`docs/development/state.md`](docs/development/state.md); planned topics in `docs/development/roadmap.md`)
+- `Topic` — Programming topic IDs, `<group>/<topic>` (count in [`docs/development/state.md`](docs/development/state.md); planned topics in `docs/development/roadmap.md`)
+- `Group` — A directory of topics with a `group.toml`; replaces 2.x's per-topic `topic` category
 - `Gotcha` — Common mistake with bad/good example (teaches what NOT to do)
 - `PerformanceNote` — Optimization insight with evidence (benchmark numbers)
 - `BestPractice` — The right way, with explanation of why

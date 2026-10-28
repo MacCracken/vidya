@@ -30,6 +30,7 @@ Expected output:
 
 ```
 === Vidya Corpus Stats ===
+  Groups:     14
   Topics:     80
   Complete:   80 (all 11 languages)
   Examples:   880
@@ -39,32 +40,35 @@ Expected output:
 ## Common Tasks
 
 ```bash
-./build/vidya list                              # browse all 80 topics
+./build/vidya list                              # all 80 topics, by group
+./build/vidya list compilers                    # one group's topics
 ./build/vidya search "memory"                   # text search across the corpus
-./build/vidya info strings                      # full record for a topic
-./build/vidya code quantum_computing rust       # ANSI-colored source via vyakarana
-./build/vidya compare strings rust python       # side-by-side cross-language view
+./build/vidya info fundamentals/strings         # full record for a topic
+./build/vidya code quantum/fundamentals rust    # ANSI-colored source via vyakarana
+./build/vidya compare fundamentals/strings rust python  # side-by-side cross-language view
 ./build/vidya gaps                              # coverage gaps (currently zero)
 ./build/vidya serve 8080                        # HTTP service for programmatic consumers
 ```
+
+A topic id is its path under `content/`: `<group>/<topic>`. A bare 2.x name such as `strings` is not found, and the error names the topic it probably meant.
 
 Full command surface and HTTP route table: [`docs/usage.md`](../usage.md).
 
 ## Validating Content
 
-Vidya validates every code example by compiling and running it in its native toolchain. For local single-language spot-checks, the CLI is enough (`vidya validate <topic>`). For the full 11-language matrix, use the script:
+Vidya validates every code example by compiling and running it in its native toolchain. For local single-language spot-checks, the CLI is enough (`vidya validate <group>/<topic>`, or a whole group with `vidya validate <group>`). For the full 11-language matrix, use the script:
 
 ```bash
 ./scripts/validate-content.sh
 ```
 
-The script gracefully skips languages whose toolchain isn't installed. CI (`.github/workflows/ci.yml`) installs the full set — zig 0.17.0, aarch64 binutils, qemu-user-static, tsx, qiskit, cyrius, plus what ubuntu-latest already ships (rustc / python3 / gcc / go / node / bash).
+The script skips languages whose toolchain isn't installed; `VIDYA_STRICT=1` makes any skip a failure. CI (`.github/workflows/ci.yml`) runs it strict in an Arch Linux container with the full set: Zig, the aarch64 binutils and qemu-user, rustup stable, Python 3.15 (uv), tsc + tsx + `@types/node`, qiskit in `.venv`, and cyrius.
 
 ## Adding Content
 
 See [`CONTRIBUTING.md`](../../CONTRIBUTING.md). The recipe in short:
 
-1. `content/<topic>/concept.toml` with required fields and at least one each of `[[best_practices]]`, `[[gotchas]]`, `[[performance_notes]]`.
+1. `content/<group>/<topic>/concept.toml`, whose `id` is `<group>/<topic>`, with the required fields and at least one each of `[[best_practices]]`, `[[gotchas]]`, `[[performance_notes]]`.
 2. One implementation per language. All 11 required for "complete" status: `rust.rs`, `python.py`, `c.c`, `go.go`, `typescript.ts`, `shell.sh`, `zig.zig`, `asm_x86_64.s`, `asm_aarch64.s`, `openqasm.qasm`, `cyrius.cyr`.
 3. Every implementation must compile and run successfully. `vidya gaps` to verify.
 
