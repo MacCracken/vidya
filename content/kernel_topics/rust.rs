@@ -157,6 +157,13 @@ impl MmioRegister {
         let val = self.read();
         self.write(val & !mask);
     }
+
+    /// Write-1-to-clear (W1C) semantics, common for interrupt status
+    /// registers: each 1 bit written CLEARS that bit, 0 bits leave it alone.
+    /// (Never RMW a W1C register: writing back the bits you read acks them all.)
+    fn write_1_to_clear(&mut self, mask: u32) {
+        self.value &= !mask;
+    }
 }
 
 impl fmt::Debug for MmioRegister {
@@ -180,10 +187,10 @@ fn test_mmio_register() {
 
     // Status register: write to acknowledge interrupt
     let mut status = MmioRegister::new("UART_STATUS");
-    status.write(0xFF); // all bits set (pending interrupts)
+    status.write(0xFF); // simulate hardware latching all bits (pending interrupts)
     assert_eq!(status.read(), 0xFF);
-    status.write(0x01); // write-1-to-clear: ack bit 0
-    assert_eq!(status.read(), 0x01);
+    status.write_1_to_clear(0x01); // ack bit 0 only
+    assert_eq!(status.read(), 0xFE); // the other seven stay pending
 }
 
 // ── Interrupt Descriptor Table (IDT) ──────────────────────────────────
@@ -307,9 +314,11 @@ fn test_abi_calling_convention() {
 
     // Linux syscall ABI: syscall number in rax, args in rdi/rsi/rdx/r10/r8/r9
     // Note: r10 replaces rcx (which is clobbered by syscall instruction)
-    let syscall_regs = ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"];
-    assert_eq!(syscall_regs[0], "rax"); // syscall number
-    assert_eq!(syscall_regs.len(), 7);  // number + 6 args
+    let syscall_regs = ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"]; // number + 6 args
+    for i in [0, 1, 2, 4, 5] {
+        assert_eq!(syscall_regs[i + 1], SysVCall::register_for_arg(i)); // same as SysV
+    }
+    assert_eq!((syscall_regs[4], SysVCall::register_for_arg(3)), ("r10", "rcx")); // the one difference
 }
 
 // ── Physical / Virtual Address Translation ────────────────────────────
@@ -397,7 +406,6 @@ fn test_gdt_entry() {
 
     // A minimal GDT needs: null, kernel code, kernel data
     let gdt = [GdtEntry::null(), GdtEntry::kernel_code(), GdtEntry::kernel_data()];
-    assert_eq!(gdt.len(), 3);
     assert!(!gdt[0].is_present()); // null descriptor
     assert!(gdt[1].is_present());  // code
     assert!(gdt[2].is_present());  // data

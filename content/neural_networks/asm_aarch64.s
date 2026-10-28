@@ -57,8 +57,11 @@ dense_2_to_3:
     cmp     x19, #3
     b.ge    .d23_done
     LDADDR  x1, b_hidden
-    ldr     x21, [x1, x19, lsl #3]        // acc = b[j]; in stack-allocated reg
-    str     x21, [sp, #-16]!              // save acc
+    // acc lives in a stack slot across `bl q_mul`; x9 is only a scratch
+    // copy. (Using callee-saved x21 here without saving it would hand
+    // the caller back a clobbered x21.)
+    ldr     x9, [x1, x19, lsl #3]         // acc = b[j]
+    str     x9, [sp, #-16]!               // spill acc
     mov     x20, #0                       // i
 .d23_inner:
     cmp     x20, #2
@@ -71,15 +74,15 @@ dense_2_to_3:
     LDADDR  x3, input_buf
     ldr     x1, [x3, x20, lsl #3]
     bl      q_mul
-    ldr     x21, [sp]
-    add     x21, x21, x0
-    str     x21, [sp]
+    ldr     x9, [sp]
+    add     x9, x9, x0
+    str     x9, [sp]
     add     x20, x20, #1
     b       .d23_inner
 .d23_store:
-    ldr     x21, [sp], #16
+    ldr     x9, [sp], #16
     LDADDR  x1, hidden_buf
-    str     x21, [x1, x19, lsl #3]
+    str     x9, [x1, x19, lsl #3]
     add     x19, x19, #1
     b       .d23_outer
 .d23_done:
@@ -99,8 +102,8 @@ dense_3_to_2:
     cmp     x19, #2
     b.ge    .d32_done
     LDADDR  x1, b_output
-    ldr     x21, [x1, x19, lsl #3]
-    str     x21, [sp, #-16]!
+    ldr     x9, [x1, x19, lsl #3]         // acc = b[j]
+    str     x9, [sp, #-16]!               // spill acc
     mov     x20, #0
 .d32_inner:
     cmp     x20, #3
@@ -114,15 +117,15 @@ dense_3_to_2:
     LDADDR  x3, hidden_buf
     ldr     x1, [x3, x20, lsl #3]
     bl      q_mul
-    ldr     x21, [sp]
-    add     x21, x21, x0
-    str     x21, [sp]
+    ldr     x9, [sp]
+    add     x9, x9, x0
+    str     x9, [sp]
     add     x20, x20, #1
     b       .d32_inner
 .d32_store:
-    ldr     x21, [sp], #16
+    ldr     x9, [sp], #16
     LDADDR  x1, output_buf
-    str     x21, [x1, x19, lsl #3]
+    str     x9, [x1, x19, lsl #3]
     add     x19, x19, #1
     b       .d32_outer
 .d32_done:

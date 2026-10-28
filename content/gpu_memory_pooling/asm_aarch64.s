@@ -15,7 +15,7 @@ pool:         .skip POOL_SIZE
 bump:         .quad 0
 
 .section .rodata
-msg_pass:     .ascii "gpu_memory_pooling: 16/16 ok\n"
+msg_pass:     .ascii "gpu_memory_pooling: 18/18 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail:     .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
@@ -49,9 +49,14 @@ pool_alloc:
     adrp    x1, bump
     add     x1, x1, :lo12:bump
     ldr     x2, [x1]
+    // Sizes are unsigned: compare against the space left with an unsigned
+    // condition. `bump + size > POOL_SIZE` with b.gt let size >= 2^63 pass
+    // (it reads as negative) and drove bump past the pool.
+    mov     x3, #POOL_SIZE
+    sub     x3, x3, x2            // free = POOL_SIZE - bump
+    cmp     x0, x3
+    b.hi    .pa_full
     add     x3, x2, x0
-    cmp     x3, #POOL_SIZE
-    b.gt    .pa_full
     str     x3, [x1]
     mov     x0, x2
     ret
@@ -64,17 +69,27 @@ pool_alloc:
     mov     x0, #-1
     ret
 
-// pool_alloc_aligned(x0=size, x1=align) -> x0
+// pool_alloc_aligned(x0=size, x1=align) -> x0, or -1
+// align must be a non-zero power of two: the round-up below is only an
+// alignment for those. align=0 makes the mask all ones and returns
+// offset 0 on top of live blocks; align=24 returns 104 for bump=100.
 pool_alloc_aligned:
+    cbz     x1, .paa_full         // align == 0
     sub     x2, x1, #1            // mask
+    tst     x1, x2                // power of two <=> align & (align-1) == 0
+    b.ne    .paa_full
     adrp    x3, bump
     add     x3, x3, :lo12:bump
     ldr     x4, [x3]
     add     x4, x4, x2
     bic     x4, x4, x2            // aligned = (bump + mask) & ~mask
+    cmp     x4, #POOL_SIZE
+    b.hi    .paa_full             // alignment padding alone overflows the pool
+    mov     x5, #POOL_SIZE
+    sub     x5, x5, x4            // free after alignment
+    cmp     x0, x5
+    b.hi    .paa_full             // unsigned, so a huge size cannot wrap past
     add     x5, x4, x0
-    cmp     x5, #POOL_SIZE
-    b.gt    .paa_full
     str     x5, [x3]
     mov     x0, x4
     ret
@@ -149,6 +164,18 @@ _start:
     bl      assert_eq
     bl      pool_used
     mov     x1, #96
+    bl      assert_eq
+
+    // invalid alignments are refused, not "aligned" onto live blocks
+    mov     x0, #16
+    mov     x1, #0
+    bl      pool_alloc_aligned
+    mov     x1, #-1
+    bl      assert_eq
+    mov     x0, #8
+    mov     x1, #24
+    bl      pool_alloc_aligned
+    mov     x1, #-1
     bl      assert_eq
 
     mov     x0, #0

@@ -242,15 +242,25 @@ func (r Rectangle) Area() float64 { return r.Width * r.Height }
 func (t Triangle) Area() float64  { return 0.5 * t.Base * t.Height }
 
 func ShapeFactory(name string, params []float64) (Shape, error) {
-	switch strings.ToLower(name) {
+	// Validate the parameter count too: a factory that returns an error
+	// for an unknown name but panics on params[0] for a short slice is
+	// only half an error-returning API.
+	want := map[string]int{"circle": 1, "rectangle": 2, "triangle": 2}
+	kind := strings.ToLower(name)
+	n, ok := want[kind]
+	if !ok {
+		return nil, fmt.Errorf("unknown shape: %s", name)
+	}
+	if len(params) != n {
+		return nil, fmt.Errorf("%s needs %d params, got %d", kind, n, len(params))
+	}
+	switch kind {
 	case "circle":
 		return Circle{params[0]}, nil
 	case "rectangle":
 		return Rectangle{params[0], params[1]}, nil
-	case "triangle":
+	default: // "triangle"
 		return Triangle{params[0], params[1]}, nil
-	default:
-		return nil, fmt.Errorf("unknown shape: %s", name)
 	}
 }
 
@@ -264,6 +274,8 @@ func testFactoryPattern() {
 
 	_, err = ShapeFactory("hexagon", nil)
 	assert(err != nil, "unknown shape")
+	_, err = ShapeFactory("circle", nil)
+	assert(err != nil, "missing params is an error, not a panic")
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────

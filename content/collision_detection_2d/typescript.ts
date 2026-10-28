@@ -70,18 +70,20 @@ function pushApartX(x1: bigint, x2: bigint, overlap: bigint): bigint {
     return dx > 0n ? -half : half;
 }
 
-function absB(v: bigint): bigint { return v < 0n ? -v : v; }
-
 function sweptAabbX(al: bigint, ar: bigint, vx: bigint,
                     bl: bigint, br: bigint): bigint {
     if (vx === 0n) return FX_ONE;
     let enterDist: bigint, exitDist: bigint;
     if (vx > 0n) { enterDist = bl - ar; exitDist = br - al; }
     else         { enterDist = br - al; exitDist = bl - ar; }
-    const absV = absB(vx);
-    const enter = (absB(enterDist) << FX_SHIFT) / absV;
-    const exit_ = (absB(exitDist)  << FX_SHIFT) / absV;
-    if (enter > exit_ || enter > FX_ONE) return FX_ONE;
+    // Divide by the SIGNED velocity: a negative entry time means A is
+    // already past B's entry edge (overlapping at t=0), a negative exit
+    // time means B is behind A. Taking the absolute value of the distances
+    // would turn both into spurious future impacts (or misses).
+    const enter = (enterDist << FX_SHIFT) / vx;
+    const exit_ = (exitDist  << FX_SHIFT) / vx;
+    if (exit_ < 0n || enter > exit_ || enter > FX_ONE) return FX_ONE;
+    if (enter < 0n) return 0n; // already overlapping at the start of the frame
     return enter;
 }
 
@@ -124,16 +126,22 @@ function main(): void {
     mustFalse(pointInCircle(fx(100n), fx(100n), fx(0n), fx(0n), fx(5n)),
         "point outside circle");
 
-    if (distSq(fx(0n), fx(0n), fx(3n), fx(4n)) <= 0n)
+    // dist² of a 3-4-5 triangle is 25, in (FX_ONE >> 4)² units after the pre-shift
+    if (distSq(fx(0n), fx(0n), fx(3n), fx(4n)) !== 25n * (FX_ONE >> 4n) ** 2n)
         throw new Error("FAIL: 3-4-5 dist²");
 
     if (pushApartX(fx(0n), fx(4n), fx(2n)) >= 0n)
         throw new Error("FAIL: push-apart direction");
 
     const toi = sweptAabbX(fx(0n), fx(2n), fx(8n), fx(6n), fx(10n));
-    if (toi <= 0n || toi >= FX_ONE) throw new Error("FAIL: swept AABB TOI");
+    if (toi !== FX_ONE / 2n) throw new Error("FAIL: swept AABB TOI (gap 4 at speed 8 = t 0.5)");
     const toi2 = sweptAabbX(fx(0n), fx(2n), -fx(1n), fx(6n), fx(10n));
     if (toi2 !== FX_ONE) throw new Error("FAIL: moving away yields no impact");
+    if (sweptAabbX(fx(0n), fx(2n), fx(8n), fx(1n), fx(5n)) !== 0n ||
+        sweptAabbX(fx(0n), fx(4n), fx(8n), fx(-2n), fx(1n)) !== 0n)
+        throw new Error("FAIL: overlapping at t=0 yields TOI 0");
+    if (sweptAabbX(fx(10n), fx(12n), fx(8n), fx(0n), fx(4n)) !== FX_ONE)
+        throw new Error("FAIL: target behind the mover yields no impact");
 
     console.log("All collision_detection_2d examples passed.");
 }

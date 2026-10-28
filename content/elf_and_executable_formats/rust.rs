@@ -1,11 +1,11 @@
 // ELF and Executable Formats — Rust Implementation
 //
 // Demonstrates ELF binary format internals:
-//   1. ELF header parsing (64-bit)
-//   2. Program header (segment) enumeration
-//   3. Section header enumeration with string table resolution
-//   4. Symbol table parsing
-//   5. Building a minimal ELF executable from scratch
+//   1. ELF header serialization and parsing (64-bit, round-tripped below)
+//   2. Program header (segment) layout
+//   3. Section header layout (a simulated readelf listing; no string-table
+//      or symbol-table parsing is done here)
+//   4. Building a minimal ELF executable from scratch
 //
 // This is what readelf, objdump, and linkers do when reading binaries.
 
@@ -74,6 +74,32 @@ impl Elf64Header {
             e_shnum: shnum,
             e_shstrndx: 0,
         }
+    }
+
+    /// Parse a little-endian ELF64 header from the first 64 bytes.
+    fn parse(b: &[u8]) -> Option<Self> {
+        if b.len() < 64 || b[0..4] != ELF_MAGIC || b[4] != ELFCLASS64 || b[5] != ELFDATA2LSB {
+            return None;
+        }
+        let u16_at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+        let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        Some(Self {
+            e_ident: b[0..16].try_into().unwrap(),
+            e_type: u16_at(16),
+            e_machine: u16_at(18),
+            e_version: u32_at(20),
+            e_entry: u64_at(24),
+            e_phoff: u64_at(32),
+            e_shoff: u64_at(40),
+            e_flags: u32_at(48),
+            e_ehsize: u16_at(52),
+            e_phentsize: u16_at(54),
+            e_phnum: u16_at(56),
+            e_shentsize: u16_at(58),
+            e_shnum: u16_at(60),
+            e_shstrndx: u16_at(62),
+        })
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -249,9 +275,14 @@ fn build_minimal_elf() -> Vec<u8> {
 // ── Simulated ELF Analysis ───────────────────────────────────────────────
 
 fn analyze_typical_binary() {
-    // Simulate what readelf shows for a typical binary
+    // Simulate what readelf shows for a typical binary. Since binutils 2.31,
+    // ld defaults to `-z separate-code` on x86-64 Linux: headers, code and
+    // read-only data each get their own PT_LOAD, so .rodata is NOT executable
+    // (ld 2.47 `readelf -lW`: LOAD R / LOAD R E / LOAD R / LOAD RW).
     let phdrs = vec![
-        Elf64Phdr { p_type: PT_LOAD, p_flags: PF_R | PF_X, p_offset: 0, p_vaddr: 0x400000, p_paddr: 0x400000, p_filesz: 8192, p_memsz: 8192, p_align: 0x1000 },
+        Elf64Phdr { p_type: PT_LOAD, p_flags: PF_R, p_offset: 0, p_vaddr: 0x400000, p_paddr: 0x400000, p_filesz: 0x300, p_memsz: 0x300, p_align: 0x1000 },              // ELF + program headers
+        Elf64Phdr { p_type: PT_LOAD, p_flags: PF_R | PF_X, p_offset: 0x1000, p_vaddr: 0x401000, p_paddr: 0x401000, p_filesz: 4096, p_memsz: 4096, p_align: 0x1000 },  // .text
+        Elf64Phdr { p_type: PT_LOAD, p_flags: PF_R, p_offset: 0x2000, p_vaddr: 0x402000, p_paddr: 0x402000, p_filesz: 256, p_memsz: 256, p_align: 0x1000 },          // .rodata
         Elf64Phdr { p_type: PT_LOAD, p_flags: PF_R | PF_W, p_offset: 0x3000, p_vaddr: 0x403000, p_paddr: 0x403000, p_filesz: 512, p_memsz: 1024, p_align: 0x1000 },
         Elf64Phdr { p_type: PT_NOTE, p_flags: PF_R, p_offset: 0x254, p_vaddr: 0x400254, p_paddr: 0x400254, p_filesz: 32, p_memsz: 32, p_align: 4 },
     ];
@@ -260,8 +291,8 @@ fn analyze_typical_binary() {
     for phdr in &phdrs {
         println!("    {}", phdr);
     }
-    println!("    Note: segment 2 has memsz > filesz → {} bytes of BSS (zero-filled)",
-        phdrs[1].p_memsz - phdrs[1].p_filesz);
+    println!("    Note: the RW segment has memsz > filesz → {} bytes of BSS (zero-filled)",
+        phdrs[3].p_memsz - phdrs[3].p_filesz);
 
     let sections = vec![
         Section { name: ".text".into(), sh_type: SHT_PROGBITS, vaddr: 0x401000, offset: 0x1000, size: 4096, flags: 6 },
@@ -290,12 +321,11 @@ fn main() {
     println!("   Total size: {} bytes ({} header + {} code)",
         binary.len(), 64 + 56, binary.len() - 64 - 56);
 
-    // Parse our own binary
-    let header = Elf64Header::new(
-        0x400000 + 120,
-        1,
-        0,
-    );
+    // Parse our own binary back out of its bytes
+    let header = Elf64Header::parse(&binary).expect("valid ELF64 header");
+    assert_eq!(header.e_entry, 0x400000 + 120);
+    assert_eq!((header.e_type, header.e_machine), (ET_EXEC, EM_X86_64));
+    assert_eq!((header.e_phoff, header.e_phnum, header.e_phentsize), (64, 1, 56));
     println!("{}", header);
 
     // ── Typical binary structure ──────────────────────────────────────
@@ -304,7 +334,8 @@ fn main() {
 
     // ── Section to segment mapping ────────────────────────────────────
     println!("\n3. Section → Segment mapping:");
-    println!("   PT_LOAD (R+X): .text, .rodata  (code segment)");
+    println!("   PT_LOAD (R+X): .text            (code segment)");
+    println!("   PT_LOAD (R):   .rodata          (own segment since binutils 2.31 -z separate-code)");
     println!("   PT_LOAD (R+W): .data, .bss      (data segment)");
     println!("   Not loaded:    .symtab, .strtab, .debug_*  (tools only)");
 

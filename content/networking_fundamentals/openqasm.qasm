@@ -4,8 +4,8 @@
 // two sockets into the ESTABLISHED state where data can flow. The
 // quantum analog is *Bell-pair generation*: two qubits are
 // entangled via H + CNOT, and from then on a measurement of one
-// constrains the outcome of the other — exactly the semantics of
-// "ESTABLISHED" where bytes from one socket reach the other.
+// constrains the outcome of the other — the analog of "ESTABLISHED"
+// (though, unlike a socket, the pair carries no bytes; see below).
 //
 // 4-qubit register represents two sockets and their data channel:
 //   q[0] — client socket state (after handshake: in superposition)
@@ -17,19 +17,22 @@
 // TCP three-way handshake; subsequent CNOTs onto q[2]/q[3] model
 // data transfer through the established connection. Measuring all
 // four qubits collapses the channel state, completing the
-// "connection lifecycle" with a deterministic shared outcome.
+// "connection lifecycle" with a shared outcome: all four read 0000
+// or all read 1111, chosen at random.
 //
 // In real quantum networking (Quantum Internet drafts, EPR-based
-// distributed computing), this is exactly how *quantum
-// connections* are established: an entangled pair is the "session
-// state," and gates on either end propagate through the
-// entanglement just like TCP bytes flow between ESTABLISHED peers.
+// distributed computing), this is how *quantum connections* are
+// established: an entangled pair is the "session state". But a gate
+// on one end does NOT propagate through the entanglement — nothing
+// the other end can measure changes (no-signaling). Moving data
+// still takes a classical channel: teleportation spends one shared
+// pair plus 2 classical bits per qubit sent.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // Three-way handshake: H + CNOT entangles client and server
 h q[0];
@@ -41,4 +44,5 @@ cx q[0], q[2];
 // Server echoes back (entangle q[3] with q[1])
 cx q[1], q[3];
 
-measure q -> c;
+c = measure q;
+// @expect c in {0, 15}

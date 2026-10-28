@@ -81,7 +81,8 @@ fn main() {
 }
 
 // ── Unit tests ─────────────────────────────────────────────────────
-// #[cfg(test)] is only compiled during `cargo test`
+// #[cfg(test)] is only compiled when building the test harness —
+// `rustc --test` (what vidya's gate runs) or `cargo test`, which calls it
 
 #[cfg(test)]
 mod tests {

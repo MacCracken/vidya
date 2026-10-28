@@ -1,7 +1,8 @@
 # Instruction Encoding — Cyrius reference
-# Documents cc2's actual x86_64 encoding patterns:
+# Documents the x86_64 encoding patterns a Cyrius code generator emits:
 # REX.W prefix, register codes, ModR/M byte layout, instruction formats.
-# Pattern-focused: verify the encoding formulas that cc2 uses.
+# Pattern-focused: verify the encoding formulas, and emit real bytes for
+# two instructions checked against GNU as 2.47 output.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -107,6 +108,42 @@ fn call_rel32_size() { return 5; }
 fn ret_size() { return 1; }
 # SYSCALL = 2 bytes: 0x0F 0x05
 fn syscall_size() { return 2; }
+
+# Emit `mov r64, imm64` (REX.W [+B] B8+rd io) into buf; returns its length.
+fn emit_mov_imm64(buf, dst, imm) {
+    store8(buf, rex_byte(1, 0, 0, reg_needs_ext(dst)));
+    store8(buf + 1, 0xB8 + reg_low3(dst));
+    store64(buf + 2, imm);              # little-endian imm64
+    return 10;
+}
+
+# Emit `add r/m64, r64` (REX.W [+R][+B] 01 /r, mod=11) into buf; returns its length.
+fn emit_add_rr(buf, dst, src) {
+    store8(buf, rex_byte(1, reg_needs_ext(src), 0, reg_needs_ext(dst)));
+    store8(buf + 1, 0x01);
+    store8(buf + 2, modrm(3, src, dst));
+    return 3;
+}
+
+fn test_emitted_bytes() {
+    var code: u8[16];
+    # GNU as: mov rcx, 0x1122334455667788 → 48 b9 88 77 66 55 44 33 22 11
+    assert_eq(emit_mov_imm64(&code, reg_rcx(), 0x1122334455667788), mov_reg_imm64_size(), "mov imm64 emits 10 bytes");
+    assert_eq(code[0], 0x48, "mov rcx: REX.W");
+    assert_eq(code[1], 0xB9, "mov rcx: B8+1");
+    assert_eq(code[2], 0x88, "mov rcx: imm low byte first");
+    assert_eq(code[9], 0x11, "mov rcx: imm high byte last");
+    # GNU as: mov r8, imm64 → 49 b8 ...
+    emit_mov_imm64(&code, 8, 0x1122334455667788);
+    assert_eq(code[0], 0x49, "mov r8: REX.WB");
+    assert_eq(code[1], 0xB8, "mov r8: B8+0 (low3 of 8)");
+    # GNU as: add rcx, rdx → 48 01 d1 ; add rax, r10 → 4c 01 d0
+    assert_eq(emit_add_rr(&code, reg_rcx(), reg_rdx()), add_reg_reg_size(), "add r,r emits 3 bytes");
+    assert_eq(code[0] * 65536 + code[1] * 256 + code[2], 0x4801D1, "add rcx,rdx = 48 01 d1");
+    emit_add_rr(&code, reg_rax(), 10);
+    assert_eq(code[0] * 65536 + code[1] * 256 + code[2], 0x4C01D0, "add rax,r10 = 4c 01 d0");
+    return 0;
+}
 
 fn test_sizes() {
     assert_eq(mov_reg_imm64_size(), 10, "mov imm64 size");
@@ -246,6 +283,7 @@ fn main() {
     test_modrm();
     test_sib();
     test_sizes();
+    test_emitted_bytes();
     test_opcodes();
     test_mov_imm64();
     test_add_reg_reg();

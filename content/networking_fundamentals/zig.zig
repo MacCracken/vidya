@@ -17,10 +17,12 @@ var port_arr: [SOCK_CAP]u16 = @splat(0);
 var peer: [SOCK_CAP]usize = @splat(0);
 var rxbuf: [SOCK_CAP][BUF_CAP]u8 = @splat(@splat(0));
 var rxlen: [SOCK_CAP]usize = @splat(0);
-// Linear-scan port-to-sock map to avoid Zig's codegen bug on large
-// global @memset (a 65536-entry table tripped "emit MIR failed:
-// InvalidInstruction"). With only SOCK_CAP sockets we can never have
-// more than SOCK_CAP active ports anyway.
+// Linear-scan port-to-sock map. It began as a workaround: on the Zig of
+// vidya 2.4.0, @memset of a 65536-entry global table tripped "emit MIR
+// failed: InvalidInstruction". That no longer reproduces on Zig 0.17 (a
+// [65536]usize global @memset builds and runs in Debug and ReleaseFast).
+// It stays because with only SOCK_CAP sockets we can never have more than
+// SOCK_CAP active ports anyway: 8 entries, not 512 KiB.
 var pmap_port: [SOCK_CAP]u16 = @splat(0);
 var pmap_sock: [SOCK_CAP]usize = @splat(0);
 var pmap_count: usize = 0;

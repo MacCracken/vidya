@@ -169,7 +169,9 @@ bitmap_count_used() {
     local count=0
     local b=$bitmap
     while (( b > 0 )); do
-        (( count += b & 1 ))
+        # Not (( count += b & 1 )): when the sum is still 0 that returns
+        # status 1, and set -e kills the script (it only survives in $(...)).
+        count=$(( count + (b & 1) ))
         b=$((b >> 1))
     done
     echo "$count"

@@ -13,7 +13,8 @@
 
 // ── Cache-friendly: struct of arrays vs array of structs ───────────
 
-// Array of Structs (AoS) — each struct occupies a cache line
+// Array of Structs (AoS) — 16 bytes each, 4 per 64-byte cache line; a
+// pass that reads only x,y,z still drags every mass through the cache
 typedef struct {
     float x, y, z;
     float mass; // not always needed
@@ -34,6 +35,7 @@ ParticlesSoA particles_new(size_t n) {
     p.y = calloc(n, sizeof(float));
     p.z = calloc(n, sizeof(float));
     p.mass = calloc(n, sizeof(float));
+    assert(p.x && p.y && p.z && p.mass);
     p.count = n;
     return p;
 }
@@ -53,6 +55,7 @@ typedef struct {
 IntVec intvec_new(size_t cap) {
     IntVec v;
     v.data = malloc(cap * sizeof(int));
+    assert(v.data != NULL);
     v.len = 0;
     v.cap = cap;
     return v;
@@ -60,12 +63,14 @@ IntVec intvec_new(size_t cap) {
 
 void intvec_push(IntVec *v, int value) {
     if (v->len == v->cap) {
-        v->cap *= 2;
+        size_t new_cap = v->cap ? v->cap * 2 : 1;
         // Trap: `v->data = realloc(v->data, ...)` leaks the old buffer when
-        // realloc fails — the only pointer to it is gone. Use a temporary.
-        int *grown = realloc(v->data, v->cap * sizeof(int));
+        // realloc fails — the only pointer to it is gone. Use a temporary,
+        // and only commit cap once the grow has succeeded.
+        int *grown = realloc(v->data, new_cap * sizeof(int));
         assert(grown != NULL);
         v->data = grown;
+        v->cap = new_cap;
     }
     v->data[v->len++] = value;
 }
@@ -108,6 +113,7 @@ int main(void) {
     // ── Cache-friendly access patterns ─────────────────────────────
     // Sequential access: fast (prefetcher works well)
     int *sequential = calloc(N, sizeof(int));
+    assert(sequential != NULL);
     long sum = 0;
     for (int i = 0; i < N; i++) {
         sequential[i] = i;
@@ -153,17 +159,21 @@ int main(void) {
     int min_val = b + ((a - b) & ((a - b) >> 31));
     // For general use, just use the ternary — compiler optimizes it
     int min_simple = a < b ? a : b;
-    assert(min_val == 17 || min_simple == 17);
+    assert(min_val == 17 && min_simple == 17);
 
     // ── restrict: help the compiler optimize ───────────────────────
     // restrict tells the compiler pointers don't alias
     // void add_arrays(int *restrict dst, const int *restrict a, const int *restrict b, int n)
     // Allows vectorization that wouldn't be safe with potential aliasing
 
-    // ── Use const: enables compiler optimizations ──────────────────
+    // ── const: for correctness, not speed ─────────────────────────
     const int constant = 42;
-    // Compiler may propagate this value and eliminate loads
-    assert(constant == 42);
+    // The optimizer propagates any local whose address doesn't escape,
+    // const or not; and `const T *` doesn't promise the pointee won't
+    // change, so it rarely enables optimizations. For a guaranteed
+    // compile-time constant use C23 `constexpr` (or an enum constant).
+    constexpr int compile_time = 42;
+    assert(constant == compile_time);
 
     // ── Struct packing: reduce memory usage ────────────────────────
     struct Padded {
@@ -178,7 +188,7 @@ int main(void) {
         char c;    // 1 + 2 padding
     }; // = 8 bytes
 
-    assert(sizeof(struct Packed) <= sizeof(struct Padded));
+    assert(sizeof(struct Packed) < sizeof(struct Padded));
 
     // ── Small-N: linear search beats hash table ────────────────────
     struct { int key; const char *value; } small_table[] = {

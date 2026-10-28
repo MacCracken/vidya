@@ -85,9 +85,10 @@ _start:
     cmp     x0, #7
     b.ne    fail
 
-    // ── Test 6: Callee-saved register spill ───────────────────────
-    // When a function needs more values than volatile registers,
-    // the compiler spills callee-saved registers to the stack.
+    // ── Test 6: Callee-saved register save/restore ────────────────
+    // A function that uses x19-x28 (normally for values that must
+    // survive a call) must save them in its prologue and restore them
+    // in its epilogue, because its caller expects them unchanged.
     mov     x0, #3
     bl      generated_polynomial    // 3^4 + 2*3^3 + 3*3^2 + 4*3 + 5
     // = 81 + 54 + 27 + 12 + 5 = 179
@@ -260,8 +261,10 @@ generated_manhattan:
 // ════════════════════════════════════════════════════════════════════
 // Generated function: polynomial(x: i64) -> i64
 // Computes: x^4 + 2*x^3 + 3*x^2 + 4*x + 5
-// Demonstrates: callee-saved register spill when intermediates
-// exceed available volatile registers (unoptimized codegen pattern)
+// Demonstrates: the callee-saved save/restore protocol. This leaf only
+// needs four temporaries, so a real compiler would keep them in x9-x15
+// and save nothing; it uses x19-x22 here to show what the prologue and
+// epilogue must do once a function touches a callee-saved register.
 // ════════════════════════════════════════════════════════════════════
 generated_polynomial:
     stp     x29, x30, [sp, #-48]!

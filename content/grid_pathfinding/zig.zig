@@ -4,8 +4,9 @@
 // Zig uses fixed-size [64]u8 for the grid, a fixed-size queue array
 // for BFS (no allocator needed for 64 cells), and `std.PriorityQueue`
 // for A*'s open set with an explicit `lessThan` comparator over an
-// (f, cell) record. Manhattan distance is the heuristic. Zig's lack
-// of implicit conversion makes every i64 / usize boundary explicit.
+// (f, cell) record. Manhattan distance is the heuristic. Zig never
+// converts implicitly between signed and unsigned, so every i64 / usize
+// boundary is an explicit @intCast.
 
 const std = @import("std");
 const Order = std.math.Order;

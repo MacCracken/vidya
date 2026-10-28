@@ -24,8 +24,10 @@
 #include <string.h>
 
 // ── Include Guards ────────────────────────────────────────────────
-// Prevent a header from being processed twice. Without this, types
-// and functions would be redefined, causing compiler errors.
+// Prevent a header from being processed twice. Without this, its
+// contents are redefined: object and function definitions, and (before
+// C23) every struct, are compile errors. C23 (N3037) tolerates only an
+// identical redefinition of a tagged struct/union/enum.
 //
 // #ifndef MY_HEADER_H
 // #define MY_HEADER_H
@@ -47,7 +49,8 @@
 // Take arguments. ALWAYS parenthesize the arguments and the whole
 // expression — operator precedence doesn't work like function calls.
 
-// BAD: no parens — MIN(1+2, 3) expands to (1+2 < 3 ? 1+2 : 3) — wrong!
+// BAD: no parens — BAD_MIN(1, 5) + 1 expands to 1 < 5 ? 1 : 5 + 1, so the
+// + 1 binds to the else branch and the result is 1, not 2.
 // #define BAD_MIN(a, b) a < b ? a : b
 
 // GOOD: fully parenthesized
@@ -57,7 +60,9 @@
 
 // But even parenthesized macros have double-evaluation:
 // MIN(expensive(), y) calls expensive() TWICE if it's the minimum.
-// This is NOT a problem with Rust macros (they evaluate once).
+// Rust macro_rules! has the same hazard if $a appears twice in the
+// expansion (its expr fragments fix precedence, not evaluation count).
+// The C fix is a static inline function, which evaluates each argument once.
 
 // ── Stringify (#) ─────────────────────────────────────────────────
 // The # operator turns a macro argument into a string literal.
@@ -89,9 +94,10 @@ MAKE_GETTER(double, double)
 // ── Variadic Macros ───────────────────────────────────────────────
 // __VA_ARGS__ captures variable arguments, like Rust's $(...)*
 
-#define LOG(fmt, ...) printf("[LOG] " fmt "\n", ##__VA_ARGS__)
-// The ## before __VA_ARGS__ removes the trailing comma when no args
-// (GCC/Clang extension, now part of C23 as __VA_OPT__)
+#define LOG(fmt, ...) printf("[LOG] " fmt "\n" __VA_OPT__(,) __VA_ARGS__)
+// __VA_OPT__(,) emits the comma only when arguments were passed (C23;
+// C23 also allows LOG("no args") with zero variadic arguments). Older
+// code uses the GCC/Clang extension `, ##__VA_ARGS__` for the same job.
 
 // ── X-Macros: Code Generation from a Table ────────────────────────
 // Define a list of data once, then expand it in multiple contexts.
@@ -149,7 +155,9 @@ static int extra_validation(int x) {
 // ── do { ... } while(0) Idiom ─────────────────────────────────────
 // Multi-statement macros must use do/while(0) to behave as a single
 // statement. Without it, if/else breaks:
-//   if (x) MULTI_MACRO(y); else z;  // else attaches to wrong if
+//   if (x) MULTI_MACRO(y); else z;
+// Unbraced, only the macro's first statement is guarded by the if; braced
+// as { ... }, the trailing ; ends the if and the else is a syntax error.
 
 #define SWAP(a, b)       \
     do {                 \
@@ -174,11 +182,12 @@ static const char *type_name_str(const char *x) { (void)x; return "string"; }
 )(x)
 
 // ── Compile-Time Assertions ───────────────────────────────────────
-// C11 _Static_assert checks conditions at compile time.
-// Like Rust's const assertions.
+// static_assert checks conditions at compile time. Like Rust's const
+// assertions. It is a keyword in C23 and the message is optional; C11
+// spelled it _Static_assert, which C23 keeps as an alternate spelling.
 
-_Static_assert(sizeof(int) >= 4, "int must be at least 32 bits");
-_Static_assert(MAX_BUFFER_SIZE == 256, "buffer size constant");
+static_assert(sizeof(int) >= 4, "int must be at least 32 bits");
+static_assert(MAX_BUFFER_SIZE == 256);
 
 int main(void) {
     // ── Object-like macros ────────────────────────────────────────

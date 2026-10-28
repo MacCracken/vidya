@@ -66,6 +66,25 @@ static bool did_transition(const Player *p) {
     return p->state != p->prev_state;
 }
 
+// Game-level transition table: only listed edges are legal.
+static bool game_can_transition(GameState from, GameState to) {
+    switch (from) {
+        case GS_MENU:     return to == GS_SELECT || to == GS_ATTRACT;
+        case GS_ATTRACT:  return to == GS_MENU;
+        case GS_SELECT:   return to == GS_TIPOFF || to == GS_MENU;
+        case GS_TIPOFF:   return to == GS_PLAYING;
+        case GS_PLAYING:  return to == GS_HALFTIME || to == GS_OVERTIME || to == GS_GAMEOVER;
+        case GS_HALFTIME: return to == GS_PLAYING;
+        case GS_OVERTIME: return to == GS_GAMEOVER || to == GS_OVERTIME;
+        case GS_GAMEOVER: return to == GS_MENU;
+    }
+    return false;
+}
+
+static GameState game_transition(GameState from, GameState to) {
+    return game_can_transition(from, to) ? to : from;   // reject = stay put
+}
+
 int main(void) {
     Player p = player_new();
     transition(&p, INPUT_MOVE);
@@ -102,13 +121,14 @@ int main(void) {
     assert(!did_transition(&p));   // run->run is not a transition
 
     GameState g = GS_MENU;
-    g = GS_SELECT;   assert(g == GS_SELECT);
-    g = GS_TIPOFF;   assert(g == GS_TIPOFF);
-    g = GS_PLAYING;  assert(g == GS_PLAYING);
-    g = GS_HALFTIME; assert(g == GS_HALFTIME);
-    g = GS_PLAYING;  assert(g == GS_PLAYING);
-    g = GS_GAMEOVER; assert(g == GS_GAMEOVER);
-    (void)g;
+    g = game_transition(g, GS_SELECT);   assert(g == GS_SELECT);
+    g = game_transition(g, GS_TIPOFF);   assert(g == GS_TIPOFF);
+    g = game_transition(g, GS_PLAYING);  assert(g == GS_PLAYING);
+    g = game_transition(g, GS_HALFTIME); assert(g == GS_HALFTIME);
+    g = game_transition(g, GS_GAMEOVER); assert(g == GS_HALFTIME);  // rejected
+    g = game_transition(g, GS_PLAYING);  assert(g == GS_PLAYING);
+    g = game_transition(g, GS_GAMEOVER); assert(g == GS_GAMEOVER);
+    assert(!game_can_transition(GS_MENU, GS_PLAYING));   // can't skip tipoff
 
     p = player_new();
     transition(&p, INPUT_SHOOT);

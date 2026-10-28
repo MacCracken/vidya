@@ -7,12 +7,16 @@
 
 import sys
 import gc
+import weakref
 
 def main():
     # ── Reference counting ──────────────────────────────────────────
     # Python tracks how many references point to each object
     a = [1, 2, 3]
-    ref_before = sys.getrefcount(a)  # includes getrefcount's own temp ref
+    # Before 3.14 this was one higher (getrefcount's argument held its own
+    # temporary reference). Since 3.14 the interpreter passes a BORROWED
+    # reference where it can, so a fresh local now reports 1, not 2.
+    ref_before = sys.getrefcount(a)
 
     b = a  # b points to the same object — refcount increases
     assert a is b  # same object identity
@@ -26,10 +30,13 @@ def main():
     assert x == y      # equal values
     assert x is not y  # different objects in memory
 
-    # Small integers and interned strings are cached
-    a = 42
-    b = 42
-    assert a is b  # same object — Python caches small ints (-5 to 256)
+    # Small integers are cached: CPython keeps one object per value in
+    # -5..1024 since 3.15 (-5..256 before). Build them at RUNTIME to see it:
+    # two equal literals in one function share a single constant object, so
+    # `a = 5000; b = 5000; a is b` is True with no cache involved at all.
+    a = int("42")
+    b = int("42")
+    assert a is b  # same cached object
 
     # ── Mutability matters for memory ───────────────────────────────
     # Mutable objects: list, dict, set — modified in place
@@ -68,15 +75,18 @@ def main():
     b = Node()
     a.ref = b
     b.ref = a  # cycle! refcount never reaches zero
+    probe = weakref.ref(a)
+
+    gc.disable()  # keep the automatic collector from running in between
+    del a, b
+    assert probe() is not None  # refcounting alone did NOT free the cycle
 
     # Python's GC detects and collects cycles
-    del a, b
     collected = gc.collect()
-    # The cycle is freed by the GC
+    gc.enable()
+    assert collected >= 2 and probe() is None  # the cycle collector did
 
     # ── Weak references: break reference cycles ─────────────────────
-    import weakref
-
     class Resource:
         def __init__(self, name):
             self.name = name
@@ -135,10 +145,13 @@ def main():
     assert len(buf.data) == 0  # cleaned up
 
     # ── String interning ────────────────────────────────────────────
-    # Python automatically interns some strings (identifiers, small literals)
+    # Python automatically interns some strings (identifier-like literals).
+    # Comparing two "hello" literals would not show it: equal literals in one
+    # function are one constant object, interned or not. Build one at runtime:
     a = "hello"
-    b = "hello"
-    assert a is b  # interned — same object
+    b = "".join(["hel", "lo"])
+    assert a == b and a is not b  # equal value, separate object
+    assert sys.intern(b) is a     # interning maps it to the canonical copy
 
     # Dynamic strings may not be interned
     a = "hello" + " " + "world"

@@ -104,6 +104,11 @@ static int64_t replay(void) {
         int64_t op  = load64(&log_buf[pos + 0]);
         int64_t key = load64(&log_buf[pos + 8]);
         int64_t val = load64(&log_buf[pos + 16]);
+        /* Recovery reads bytes back from storage, so nothing in a record can
+         * be trusted: a torn or corrupted record with a wild key would index
+         * past data_vals. Stop at the first record that fails validation and
+         * treat it as the end of the durable log. */
+        if ((op != OP_SET && op != OP_DEL) || key < 0 || key >= STORE_KEYS) break;
         if (op == OP_SET) {
             data_vals[key] = val;
             data_present[key] = 1;
@@ -196,6 +201,17 @@ static void test_sequential_offsets_monotonic(void) {
     }
 }
 
+static void test_replay_stops_at_corrupt_record(void) {
+    reset_all();
+    store_set(0, 1);
+    store_set(1, 2);
+    log_commit();
+    store64(&log_buf[REC_SZ + 8], 1000000);  /* corrupt record 2's key */
+    int64_t n = replay();
+    CHECK(n == 1, "replay stops at the corrupt record");
+    CHECK(store_get(0) == 1, "records before it still applied");
+}
+
 static void test_log_capacity_limit(void) {
     reset_all();
     int failures = 0;
@@ -214,6 +230,7 @@ int main(void) {
     test_delete_replays_correctly();
     test_overwrite_uses_last_record();
     test_sequential_offsets_monotonic();
+    test_replay_stops_at_corrupt_record();
     test_log_capacity_limit();
     printf("All write_ahead_logging examples passed.\n");
     return 0;

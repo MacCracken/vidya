@@ -8,6 +8,7 @@
 // B was written in TMG, TMG was written in assembly.
 // Each stage only needed to compile the next stage's subset.
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,7 +44,14 @@ int collect_labels(Instruction *insts, int count, Label *labels) {
     for (int i = 0; i < count; i++) {
         switch (insts[i].op) {
             case OP_LABEL:
+                if (nlabels == MAX_LABELS) {
+                    fprintf(stderr, "too many labels (max %d)\n", MAX_LABELS);
+                    exit(1);
+                }
+                // strncpy does not terminate when the source fills all 63
+                // bytes, and labels[] is uninitialized — terminate explicitly
                 strncpy(labels[nlabels].name, insts[i].label, 63);
+                labels[nlabels].name[63] = '\0';
                 labels[nlabels].offset = offset;
                 nlabels++;
                 break;
@@ -133,6 +141,20 @@ int main(void) {
     printf("\nCode (%d bytes): ", code_size);
     for (int i = 0; i < code_size; i++)
         printf("%02X ", code[i]);
+
+    // Check the bytes, not just print them: the two passes must agree on
+    // every instruction's size, or the rel32 below lands mid-instruction.
+    static const unsigned char expected[] = {
+        0x48, 0xB8, 0x0A, 0, 0, 0, 0, 0, 0, 0,   // mov rax, 10
+        0x48, 0xB9, 0x20, 0, 0, 0, 0, 0, 0, 0,   // mov rcx, 32
+        0x48, 0x01, 0xC8,                        // add rax, rcx
+        0xE9, 0xE4, 0xFF, 0xFF, 0xFF,            // jmp start (rel32 = -28)
+        0xF4,                                    // hlt
+    };
+    assert(nlabels == 1 && labels[0].offset == 0);
+    assert(code_size == (int)sizeof(expected));
+    assert(memcmp(code, expected, sizeof(expected)) == 0);
+
     printf("\nBootstrap chain: source -> labels -> machine code\n");
 
     return 0;

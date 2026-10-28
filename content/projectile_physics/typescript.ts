@@ -96,18 +96,22 @@ function testEnergyDecay(): void {
 }
 
 function testSemiImplicitStability(): void {
-    const startY = FLOOR_Y - 655360n;                               // 10.0 above floor
-    const b: Ball = { x: 0n, y: startY, vx: 0n, vy: -655360n };     // vy=-10.0 upward
-    let minY = startY;
+    // A perfectly elastic floor isolates the integrator: any growth in bounce
+    // height is energy the integration order invented. Semi-implicit Euler's
+    // peaks stay flat (~9.1 units every bounce); explicit Euler's
+    // (`y += vy; vy += g`) grow 12 → 15 → 19 → … and fail this test.
+    const b: Ball = { x: 0n, y: FLOOR_Y - 655360n, vx: 0n, vy: 0n }; // 10.0 above floor
+    let earlyMinY = b.y;   // highest point (smallest y) in the first 200 frames
+    let lateMinY = FLOOR_Y; // ... and in the last 200 of 2000
 
-    for (let i = 0; i < 500; i++) {
+    for (let i = 0; i < 2000; i++) {
         physicsStep(b);
-        bounceCheck(b);
-        if (b.y < minY) minY = b.y;
+        if (b.y > FLOOR_Y) { b.y = FLOOR_Y; b.vy = -b.vy; } // restitution 1.0
+        if (i < 200 && b.y < earlyMinY) earlyMinY = b.y;
+        if (i >= 1800 && b.y < lateMinY) lateMinY = b.y;
     }
 
-    const maxRise = 1000n * 65536n;
-    mustTrue(minY > startY - maxRise, "semi-implicit euler does not explode");
+    mustTrue(lateMinY >= earlyMinY, "semi-implicit euler: elastic bounces do not grow");
 }
 
 function main(): void {

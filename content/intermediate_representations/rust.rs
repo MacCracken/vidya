@@ -369,4 +369,6 @@ fn main() {
     let folded = constant_fold(&mut cfg4);
     println!("  After folding ({} operations folded):", folded);
     print!("{}", cfg4);
+    assert_eq!(folded, 3);
+    assert!(matches!(cfg4.blocks[0].instructions[6], Tac::LoadConst { value: 60, .. }));
 }

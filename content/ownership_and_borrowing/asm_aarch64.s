@@ -136,19 +136,25 @@ _start:
     b.ne    fail
 
     // ── Test 8: double-free prevention (manual) ─────────────────────
-    // Mark pointer as null after "free" to prevent double-free.
+    // release(&ptr) frees the pointee and nulls the OWNER's pointer, so
+    // a second release of the same owner sees null and does nothing.
     sub     sp, sp, #16
     mov     w0, #42
-    str     w0, [sp]
+    str     w0, [sp]               // the resource
+    mov     x0, sp
+    str     x0, [sp, #8]           // owner's pointer slot -> resource
 
-    // "Free" by zeroing and nulling the pointer
-    str     wzr, [sp]              // clear data
-    mov     x0, xzr                // null the pointer
-
-    // Before "using", check for null (manual null check)
-    cbz     x0, .Lnull_ok          // null -> skip use
-    b       fail                    // should not reach here
-.Lnull_ok:
+    add     x0, sp, #8
+    bl      release                // first release: frees, returns 1
+    cmp     w0, #1
+    b.ne    fail
+    add     x0, sp, #8
+    bl      release                // second release: no-op, returns 0
+    cbnz    w0, fail
+    ldr     x0, [sp, #8]
+    cbnz    x0, fail               // owner's pointer is null
+    ldr     w0, [sp]
+    cbnz    w0, fail               // resource was cleared exactly once
     add     sp, sp, #16
 
     // ── Print success ────────────────────────────────────────────────
@@ -186,6 +192,19 @@ borrow_mutate:
 // Borrows pointer, reads value, returns it. Does not modify.
 inner_scope:
     ldr     w0, [x0]
+    ret
+
+// ── release(x0=&ptr) -> w0 = 1 if freed, 0 if ptr was already null ──
+// "Frees" *ptr by clearing the pointee, then nulls the owner's slot.
+release:
+    ldr     x1, [x0]
+    cbz     x1, .Lrelease_null     // already released: do nothing
+    str     wzr, [x1]              // clear (free) the pointee
+    str     xzr, [x0]              // null the owner's pointer
+    mov     w0, #1
+    ret
+.Lrelease_null:
+    mov     w0, #0
     ret
 
 // ── take_and_transform(w0=value) -> w0=result ──────────────────────

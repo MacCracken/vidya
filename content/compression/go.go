@@ -66,7 +66,8 @@ func encode(src []byte) []byte {
 	return tok
 }
 
-// Returns nil on bomb-guard trigger, else the decoded output.
+// Returns nil on bomb-guard trigger or an offset that points before the
+// start of the output (a corrupt or hostile stream), else the output.
 func decode(tok []byte, outCap int) []byte {
 	out := make([]byte, 0, outCap)
 	for i := 0; i+1 < len(tok); i += 2 {
@@ -83,6 +84,9 @@ func decode(tok []byte, outCap int) []byte {
 			if len(out)+length > outCap {
 				return nil
 			}
+			if off > len(out) {
+				return nil // offset reaches before the start of the output
+			}
 			for k := 0; k < length; k++ {
 				out = append(out, out[len(out)-off])
 			}
@@ -92,8 +96,19 @@ func decode(tok []byte, outCap int) []byte {
 }
 
 func mustEq(got, want []byte, label string) {
+	checks++
 	if !bytes.Equal(got, want) {
 		panic(fmt.Sprintf("%s: got %q want %q", label, got, want))
+	}
+}
+
+// checks counts the assertions this file runs, for the final tally.
+var checks int
+
+func check(cond bool, label string) {
+	checks++
+	if !cond {
+		panic(label)
 	}
 }
 
@@ -101,18 +116,14 @@ func main() {
 	// 1. Round-trip with substring match
 	s1 := []byte("ABCABCABC")
 	t1 := encode(s1)
-	if len(t1) == 0 {
-		panic("encoded length > 0")
-	}
+	check(len(t1) != 0, "encoded length > 0")
 	mustEq(decode(t1, 512), s1, "ABCABCABC roundtrip")
 
 	// 2. Overlapping (RLE)
 	s2 := []byte("AAAAAAAA")
 	t2 := encode(s2)
 	mustEq(decode(t2, 512), s2, "AAAAAAAA roundtrip")
-	if len(t2) >= len(s2)+4 {
-		panic("AAAAAAAA actually compresses")
-	}
+	check(len(t2) < len(s2), "AAAAAAAA actually compresses")
 
 	// 3. Mostly literals
 	s3 := []byte("Hello, World!")
@@ -121,19 +132,16 @@ func main() {
 
 	// 4. Bomb guard
 	bomb := []byte{1, 200}
-	if decode(bomb, 10) != nil {
-		panic("bomb guard rejects oversize")
-	}
+	check(decode(bomb, 10) == nil, "bomb guard rejects oversize")
+	check(decode([]byte{5, 3}, 10) == nil, "decoder rejects an offset past the start of the output")
 
 	// 5. Empty input
 	t5 := encode(nil)
-	if len(t5) != 0 {
-		panic("empty input → zero tokens")
-	}
+	check(len(t5) == 0, "empty input → zero tokens")
 	d5 := decode(nil, 512)
-	if len(d5) != 0 {
-		panic("empty tokens → zero output")
-	}
+	check(len(d5) == 0, "empty tokens → zero output")
 
-	fmt.Println("compression: 11/11 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("compression: %d/%d ok\n", checks, checks)
 }

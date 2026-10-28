@@ -11,23 +11,26 @@
 // The 4-qubit register here represents 4 page slots. We:
 //   q[0]  — page 1: prepared into |1> (the "value 42" analog), then
 //           measured to verify the prep landed correctly.
-//   q[1]  — page 2: allocated, then "freed" via reset, then re-prepared
-//           into a new state (showing reuse from the free list).
+//   q[1]  — page 2: allocated and freed with no write in between, so
+//           it reads |0> (the classical analog allocates, then frees it;
+//           bindless_resources and gpu_memory_pooling show reset-and-
+//           reuse with the `reset` instruction).
 //   q[2]  — page 3: extension path — allocated into |+> (Hadamard) to
 //           show that successive allocs return distinct slots.
 //   q[3]  — page 4: idle — illustrates that unallocated slots stay |0>.
 //
 // In real quantum compilers, qubit allocation is exactly this pattern:
 // the compiler tracks a free-list of "scratch" qubits and recycles them
-// after a measurement collapse and reset (see Qiskit's QubitManager and
-// Cirq's QidPool). The classical page-allocator/free-list pattern maps
+// after a measurement collapse and reset (see Cirq's `QubitManager`
+// interface — `qalloc` / `qfree` — and its `GreedyQubitManager`, which
+// reuses freed qubits). The classical page-allocator/free-list pattern maps
 // directly onto the quantum compiler's register pressure problem.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // "Allocate page 1 + write 42" — flip to |1>
 x q[0];
@@ -39,4 +42,6 @@ x q[0];
 h q[2];
 
 // Measure all four (the "page reads")
-measure q -> c;
+c = measure q;
+// Page 1 reads 1, pages 2 and 4 read 0, page 3 is 50/50: c is 0001 or 0101
+// @expect c in {1, 5}

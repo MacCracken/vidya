@@ -54,7 +54,9 @@ _start:
     jne     fail
 
     # ── LEA for fast arithmetic ─────────────────────────────────────
-    # LEA can compute a*b+c in one instruction (1 cycle)
+    # LEA computes base + index*s + disp in one instruction (1 cycle for
+    # the two-term forms), with s limited to 1, 2, 4 or 8 — so x*3, x*5,
+    # x*9 are one LEA, but a general a*b+c is not
     # Multiply by 5: x*4 + x
     mov     eax, 10
     lea     eax, [eax + eax * 4]    # eax = 10*5 = 50
@@ -130,7 +132,7 @@ _start:
     # Count set bits — used in bitmap operations, hash tables
     mov     rax, 0xFF00FF00FF00FF00
     popcnt  rcx, rax            # count of set bits
-    cmp     rcx, 32             # 8 bytes * 4 bits each = 32
+    cmp     rcx, 32             # four 0xFF bytes * 8 bits = 32
     jne     fail
 
     # ── LZCNT/TZCNT: leading/trailing zero count ───────────────────

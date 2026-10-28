@@ -1,8 +1,9 @@
 # Vidya — Optimization Passes in Cyrius
 #
-# PATTERN-FOCUSED: documents cc2's actual optimization patterns.
-# Covers dead code elimination with bitmap liveness, constant folding,
-# tail call optimization, and strength reduction.
+# PATTERN-FOCUSED: the classic passes, each with a small working helper —
+# dead code elimination with bitmap liveness, constant folding, tail call
+# optimization, and strength reduction. The last section says what the
+# cycc 6.7.18 compiler itself does.
 #
 # Key patterns:
 #   - DCE: bitmap tracks which registers are live, dead defs removed
@@ -26,8 +27,34 @@ include "lib/assert.cyr"
 #   3. If an instruction's dst is not in "used", mark it dead
 #   4. If an instruction IS used, add its operands to "used"
 #
-# cc2 can use a bitmap for the "used" set (registers are integers).
+# A bitmap works for the "used" set (registers are integers).
 # A 64-bit integer holds liveness for up to 64 virtual registers.
+
+fn popcount(x) {
+    var n = 0;
+    var t = x;
+    while (t != 0) { n = n + (t & 1); t = t >> 1; }   # `>>` is logical
+    return n;
+}
+
+# Backward DCE over straight-line code: inst i defines dst[i] and reads the
+# registers in use_mask[i]; `ret_mask` is what the return reads. Returns the
+# number of dead instructions.
+fn dce_count(dst, use_mask, n, ret_mask) {
+    var live = ret_mask;
+    var dead = 0;
+    var i = n - 1;
+    while (i >= 0) {
+        var d = load64(dst + i * 8);
+        if ((live & (1 << d)) != 0) {
+            live = (live & (0 - 1 - (1 << d))) | load64(use_mask + i * 8);
+        } else {
+            dead = dead + 1;
+        }
+        i = i - 1;
+    }
+    return dead;
+}
 
 fn test_dce_bitmap() {
     # Bitmap liveness: bit N = register N is live
@@ -50,13 +77,7 @@ fn test_dce_bitmap() {
     assert_eq(live & 16, 0, "reg 4 is dead");
 
     # Total live registers
-    var count = 0;
-    var tmp = live;
-    while (tmp > 0) {
-        count = count + (tmp & 1);
-        tmp = tmp / 2;
-    }
-    assert_eq(count, 3, "3 live registers");
+    assert_eq(popcount(live), 3, "3 live registers");
     return 0;
 }
 
@@ -71,10 +92,17 @@ fn test_dce_example() {
     #
     # After DCE: v2 and v4 removed (2 instructions eliminated)
 
-    var total_before = 6;
-    var dead_count = 2;  # v2 and v4
-    var total_after = total_before - dead_count;
-    assert_eq(total_after, 4, "4 instructions after DCE");
+    # v0..v4 as (dst, uses); the return reads v3 (bit 3).
+    var dst: i64[5];
+    var uses: i64[5];
+    dst[0] = 0; uses[0] = 0;          # v0 = 1
+    dst[1] = 1; uses[1] = 0;          # v1 = 2
+    dst[2] = 2; uses[2] = 0;          # v2 = 3
+    dst[3] = 3; uses[3] = 1 | 2;      # v3 = v0 + v1
+    dst[4] = 4; uses[4] = 0;          # v4 = 99
+    var dead_count = dce_count(&dst, &uses, 5, 8);
+    assert_eq(dead_count, 2, "DCE finds v2 and v4 dead");
+    assert_eq(6 - dead_count, 4, "4 instructions after DCE");
 
     # DCE is safe because removing a dead instruction cannot change
     # the program's observable behavior (it was never used)
@@ -99,24 +127,24 @@ fn test_dce_example() {
 # This is the most basic optimization and catches a lot of
 # code patterns (especially after inlining and specialization).
 
+enum FoldOp { OP_ADD = 1; OP_SUB = 2; OP_MUL = 3; }
+
+# The folder's core: a BINOP whose operands are both known constants
+# becomes the CONST it evaluates to.
+fn fold(op, a, b) {
+    if (op == OP_ADD) { return a + b; }
+    if (op == OP_SUB) { return a - b; }
+    if (op == OP_MUL) { return a * b; }
+    return 0;
+}
+
 fn test_constant_folding() {
     # (10 + 20) * (3 - 1) should fold to 60
-    var a = 10;
-    var b = 20;
-    var sum = a + b;
+    var sum = fold(OP_ADD, 10, 20);
     assert_eq(sum, 30, "10 + 20 = 30");
-
-    var c = 3;
-    var d = 1;
-    var diff = c - d;
+    var diff = fold(OP_SUB, 3, 1);
     assert_eq(diff, 2, "3 - 1 = 2");
-
-    var product = sum * diff;
-    assert_eq(product, 60, "(10+20) * (3-1) = 60");
-
-    # All 3 operations folded: add, sub, mul
-    var folded_count = 3;
-    assert_eq(folded_count, 3, "3 operations folded");
+    assert_eq(fold(OP_MUL, sum, diff), 60, "(10+20) * (3-1) = 60");
     return 0;
 }
 
@@ -127,15 +155,13 @@ fn test_constant_folding_chain() {
     # v3 = v2 * 4  -> fold to 20 (because v2 is now known = 5)
     # v4 = v3 - 1  -> fold to 19
 
-    var v0 = 2;
-    var v1 = 3;
-    var v2 = v0 + v1;
+    var v2 = fold(OP_ADD, 2, 3);
     assert_eq(v2, 5, "first fold: 2 + 3 = 5");
 
-    var v3 = v2 * 4;
+    var v3 = fold(OP_MUL, v2, 4);
     assert_eq(v3, 20, "second fold: 5 * 4 = 20");
 
-    var v4 = v3 - 1;
+    var v4 = fold(OP_SUB, v3, 1);
     assert_eq(v4, 19, "third fold: 20 - 1 = 19");
 
     # Each fold produces a new constant, enabling subsequent folds
@@ -179,11 +205,16 @@ fn test_tco_savings() {
 
     # But the real win is stack usage:
     # Without TCO: each recursive call adds a frame (stack overflow)
-    # With TCO: constant stack usage (loop equivalent)
-    var stack_growth_without = 1;  # grows per call
-    var stack_growth_with = 0;     # constant
-    assert_eq(stack_growth_with, 0, "TCO: no stack growth");
+    # With TCO: constant stack usage (loop equivalent). cycc compiles
+    # `return f(..);` as a jmp, so 5,000,000 tail calls run in one frame;
+    # the non-tail `return 1 + f(n - 1);` overflows the 8 MB stack (SIGSEGV).
+    assert_eq(count_down(5000000, 0), 5000000, "TCO: 5M tail calls, no stack growth");
     return 0;
+}
+
+fn count_down(n, acc) {
+    if (n == 0) { return acc; }
+    return count_down(n - 1, acc + 1);       # tail call
 }
 
 fn test_tco_detection() {
@@ -196,13 +227,10 @@ fn test_tco_detection() {
     # NOT tail call: return foo(x) + 1;    (addition after call)
     # NOT tail call: var r = foo(x); bar(); return r;  (bar() after)
 
-    # cc2 detects tail calls by checking:
+    # A compiler detects tail calls by checking:
     # - Is the call the direct child of a return statement?
     # - Is there no operation between call result and return?
-    var is_tail = 1;    # return foo(x)
-    var not_tail = 0;   # return foo(x) + 1
-    assert_eq(is_tail, 1, "direct return of call = tail call");
-    assert_eq(not_tail, 0, "computation after call = not tail call");
+    # (count_down above is the first shape; test_tco_savings runs it.)
     return 0;
 }
 
@@ -222,13 +250,29 @@ fn test_tco_detection() {
 #   SHL:  1 cycle latency
 #   Savings: 2 cycles per multiply-by-power-of-2
 
+fn is_pow2(n) {
+    if (n <= 0) { return 0; }
+    if ((n & (n - 1)) == 0) { return 1; }
+    return 0;
+}
+
+# Strength reduction of `x * c`: the shift that replaces it, or -1 when c
+# is not a power of two (keep the multiply).
+fn mul_shift_for(c) {
+    if (is_pow2(c) == 0) { return 0 - 1; }
+    var k = 0;
+    while ((1 << k) != c) { k = k + 1; }
+    return k;
+}
+
 fn test_strength_reduction() {
     # Multiply by powers of 2
     var x = 42;
-    assert_eq(x * 1, 42, "x * 1 = x (identity)");
-    assert_eq(x * 2, 84, "x * 2 = x << 1");
-    assert_eq(x * 4, 168, "x * 4 = x << 2");
-    assert_eq(x * 8, 336, "x * 8 = x << 3");
+    assert_eq(mul_shift_for(1), 0, "x * 1 = x << 0 (identity)");
+    assert_eq(x << mul_shift_for(2), x * 2, "x * 2 = x << 1");
+    assert_eq(x << mul_shift_for(4), x * 4, "x * 4 = x << 2");
+    assert_eq(x << mul_shift_for(8), x * 8, "x * 8 = x << 3");
+    assert_eq(mul_shift_for(6), 0 - 1, "x * 6 is not reduced to a shift");
 
     # Multiply by 0
     assert_eq(x * 0, 0, "x * 0 = 0");
@@ -246,16 +290,17 @@ fn test_power_of_two_detection() {
     #   6 = 0b0110, 5 = 0b0101, 6 & 5 = 0b0100 != 0
 
     # Powers of 2:
-    assert_eq(1 & 0, 0, "1 is power of 2");
-    assert_eq(2 & 1, 0, "2 is power of 2");
-    assert_eq(4 & 3, 0, "4 is power of 2");
-    assert_eq(8 & 7, 0, "8 is power of 2");
-    assert_eq(16 & 15, 0, "16 is power of 2");
+    assert_eq(is_pow2(1), 1, "1 is power of 2");
+    assert_eq(is_pow2(2), 1, "2 is power of 2");
+    assert_eq(is_pow2(4), 1, "4 is power of 2");
+    assert_eq(is_pow2(8), 1, "8 is power of 2");
+    assert_eq(is_pow2(16), 1, "16 is power of 2");
 
-    # Not powers of 2:
-    assert(3 & 2 != 0, "3 is not power of 2");
-    assert(6 & 5 != 0, "6 is not power of 2");
-    assert(10 & 9 != 0, "10 is not power of 2");
+    # Not powers of 2 (0 too: 0 & -1 == 0, hence the n > 0 guard):
+    assert_eq(is_pow2(3), 0, "3 is not power of 2");
+    assert_eq(is_pow2(6), 0, "6 is not power of 2");
+    assert_eq(is_pow2(10), 0, "10 is not power of 2");
+    assert_eq(is_pow2(0), 0, "0 is not power of 2");
     return 0;
 }
 
@@ -281,59 +326,40 @@ fn test_fixed_point() {
     # Example needing 2 iterations:
     # Iter 1: fold v2 = v0 + v1 -> v2 = 30 (enables DCE of v0, v1)
     # Iter 2: no more changes -> fixed point
-    var iter1_folds = 1;
-    var iter1_dce = 2;
-    var iter2_changes = 0;
-    assert_eq(iter2_changes, 0, "fixed point: no changes in final iteration");
 
     # More complex example: (10 + 20) * (x + 0) * 1 where x = 5
     # Iter 1: fold 10+20=30, reduce x+0=x, reduce v6*1=v6
     # Iter 2: fold 30*5=150 (now both operands known)
     # Iter 3: DCE removes dead intermediates
     # Iter 4: no changes -> fixed point
-    var total_passes = 150;  # final result
-    assert_eq(total_passes, 150, "(10+20) * (5+0) * 1 = 150");
+    var folded = fold(OP_MUL, fold(OP_MUL, fold(OP_ADD, 10, 20), fold(OP_ADD, 5, 0)), 1);
+    assert_eq(folded, 150, "(10+20) * (5+0) * 1 = 150");
     return 0;
 }
 
 # ================================================================
-# cc2's Current Optimizations
+# What the cycc 6.7.18 compiler does
 # ================================================================
-# cc2 currently performs minimal optimization:
-#   1. Constant expression evaluation at parse time
-#      (2 + 3 is computed during parsing, not emitted as code)
-#   2. Tail call optimization (call+ret -> jmp)
-#   3. Dead function detection (functions never called are not emitted)
-#
-# NOT yet implemented in cc2:
-#   - Register allocation (everything through stack/rax)
-#   - Inlining
-#   - Loop optimization
-#   - SSA-based passes (requires IR construction)
-#
-# This is the classic bootstrap tradeoff: simple compiler, slow code.
-# The compiler compiles itself fast; the output runs slow.
+# (The early bootstrap compiler, cc2, did almost none of this; cycc does.)
+#   1. Compile-time evaluation of const contexts: `const`, `const fn`,
+#      array sizes and enum values are folded by the compiler (6.7.2).
+#   2. Tail calls: `return f(..);` becomes a jmp (test_tco_savings runs
+#      5,000,000 of them in one frame).
+#   3. Register allocation on request: the `#regalloc` attribute.
+#   4. An opt-in IR (`CYRIUS_IR=3`) with constant folding and DCE.
+#   5. Dead-function elimination is OPT-IN (`CYRIUS_DCE=1` or `[build]
+#      dce = true`): a default build ships unreachable fns, which is why
+#      every `cyrius run` prints "note: N unreachable fns ... set
+#      CYRIUS_DCE=1 to eliminate".
 
-fn test_cc2_current_opts() {
-    # cc2 folds constants during parsing:
-    # "var x = 2 + 3;" -> stores 5 directly, no ADD instruction
-    var x = 2 + 3;
-    assert_eq(x, 5, "cc2 folds constants at parse time");
-
-    # cc2 does NOT do register allocation:
-    # Every value goes through rax and stack
-    var uses_reg_alloc = 0;
-    assert_eq(uses_reg_alloc, 0, "cc2: no register allocation");
-
-    # cc2 does NOT do inlining:
-    # Every call is a real CALL instruction
-    var uses_inlining = 0;
-    assert_eq(uses_inlining, 0, "cc2: no inlining");
-
-    # cc2 DOES do tail call optimization:
-    # return foo(x) -> leave; jmp foo
-    var uses_tco = 1;
-    assert_eq(uses_tco, 1, "cc2: has tail call optimization");
+fn test_cycc_current_opts() {
+    # A const context is evaluated by the compiler: an array size must be
+    # a compile-time constant, so this only compiles because 2 + 3 folds.
+    const FOLDED = 2 + 3;
+    var arr: i64[FOLDED];
+    arr[FOLDED - 1] = 7;
+    assert_eq(FOLDED, 5, "const 2 + 3 folded to 5");
+    assert_eq(arr[4], 7, "array sized by a folded const");
     return 0;
 }
 
@@ -348,7 +374,7 @@ fn main() {
     test_strength_reduction();
     test_power_of_two_detection();
     test_fixed_point();
-    test_cc2_current_opts();
+    test_cycc_current_opts();
     return assert_summary();
 }
 var exit_code = main();

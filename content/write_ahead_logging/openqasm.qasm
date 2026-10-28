@@ -11,8 +11,10 @@
 //   1. A 4-qubit "data store" register encodes 4 boolean keys.
 //   2. A 4-qubit "log" register entangles via CNOT with each data
 //      transition — the analog of "append a SET op record before
-//      flipping the data bit". Entanglement is the irreversible "log
-//      record" in this picture.
+//      flipping the data bit". (With every log bit a basis state,
+//      each CNOT is a plain XOR and nothing is entangled; the one
+//      irreversible step that makes the record durable is the
+//      measurement.)
 //   3. Measurement of the log register reports the recovered key
 //      states — the quantum analog of replay.
 //
@@ -25,19 +27,19 @@
 // QEC ancillas record "what went wrong" — both are checkpoint streams
 // that enable post-hoc state recovery.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // --- Data store register: 4 keys × 1 bit each -----------------------
 // data[i] = |1> means "key i has a value", |0> means absent.
-qreg data[4];
-creg data_c[4];
+qubit[4] data;
+bit[4] data_c;
 
 // --- Log register: 4 record slots, one per data transition ----------
-// log[i] is entangled with data[i] on each SET operation. After
+// log[i] drives data[i] through a CNOT on each SET operation. After
 // commit, measurement of log_c yields the recovered keys.
-qreg log[4];
-creg log_c[4];
+qubit[4] log;
+bit[4] log_c;
 
 // --- SET key 0: classical analog is store_set(0, 100). The "log
 // before data" rule means we entangle log[0] with the eventual data
@@ -62,12 +64,14 @@ cx log[2], data[2];
 // to a definite computational-basis state, which is the durable
 // checkpoint. data_c is read out separately to verify both registers
 // agree (the log-data consistency invariant).
-measure log -> log_c;
-measure data -> data_c;
+log_c = measure log;
+data_c = measure data;
 
 // log_c will read "0111" (bits 0, 1, 2 set) with probability 1.
 // data_c will read "0111" — the same — confirming WAL's invariant:
 // every committed log record corresponds to a data mutation.
+// @expect log_c == 7
+// @expect data_c == 7
 
 
 // --- Crash + replay illustration ------------------------------------
@@ -75,9 +79,9 @@ measure data -> data_c;
 // re-initialized to |0000>, but the log register still holds the
 // committed records. Replaying the log against fresh data restores
 // state.
-qreg data2[4];
-qreg log2[4];
-creg data2_c[4];
+qubit[4] data2;
+qubit[4] log2;
+bit[4] data2_c;
 
 // Re-establish the committed log (in a real system this would be
 // loaded from disk; here we re-prepare it).
@@ -91,9 +95,10 @@ cx log2[0], data2[0];
 cx log2[1], data2[1];
 cx log2[2], data2[2];
 
-measure data2 -> data2_c;
+data2_c = measure data2;
 // data2_c = "0111" — replay successfully reconstructed the data
 // store from the log register.
+// @expect data2_c == 7
 
 
 // --- Notes — classical WAL vs quantum-state recovery ----------------
@@ -105,7 +110,7 @@ measure data2 -> data2_c;
 //   - Recovery is O(log_size) per restart
 //
 // Quantum analog (this file):
-//   - Log register entangled with data via CNOT-per-transition
+//   - Log register drives data via CNOT-per-transition
 //   - Measurement collapses the log to a durable basis state
 //   - Re-applying the same gate sequence on a fresh data register
 //     reconstructs the post-commit state

@@ -46,8 +46,12 @@ classify_word() {
 }
 
 # tokenize <sql> — populates TOK_KIND, TOK_TEXT, TOK_N as globals.
-# Returns 0 on success. Cannot use $(tokenize ...) to capture results
-# because subshells discard global mutations.
+# Returns 0 on success, 1 on a character this lexer does not know
+# (TOK_ERR_POS holds its offset). Refusing matters: dropping '<' turns
+# `id < 5` into `id 5`, dropping '!' turns `id != 1` into `id = 1`, and
+# dropping ';' lets `FROM t; DROP TABLE t` through as plain identifiers.
+# Cannot use $(tokenize ...) to capture results because subshells
+# discard global mutations.
 tokenize() {
     local sql="$1"
     local len=${#sql}
@@ -105,8 +109,8 @@ tokenize() {
                 TOK_KIND+=("COMMA"); TOK_TEXT+=(","); TOK_N=$((TOK_N + 1)); i=$((i + 1))
                 ;;
             *)
-                # Unknown char — skip
-                i=$((i + 1))
+                TOK_ERR_POS=$i      # unknown char: reject, never skip
+                return 1
                 ;;
         esac
     done
@@ -138,7 +142,14 @@ is_valid_select() {
         echo 0
         return
     fi
-    echo 1
+    # ...then end of input, or exactly WHERE <ident> = <int|ident>. Without
+    # this, anything after the table name ("FROM t DROP TABLE t") passed.
+    local tail
+    tail=$(IFS=,; echo "${TOK_KIND[*]:from_idx + 2}")
+    case "$tail" in
+        EOF|WHERE,IDENT,EQ,INT,EOF|WHERE,IDENT,EQ,IDENT,EOF) echo 1 ;;
+        *) echo 0 ;;
+    esac
 }
 
 # kinds_match <expected_csv> — returns 0 if TOK_KIND matches expected
@@ -187,11 +198,28 @@ tokenize "SELECT FROM t"
 assert '[[ "$(is_valid_select)" == "0" ]]' "empty cols rejected"
 tokenize "SELECT * FROM"
 assert '[[ "$(is_valid_select)" == "0" ]]' "missing table rejected"
+# Nothing may follow the table except one WHERE <ident> = <value>
+for bad in "SELECT * FROM t DROP TABLE t" "SELECT * FROM t u" \
+           "SELECT * FROM t WHERE DROP TABLE t" \
+           "SELECT * FROM t WHERE id = 1 DROP TABLE t"; do
+    tokenize "$bad"
+    assert '[[ "$(is_valid_select)" == "0" ]]' "trailing tokens rejected: $bad"
+done
 
 # ── Test 7: whitespace tolerance ─────────────────────────────────────
 tokenize "  SELECT	*
 FROM	t  "
 assert 'kinds_match "SELECT,STAR,FROM,IDENT,EOF"' "whitespace kinds"
+
+# ── Test 8: unknown characters are rejected, never dropped ───────────
+for bad in "SELECT * FROM t WHERE id < 5" "SELECT * FROM t WHERE id != 1" \
+           "SELECT * FROM t; DROP TABLE t" "SELECT * FROM t WHERE n = 'x'"; do
+    rc=0
+    tokenize "$bad" || rc=$?
+    assert '(( rc == 1 ))' "should reject: $bad"
+done
+tokenize "SELECT * FROM t WHERE id < 5" || true
+assert '(( TOK_ERR_POS == 25 ))' "error offset points at '<'"
 
 echo "All sql_parsing examples passed."
 exit 0

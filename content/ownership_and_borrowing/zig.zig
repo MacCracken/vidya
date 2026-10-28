@@ -185,8 +185,10 @@ pub fn main() !void {
 
     // ── 8. No use-after-free at language level ───────────────────
     // Rust: borrow checker prevents use-after-free at compile time.
-    // Zig: no compile-time prevention, but SafeAllocator detects
-    //       use-after-free and double free at runtime. (It replaces
+    // Zig: no compile-time prevention, but SafeAllocator panics on a
+    //       double free and catches most WRITES after free at runtime.
+    //       A READ after free is not detected: it returns the poisoned
+    //       byte and carries on. (It replaces
     //       DebugAllocator, deprecated in 0.17, which had replaced
     //       GeneralPurposeAllocator in 0.16.)
     // Zig's philosophy: use tools (SafeAllocator, sanitizers) not type systems.

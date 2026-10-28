@@ -10,10 +10,6 @@ exceeds MAX entries, and descending-input inserts (which exercise the
 shift-right loop most heavily).
 """
 
-from __future__ import annotations
-
-from typing import List, Union
-
 MAX = 7
 
 
@@ -21,19 +17,19 @@ class Leaf:
     __slots__ = ("keys", "vals")
 
     def __init__(self) -> None:
-        self.keys: List[int] = []
-        self.vals: List[int] = []
+        self.keys: list[int] = []
+        self.vals: list[int] = []
 
 
 class Internal:
     __slots__ = ("keys", "children")
 
     def __init__(self) -> None:
-        self.keys: List[int] = []
-        self.children: List[Union["Leaf", "Internal"]] = []
+        self.keys: list[int] = []
+        self.children: list[Leaf | Internal] = []
 
 
-Node = Union[Leaf, Internal]
+Node = Leaf | Internal
 
 
 def _leaf_insert(leaf: Leaf, key: int, val: int) -> None:

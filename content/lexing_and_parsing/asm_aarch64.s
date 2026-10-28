@@ -242,6 +242,8 @@ skip_whitespace:
     b.eq    .Lsw_skip
     cmp     w2, #'\n'
     b.eq    .Lsw_skip
+    cmp     w2, #'\r'              // same set as is_whitespace, or CRLF stalls
+    b.eq    .Lsw_skip
     b       .Lsw_done
 .Lsw_skip:
     add     x0, x0, #1

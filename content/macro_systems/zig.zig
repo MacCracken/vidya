@@ -130,9 +130,16 @@ fn serializeStruct(value: anytype, buf: []u8) []const u8 {
     return buf[0..pos];
 }
 
-/// Simple integer-to-string for positive numbers.
+/// Simple integer-to-string (up to 64-bit). Negative values get a '-':
+/// dropping the sign would serialize x = -10 as "x=10". @abs (not `-val`)
+/// so minInt does not overflow.
 fn formatInt(val: anytype, buf: []u8) usize {
-    var v: u64 = if (val < 0) @intCast(-val) else @intCast(val);
+    var sign_len: usize = 0;
+    if (val < 0) {
+        buf[0] = '-';
+        sign_len = 1;
+    }
+    var v: u64 = @abs(val);
     var tmp: [20]u8 = undefined;
     var len: usize = 0;
 
@@ -147,11 +154,11 @@ fn formatInt(val: anytype, buf: []u8) usize {
         len += 1;
     }
 
-    // Reverse into buf
+    // Reverse into buf, after the sign
     for (0..len) |i| {
-        buf[i] = tmp[len - 1 - i];
+        buf[sign_len + i] = tmp[len - 1 - i];
     }
-    return len;
+    return sign_len + len;
 }
 
 // ── 3. inline for/while — unrolled iteration ─────────────────────────
@@ -258,7 +265,7 @@ fn comptimeConcat(comptime a: []const u8, comptime b: []const u8) []const u8 {
 // ── 6. Enum generation from comptime data ────────────────────────────
 //
 // Rust derive macros generate trait impls from enum definitions.
-// Zig generates the enum itself at comptime.
+// Zig generates the whole flag type (here a u32-backed struct) at comptime.
 
 /// Build a bitflag type from a list of names.
 fn BitFlags(comptime names: []const []const u8) type {
@@ -336,6 +343,8 @@ pub fn main() void {
     var buf2: [64]u8 = undefined;
     const pt_s = serializeStruct(pt, &buf2);
     assert(mem.eql(u8, pt_s, "x=10, y=20"));
+    var buf3: [64]u8 = undefined;
+    assert(mem.eql(u8, serializeStruct(Point{ .x = -10, .y = 0 }, &buf3), "x=-10, y=0"));
     print("   Point serialized: \"{s}\"\n\n", .{pt_s});
 
     // ── inline for ───────────────────────────────────────────────

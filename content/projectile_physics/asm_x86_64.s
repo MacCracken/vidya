@@ -180,11 +180,29 @@ _start:
     jnz     .rise_loop
 
     # After 10 frames of gravity=0.1 on vy=-20.0:
-    # vy should have increased (less negative or positive)
-    mov     rdi, [rip + ball_vy]
     # vy started at -1310720, after 10 frames: -1310720 + 10*6554 = -1245180
-    # vy should be greater than initial (closer to zero)
-    cmp     rdi, -1310720
+    mov     rdi, [rip + ball_vy]
+    mov     rsi, -1245180
+    lea     rdx, [rip + msg_t2]
+    mov     rcx, msg_t2_len
+    call    assert_eq
+    # ...and the ball rose: y is above (less than) where it started
+    mov     rdi, [rip + ball_y]
+    cmp     rdi, r12
+    setl    al
+    movzx   rdi, al
+    mov     rsi, 1
+    lea     rdx, [rip + msg_t2]
+    mov     rcx, msg_t2_len
+    call    assert_eq
+    # 300 frames later gravity has turned it around: vy > 0, falling
+    mov     r13, 300
+.fall_loop:
+    call    physics_step
+    dec     r13
+    jnz     .fall_loop
+    mov     rdi, [rip + ball_vy]
+    test    rdi, rdi
     setg    al
     movzx   rdi, al
     mov     rsi, 1
@@ -196,22 +214,15 @@ _start:
     # Put ball at floor with downward velocity
     mov     qword ptr [rip + ball_y], FLOOR_Y
     mov     qword ptr [rip + ball_vy], 655360       # 10.0 downward
-    mov     rax, [rip + ball_vy]                     # save pre-bounce vy
 
     # Push just below floor to trigger bounce
     add     qword ptr [rip + ball_y], 1
     call    bounce_check
 
-    # vy should now be negative (upward) and smaller magnitude
+    # vy should now be negative (upward) and smaller magnitude:
+    # -(10.0 * 0.7) = -7.0 = -458750 (exact in 16.16)
     mov     rdi, [rip + ball_vy]
-    test    rdi, rdi
-    js      .bounce_ok
-    xor     rdi, rdi
-    jmp     .bounce_check_done
-.bounce_ok:
-    mov     rdi, 1
-.bounce_check_done:
-    mov     rsi, 1
+    mov     rsi, -458750
     lea     rdx, [rip + msg_t3]
     mov     rcx, msg_t3_len
     call    assert_eq
@@ -285,13 +296,13 @@ _start:
     dec     r13
     jnz     .stable_loop
 
-    # min_y should be >= 0 (ball never went above starting area too much)
-    # and ball_y should be near floor (energy dissipated)
-    mov     rdi, [rip + ball_y]
-    cmp     rdi, FLOOR_Y
-    setle   al
-    movzx   rdi, al
-    mov     rsi, 1
+    # No energy gain: the first apex (100 frames up from -10.0, 32438340
+    # above the floor) must stay the highest point of the whole run — every
+    # later bounce peaks lower. A scheme or restitution that adds energy
+    # would push min_y below it. (ball_y <= FLOOR_Y alone proves nothing:
+    # bounce_check clamps y to the floor.)
+    mov     rdi, r12
+    mov     rsi, FLOOR_Y - 32438340
     lea     rdx, [rip + msg_t6]
     mov     rcx, msg_t6_len
     call    assert_eq

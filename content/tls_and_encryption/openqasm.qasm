@@ -17,18 +17,23 @@
 //   q[3] — application data flowing (entangled via CNOT from q[2] —
 //          only valid after cert verification)
 //
-// In real quantum cryptography (BB84, E91), this is exactly how
-// authenticated key exchange works: entanglement IS the shared
-// secret, and measurements collapse it into a classical key that
-// both parties hold. Quantum-resistant TLS variants (Kyber/Dilithium
-// in TLS 1.3 hybrid mode) will eventually move the handshake into
-// this domain.
+// In real quantum cryptography, E91 works this way: shared entangled
+// pairs are the source of the secret, and measurements collapse them
+// into a classical key that both parties hold (BB84 gets the same
+// result by prepare-and-measure, with no entanglement). Neither
+// authenticates anyone: QKD needs an already-authenticated classical
+// channel, which is the job TLS's certificate chain does.
+//
+// Post-quantum TLS is a different thing. Hybrid key exchange such as
+// X25519MLKEM768 (ML-KEM, FIPS 203 — formerly Kyber), deployed in
+// browsers since 2024, is classical math chosen to resist quantum
+// attackers. It runs on ordinary computers and involves no qubits.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // ECDHE: client and server agree on shared secret via entanglement
 h q[0];
@@ -40,4 +45,6 @@ cx q[1], q[2];
 // App data: only after cert
 cx q[2], q[3];
 
-measure q -> c;
+c = measure q;
+// All four agree: 0000 or 1111, each half the time
+// @expect c in {0, 15}

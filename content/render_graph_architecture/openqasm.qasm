@@ -15,24 +15,27 @@
 //
 // The topological sort is implicit in the circuit's gate order:
 // Qiskit's transpiler walks the same dependency DAG to determine
-// scheduling and barrier insertion. This is exactly the structure
+// scheduling (barriers are placed by the programmer, not inferred).
+// This is exactly the structure
 // render graphs build for GPU passes.
 //
 // Real quantum compilers (Qiskit's transpiler, t|ket>) maintain a
 // DAG explicitly (DAGCircuit class) and the optimisation passes are
 // graph rewrites over it — the same shape, different domain.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // Pass A: writes R1
 x q[1];
 
-// Pass B: reads R1, writes R2 (CNOT entangles them)
+// Pass B: reads R1, writes R2 (CNOT copies R1's bit into R2)
 cx q[1], q[2];
 
 // Pass C: reads R2 (measurement is the read)
-measure q -> c;
+c = measure q;
+// R1 and R2 read 1, R0 and R3 read 0: c = 0110
+// @expect c == 6

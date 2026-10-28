@@ -9,8 +9,9 @@
 .global _start
 
 .section .rodata
-# Test input: "  123 abc 456  "
-input:      .ascii "  123 abc 456  "
+# Test input: "  123 aBc 456  " (mixed case: the identifier scan has
+# separate upper- and lower-case range checks, and both must run)
+input:      .ascii "  123 aBc 456  "
 input_len = . - input
 
 msg_pass:   .ascii "All lexing and parsing examples passed.\n"
@@ -87,7 +88,7 @@ _start:
     mov     esi, input_len
     lea     rdx, [tokens]
     call    tokenize
-    # Returns eax = token count. We expect 3 tokens: "123", "abc", "456"
+    # Returns eax = token count. We expect 3 tokens: "123", "aBc", "456"
     cmp     eax, 3
     jne     fail
 

@@ -61,26 +61,29 @@ fn main() {
         // String::drop() runs here — memory freed automatically
     }
 
-    // Custom Drop
-    struct Guard {
+    // Custom Drop — a borrowed Cell<bool>, not a raw *mut bool: the lifetime
+    // 'a makes the compiler prove the flag outlives the guard, with no unsafe.
+    use std::cell::Cell;
+    struct Guard<'a> {
         name: &'static str,
-        dropped: *mut bool,
+        dropped: &'a Cell<bool>,
     }
-    impl Drop for Guard {
+    impl Drop for Guard<'_> {
         fn drop(&mut self) {
-            unsafe { *self.dropped = true; }
+            self.dropped.set(true);
         }
     }
 
-    let mut was_dropped = false;
+    let was_dropped = Cell::new(false);
     {
-        let _g = Guard { name: "test", dropped: &mut was_dropped };
+        let _g = Guard { name: "test", dropped: &was_dropped };
     }
-    assert!(was_dropped); // Drop ran when _g went out of scope
+    assert!(was_dropped.get()); // Drop ran when _g went out of scope
 
     // ── Clone: explicit deep copy ──────────────────────────────────
     let original = vec![1, 2, 3];
-    let copy = original.clone(); // explicit — Rust never copies implicitly
+    let copy = original.clone(); // explicit — Rust never DEEP-copies implicitly
+    // (only `Copy` types — plain bits like i32 — are copied on assignment)
     assert_eq!(original, copy);
     // Both are independent — modifying one doesn't affect the other
 
@@ -104,18 +107,19 @@ fn main() {
     // ── Minimizing allocations in loops ─────────────────────────────
     let items = ["alpha", "beta", "gamma"];
 
-    // BAD: format!() allocates a new String every iteration
-    // for item in &items { results.push(format!("{item}!")); }
-
-    // GOOD: reuse a buffer
+    // If you need a Vec<String>, each element must own its heap buffer:
+    // `format!` per item is one allocation each, and "reuse a buffer, then
+    // push buf.clone()" allocates exactly as often (clone allocates).
+    // Buffer reuse pays off when each formatted value is CONSUMED before
+    // the next one is built — written out, hashed, compared:
     let mut string_buf = String::new();
-    let mut results = Vec::with_capacity(items.len());
+    let mut total_len = 0;
     for item in &items {
-        string_buf.clear();
+        string_buf.clear(); // keeps the capacity: no allocation after the first item
         write!(string_buf, "{item}!").unwrap();
-        results.push(string_buf.clone());
+        total_len += string_buf.len(); // consume it here (e.g. write to a socket)
     }
-    assert_eq!(results, vec!["alpha!", "beta!", "gamma!"]);
+    assert_eq!(total_len, "alpha!beta!gamma!".len());
 
     // ── Box: owned heap allocation ─────────────────────────────────
     let boxed: Box<[u8; 1024]> = Box::new([0u8; 1024]); // 1KB on heap

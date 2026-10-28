@@ -77,7 +77,12 @@ func emitCode(insts []Instruction, labels map[string]int) []byte {
 			code = append(code, 0xC0|(inst.Src<<3)|inst.Reg) // ModR/M
 			offset += 3
 		case OpJump:
-			target := labels[inst.Label]
+			// comma-ok: a plain labels[name] returns 0 for an undefined
+			// label, silently turning a typo into a jump to offset 0.
+			target, ok := labels[inst.Label]
+			if !ok {
+				panic("undefined label: " + inst.Label)
+			}
 			rel := int32(target - (offset + 5))
 			code = append(code, 0xE9) // JMP rel32
 			relBytes := make([]byte, 4)
@@ -152,6 +157,24 @@ func main() {
 	}
 	if labels["start"] != 0 {
 		panic("start label should be at offset 0")
+	}
+	// Pass 2 resolved the backward jump: rel32 = start(0) - next(28).
+	if rel := int32(binary.LittleEndian.Uint32(code[24:28])); rel != -28 {
+		panic(fmt.Sprintf("jmp start: rel32 = %d, want -28", rel))
+	}
+
+	// A FORWARD reference is why pass 1 exists: when "jmp end" is
+	// emitted, "end" has not been seen yet, so a one-pass emitter could
+	// not know the displacement.
+	fwd := []Instruction{
+		{Op: OpJump, Label: "end"},
+		{Op: OpHalt},
+		{Op: OpLabel, Label: "end"},
+		{Op: OpHalt},
+	}
+	fwdCode := emitCode(fwd, collectLabels(fwd))
+	if rel := int32(binary.LittleEndian.Uint32(fwdCode[1:5])); rel != 1 {
+		panic(fmt.Sprintf("jmp end: rel32 = %d, want 1 (skip one HLT)", rel))
 	}
 	fmt.Println("All verifications passed.")
 }

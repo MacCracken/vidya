@@ -3,7 +3,9 @@
 // Zig has a strong static type system with comptime generics. Types
 // are first-class values at compile time. No inheritance — use
 // composition and interfaces via duck-typed comptime functions.
-// Every type decision is explicit: no implicit conversions.
+// Lossy conversions are always explicit: a value only coerces implicitly
+// when every value of the source type fits the target (u8 -> i16,
+// u32 -> u64, f32 -> f64); narrowing and sign changes need a builtin.
 
 const std = @import("std");
 const expect = std.testing.expect;
@@ -185,7 +187,11 @@ pub fn main() !void {
     try expect((try result) == 42);
 
     // ── Explicit casting ───────────────────────────────────────────
-    // Zig never converts implicitly between numeric types
+    // Widening that cannot lose information is implicit...
+    const narrow: u16 = 1000;
+    const wide: u64 = narrow; // u16 -> u64: no cast needed
+    try expect(wide == 1000);
+    // ...but anything that could lose a value needs an explicit builtin
     const big: u32 = 1000;
     const small: u16 = @intCast(big); // explicit, checked
     try expect(small == 1000);

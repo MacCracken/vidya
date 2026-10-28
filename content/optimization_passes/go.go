@@ -28,13 +28,14 @@ func (r Reg) String() string { return fmt.Sprintf("v%d", r) }
 type OpCode int
 
 const (
-	OpConst OpCode = iota // dst = imm
-	OpAdd                 // dst = lhs + rhs
-	OpSub                 // dst = lhs - rhs
-	OpMul                 // dst = lhs * rhs
-	OpShl                 // dst = lhs << rhs (shift left)
-	OpNeg                 // dst = -src
-	OpRet                 // return src
+	OpConst  OpCode = iota // dst = imm
+	OpAdd                  // dst = lhs + rhs
+	OpSub                  // dst = lhs - rhs
+	OpMul                  // dst = lhs * rhs
+	OpShl                  // dst = lhs << rhs (shift left)
+	OpShlImm               // dst = lhs << imm (shift by an immediate)
+	OpNeg                  // dst = -src
+	OpRet                  // return src
 )
 
 func (op OpCode) String() string {
@@ -47,7 +48,7 @@ func (op OpCode) String() string {
 		return "sub"
 	case OpMul:
 		return "mul"
-	case OpShl:
+	case OpShl, OpShlImm:
 		return "shl"
 	case OpNeg:
 		return "neg"
@@ -81,6 +82,8 @@ func (i Inst) liveString() string {
 		return fmt.Sprintf("  %s = const %d", i.Dst, i.Imm)
 	case OpAdd, OpSub, OpMul, OpShl:
 		return fmt.Sprintf("  %s = %s %s, %s", i.Dst, i.Op, i.Lhs, i.Rhs)
+	case OpShlImm:
+		return fmt.Sprintf("  %s = shl %s, %d", i.Dst, i.Lhs, i.Imm)
 	case OpNeg:
 		return fmt.Sprintf("  %s = neg %s", i.Dst, i.Lhs)
 	case OpRet:
@@ -121,6 +124,8 @@ func (p *Program) Eval() int64 {
 			regs[inst.Dst] = regs[inst.Lhs] * regs[inst.Rhs]
 		case OpShl:
 			regs[inst.Dst] = regs[inst.Lhs] << uint(regs[inst.Rhs])
+		case OpShlImm:
+			regs[inst.Dst] = regs[inst.Lhs] << uint(inst.Imm)
 		case OpNeg:
 			regs[inst.Dst] = -regs[inst.Lhs]
 		case OpRet:
@@ -186,6 +191,17 @@ func constantFold(p *Program) int {
 			known[inst.Dst] = result
 			folded++
 
+		case OpShlImm:
+			src, ok := known[inst.Lhs]
+			if !ok {
+				continue
+			}
+			inst.Op = OpConst
+			inst.Imm = src << uint(inst.Imm)
+			inst.Lhs = 0
+			known[inst.Dst] = inst.Imm
+			folded++
+
 		case OpNeg:
 			src, ok := known[inst.Lhs]
 			if !ok {
@@ -221,7 +237,7 @@ func deadCodeElim(p *Program) int {
 			case OpAdd, OpSub, OpMul, OpShl:
 				uses[inst.Lhs]++
 				uses[inst.Rhs]++
-			case OpNeg:
+			case OpNeg, OpShlImm:
 				uses[inst.Lhs]++
 			case OpRet:
 				uses[inst.Lhs]++
@@ -327,26 +343,25 @@ func strengthReduce(p *Program) int {
 				continue
 			}
 
-			// x * 2^n → x << n
+			// x * 2^n → x << n. The shift amount is n, not 2^n: reusing
+			// the register that holds 2^n as the shift count would turn
+			// x*8 into x<<8. The shift-by-immediate form carries n itself.
 			if rOk {
 				if shift, ok := isPowerOfTwo(rhs); ok && shift > 0 {
-					// Need a register holding the shift amount
-					// For simplicity, convert to const+shl pair by noting
-					// the shift in the immediate field
-					inst.Op = OpShl
-					// Replace rhs with a new const register would require
-					// inserting instructions. Instead, since the constant is
-					// already in a register, just change the op.
+					inst.Op = OpShlImm
+					inst.Imm = int64(shift)
+					inst.Rhs = 0
 					reduced++
 					continue
 				}
 			}
 			if lOk {
 				if shift, ok := isPowerOfTwo(lhs); ok && shift > 0 {
-					// Swap operands: put the non-constant in lhs position
-					inst.Op = OpShl
+					// 2^n * x: the non-constant operand becomes the shiftee
+					inst.Op = OpShlImm
 					inst.Lhs = inst.Rhs
-					inst.Rhs = inst.Lhs
+					inst.Imm = int64(shift)
+					inst.Rhs = 0
 					reduced++
 					continue
 				}
@@ -494,17 +509,32 @@ func main() {
 	fmt.Println("  After strength reduction:")
 	fmt.Print(prog3.String())
 
-	// Verify mul was replaced with shl
+	// Verify mul was replaced with shl by 3 — and that it still computes 56
 	srInst := prog3.Insts[2]
-	assert(srInst.Op == OpShl, fmt.Sprintf("mul*8 must become shl, got %s", srInst.Op))
+	assert(srInst.Op == OpShlImm && srInst.Imm == 3,
+		fmt.Sprintf("mul*8 must become shl by 3, got %s", srInst.liveString()))
+	assert(prog3.Eval() == beforeSR, fmt.Sprintf("strength reduction changed 7*8 to %d", prog3.Eval()))
 	fmt.Printf("  Reduced %d instructions. mul → shl\n", nReduced)
+
+	// Constant on the left: 8 * 7 must also become 7 << 3
+	progL := &Program{Insts: []Inst{
+		{Op: OpConst, Dst: 0, Imm: 8},
+		{Op: OpConst, Dst: 1, Imm: 7},
+		{Op: OpMul, Dst: 2, Lhs: 0, Rhs: 1},
+		{Op: OpRet, Lhs: 2},
+	}}
+	strengthReduce(progL)
+	assert(progL.Insts[2].Op == OpShlImm && progL.Insts[2].Lhs == 1 && progL.Eval() == 56,
+		fmt.Sprintf("8*7 must become v1 << 3 = 56, got %s = %d", progL.Insts[2].liveString(), progL.Eval()))
 
 	// ── 4. Combined pass pipeline ────────────────────────────────────
 	// Run all three passes in sequence on a fresh program.
 	// Expression: (5 * 1) + (0 * x) + (y * 4)
-	// After constant fold: 5 + 0 + (y * 4)  [partial, y unknown]
-	// After strength reduce: y * 4 → y << 2
-	// After DCE: remove dead intermediates
+	// This IR has no runtime inputs, so x and y are constants (42, 3) here
+	// and constant folding resolves the WHOLE expression; strength
+	// reduction then has nothing left to do (it reports 0) and DCE removes
+	// every intermediate. With a genuinely unknown y, folding would stop at
+	// y * 4 and strength reduction would turn it into y << 2 (section 3).
 	fmt.Println("\n4. Combined pass pipeline:")
 	fmt.Println("  Expression: (5 * 1) + (0 * x) + (y * 4)")
 

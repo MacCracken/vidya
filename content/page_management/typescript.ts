@@ -3,7 +3,8 @@
 // Fixed-size 4KB pages, single file. Header at offset 0; page 0 reserved
 // as null sentinel; data pages at PAGE_SZ + num * PAGE_SZ. Free list is
 // a stack with `next` pointer at byte offset 8 of each freed page.
-// Mirrors the cyrius reference's test surface exactly.
+// Mirrors the cyrius reference's test surface, plus check 7: the header is
+// written back after every alloc/free, and short page reads are errors.
 
 import * as fs from "fs";
 
@@ -47,8 +48,15 @@ function hdrLoad(buf: Buffer): Header {
 
 function pageRead(fd: number, num: bigint): Buffer {
   const buf = Buffer.alloc(PAGE_SZ);
-  fs.readSync(fd, buf, 0, PAGE_SZ, pageOffset(num));
+  // A short read (truncated file, page past EOF) leaves zeros in buf — and a
+  // zero `next` silently ends the free list. Treat it as corruption.
+  const n = fs.readSync(fd, buf, 0, PAGE_SZ, pageOffset(num));
+  if (n !== PAGE_SZ) throw new Error(`short read of page ${num}: ${n}/${PAGE_SZ} bytes`);
   return buf;
+}
+
+function hdrStore(fd: number, h: Header): void {
+  fs.writeSync(fd, hdrToBytes(h), 0, PAGE_SZ, 0);
 }
 
 function pageWrite(fd: number, num: bigint, buf: Buffer): void {
@@ -60,11 +68,13 @@ function pageAlloc(fd: number, h: Header): bigint {
     const fh = h.freeHead;
     const buf = pageRead(fd, fh);
     h.freeHead = buf.readBigUInt64LE(FP_NEXT);
+    hdrStore(fd, h);
     return fh;
   }
   const num = h.pageCount;
   h.pageCount = h.pageCount + 1n;
   pageWrite(fd, num, Buffer.alloc(PAGE_SZ));
+  hdrStore(fd, h); // header follows every page_count change (else: orphaned pages)
   return num;
 }
 
@@ -73,6 +83,7 @@ function pageFree(fd: number, h: Header, num: bigint): void {
   buf.writeBigUInt64LE(h.freeHead, FP_NEXT);
   pageWrite(fd, num, buf);
   h.freeHead = num;
+  hdrStore(fd, h);
 }
 
 function assertEq(got: bigint, want: bigint, label: string): void {
@@ -87,7 +98,7 @@ function main(): void {
 
   const fd = fs.openSync(path, "w+");
   const h = hdrInit();
-  fs.writeSync(fd, hdrToBytes(h), 0, PAGE_SZ, 0);
+  hdrStore(fd, h);
 
   // 1-2. header
   const rh = Buffer.alloc(PAGE_SZ);
@@ -115,9 +126,14 @@ function main(): void {
   const p3 = pageAlloc(fd, h);
   assertEq(p3, 2n, "reused freed page");
 
+  // 7. the on-disk header tracks every alloc/free
+  const dh = Buffer.alloc(PAGE_SZ);
+  fs.readSync(fd, dh, 0, PAGE_SZ, 0);
+  assertEq(hdrLoad(dh).pageCount, h.pageCount, "on-disk pgcount = in-memory");
+
   fs.closeSync(fd);
   fs.unlinkSync(path);
-  console.log("page_management: 6/6 ok");
+  console.log("page_management: 7/7 ok");
 }
 
 main();

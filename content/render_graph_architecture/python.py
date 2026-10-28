@@ -14,6 +14,7 @@ class Graph:
         self.count = 0
         self.topo_order = [0] * PASS_CAP
         self.topo_len = 0
+        self.culled = [False] * PASS_CAP
 
     def add_pass(self, id, reads, writes):
         if self.count >= PASS_CAP:
@@ -29,14 +30,19 @@ class Graph:
         return (self.writes[producer] & self.reads[consumer]) != 0
 
     def topo_sort(self):
+        """Order the LIVE passes; culled passes are not scheduled at all."""
         in_degree = [0] * PASS_CAP
         for i in range(self.count):
+            if self.culled[i]:
+                in_degree[i] = -1  # never picked
+                continue
             for j in range(self.count):
-                if i != j and self.has_edge(j, i):
+                if i != j and not self.culled[j] and self.has_edge(j, i):
                     in_degree[i] += 1
+        live = self.count - sum(self.culled[:self.count])
         self.topo_len = 0
         emitted = 0
-        while emitted < self.count:
+        while emitted < live:
             picked = -1
             for k in range(self.count):
                 if in_degree[k] == 0:
@@ -62,18 +68,28 @@ class Graph:
         return count
 
     def cull_dead(self):
+        """Remove passes whose outputs no live pass reads, to a fixed point:
+        culling a reader can leave its producer dead too (A -> B -> nobody
+        culls B, then A). Passes that write nothing are the graph's sinks
+        (final outputs) and are kept."""
         culled = 0
-        for i in range(self.count):
-            w = self.writes[i]
-            if w != 0:
+        changed = True
+        while changed:
+            changed = False
+            for i in range(self.count):
+                w = self.writes[i]
+                if self.culled[i] or w == 0:
+                    continue
                 any_reader = any(
-                    i != j and (w & self.reads[j]) != 0
+                    i != j and not self.culled[j] and (w & self.reads[j]) != 0
                     for j in range(self.count)
                 )
                 if not any_reader:
+                    self.culled[i] = True
                     self.writes[i] = 0
                     self.reads[i] = 0
                     culled += 1
+                    changed = True
         return culled
 
 
@@ -96,15 +112,24 @@ def main():
     assert d == 3
     assert g.cull_dead() == 1
     assert g.writes[3] == 0
-    assert g.topo_sort() == 4
+    assert g.topo_sort() == 3        # the culled pass is not scheduled
+    assert 3 not in g.topo_order[:g.topo_len]
     assert g.barrier_count() == 2
+
+    # Transitive: A -> B -> (nobody), plus a sink. Culling B kills A too.
+    g3 = Graph()
+    g3.add_pass(300, 0, 1)
+    g3.add_pass(301, 1, 2)
+    g3.add_pass(302, 0, 0)
+    assert g3.cull_dead() == 2
+    assert g3.topo_sort() == 1
 
     g2 = Graph()
     g2.add_pass(200, 1, 2)
     g2.add_pass(201, 2, 1)
     assert g2.topo_sort() == 0
 
-    print("render_graph_architecture: 14/14 ok")
+    print("render_graph_architecture: 15/15 ok")
 
 
 main()

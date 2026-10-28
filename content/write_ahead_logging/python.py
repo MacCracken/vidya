@@ -200,7 +200,11 @@ def test_log_capacity_limit() -> None:
         ok = w.store_set(0, i)
         if ok == 0:
             failures += 1
-    assert failures > 0, "log capacity is bounded"
+    assert failures == 300 - LOG_CAP_BYTES // REC_SZ, "exactly the overflow sets fail"
+    # The WAL rule, tested: a write that could not be LOGGED must not reach
+    # the data store. Mutating data first and logging second would leave 299
+    # here; log-first leaves the last value that was actually logged.
+    assert w.store_get(0) == LOG_CAP_BYTES // REC_SZ - 1, "unlogged writes never applied"
 
 
 def main() -> None:

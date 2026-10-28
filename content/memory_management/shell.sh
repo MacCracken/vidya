@@ -76,8 +76,10 @@ echo "will be cleaned up" > "$cleanup_file"
 assert_eq "$(cat "$cleanup_file")" "will be cleaned up" "trap file exists"
 # cleanup runs automatically when script exits
 
-# ── Heredoc vs herestring: avoiding temp allocations ────────────────
-# Herestring: passes string to stdin without a temp file (in most shells)
+# ── Heredoc and herestring: what backs stdin ───────────────────────
+# In bash both work the same way. Before 5.1 both were backed by a temp
+# file; since 5.1 both use a pipe when the text fits in the pipe buffer
+# (64 KiB on Linux) and fall back to a temp file when it is larger.
 result=$(cat <<< "hello herestring")
 assert_eq "$result" "hello herestring" "herestring"
 

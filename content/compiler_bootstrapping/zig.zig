@@ -23,6 +23,8 @@ pub fn main() !void {
 // ── Instruction Set ──────────────────────────────────────────────────
 // A minimal instruction set for a toy assembler. Each instruction
 // encodes to a fixed number of bytes so address calculation is simple.
+// (0.17: an enum's integer value is read with @backingInt; the old
+// @intFromEnum is on its way out and `zig fmt` rewrites it.)
 const Opcode = enum(u8) {
     nop = 0x00,
     load_imm = 0x01, // LOAD R, imm8  → 3 bytes: [op, reg, imm]
@@ -95,30 +97,30 @@ const Assembler = struct {
     fn pass2(self: *Assembler, program: []const SourceLine) !void {
         for (program) |line| {
             switch (line.inst) {
-                .nop => try self.code.append(self.alloc,@intFromEnum(Opcode.nop)),
+                .nop => try self.code.append(self.alloc,@backingInt(Opcode.nop)),
                 .load_imm => |op| {
-                    try self.code.append(self.alloc,@intFromEnum(Opcode.load_imm));
+                    try self.code.append(self.alloc,@backingInt(Opcode.load_imm));
                     try self.code.append(self.alloc,op.reg);
                     try self.code.append(self.alloc,op.value);
                 },
                 .add => |op| {
-                    try self.code.append(self.alloc,@intFromEnum(Opcode.add));
+                    try self.code.append(self.alloc,@backingInt(Opcode.add));
                     try self.code.append(self.alloc,op.dst);
                     try self.code.append(self.alloc,op.src);
                 },
                 .store => |op| {
                     const addr = self.symbols.get(op.label) orelse return error.UndefinedLabel;
-                    try self.code.append(self.alloc,@intFromEnum(Opcode.store));
+                    try self.code.append(self.alloc,@backingInt(Opcode.store));
                     try self.code.append(self.alloc,@truncate(addr & 0xFF));
                     try self.code.append(self.alloc,@truncate(addr >> 8));
                 },
                 .jmp => |op| {
                     const addr = self.symbols.get(op.label) orelse return error.UndefinedLabel;
-                    try self.code.append(self.alloc,@intFromEnum(Opcode.jmp));
+                    try self.code.append(self.alloc,@backingInt(Opcode.jmp));
                     try self.code.append(self.alloc,@truncate(addr & 0xFF));
                     try self.code.append(self.alloc,@truncate(addr >> 8));
                 },
-                .halt => try self.code.append(self.alloc,@intFromEnum(Opcode.halt)),
+                .halt => try self.code.append(self.alloc,@backingInt(Opcode.halt)),
             }
         }
     }
@@ -150,12 +152,12 @@ fn testTwoPassAssembler() !void {
     try expect(code.len == 10);
 
     // Verify opcode bytes
-    try expect(code[0] == @intFromEnum(Opcode.load_imm));
+    try expect(code[0] == @backingInt(Opcode.load_imm));
     try expect(code[1] == 0); // reg 0
     try expect(code[2] == 10); // immediate
-    try expect(code[3] == @intFromEnum(Opcode.load_imm));
-    try expect(code[6] == @intFromEnum(Opcode.add));
-    try expect(code[9] == @intFromEnum(Opcode.halt));
+    try expect(code[3] == @backingInt(Opcode.load_imm));
+    try expect(code[6] == @backingInt(Opcode.add));
+    try expect(code[9] == @backingInt(Opcode.halt));
 
     // Verify label addresses
     try expect(asm_.symbols.get("start").? == 0);
@@ -167,7 +169,7 @@ fn testForwardReference() !void {
     defer asm_.deinit();
 
     // Jump to a label defined AFTER the jump — this is why two passes
-    // are essential. Pass 1 collects "done" at address 4, pass 2
+    // are essential. Pass 1 collects "done" at address 6, pass 2
     // resolves the forward reference.
     const program = [_]SourceLine{
         .{ .label = null, .inst = .{ .jmp = .{ .label = "done" } } },
@@ -178,11 +180,11 @@ fn testForwardReference() !void {
     const code = try asm_.assemble(&program);
 
     // JMP instruction at offset 0: [04, lo, hi]
-    try expect(code[0] == @intFromEnum(Opcode.jmp));
+    try expect(code[0] == @backingInt(Opcode.jmp));
     // "done" is at address 6 (3 + 3)
     try expect(code[1] == 6); // lo byte
     try expect(code[2] == 0); // hi byte
-    try expect(code[6] == @intFromEnum(Opcode.halt));
+    try expect(code[6] == @backingInt(Opcode.halt));
 }
 
 fn testMultipleLabels() !void {
@@ -205,7 +207,7 @@ fn testMultipleLabels() !void {
     try expect(asm_.symbols.get("d").? == 5);
 
     // STORE references label "a" (address 0)
-    try expect(code[2] == @intFromEnum(Opcode.store));
+    try expect(code[2] == @backingInt(Opcode.store));
     try expect(code[3] == 0); // lo
     try expect(code[4] == 0); // hi
     try expect(code.len == 6);

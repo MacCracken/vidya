@@ -8,15 +8,20 @@ set -uo pipefail
 readonly MAX_VARINT_BYTES=10
 readonly MAX_MSG_SIZE=1024
 
+# Bash integers are SIGNED 64-bit. A u64 >= 2^63 is held as its bit
+# pattern, which bash reads as negative (2^64 - 1 is -1). Encode must not
+# test "value >= 128" and must shift logically (>> is arithmetic in bash,
+# so mask off the copied sign bits); a length check must reject < 0.
+
 # encode_varint VALUE — sets ENC[] (byte array) + ENC_LEN
 declare -a ENC
 encode_varint() {
     local value=$1
     ENC=()
     ENC_LEN=0
-    while (( value >= 128 )); do
+    while (( (value >> 7) != 0 )); do
         ENC[ENC_LEN]=$(( (value & 0x7F) | 0x80 ))
-        value=$((value >> 7))
+        value=$(( (value >> 7) & 0x01FFFFFFFFFFFFFF ))   # logical >> 7
         ENC_LEN=$((ENC_LEN + 1))
     done
     ENC[ENC_LEN]=$((value & 0x7F))
@@ -32,6 +37,10 @@ decode_varint() {
     for (( i = 0; i < MAX_VARINT_BYTES; i++ )); do
         if (( i >= buf_len )); then DEC_BYTES=-1; return; fi
         local b=${_buf[i]}
+        # The 10th byte holds bit 63 only (9 * 7 = 63 bits before it). Any
+        # higher bit is past 2^64 - 1, and `<<` would drop it silently
+        # (80x9 02, which is 2^64, decoded to 0).
+        if (( i == MAX_VARINT_BYTES - 1 && b > 1 )); then DEC_BYTES=-1; return; fi
         local low7=$(( b & 0x7F ))
         DEC_VAL=$(( DEC_VAL + (low7 << shift) ))
         if (( (b & 0x80) == 0 )); then
@@ -67,7 +76,9 @@ decode_frame() {
     # doesn't create a self-cycle on the same local name.
     decode_varint $buf_arg $buf_len
     if (( DEC_BYTES < 0 )); then FRAME_CONSUMED=-1; return; fi
-    if (( DEC_VAL > max_msg )); then FRAME_CONSUMED=-1; return; fi
+    # DEC_VAL < 0 is a length >= 2^63: without that test, 2^64 - 1 (-1)
+    # passed "> max_msg" and the frame "consumed" fewer bytes than its header.
+    if (( DEC_VAL < 0 || DEC_VAL > max_msg )); then FRAME_CONSUMED=-1; return; fi
     local hdr=$DEC_BYTES
     local total=$((hdr + DEC_VAL))
     if (( total > buf_len )); then FRAME_CONSUMED=-1; return; fi
@@ -100,6 +111,23 @@ declare -a BOMB
 for (( i = 0; i < 11; i++ )); do BOMB[i]=255; done
 decode_varint BOMB 11
 check $DEC_BYTES -1 "overflow guard"
+
+# Past u64: 10 bytes, but the last one carries bits 64+ (2^64 here)
+declare -a PAST=(128 128 128 128 128 128 128 128 128 2)
+decode_varint PAST 10
+check $DEC_BYTES -1 "2^64 rejected"
+
+# u64 max round-trips: 10 bytes, held by bash as -1
+encode_varint -1
+check $ENC_LEN 10 "u64 max encodes to 10 bytes"
+declare -a U64MAX; U64MAX=("${ENC[@]}")
+decode_varint U64MAX 10
+check $DEC_VAL -1 "u64 max decodes (bit pattern -1)"
+
+# A frame claiming a length >= 2^63 is refused, not read as negative
+declare -a NEGF=("${U64MAX[@]}" 65 66 67) NEG_OUT
+decode_frame NEGF 13 NEG_OUT $MAX_MSG_SIZE
+check $FRAME_CONSUMED -1 "length 2^64-1 rejected"
 
 # Frame round-trip — payload "hello, world"
 declare -a HELLO=(104 101 108 108 111 44 32 119 111 114 108 100)
@@ -146,7 +174,7 @@ check $FRAME_CONSUMED -1 "oversize"
 # had drifted to 19 while the file actually runs 18. The gate only
 # reads the exit status, so the wrong number shipped green. Assert the
 # count so it can never drift silently again.
-EXPECTED=18
+EXPECTED=22
 if [[ $PASS -ne $EXPECTED ]]; then
     echo "FAIL: ran $PASS checks, expected $EXPECTED" >&2
     exit 1

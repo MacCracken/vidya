@@ -57,7 +57,7 @@ gdt_code:                       # Entry 1: 64-bit code segment
 gdt_data:                       # Entry 2: 64-bit data segment
     # Access: P=1, DPL=0, S=1, Type=0010 (read/write)
     #   = 1 00 1 0010 = 0x92
-    # Flags: G=1, D/B=0, L=0, AVL=0
+    # Flags: G=1, D/B=1, L=0, AVL=0 (D/B is ignored for data in long mode)
     .word   0xFFFF
     .word   0x0000
     .byte   0x00
@@ -65,17 +65,11 @@ gdt_data:                       # Entry 2: 64-bit data segment
     .byte   0xCF                # flags (G=1, D/B=1) + limit [16:19]=0xF
     .byte   0x00
 
-gdt_user_code:                  # Entry 3: 64-bit user code (ring 3)
-    # Access: P=1, DPL=3, S=1, Type=1010
-    #   = 1 11 1 1010 = 0xFA
-    .word   0xFFFF
-    .word   0x0000
-    .byte   0x00
-    .byte   0xFA                # access: present, ring 3, code, exec/read
-    .byte   0xAF
-    .byte   0x00
-
-gdt_user_data:                  # Entry 4: 64-bit user data (ring 3)
+# User data comes BEFORE user code: SYSRET loads SS = STAR[63:48] + 8 and
+# CS = STAR[63:48] + 16, so the pair must be (data, code) in that order —
+# user SS = user CS - 8 (Linux: SS 0x2B, CS 0x33). (SYSCALL likewise needs
+# kernel data right after kernel code: entries 1 and 2.)
+gdt_user_data:                  # Entry 3: 64-bit user data (ring 3)
     # Access: P=1, DPL=3, S=1, Type=0010
     #   = 1 11 1 0010 = 0xF2
     .word   0xFFFF
@@ -83,6 +77,16 @@ gdt_user_data:                  # Entry 4: 64-bit user data (ring 3)
     .byte   0x00
     .byte   0xF2                # access: present, ring 3, data, read/write
     .byte   0xCF
+    .byte   0x00
+
+gdt_user_code:                  # Entry 4: 64-bit user code (ring 3)
+    # Access: P=1, DPL=3, S=1, Type=1010
+    #   = 1 11 1 1010 = 0xFA
+    .word   0xFFFF
+    .word   0x0000
+    .byte   0x00
+    .byte   0xFA                # access: present, ring 3, code, exec/read
+    .byte   0xAF
     .byte   0x00
 gdt_end:
 
@@ -98,8 +102,8 @@ gdt_pointer:
 # TI=0 for GDT, RPL=ring level
 KERNEL_CODE_SEL = 0x08          # GDT entry 1 (index=1, TI=0, RPL=0)
 KERNEL_DATA_SEL = 0x10          # GDT entry 2 (index=2, TI=0, RPL=0)
-USER_CODE_SEL   = 0x1B          # GDT entry 3 (index=3, TI=0, RPL=3)
-USER_DATA_SEL   = 0x23          # GDT entry 4 (index=4, TI=0, RPL=3)
+USER_DATA_SEL   = 0x1B          # GDT entry 3 (index=3, TI=0, RPL=3)
+USER_CODE_SEL   = 0x23          # GDT entry 4 (index=4, TI=0, RPL=3)
 
 # ── CR0 / CR4 / EFER bit constants ─────────────────────────────────
 # These are the bits a bootloader sets during mode transitions
@@ -113,10 +117,18 @@ efer_lme:   .quad   0x00000100  # EFER.LME — Long Mode Enable
 efer_sce:   .quad   0x00000001  # EFER.SCE — System Call Enable
 
 # ── Multiboot2 header constants ─────────────────────────────────────
+# The tag list must end with an end tag (type 0, size 8), so the smallest
+# valid header is 24 bytes, not the 16-byte fixed part (Multiboot2 spec
+# §3.1.1, §3.1.3).
+.align 8
 mb2_magic:      .long   0xE85250D6  # Multiboot2 header magic
 mb2_arch:       .long   0           # architecture: 0 = i386/x86
-mb2_length:     .long   16          # header length
-mb2_checksum:   .long   -(0xE85250D6 + 0 + 16)  # checksum (magic+arch+len+check=0)
+mb2_length:     .long   mb2_end - mb2_magic     # header length (24)
+mb2_checksum:   .long   -(0xE85250D6 + 0 + (mb2_end - mb2_magic))  # magic+arch+len+check=0
+mb2_end_tag:    .word   0           # type 0 = end tag
+                .word   0           # flags
+                .long   8           # size
+mb2_end:
 
 .section .rodata
 msg_pass:   .ascii "All boot and startup examples passed.\n"
@@ -138,7 +150,7 @@ _start:
 
     # Code segment flags byte: must have L=1 (long mode)
     movzx   eax, byte ptr [gdt_code + 6]
-    and     al, 0x20            # isolate L bit (bit 5 of flags nibble)
+    and     al, 0x20            # isolate L bit (bit 5 of this byte = descriptor bit 53)
     cmp     al, 0x20
     jne     fail
 
@@ -164,10 +176,17 @@ _start:
     cmp     eax, 3
     jne     fail
 
-    # Extract GDT index from user code selector: should be 3
+    # Extract GDT index from user code selector: should be 4
     mov     eax, USER_CODE_SEL
     shr     eax, 3              # index is bits [15:3]
-    cmp     eax, 3
+    cmp     eax, 4
+    jne     fail
+
+    # SYSRET layout: the descriptor 8 bytes below user code must be the
+    # user DATA segment (access 0xF2), or SYSRET would load a code
+    # segment into SS
+    movzx   eax, byte ptr [gdt_start + (USER_CODE_SEL & ~7) - 8 + 5]
+    cmp     al, 0xF2
     jne     fail
 
     # ── Verify GDT pointer structure ────────────────────────────────
@@ -202,6 +221,11 @@ _start:
     # Magic must be 0xE85250D6
     mov     eax, [mb2_magic]
     cmp     eax, 0xE85250D6
+    jne     fail
+
+    # header_length covers the fixed part AND the end tag
+    mov     eax, [mb2_length]
+    cmp     eax, 24
     jne     fail
 
     # Checksum: magic + arch + length + checksum must equal 0

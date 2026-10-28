@@ -35,9 +35,13 @@ fn build_index(buf: &[u8]) -> LineIndex {
     idx
 }
 
-// Returns escaped length, or None on bounds-check failure.
+// Returns escaped length, or None on bounds-check failure. Worst case is
+// 6x: RFC 8259 §7 requires EVERY control byte U+0000..U+001F to be escaped,
+// and those without a short form become \u00XX. Leaving them raw (only
+// escaping \n \t \r) emits invalid JSON.
 fn json_escape(dst: &mut Vec<u8>, dst_cap: usize, src: &[u8]) -> Option<usize> {
-    if src.len() * 2 > dst_cap {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    if src.len() * 6 > dst_cap {
         return None;
     }
     dst.clear();
@@ -48,6 +52,9 @@ fn json_escape(dst: &mut Vec<u8>, dst_cap: usize, src: &[u8]) -> Option<usize> {
             b'\n' => { dst.push(b'\\'); dst.push(b'n'); }
             b'\t' => { dst.push(b'\\'); dst.push(b't'); }
             b'\r' => { dst.push(b'\\'); dst.push(b'r'); }
+            c if c < 0x20 => {
+                dst.extend_from_slice(&[b'\\', b'u', b'0', b'0', HEX[(c >> 4) as usize], HEX[(c & 0xF) as usize]]);
+            }
             _ => dst.push(c),
         }
     }
@@ -66,6 +73,16 @@ fn json_unescape(dst: &mut Vec<u8>, src: &[u8]) -> usize {
                 b'n' => dst.push(b'\n'),
                 b't' => dst.push(b'\t'),
                 b'r' => dst.push(b'\r'),
+                b'u' if i + 5 < src.len() => {
+                    // \u00XX (control bytes)
+                    let hex = std::str::from_utf8(&src[i + 2..i + 6]).ok()
+                        .and_then(|h| u8::from_str_radix(h, 16).ok());
+                    match hex {
+                        Some(b) => { dst.push(b); i += 6; }
+                        None => { dst.push(src[i]); i += 1; }
+                    }
+                    continue;
+                }
                 _ => { dst.push(src[i]); i += 1; continue; }
             }
             i += 2;
@@ -112,5 +129,14 @@ fn main() {
     assert_eq!(unl, 12, "unescape recovers 12 bytes");
     assert_eq!(un, s3, "round-trip bytes match");
 
-    println!("jsonl_format: 8/8 ok");
+    // Test 6: control bytes without a short escape (NUL, backspace, 0x1F)
+    let s6: &[u8] = &[b'a', 0x00, 0x08, 0x1F];
+    let mut esc6: Vec<u8> = Vec::new();
+    json_escape(&mut esc6, 64, s6).expect("escape fits");
+    assert_eq!(esc6, b"a\\u0000\\u0008\\u001f", "\\u00XX escapes");
+    let mut un6: Vec<u8> = Vec::new();
+    json_unescape(&mut un6, &esc6);
+    assert_eq!(un6, s6, "\\u00XX round-trip");
+
+    println!("jsonl_format: 10/10 ok");
 }

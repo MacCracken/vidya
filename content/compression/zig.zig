@@ -56,7 +56,11 @@ fn encode(src: []const u8, tok: *[BUF_CAP]u8) usize {
     return tpos;
 }
 
-// Returns null on bomb-guard trigger, else decoded length.
+// Returns null on bomb-guard trigger or a malformed token, else decoded
+// length. A match offset must not reach before the start of the output:
+// untrusted input like {5, 3} as the first token would otherwise compute
+// `pos - b0` below zero (a safety panic in Debug, an out-of-bounds read
+// in ReleaseFast).
 fn decode(tok: []const u8, out_cap: usize, out: *[BUF_CAP]u8) ?usize {
     var pos: usize = 0;
     var i: usize = 0;
@@ -68,6 +72,7 @@ fn decode(tok: []const u8, out_cap: usize, out: *[BUF_CAP]u8) ?usize {
             out[pos] = b1;
             pos += 1;
         } else {
+            if (b0 > pos) return null;
             if (pos + b1 > out_cap) return null;
             var k: usize = 0;
             while (k < b1) : (k += 1) {
@@ -107,11 +112,15 @@ pub fn main() !void {
     const bomb = [_]u8{ 1, 200 };
     if (decode(&bomb, 10, &out) != null) return error.BombNotCaught;
 
+    // 4b. Offset reaching before the output start is rejected
+    const before_start = [_]u8{ 5, 3 };
+    if (decode(&before_start, BUF_CAP, &out) != null) return error.BadOffsetNotCaught;
+
     // 5. Empty input
     const t5 = encode("", &tok);
     if (t5 != 0) return error.EmptyEncodeBad;
     const d5 = decode(&[_]u8{}, BUF_CAP, &out) orelse return error.DecodeBomb;
     if (d5 != 0) return error.EmptyDecodeBad;
 
-    std.debug.print("compression: 11/11 ok\n", .{});
+    std.debug.print("compression: 13/13 ok\n", .{});
 }

@@ -153,12 +153,18 @@ int main(void) {
     assert(fb_get(22, 22) == 2);
     assert(fb_get(23, 23) == 2);
 
-    /* depth sort (painter's algorithm) */
+    /* depth sort (painter's algorithm): draw back-to-front, so the
+     * later (nearer) sprite covers the earlier one, except where its
+     * own pixels are the color key. */
+    static const uint8_t front_data[4] = { 7, 7, 7, 0 };
+    Sprite front = { front_data, 2, 2 };
     fb_clear(0);
-    blit(&sprite, 50, 50);
-    assert(fb_get(51, 51) == 2);
-    fb_set(51, 51, 7);
-    assert(fb_get(51, 51) == 7);
+    fb_set(53, 52, 5);           /* farthest: background pixel */
+    blit(&sprite, 50, 50);       /* back  */
+    blit(&front, 51, 51);        /* front */
+    assert(fb_get(53, 52) == 1); /* back covers the background */
+    assert(fb_get(51, 51) == 7); /* front covers back's 2 */
+    assert(fb_get(52, 52) == 2); /* front's key pixel shows back */
 
     /* scaled shrink */
     fb_clear(0);

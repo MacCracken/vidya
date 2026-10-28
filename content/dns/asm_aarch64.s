@@ -1,8 +1,16 @@
 // Vidya — DNS in AArch64 Assembly
 //
 // Asm port focuses on zone_lookup with CNAME chain + cache_lookup/insert
-// + resolve. 5 critical asserts: A hit, CNAME chain, loop bounded,
-// cache miss → hit, miss again after TTL expiry.
+// + resolve. 6 tests: A hit, CNAME chain, loop bounded,
+// cache miss → hit, miss again after TTL expiry, and a CNAME-reached
+// answer that expires with the shortest TTL on its chain.
+//
+// Simplification: zone_lookup returns -1 for EVERY failure. It does not
+// tell NXDOMAIN (no such name) from NODATA (name exists, type does not;
+// RFC 2308 §2.2) or SERVFAIL (a CNAME loop or over-deep chain; RFC 1034
+// §3.6.2), and resolve caches all of them alike. A real resolver must
+// keep them apart: answering NXDOMAIN for a name that exists tells an
+// RFC 8020 resolver the whole name is gone.
 
 .global _start
 
@@ -30,9 +38,10 @@ z_count:      .quad 0
 c_count:      .quad 0
 now_clock:    .quad 0
 last_status:  .quad 0
+last_ttl:     .quad 0             // min TTL over the chain zone_lookup walked
 
 .section .rodata
-msg_pass:     .ascii "dns: 5/5 ok\n"
+msg_pass:     .ascii "dns: 6/6 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail:     .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
@@ -63,7 +72,9 @@ zone_add:
 .za_done:
     ret
 
-// zone_lookup(x0=name, x1=rtype) -> x0
+// zone_lookup(x0=name, x1=rtype) -> x0; on a hit, last_ttl = the
+// minimum TTL over every record on the chain (each CNAME and the final
+// record): the answer must not be cached longer than any link lives.
 zone_lookup:
     stp     x29, x30, [sp, #-16]!
     stp     x19, x20, [sp, #-16]!
@@ -71,6 +82,7 @@ zone_lookup:
     mov     x19, x0               // cur
     mov     x20, x1               // rtype
     mov     x21, #0               // depth
+    mov     x7, #0x7FFFFFFFFFFFFFFF   // min_ttl (no call below: x7 is safe)
 .zl_outer:
     cmp     x21, #CNAME_MAX_DEPTH
     b.gt    .zl_neg
@@ -92,6 +104,14 @@ zone_lookup:
     ldr     x5, [x4, x3, lsl #3]
     cmp     x5, x20
     b.ne    .zl_search_next
+    adrp    x4, z_ttl
+    add     x4, x4, :lo12:z_ttl
+    ldr     x8, [x4, x3, lsl #3]
+    cmp     x8, x7
+    csel    x7, x8, x7, lt        // min_ttl = min(min_ttl, ttl)
+    adrp    x4, last_ttl
+    add     x4, x4, :lo12:last_ttl
+    str     x7, [x4]
     adrp    x4, z_value
     add     x4, x4, :lo12:z_value
     ldr     x0, [x4, x3, lsl #3]
@@ -117,6 +137,11 @@ zone_lookup:
     ldr     x5, [x4, x3, lsl #3]
     cmp     x5, #RR_CNAME
     b.ne    .zl_cname_next
+    adrp    x4, z_ttl
+    add     x4, x4, :lo12:z_ttl
+    ldr     x8, [x4, x3, lsl #3]
+    cmp     x8, x7
+    csel    x7, x8, x7, lt        // the CNAME's own TTL bounds the answer
     adrp    x4, z_value
     add     x4, x4, :lo12:z_value
     ldr     x6, [x4, x3, lsl #3]
@@ -269,36 +294,15 @@ resolve:
     mov     x0, #-1
     b       .rs_done
 .rs_pos:
-    mov     x21, x0               // (we already saved 19/20 — borrow x21? need to push too)
-    // We didn't push x21; use stack for value instead
+    // Only x19/x20 were saved in the prologue, so x21-x28 are off limits
+    // (callee-saved: our caller expects them back). Spill the value instead.
     str     x0, [sp, #-16]!
-    // find ttl
-    adrp    x2, z_count
-    add     x2, x2, :lo12:z_count
-    ldr     x3, [x2]
-    mov     x4, #0
-    mov     x5, #NEGATIVE_TTL
-.rs_findttl:
-    cmp     x4, x3
-    b.ge    .rs_insert
-    adrp    x6, z_name
-    add     x6, x6, :lo12:z_name
-    ldr     x7, [x6, x4, lsl #3]
-    cmp     x7, x19
-    b.ne    .rs_findnext
-    adrp    x6, z_type
-    add     x6, x6, :lo12:z_type
-    ldr     x7, [x6, x4, lsl #3]
-    cmp     x7, x20
-    b.ne    .rs_findnext
-    adrp    x6, z_ttl
-    add     x6, x6, :lo12:z_ttl
-    ldr     x5, [x6, x4, lsl #3]
-    b       .rs_insert
-.rs_findnext:
-    add     x4, x4, #1
-    b       .rs_findttl
-.rs_insert:
+    // TTL = min over the chain, from zone_lookup. (Looking up a record
+    // named `name` of type `rtype` finds nothing for a CNAME-reached
+    // answer and would fall back to NEGATIVE_TTL, outliving the A record.)
+    adrp    x6, last_ttl
+    add     x6, x6, :lo12:last_ttl
+    ldr     x5, [x6]
     ldr     x2, [sp], #16         // value
     mov     x0, x19
     mov     x1, x20
@@ -374,22 +378,31 @@ _start:
     mov     x1, #-1
     bl      assert_eq
 
-    // 4. Cache miss → hit
+    // 4. Cache miss → hit (status AND the answer: a cache that stored the
+    //    wrong value would still report a hit)
     mov     x0, #1
     mov     x1, #RR_A
     bl      resolve
+    mov     x19, x0               // answer (x19: callee-saved, survives bl)
     adrp    x0, last_status
     add     x0, x0, :lo12:last_status
     ldr     x0, [x0]
     mov     x1, #0
     bl      assert_eq
+    mov     x0, x19
+    ldr     x1, =0x7F000001
+    bl      assert_eq
     mov     x0, #1
     mov     x1, #RR_A
     bl      resolve
+    mov     x19, x0
     adrp    x0, last_status
     add     x0, x0, :lo12:last_status
     ldr     x0, [x0]
     mov     x1, #1
+    bl      assert_eq
+    mov     x0, x19
+    ldr     x1, =0x7F000001
     bl      assert_eq
 
     // 5. TTL expiry
@@ -398,10 +411,41 @@ _start:
     mov     x0, #1
     mov     x1, #RR_A
     bl      resolve
+    mov     x19, x0
     adrp    x0, last_status
     add     x0, x0, :lo12:last_status
     ldr     x0, [x0]
     mov     x1, #0
+    bl      assert_eq
+    mov     x0, x19
+    ldr     x1, =0x7F000001
+    bl      assert_eq
+
+    // 6. A CNAME-reached answer expires with the SHORTEST TTL on its
+    //    chain: 3 -> CNAME (600 s) -> 4 (A, 60 s). Caching it for longer
+    //    would keep serving the A record after it expired.
+    mov     x0, #3
+    mov     x1, #RR_CNAME
+    mov     x2, #600
+    mov     x3, #4
+    bl      zone_add
+    mov     x0, #4
+    mov     x1, #RR_A
+    mov     x2, #60
+    ldr     x3, =0x7F000004
+    bl      zone_add
+    mov     x0, #3
+    mov     x1, #RR_A
+    bl      resolve               // miss: fills the cache
+    mov     x0, #61
+    bl      advance_time
+    mov     x0, #3
+    mov     x1, #RR_A
+    bl      resolve
+    adrp    x0, last_status
+    add     x0, x0, :lo12:last_status
+    ldr     x0, [x0]
+    mov     x1, #0                // must be a miss: the A record expired
     bl      assert_eq
 
     mov     x0, #1

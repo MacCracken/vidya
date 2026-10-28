@@ -137,6 +137,9 @@ int main(void) {
     printf("1. Direct syscalls (inline assembly, no libc wrappers):\n");
 
     // write(1, "hello\n", ...) — syscall nr 1
+    // A raw write bypasses stdio's buffer: flush what printf has queued
+    // first, or on a pipe this line overtakes the headers printed above.
+    fflush(stdout);
     const char *msg = "  Hello from raw syscall!\n";
     long written = raw_syscall3(NR_WRITE, 1, (long)msg, (long)strlen(msg));
     if (is_syscall_error(written)) {

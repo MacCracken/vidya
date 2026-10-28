@@ -103,8 +103,12 @@ fn splitRootLeaf(allocator: std.mem.Allocator, old: *Node) !*Node {
     const mid = nk / 2;
     const median = old.keys[mid];
 
+    // errdefer: if a later allocation fails, the nodes made so far must
+    // not leak (the caller still owns `old` and frees it as before).
     const left = try Node.newLeaf(allocator);
+    errdefer allocator.destroy(left);
     const right = try Node.newLeaf(allocator);
+    errdefer allocator.destroy(right);
 
     var i: usize = 0;
     while (i < mid) : (i += 1) {

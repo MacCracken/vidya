@@ -15,12 +15,11 @@
 // untouched. Atomicity is the all-or-nothing structure of a single
 // gate: it either fires or it doesn't.
 //
-// OCC validation maps to a *version qubit*: entangled with data on
-// every write. The tx snapshots the version qubit at read time. If a
-// concurrent tx has flipped the version qubit before our commit, the
-// snapshot register and the live version register are now out of
-// phase, and the controlled-commit gate on (snap == live) blocks the
-// install. The structural pattern matches stabilizer-code QEC: the
+// OCC validation maps to a *version qubit*, bumped on every write. The
+// tx snapshots the version qubit at read time. If a concurrent tx has
+// flipped the version qubit before our commit, the snapshot register
+// and the live version register now disagree, and the
+// controlled-commit gate on (snap == live) blocks the install. The structural pattern matches stabilizer-code QEC: the
 // ancilla register is measured to detect whether an unauthorized
 // change happened between read and commit.
 //
@@ -30,21 +29,20 @@
 //   3. A 1-qubit "version" register entangled with account[0].
 //
 // Each demonstration is a self-contained sub-circuit on its own
-// register — qiskit's qasm2 loader accepts the file as long as the
-// gate set is valid.
+// registers; the file is one program.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // === A — Atomicity: commit installs all-or-nothing ==================
 // data_c is initially |000>. tx_c stages writes |111>. A controlled
 // fan-out (via CNOTs from tx into data) copies tx onto data only if
 // the commit qubit is |1>. Setting commit = |1> = "commit"; |0> = "abort".
 
-qreg data[3];
-qreg tx[3];
-qreg commit_q[1];
-creg data_c[3];
+qubit[3] data;
+qubit[3] tx;
+qubit[1] commit_q;
+bit[3] data_c;
 
 // Stage 3 writes in tx (|111>)
 x tx[0];
@@ -60,17 +58,18 @@ ccx commit_q[0], tx[0], data[0];
 ccx commit_q[0], tx[1], data[1];
 ccx commit_q[0], tx[2], data[2];
 
-measure data -> data_c;
+data_c = measure data;
 // data_c = "111" — commit installed all three writes atomically.
+// @expect data_c == 7
 
 
 // === A — Atomicity: abort discards all writes =======================
 // Same setup but commit_q stays |0> — the ccx gates never fire.
 
-qreg data_a[3];
-qreg tx_a[3];
-qreg commit_a[1];
-creg data_ac[3];
+qubit[3] data_a;
+qubit[3] tx_a;
+qubit[1] commit_a;
+bit[3] data_ac;
 
 x tx_a[0];
 x tx_a[1];
@@ -82,21 +81,22 @@ ccx commit_a[0], tx_a[0], data_a[0];
 ccx commit_a[0], tx_a[1], data_a[1];
 ccx commit_a[0], tx_a[2], data_a[2];
 
-measure data_a -> data_ac;
+data_ac = measure data_a;
 // data_ac = "000" — abort, all writes discarded.
+// @expect data_ac == 0
 
 
 // === I — Isolation via OCC version snapshot =========================
-// version qubit entangles with account[0]. Tx reads → snapshot version.
+// version qubit tracks writes to account[0]. Tx reads → snapshot version.
 // Concurrent tx flips version. Validation gate gates the commit on
 // (snapshot == live), which now disagree → commit blocked.
 
-qreg account[1];
-qreg version[1];
-qreg snap[1];
-qreg tx_w[1];
-qreg validate[1];
-creg account_c[1];
+qubit[1] account;
+qubit[1] version;
+qubit[1] snap;
+qubit[1] tx_w;
+qubit[1] validate;
+bit[1] account_c;
 
 // Initial state: account[0] = |0>, version[0] = |0>.
 
@@ -126,9 +126,10 @@ cx version[0], validate[0];  // if version is |1>, flip again
 // Commit: install tx_w into account ONLY if validate == |1>.
 ccx validate[0], tx_w[0], account[0];
 
-measure account -> account_c;
+account_c = measure account;
 // account_c = "0" — commit was blocked because the snapshot was stale.
 // (Had no concurrent tx bumped version, account_c would be "1".)
+// @expect account_c == 0
 
 
 // === D — Durability via measurement collapse =========================
@@ -138,16 +139,19 @@ measure account -> account_c;
 // on the (now-classical) bit. This mirrors the "post-fsync the bytes
 // are durable" contract.
 
-qreg durable[1];
-creg durable_c[1];
+qubit[1] durable;
+bit[1] durable_c;
 
 // Commit a "1" into durable.
 x durable[0];
 
 // Measure to "fsync".
-measure durable -> durable_c;
-// durable_c = "1" — committed. The bit is now classical. Any further
-// quantum gates on durable[] cannot un-collapse the measured value.
+durable_c = measure durable;
+// durable_c = "1" — committed. The classical bit durable_c keeps that
+// value whatever happens next. The qubit durable[0] is still a qubit —
+// a later x would flip it — so what is durable is the recorded result,
+// not the qubit: that is the fsync'd bytes, not the page cache.
+// @expect durable_c == 1
 
 
 // --- Notes — classical ACID vs quantum entanglement-as-commit -------
@@ -158,7 +162,7 @@ measure durable -> durable_c;
 //   - Pass: install writes, bump versions; Fail: abort tx
 //
 // Quantum analog (this file):
-//   - Version qubit entangled with data on each write
+//   - Version qubit bumped on each write
 //   - Tx copies version into snap qubit at read time (CNOT)
 //   - Validation gate: ccx gated on (snap XOR version == 0)
 //   - Commit fans out tx_w into data only if validation passes

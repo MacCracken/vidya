@@ -19,6 +19,10 @@ const Store = struct {
     rcount: [N_TX]usize = @splat(0),
     rkeys: [N_TX][TX_CAP]i32 = @splat(@splat(0)),
     rsnaps: [N_TX][TX_CAP]i64 = @splat(@splat(0)),
+    // A read the read set had no room to record can never be validated,
+    // so the transaction must not commit. (Silently dropping it let a tx
+    // commit on a stale value that another tx had overwritten.)
+    doomed: [N_TX]bool = @splat(false),
 
     fn accountSetRaw(self: *Store, k: usize, v: i64) void {
         self.accounts[k] = v;
@@ -37,6 +41,7 @@ const Store = struct {
                 self.status[t] = .active;
                 self.wcount[t] = 0;
                 self.rcount[t] = 0;
+                self.doomed[t] = false;
                 return @intCast(t);
             }
         }
@@ -60,10 +65,14 @@ const Store = struct {
         std.debug.assert(self.status[tx] == .active);
         const widx = self.findWrite(tx, k);
         if (widx >= 0) return self.wvals[tx][@intCast(widx)];
-        if (!self.hasRead(tx, k) and self.rcount[tx] < TX_CAP) {
-            self.rkeys[tx][self.rcount[tx]] = k;
-            self.rsnaps[tx][self.rcount[tx]] = self.version[@intCast(k)];
-            self.rcount[tx] += 1;
+        if (!self.hasRead(tx, k)) {
+            if (self.rcount[tx] < TX_CAP) {
+                self.rkeys[tx][self.rcount[tx]] = k;
+                self.rsnaps[tx][self.rcount[tx]] = self.version[@intCast(k)];
+                self.rcount[tx] += 1;
+            } else {
+                self.doomed[tx] = true; // untracked read: commit must fail
+            }
         }
         return self.accounts[@intCast(k)];
     }
@@ -81,6 +90,7 @@ const Store = struct {
         return 1;
     }
     fn validate(self: *const Store, tx: usize) bool {
+        if (self.doomed[tx]) return false;
         var i: usize = 0;
         while (i < self.rcount[tx]) : (i += 1) {
             const k: usize = @intCast(self.rkeys[tx][i]);
@@ -114,6 +124,7 @@ const Store = struct {
             self.status[t] = .free;
             self.wcount[t] = 0;
             self.rcount[t] = 0;
+            self.doomed[t] = false;
         }
     }
 };
@@ -231,6 +242,21 @@ pub fn main() !void {
         _ = s.write(tx, 3, 4);
         const fifth = s.write(tx, 4, 5);
         check(fifth == 0, "5th write rejected (cap=4)");
+    }
+    {
+        // A 5th distinct read does not fit the read set (cap=4). It cannot
+        // be validated, so the commit must fail even though another tx
+        // changing that key would otherwise go unnoticed.
+        var s = seed();
+        const t1: usize = @intCast(s.begin());
+        const t2: usize = @intCast(s.begin());
+        var k: i32 = 0;
+        var sum: i64 = 0;
+        while (k < 5) : (k += 1) sum += s.read(t1, k);
+        _ = s.write(t2, 4, 777);
+        _ = s.commit(t2);
+        _ = s.write(t1, 5, sum);
+        check(s.commit(t1) == 0, "untracked read (read set full) aborts");
     }
 
     std.debug.print("=== transactions_and_acid ===\n", .{});

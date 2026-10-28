@@ -296,14 +296,16 @@ class IrBuilder:
 # Used for: SSA construction, loop detection, code motion.
 
 def compute_dominators(cfg):
-    """Simple iterative dominator computation (Cooper, Harvey, Kennedy)."""
+    """Classic iterative data-flow dominator sets (Allen & Cocke; the
+    dragon book). Cooper, Harvey & Kennedy's "A Simple, Fast Dominance
+    Algorithm" (2001) refines this with an idom array and RPO intersect."""
     n = len(cfg.blocks)
     if n == 0:
         return {}
 
     # dom[b] = set of blocks that dominate b
     dom = {b.id: set(range(n)) for b in cfg.blocks}
-    dom[0] = {0}  # entry dominates only itself
+    dom[0] = {0}  # entry is dominated only by itself
 
     changed = True
     while changed:
@@ -335,9 +337,10 @@ def compute_idom(dom, num_blocks):
             continue
         # idom(b) = the dominator of b that is dominated by all other dominators of b
         for candidate in strict_doms:
-            # candidate is idom if it's dominated by no other strict dominator
-            if all(candidate in dom[other] or other == candidate
-                   for other in strict_doms):
+            # every other strict dominator must dominate candidate, i.e. be in
+            # dom[candidate]. (Testing `candidate in dom[other]` instead picks
+            # the dominator FARTHEST from b — the entry, for any nesting.)
+            if all(other in dom[candidate] for other in strict_doms):
                 idom[b] = candidate
                 break
     return idom
@@ -466,6 +469,15 @@ def main():
     # Then and else blocks are dominated by the condition block
     assert idom[1] == 0, "then block dominated by entry"
     assert idom[2] == 0, "else block dominated by entry"
+
+    # One level of nesting is where a wrong idom shows: in
+    # if 1>0 then (if 2>0 then 3 else 4) else 5, the inner branch blocks are
+    # dominated by BOTH B0 and B1, and their idom is the closer one, B1.
+    cfg_n = IrBuilder().build(IfPos(Lit(1), IfPos(Lit(2), Lit(3), Lit(4)), Lit(5)))
+    idom_n = compute_idom(compute_dominators(cfg_n), len(cfg_n.blocks))
+    inner = cfg_n.blocks[1].successors
+    assert all(idom_n[b] == 1 for b in inner), f"nested idom must be B1, got {idom_n}"
+    print(f"   nested if: inner blocks {inner} have idom B1")
     print()
 
     # ── Test 5: Constant folding ───────────────────────────────────
@@ -491,6 +503,8 @@ def main():
         if isinstance(inst, LoadConst) and inst.dst == result_reg:
             assert inst.value == 60, f"expected 60, got {inst.value}"
             break
+    else:
+        raise AssertionError("returned register was not folded to a constant")
     print()
 
     # ── Test 6: Basic block properties ─────────────────────────────

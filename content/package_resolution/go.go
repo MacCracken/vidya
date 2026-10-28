@@ -9,7 +9,10 @@
 //   enc = major*1_000_000 + minor*1_000 + patch
 // so version comparison IS integer comparison. A constraint is a
 // half-open range [lo, hi). A caret ^X.Y.Z allows everything from
-// X.Y.Z up to (but not including) the next major: [X.Y.Z, (X+1).0.0).
+// X.Y.Z up to (but not including) the next BREAKING version: the next
+// major for X >= 1, but below 1.0 the leftmost non-zero field is the
+// breaking one (npm, cargo): ^0.2.3 = [0.2.3, 0.3.0), ^0.0.3 =
+// [0.0.3, 0.0.4).
 
 package main
 
@@ -27,11 +30,21 @@ const (
 
 func sv(maj, min, pat int64) int64 { return maj*vMaj + min*vMin + pat }
 func svMajor(v int64) int64        { return v / vMaj }
+func svMinor(v int64) int64        { return v / vMin % vMin }
 
-// --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0) ---
+// --- Caret range [lo, hi): bump the leftmost non-zero field ---
 
 func caretLo(v int64) int64 { return v }
-func caretHi(v int64) int64 { return (svMajor(v) + 1) * vMaj }
+func caretHi(v int64) int64 {
+	switch {
+	case svMajor(v) > 0:
+		return (svMajor(v) + 1) * vMaj // ^1.2.3 → <2.0.0
+	case svMinor(v) > 0:
+		return (svMinor(v) + 1) * vMin // ^0.2.3 → <0.3.0
+	default:
+		return v + 1 // ^0.0.3 → <0.0.4
+	}
+}
 
 // --- Constraint satisfaction over a half-open range ---
 
@@ -172,6 +185,10 @@ func main() {
 	check(satisfies(sv(1, 4, 0), caretLo(sv(1, 2, 0)), caretHi(sv(1, 2, 0))), "1.4.0 in ^1.2.0")
 	check(!satisfies(sv(2, 0, 0), caretLo(sv(1, 2, 0)), caretHi(sv(1, 2, 0))), "2.0.0 not in ^1.2.0")
 	check(!satisfies(sv(1, 1, 0), caretLo(sv(1, 2, 0)), caretHi(sv(1, 2, 0))), "1.1.0 below ^1.2.0")
+	// Below 1.0 the minor (or patch) is the breaking axis.
+	check(caretHi(sv(0, 2, 3)) == sv(0, 3, 0), "^0.2.3 upper = 0.3.0, not 1.0.0")
+	check(!satisfies(sv(0, 9, 0), caretLo(sv(0, 2, 3)), caretHi(sv(0, 2, 3))), "0.9.0 not in ^0.2.3")
+	check(caretHi(sv(0, 0, 3)) == sv(0, 0, 4), "^0.0.3 upper = 0.0.4")
 
 	// Range intersection.
 	check(rangeLoMax(sv(1, 0, 0), sv(1, 3, 0)) == sv(1, 3, 0), "intersect lo = max")

@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — vidya
 
-> **Last refresh**: 2026-10-28 (the v2.9.3 and v2.9.2 ships; the 2026-10-27 roadmap cleanup and v2.9.1 ship below them). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
+> **Last refresh**: 2026-10-28 (the v2.9.4, v2.9.3 and v2.9.2 ships; the 2026-10-27 roadmap cleanup and v2.9.1 ship below them). Before that, 2026-10-23 (v2.9.0, plus the 2.8.7 and 2.8.6 blocks from the same day). 2.8.5 shipped without a sweep, so its state was back-filled in the 2.8.6 block.
 >
 > **Previous refresh**: 2026-05-16 (v2.7.1 ship — first scaffold + first sweep + standards-conformance pass). **Sweep fixes**: `BENCHMARKS.md` (v2.1.0 / 35 topics → v2.7.1 / 74 topics), `docs/usage.md` (added `code` + `serve`, 36 → 74 topics), `docs/sources.md` (Cyrius row added), `docs/development/learning-paths.md` (5 → 12 paths, 65 verified topic IDs). **Standards-conformance additions**: `CODE_OF_CONDUCT.md` (required), `docs/adr/` tier (template + README + 2 ADRs covering Rust→Cyrius port and vyakarana streaming migration — the latter retires `content-expansion-2026-04-08.md` into ADR 0001), `docs/architecture/README.md` (index), `docs/guides/getting-started.md` (zero-to-CLI), `docs/examples/README.md` (placeholder for consumer-integration examples), `docs/development/state.md` (volatile-state ledger — cyrius pin moved out of CLAUDE.md per first-party-documentation §"CLAUDE.md"). | **Refresh cadence**: when docs are touched, update the affected row.
 >
@@ -17,6 +17,18 @@ type: state
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change.
 
 ---
+
+## 2026-10-28 (v2.9.4) — content review and language versions
+
+| Doc | Change |
+|---|---|
+| `CHANGELOG.md` | 2.9.4 entry: the language-version table, the OpenQASM 3.1 port and its equivalence proof, `qasm_check.py` and `@expect`, Python 3.15, the Arch CI container, and the review (1,134 findings by language and by kind). |
+| `CLAUDE.md` | Tree comment → OpenQASM 3.1; Python row (`VIDYA_PYTHON`, 3.15); OpenQASM row (`qasm_check.py`, qasm3 + aer); the blind-spots line (circuits are now simulated against `@expect`). |
+| `README.md` | Language table: Rust, Python 3.15, C (GCC 16), Go 1.27, TypeScript 7, Bash 5.3, OpenQASM 3.1. |
+| `docs/sources.md` | Version column for Rust, Python, Go, Shell, Zig and OpenQASM (3.1 spec link); `stdgates.inc` replaces the bundled `qelib1.inc`. |
+| `docs/development/content-format.md` | `qelib1.inc` removed from the tree; the toolchain table; the OpenQASM authoring notes rewritten for 3.1 (no `cu`, reserved names, undefined initial state, importer limits, `@expect`). |
+| `docs/development/roadmap.md` | The content review replaced by its three follow-ups; a trigger row for OpenQASM `for` loops. |
+| `docs/development/state.md` | Version → 2.9.4, binary size, the 2.9.4 posture line; the gates line (Arch CI, Python 3.15, OpenQASM 3.1); "Next". |
 
 ## 2026-10-28 (v2.9.3) — `serve` longevity
 

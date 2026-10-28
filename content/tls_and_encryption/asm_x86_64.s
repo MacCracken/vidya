@@ -24,12 +24,14 @@
 srv_ciphers:  .quad TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384
 cli_ciphers:  .quad TLS_AES_128_GCM_SHA256, TLS_CHACHA20_POLY1305_SHA256
 srv_legacy:   .quad TLS_RSA_AES_128_CBC_SHA
+srv_256first: .quad TLS_AES_256_GCM_SHA384, TLS_AES_128_GCM_SHA256
 
 # Cert chain: each cert is { subject, issuer } as i64 pair.
 leaf_cert:    .quad 100, 200
 inter_cert:   .quad 200, 300
 root_cert:    .quad 300, 300
 chain_arr:    .quad 0, 0, 0          # filled at runtime to point at the certs above
+gap_chain:    .quad 0, 0             # leaf -> root, skipping the intermediate
 trust_arr:    .quad 0                # filled at runtime to point at root_cert
 ss_leaf:      .quad 100, 100
 bad_root:     .quad 999, 999
@@ -238,9 +240,25 @@ _start:
     lea     rax, [rip + bad_root]
     lea     rcx, [rip + bad_trust]
     mov     [rcx], rax
+    lea     rax, [rip + leaf_cert]
+    lea     rcx, [rip + gap_chain]
+    mov     [rcx], rax
+    lea     rax, [rip + root_cert]
+    mov     [rcx + 8], rax
 
     # 1. pick_cipher → AES_128_GCM
     lea     rdi, [rip + srv_ciphers]
+    mov     rsi, 2
+    lea     rdx, [rip + cli_ciphers]
+    mov     rcx, 2
+    call    pick_cipher
+    mov     rdi, rax
+    mov     rsi, TLS_AES_128_GCM_SHA256
+    call    assert_eq
+
+    # 1b. server prefers AES_256 but the client lacks it: the pick must
+    #     skip to the first suite BOTH sides support, not the server's first
+    lea     rdi, [rip + srv_256first]
     mov     rsi, 2
     lea     rdx, [rip + cli_ciphers]
     mov     rcx, 2
@@ -267,6 +285,18 @@ _start:
     call    verify_chain
     mov     rdi, rax
     mov     rsi, 1
+    call    assert_eq
+
+    # 3b. trusted root but a broken link (leaf's issuer 200 ≠ root's
+    #     subject 300) → 0. Test 4 alone fails on trust, so without this
+    #     the linkage loop is never shown to reject anything.
+    lea     rdi, [rip + gap_chain]
+    mov     rsi, 2
+    lea     rdx, [rip + trust_arr]
+    mov     rcx, 1
+    call    verify_chain
+    mov     rdi, rax
+    mov     rsi, 0
     call    assert_eq
 
     # 4. verify_chain with untrusted root → 0
@@ -307,6 +337,22 @@ _start:
     mov     rdi, rax
     mov     rsi, r12
     call    assert_eq
+
+    # 5b. a tampered ciphertext must fail verification: flip one bit of
+    #     ct byte 0, decrypt again, the tag no longer matches
+    xor     byte ptr [rip + ct_buf], 0x01
+    lea     rdi, [rip + pt_buf]
+    lea     rsi, [rip + ct_buf]
+    mov     rdx, pt_len
+    mov     rcx, 42
+    call    xor_stream
+    lea     rdi, [rip + pt_buf]
+    mov     rsi, pt_len
+    mov     rdx, 42
+    mov     rcx, 7
+    call    weak_checksum
+    cmp     rax, r12
+    je      fail_exit               # tag must differ
 
     mov     rax, 1
     mov     rdi, 1

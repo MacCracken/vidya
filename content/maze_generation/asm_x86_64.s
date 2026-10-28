@@ -25,7 +25,8 @@
 
 .section .data
 
-# PCG state, seeded to 12345 (overwritten by rng_seed)
+# LCG state (PCG's multiplier/increment, without PCG's output
+# permutation), seeded to 12345 (overwritten by rng_seed)
 rng_state:  .quad 12345
 
 .section .bss
@@ -54,7 +55,7 @@ rng_seed:
     ret
 
 # rng_next: returns next pseudo-random value in rax (non-negative,
-# 31-bit). `imul` wraps to the low 64 bits — the PCG modular step.
+# 31-bit). `imul` wraps to the low 64 bits — the LCG modular step.
 rng_next:
     mov     rax, [rip + rng_state]
     mov     rcx, 6364136223846793005
@@ -637,6 +638,14 @@ _start:
     call    count_visited
     mov     rdi, rax
     mov     rsi, GN
+    call    expect_eq
+    # A spanning tree from any start removes exactly GN-1 walls. (Checked
+    # on a second maze because seed 42 from (0,0) happens to remove 35 N/S
+    # and 28 E/W walls — a split that also gives 63 if the W test is
+    # inverted.)
+    call    count_removed_walls
+    mov     rdi, rax
+    mov     rsi, GN-1
     call    expect_eq
 
     # --- Cross-language byte parity (matches cyrius reference) ---

@@ -210,14 +210,18 @@ _start:
     cmp     x0, #0
     b.ne    fail
 
-    // -------- Test 11: dist_sq positive for 3-4-5 ---------
+    // -------- Test 11: dist_sq exact for 3-4-5 ---------
+    // (3.0>>4)^2 + (4.0>>4)^2 = 12288^2 + 16384^2 = 20480^2 = (5.0>>4)^2.
+    // The >>4 pre-shift loses nothing here, so the result must be exact
+    // (checking only "> 0" would pass for almost any bug).
     mov     x0, #0
     mov     x1, #0
     ldr     x2, =196608         // 3.0
     ldr     x3, =262144         // 4.0
     bl      dist_sq
-    cmp     x0, #0
-    b.le    fail
+    ldr     x1, =419430400      // (5.0 >> 4)^2
+    cmp     x0, x1
+    b.ne    fail
 
     // -------- All passed --------
     mov     x0, #1

@@ -137,6 +137,8 @@ function testGdtEntryEncoding(): void {
     // Verify byte-level encoding roundtrips
     const bytes = kcode.toBytes();
     assert(bytes.byteLength === 8, "GDT entry is 8 bytes");
+    assert(bytes.getBigUint64(0, true) === kcode.raw, "bytes decode back to raw");
+    assert(bytes.getUint8(5) === 0x9A, "access byte lands at byte 5");
 }
 
 // ── GDT Table ───────────────────────────────────────────────────────
@@ -320,8 +322,11 @@ function testMultibootHeader(): void {
     assert(hdr.length === 24, "header length");
     assert(hdr.verify(), "checksum verifies");
 
-    // Bootloader passes magic in EAX to confirm Multiboot2 boot
-    assert(MULTIBOOT2_BOOTLOADER_MAGIC === 0x36D7_6289, "bootloader magic");
+    // Bootloader passes magic in EAX to confirm Multiboot2 boot; the
+    // kernel's entry checks it before trusting the info pointer in EBX
+    const isMultiboot2Boot = (eax: number): boolean => eax === MULTIBOOT2_BOOTLOADER_MAGIC;
+    assert(isMultiboot2Boot(0x36D7_6289), "accepts Multiboot2 bootloader magic");
+    assert(!isMultiboot2Boot(0x2BAD_B002), "rejects Multiboot1 bootloader magic");
 }
 
 // ── Mode Transition ─────────────────────────────────────────────────

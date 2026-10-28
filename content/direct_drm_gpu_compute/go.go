@@ -95,13 +95,25 @@ func (d *Device) SyncobjWait(seq uint64) bool {
 }
 
 func eq[T comparable](got, want T, label string) {
+	checks++
 	if got != want {
 		panic(fmt.Sprintf("%s: got %v want %v", label, got, want))
 	}
 }
 
 func tru(b bool, label string) {
+	checks++
 	if !b {
+		panic(label)
+	}
+}
+
+// checks counts the assertions this file runs, for the final tally.
+var checks int
+
+func check(cond bool, label string) {
+	checks++
+	if !cond {
 		panic(label)
 	}
 }
@@ -109,9 +121,7 @@ func tru(b bool, label string) {
 func main() {
 	d := newDevice()
 
-	if d.OpenRenderNode() == 0 {
-		panic("fd")
-	}
+	check(d.OpenRenderNode() != 0, "fd")
 
 	b1 := d.GemCreate(4096)
 	b2 := d.GemCreate(8192)
@@ -144,5 +154,7 @@ func main() {
 	eq(d.Submit(b1), uint64(0), "submit destroyed")
 	eq(d.Submit(b2), uint64(4), "next valid")
 
-	fmt.Println("direct_drm_gpu_compute: 20/20 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("direct_drm_gpu_compute: %d/%d ok\n", checks, checks)
 }

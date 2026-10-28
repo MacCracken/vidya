@@ -23,6 +23,9 @@ struct Store {
     tx_status: [TxStatus; N_TX],
     tx_writes: [HashMap<usize, i64>; N_TX],
     tx_reads: [HashMap<usize, i64>; N_TX],
+    /// Set when a read could not be recorded (read set full): validation can
+    /// no longer prove the tx saw a consistent snapshot, so it must abort.
+    tx_read_overflow: [bool; N_TX],
 }
 
 impl Store {
@@ -33,6 +36,7 @@ impl Store {
             tx_status: [TxStatus::Free; N_TX],
             tx_writes: [HashMap::new(), HashMap::new()],
             tx_reads: [HashMap::new(), HashMap::new()],
+            tx_read_overflow: [false; N_TX],
         }
     }
 
@@ -55,6 +59,7 @@ impl Store {
                 self.tx_status[t] = TxStatus::Active;
                 self.tx_writes[t].clear();
                 self.tx_reads[t].clear();
+                self.tx_read_overflow[t] = false;
                 return t;
             }
         }
@@ -66,8 +71,14 @@ impl Store {
         if let Some(&v) = self.tx_writes[tx].get(&k) {
             return v;
         }
-        if !self.tx_reads[tx].contains_key(&k) && self.tx_reads[tx].len() < TX_CAP {
-            self.tx_reads[tx].insert(k, self.version[k]);
+        if !self.tx_reads[tx].contains_key(&k) {
+            if self.tx_reads[tx].len() < TX_CAP {
+                self.tx_reads[tx].insert(k, self.version[k]);
+            } else {
+                // Untracked read: silently skipping the snapshot would let a
+                // stale read commit (a lost update). Doom the tx instead.
+                self.tx_read_overflow[tx] = true;
+            }
         }
         self.accounts[k]
     }
@@ -88,6 +99,9 @@ impl Store {
     }
 
     fn validate(&self, tx: usize) -> bool {
+        if self.tx_read_overflow[tx] {
+            return false;
+        }
         for (&k, &snap) in &self.tx_reads[tx] {
             if self.version[k] != snap {
                 return false;
@@ -126,6 +140,7 @@ impl Store {
             self.tx_status[t] = TxStatus::Free;
             self.tx_writes[t].clear();
             self.tx_reads[t].clear();
+            self.tx_read_overflow[t] = false;
         }
     }
 }
@@ -237,5 +252,18 @@ fn main() {
         assert_eq!(s.write(tx, 4, 5), 0);
     }
 
-    println!("transactions_and_acid: 9 tests, 23 assertions ok");
+    // I — a read the read set cannot record aborts the commit
+    {
+        let mut s = seed();
+        let t1 = s.begin();
+        let t2 = s.begin();
+        let mut v4 = 0;
+        for k in 0..5 { v4 = s.read(t1, k); } // 5th distinct key: past TX_CAP
+        s.write(t2, 4, 777);
+        assert_eq!(s.commit(t2), 1);
+        s.write(t1, 5, v4 + 1); // derived from a now-stale read of key 4
+        assert_eq!(s.commit(t1), 0, "untracked (stale) read must not commit");
+    }
+
+    println!("transactions_and_acid: 10 tests, 24 assertions ok");
 }

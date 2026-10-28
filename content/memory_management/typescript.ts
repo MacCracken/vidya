@@ -11,11 +11,17 @@ function main(): void {
     b.x = 99;
     assert(a.x === 99, "shared reference");
 
-    // ── Value semantics: primitives are copied ─────────────────────
+    // ── Rebinding is not mutation ──────────────────────────────────
+    // Assigning a new value to one binding never affects another — for
+    // primitives AND objects. What differs above is mutation through a
+    // shared reference; primitives simply have no in-place mutation.
     let num = 42;
     let copy = num;
     copy = 100;
-    assert(num === 42, "primitive copy");
+    assert(num === 42 && copy === 100, "primitive rebind");
+    let alias = a;
+    alias = { x: 0, y: 0 }; // rebinds alias; a's object is untouched
+    assert(a.x === 99 && alias.x === 0, "object rebind");
 
     // ── Shallow vs deep copy ───────────────────────────────────────
     const original = { nested: { value: 1 }, top: "hello" };
@@ -28,9 +34,9 @@ function main(): void {
     assert(original.nested.value === 99, "shallow nested shared!");
 
     // Deep copy: structuredClone (modern) or JSON roundtrip
-    const deep = structuredClone({ nested: { value: 1 }, top: "hello" });
-    deep.nested.value = 99;
-    // original is not affected by deep copy
+    const deep = structuredClone(original);
+    deep.nested.value = 7;
+    assert(original.nested.value === 99, "deep copy nested independent");
 
     // ── Array copying ──────────────────────────────────────────────
     const arr = [1, 2, 3];
@@ -55,12 +61,14 @@ function main(): void {
     // for (var i = 0; i < 3; i++) { setTimeout(() => console.log(i)); }
     // prints 3, 3, 3
 
-    // GOOD: let is block-scoped — each iteration gets its own binding
-    const results: number[] = [];
+    // GOOD: let is block-scoped — each iteration gets its own binding.
+    // The closures must be CALLED after the loop for the difference to show:
+    // pushing i directly gives [0, 1, 2] with var too.
+    const getters: Array<() => number> = [];
     for (let i = 0; i < 3; i++) {
-        results.push(i); // each i is a separate binding
+        getters.push(() => i); // each closure captures a separate i
     }
-    assertArrayEq(results, [0, 1, 2], "let scoping");
+    assertArrayEq(getters.map((g) => g()), [0, 1, 2], "let scoping");
 
     // ── WeakRef: reference that doesn't prevent GC ─────────────────
     let obj: { data: string } | undefined = { data: "hello" };

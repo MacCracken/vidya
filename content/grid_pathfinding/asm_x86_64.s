@@ -418,8 +418,9 @@ astar_relax:
     cmp     rdi, [r11 + r10 * 8]
     jge     .ar_done
 
-    # Save callee-clobbered scratch around the manhattan call:
-    # rdi = tg, r10 = n, rbx = curr (caller-saved across us)
+    # Save scratch around the manhattan call: rdi = tg and r10 = n are
+    # caller-saved, so the callee may clobber them. (rbx = curr is
+    # callee-saved under SysV — manhattan must preserve it anyway.)
     push    rdi
     push    r10
     push    rbx

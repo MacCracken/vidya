@@ -107,13 +107,28 @@ class X86Encoder {
         this.emit(modRM(0b11, srcNum, dstNum));
     }
 
-    // ADD reg64, imm32 (REX.W + 81 /0 id)
-    encodeADDImm32(dst: RegName, imm: number): void {
+    // ALU reg64, imm — group-1 opcode, /ext selects the operation
+    // (/0 ADD, /5 SUB, /7 CMP). Picks the shortest form, as an assembler
+    // does: REX.W + 83 /ext ib (4 bytes) when imm fits a sign-extended
+    // imm8, else REX.W + 81 /ext id (7 bytes).
+    private encodeALUImm(ext: number, dst: RegName, imm: number): void {
         const dstNum = REG[dst];
+        const short = imm >= -128 && imm <= 127;
         this.emit(rexPrefix(true, false, false, isExtended(dst)));
-        this.emit(0x81);
-        this.emit(modRM(0b11, 0, dstNum)); // /0 means reg field = 0
-        this.emitImm32(imm);
+        this.emit(short ? 0x83 : 0x81);
+        this.emit(modRM(0b11, ext, dstNum)); // /ext goes in the reg field
+        if (short) this.emit(imm);
+        else this.emitImm32(imm);
+    }
+
+    // ADD reg64, imm (REX.W + 83 /0 ib, or REX.W + 81 /0 id)
+    encodeADDImm(dst: RegName, imm: number): void {
+        this.encodeALUImm(0, dst, imm);
+    }
+
+    // SUB reg64, imm (REX.W + 83 /5 ib, or REX.W + 81 /5 id)
+    encodeSUBImm(dst: RegName, imm: number): void {
+        this.encodeALUImm(5, dst, imm);
     }
 
     // SUB reg64, reg64 (REX.W + 29 /r)
@@ -253,13 +268,25 @@ function testADDRegReg(): void {
     assertBytes(enc.getBytes(), [0x48, 0x01, 0xc8], "add rax, rcx");
 }
 
-function testADDImm32(): void {
+function testADDImm(): void {
     const enc = new X86Encoder();
 
-    // add rax, 0x10  →  48 81 c0 10 00 00 00
-    enc.encodeADDImm32("rax", 0x10);
-    assertBytes(enc.getBytes(), [0x48, 0x81, 0xc0, 0x10, 0x00, 0x00, 0x00],
-        "add rax, 0x10");
+    // add rax, 0x10  →  48 83 c0 10  (sign-extended imm8: 4 bytes, not 7)
+    enc.encodeADDImm("rax", 0x10);
+    assertBytes(enc.getBytes(), [0x48, 0x83, 0xc0, 0x10], "add rax, 0x10");
+
+    enc.reset();
+
+    // add rax, -1  →  48 83 c0 ff  (imm8 is sign-extended to 64 bits)
+    enc.encodeADDImm("rax", -1);
+    assertBytes(enc.getBytes(), [0x48, 0x83, 0xc0, 0xff], "add rax, -1");
+
+    enc.reset();
+
+    // add rcx, 0x1000  →  48 81 c1 00 10 00 00  (needs imm32)
+    enc.encodeADDImm("rcx", 0x1000);
+    assertBytes(enc.getBytes(), [0x48, 0x81, 0xc1, 0x00, 0x10, 0x00, 0x00],
+        "add rcx, 0x1000");
 }
 
 function testSUBRegReg(): void {
@@ -339,17 +366,16 @@ function testFunctionPrologue(): void {
     // Standard x86_64 function prologue:
     //   push rbp       → 55
     //   mov rbp, rsp   → 48 89 e5
-    //   sub rsp, 0x20  → 48 81 ec 20 00 00 00
+    //   sub rsp, 0x20  → 48 83 ec 20   (as GNU as emits it)
     const enc = new X86Encoder();
     enc.encodePUSH("rbp");
     enc.encodeMOVRegReg("rbp", "rsp");
-    enc.encodeSUBRegReg("rsp", "rax"); // simplified — real would use sub imm
+    enc.encodeSUBImm("rsp", 0x20);
     enc.encodeRET();
 
-    const bytes = enc.getBytes();
-    assert(bytes[0] === 0x55, "prologue starts with push rbp");
-    assert(bytes[1] === 0x48, "REX.W for mov");
-    assert(bytes[bytes.length - 1] === 0xc3, "ends with ret");
+    assertBytes(enc.getBytes(),
+        [0x55, 0x48, 0x89, 0xe5, 0x48, 0x83, 0xec, 0x20, 0xc3],
+        "push rbp; mov rbp, rsp; sub rsp, 0x20; ret");
 }
 
 // ── Main ─────────────────────────────────────────────────────────────
@@ -360,7 +386,7 @@ function main(): void {
     testMOVRegReg();
     testMOVImm64();
     testADDRegReg();
-    testADDImm32();
+    testADDImm();
     testSUBRegReg();
     testJMPRel32();
     testSimpleInstructions();

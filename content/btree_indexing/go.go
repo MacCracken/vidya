@@ -3,8 +3,9 @@
 // Simplified in-memory B+ tree (order 8, max 7 keys per node) — exactly
 // the layout declared by cyrius.cyr. Go uses slices for keys/vals and a
 // `[]*node` for children; an `isLeaf` bool tags the discriminator. The
-// slice-based design lets append+sort logic stay branch-free; we
-// allocate a fresh leaf on split rather than mutating in place. Lookup
+// slice-based design keeps insertion to a linear scan for the slot plus
+// one shifting copy; we allocate a fresh leaf on split rather than
+// mutating in place. Lookup
 // of a missing key returns -1 (matches bt_search).
 
 package main

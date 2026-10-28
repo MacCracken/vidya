@@ -69,19 +69,21 @@ func countLit(fb []byte) int {
 // clearFb zeroes a framebuffer. Named clearFb, not clear: since Go 1.21
 // `clear` is a builtin (clear(slice) zeroes it, clear(map) empties it).
 // A package-level func named clear compiles, but it shadows the builtin
-// for the whole file — a later reader writing clear(someMap) gets a
-// confusing type error instead of the builtin.
+// for the whole package (every file, not just this one) — a later reader
+// writing clear(someMap) gets a confusing type error instead of the builtin.
 func clearFb(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
+	clear(b)
 }
 
 func eq(got, want int, label string) {
+	checks++
 	if got != want {
 		panic(fmt.Sprintf("%s: got %d want %d", label, got, want))
 	}
 }
+
+// checks counts the assertions this file runs, for the final tally.
+var checks int
 
 func main() {
 	src := make([]byte, FbSz)
@@ -131,5 +133,7 @@ func main() {
 	eq(int(fbGet(dst, 3, 8)), 100, "outer L")
 	eq(int(fbGet(dst, 7, 8)), 100, "outer R")
 
-	fmt.Println("bloom_and_glow: 20/20 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("bloom_and_glow: %d/%d ok\n", checks, checks)
 }

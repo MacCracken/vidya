@@ -111,14 +111,29 @@ assert_eq "$P_PREV" "$PS_IDLE" "prev_state idle"
 transition $IN_MOVE
 assert_eq "$(did_transition)" "0" "run->run no transition"
 
-# game state progression
+# game state progression — through a transition TABLE, so an illegal edge
+# is actually rejected. (Assigning g=$GS_X and then asserting g == GS_X
+# tests nothing: it cannot fail.)
+declare -A GS_NEXT=(
+    ["$GS_MENU:start"]=$GS_SELECT
+    ["$GS_SELECT:confirm"]=$GS_TIPOFF
+    ["$GS_TIPOFF:jump"]=$GS_PLAYING
+    ["$GS_PLAYING:half"]=$GS_HALFTIME
+    ["$GS_HALFTIME:resume"]=$GS_PLAYING
+    ["$GS_PLAYING:final"]=$GS_GAMEOVER
+)
+game_advance() {  # game_advance EVENT — moves g if STATE:EVENT is a legal edge
+    local key="$g:$1"
+    if [[ -n "${GS_NEXT[$key]+x}" ]]; then g=${GS_NEXT[$key]}; fi
+}
 g=$GS_MENU
-g=$GS_SELECT;   assert_eq "$g" "$GS_SELECT"   "menu->select"
-g=$GS_TIPOFF;   assert_eq "$g" "$GS_TIPOFF"   "select->tipoff"
-g=$GS_PLAYING;  assert_eq "$g" "$GS_PLAYING"  "tipoff->playing"
-g=$GS_HALFTIME; assert_eq "$g" "$GS_HALFTIME" "playing->halftime"
-g=$GS_PLAYING;  assert_eq "$g" "$GS_PLAYING"  "halftime->playing"
-g=$GS_GAMEOVER; assert_eq "$g" "$GS_GAMEOVER" "playing->gameover"
+game_advance final;   assert_eq "$g" "$GS_MENU"     "menu rejects final"
+game_advance start;   assert_eq "$g" "$GS_SELECT"   "menu->select"
+game_advance confirm; assert_eq "$g" "$GS_TIPOFF"   "select->tipoff"
+game_advance jump;    assert_eq "$g" "$GS_PLAYING"  "tipoff->playing"
+game_advance half;    assert_eq "$g" "$GS_HALFTIME" "playing->halftime"
+game_advance resume;  assert_eq "$g" "$GS_PLAYING"  "halftime->playing"
+game_advance final;   assert_eq "$g" "$GS_GAMEOVER" "playing->gameover"
 
 # committed-then-free
 player_reset

@@ -2,8 +2,11 @@
 //
 // JavaScript/TypeScript is single-threaded with an event loop. Concurrency
 // is cooperative: async/await for I/O, Promises for composition, and
-// Web Workers / worker_threads for true parallelism. There are no
-// mutexes because there's no shared mutable state (by default).
+// Web Workers / worker_threads for true parallelism. One thread means no
+// data races, but every `await` is a point where another task can run, so
+// shared state can still race logically (check, await, act) — that is what
+// the Semaphore below is for. Across workers, SharedArrayBuffer + Atomics
+// give real shared memory and blocking waits.
 
 // ── Promises: the foundation ───────────────────────────────────────
 
@@ -11,11 +14,15 @@ function delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function asyncCompute(n: number): Promise<number> {
-    return new Promise((resolve) => {
-        // Simulate async work
-        resolve(n * n);
-    });
+// Records when each computation starts and ends, so the tests can SEE the
+// difference between sequential and concurrent — the results alone are equal.
+const events: string[] = [];
+
+async function asyncCompute(n: number): Promise<number> {
+    events.push(`start ${n}`);
+    await delay(1); // simulate async work: yield to the event loop
+    events.push(`end ${n}`);
+    return n * n;
 }
 
 // ── Async/await: sequential async code ─────────────────────────────
@@ -130,12 +137,18 @@ async function main(): Promise<void> {
     assert(result === 25, "basic promise");
 
     // ── Sequential execution ───────────────────────────────────────
+    events.length = 0;
     const seqResults = await sequential();
     assertArrayEq(seqResults, [4, 9, 16], "sequential");
+    assertArrayEq(events, ["start 2", "end 2", "start 3", "end 3", "start 4", "end 4"],
+        "sequential: each await finishes before the next starts");
 
     // ── Concurrent execution ───────────────────────────────────────
+    events.length = 0;
     const conResults = await concurrent();
     assertArrayEq(conResults, [4, 9, 16], "concurrent");
+    assertArrayEq(events, ["start 2", "start 3", "start 4", "end 2", "end 3", "end 4"],
+        "concurrent: all three start before any finishes");
 
     // ── Promise.allSettled ─────────────────────────────────────────
     const mixed = await mixedResults();
@@ -182,7 +195,7 @@ async function main(): Promise<void> {
 
     const semResults = await Promise.all(tasks);
     assert(semResults.length === 6, "semaphore all completed");
-    assert(maxConcurrent <= 2, "semaphore limited concurrency");
+    assert(maxConcurrent === 2, "semaphore: 2 at once, never more");
 
     // ── AbortController: cancellation ──────────────────────────────
     const controller = new AbortController();
@@ -192,10 +205,10 @@ async function main(): Promise<void> {
     assert(cancelResult === "cancelled", "abort controller");
 
     // ── Promise.withResolvers (ES2024) ─────────────────────────────
-    // Externalizes resolve/reject for manual control
-    // const { promise, resolve, reject } = Promise.withResolvers<number>();
-    // resolve(42);
-    // assert(await promise === 42);
+    // Externalizes resolve/reject for manual control — no executor callback
+    const { promise, resolve } = Promise.withResolvers<number>();
+    setTimeout(() => resolve(42), 0);
+    assert((await promise) === 42, "withResolvers");
 
     // ── Microtasks vs macrotasks ───────────────────────────────────
     // Promise callbacks (.then) run as microtasks (before next macrotask)

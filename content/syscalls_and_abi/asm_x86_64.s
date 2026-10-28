@@ -30,7 +30,9 @@ _start:
     #   r10 = arg4, r8  = arg5, r9  = arg6
     #   Return value in rax (-errno on error)
     #   Clobbered: rcx (set to rip), r11 (set to rflags)
-    #   Preserved: rbx, rbp, r12-r15, rsp
+    #   Preserved: every other register — unlike a function call, the
+    #   argument registers rdi..r9 survive too (psABI A.2.1: "The kernel
+    #   destroys registers %rcx and %r11")
 
     # ── sys_getpid (syscall 39) — simplest syscall, no args ────────
     mov     rax, 39             # sys_getpid
@@ -63,7 +65,8 @@ _start:
     mov     rax, 102            # sys_getuid
     syscall
     # rax = uid (>= 0, usually 1000+ for regular users)
-    # Just verify it didn't fail (no error return for getuid)
+    # getuid cannot fail (POSIX: "shall always be successful"), so there
+    # is no error value to check — the value is just kept
     mov     r13, rax            # save uid
 
     # ── sys_getgid (syscall 104) ───────────────────────────────────

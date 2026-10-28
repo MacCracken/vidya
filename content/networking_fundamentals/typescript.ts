@@ -1,6 +1,14 @@
 // Vidya — Networking Fundamentals in TypeScript
 //
 // In-memory simulation of TCP socket state machine + lifecycle.
+//
+// Like the cyrius reference, this collapses the transient states: connect()
+// moves both ends straight to ESTABLISHED (no SYN / SYN-ACK / ACK, so
+// SYN_RCVD is never entered) and close() goes straight to CLOSED (FIN_WAIT
+// and the peer's CLOSE_WAIT / TIME_WAIT are skipped). The constants are kept
+// to show where the real states sit. Also simplified: the LISTENING socket
+// itself becomes the connection, so it cannot accept a second client — a
+// real listener stays in LISTEN and accept() returns a new socket.
 
 const ST_CLOSED = 0;
 const ST_LISTEN = 1;

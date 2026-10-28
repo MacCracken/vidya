@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -47,7 +48,8 @@ func main() {
 	for i := 0; i < 3; i++ {
 		collected = append(collected, <-results)
 	}
-	assert(len(collected) == 3, "fan-out count")
+	slices.Sort(collected) // arrival order is not deterministic
+	assertSlice(collected, []int{0, 10, 20}, "fan-in collects every result")
 
 	// ── Select: multiplexing channels ──────────────────────────────
 	ch1 := make(chan string, 1)
@@ -70,20 +72,22 @@ func main() {
 	}
 
 	// ── WaitGroup: waiting for multiple goroutines ──────────────────
+	// wg.Go (Go 1.25) is Add(1) + go + defer Done() in one call, so the
+	// Add can't be forgotten or misplaced inside the goroutine. The typed
+	// atomic.Int64 (Go 1.19) makes a plain, racy read of the counter
+	// impossible, unlike atomic.AddInt64 on a bare int64.
 	var wg sync.WaitGroup
-	counter := int64(0)
+	var counter atomic.Int64
 
 	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := 0; j < 1000; j++ {
-				atomic.AddInt64(&counter, 1)
+				counter.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
-	assert(counter == 4000, "waitgroup + atomic")
+	assert(counter.Load() == 4000, "waitgroup + atomic")
 
 	// ── Mutex: protecting shared state ─────────────────────────────
 	var mu sync.Mutex

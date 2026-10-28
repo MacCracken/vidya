@@ -189,6 +189,8 @@ fn testThreeAddressCode() !void {
     try expect(program[0].op == .load_const);
     try expect(program[2].op == .add);
     try expect(program[6].op == .mul);
+    // ... and it computes what the comment says it does
+    try expect(try interpretTac(&program) == 7);
 }
 
 fn testBasicBlocks() !void {
@@ -276,9 +278,27 @@ fn testSSA() !void {
     var bb2 = SSABlock{ .id = 2, .ops = undefined, .op_count = 0 };
     bb2.addOp(.{ .load_const = .{ .dst = 2, .val = 2 } });
 
-    // t1 defined only in bb1, t2 only in bb2, t3 only in bb3
+    // t1 defined only in bb1, t2 only in bb2, t3 only in bb3: check the
+    // invariant itself — no destination is defined twice across the function
     try expect(bb1.op_count == 1);
     try expect(bb2.op_count == 1);
+    var defined: [16]bool = @splat(false);
+    for ([_]*const SSABlock{ &bb1, &bb2, &bb3 }) |blk| {
+        for (blk.ops[0..blk.op_count]) |op| {
+            const dst: ?u16 = switch (op) {
+                .phi => |p| p.dst,
+                .load_const => |c| c.dst,
+                .binary => |b| b.dst,
+                .copy => |c| c.dst,
+                .ret => null,
+            };
+            if (dst) |d| {
+                try expect(!defined[d]); // a second definition breaks SSA
+                defined[d] = true;
+            }
+        }
+    }
+    try expect(defined[1] and defined[2] and defined[3]);
 }
 
 fn testIRInterpreter() !void {

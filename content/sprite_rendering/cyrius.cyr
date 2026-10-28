@@ -1,6 +1,7 @@
 # Sprite Rendering — Cyrius reference (runnable)
 # Software sprite blitting: atlas lookup, transparency, clipping,
-# scaled blit with fixed-point stepping, and depth-sorted draw order.
+# scaled blit with fixed-point stepping, and depth-sorted draw order
+# (a draw list sorted farthest-first, then painted in order).
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -35,8 +36,8 @@ fn fb_get(x, y) {
 }
 
 fn fb_set(x, y, color) {
-    # Cyrius's parser rejects bare `return;` inside an `if { }` block —
-    # must use `return 0;` (Cyrius has no void; everything is i64).
+    # `return 0;` keeps every path's value defined (a bare `return;`
+    # also compiles; the caller just must not use the value).
     if (x < 0) { return 0; }
     if (x >= SCREEN_W) { return 0; }
     if (y < 0) { return 0; }
@@ -47,21 +48,16 @@ fn fb_set(x, y, color) {
 
 # --- Sprite atlas ---
 
-# Cyrius's struct parser expects fields on a single line; multi-line
-# bodies trip the struct-vs-block disambiguation.
 # Fields: data (pointer to pixel data), width, height.
 struct SpriteRegion { data; width; height; }
 
 # TRAP: `var s = SpriteRegion { … }; return &s;` compiles clean but is
-# wrong. Cyrius gives every local a FIXED address (static storage, not a
-# stack slot). So the pointer does not dangle in the C
-# sense (it never faults), but the data is NOT safe: two hazards, neither
-# of which crashes. (1) ALIASING — every call returns the same address, so
-# a second call silently overwrites the first call's object. (2) REUSE —
-# the compiler overlays frames, so an unrelated function's local can take
-# the same address. Measured: a helper returning &local read back 4242,
-# then 999888 after one call to an unrelated function. Heap the storage so
-# each call owns its own object.
+# wrong, exactly as in C: `s` lives in sprite_region's stack frame, so the
+# returned address dangles once the function returns, and the next call
+# reuses that frame and overwrites the region. Measured: a helper
+# returning &local read back 4242, then 0 after one unrelated call. Heap
+# the storage so each call owns its own object (or return the struct by
+# value: `var t: SpriteRegion = SpriteRegion { .. }; return t;`).
 fn sprite_region(data, w, h) {
     var s = alloc(24);              # 3 fields * 8 bytes
     if (s == 0) { return 0; }
@@ -182,6 +178,60 @@ fn init_test_sprite() {
     store8(d + 12, 0); store8(d + 13, 1); store8(d + 14, 1); store8(d + 15, 0);
 }
 
+# Solid 4x4 sprite, color 7 everywhere (no transparent pixels).
+var _solid_sprite_data[16];
+
+fn init_solid_sprite() {
+    memset(&_solid_sprite_data, 7, 16);
+}
+
+# --- Depth-sorted draw list (painter's algorithm) ---
+# Queue sprites with a depth (larger = farther), then draw the farthest
+# first so nearer sprites overwrite it. Sorting an index array leaves the
+# parallel arrays in place.
+var DL_CAP = 8;
+var dl_sprite: i64[8];
+var dl_x: i64[8];
+var dl_y: i64[8];
+var dl_depth: i64[8];
+var dl_order: i64[8];
+var dl_n = 0;
+
+fn dl_add(sprite, x, y, depth) {
+    if (dl_n >= DL_CAP) { return 0; }
+    dl_sprite[dl_n] = sprite;
+    dl_x[dl_n] = x;
+    dl_y[dl_n] = y;
+    dl_depth[dl_n] = depth;
+    dl_order[dl_n] = dl_n;
+    dl_n = dl_n + 1;
+    return 1;
+}
+
+fn dl_draw() {
+    # Insertion sort of the draw order by depth, farthest (largest) first.
+    var i = 1;
+    while (i < dl_n) {
+        var k = dl_order[i];
+        var j = i - 1;
+        while (j >= 0 && dl_depth[dl_order[j]] < dl_depth[k]) {
+            dl_order[j + 1] = dl_order[j];
+            j = j - 1;
+        }
+        dl_order[j + 1] = k;
+        i = i + 1;
+    }
+    var n = 0;
+    while (n < dl_n) {
+        var e = dl_order[n];
+        blit(dl_sprite[e], dl_x[e], dl_y[e]);
+        n = n + 1;
+    }
+    var drawn = dl_n;
+    dl_n = 0;
+    return drawn;
+}
+
 # --- Tests ---
 
 # Proves the heap fix in sprite_region above: two regions are two objects.
@@ -249,6 +299,8 @@ fn test_clipping_right() {
     # Pixel at (318, 0) — sprite column 0, row 0 = color 0 (transparent)
     # Background should be 0 (cleared), transparent also 0, so still 0
     assert_eq(fb_get(318, 0), 0, "clipped transparent pixel");
+    # Without the right clip, sprite (2,0) = 1 lands at fb offset 320 = (0,1).
+    assert_eq(fb_get(0, 1), 0, "right clip did not wrap into the next row");
     return 0;
 }
 
@@ -284,14 +336,19 @@ fn test_depth_sort() {
     fb_clear(0);
     init_test_sprite();
 
-    # Draw sprite A (color 2 at center)
-    var s = SpriteRegion { &_test_sprite_data, 4, 4 };
-    blit(&s, 50, 50);
-    assert_eq(fb_get(51, 51), 2, "first sprite drawn");
+    init_solid_sprite();
 
-    # Draw over it with a direct pixel write (simulating second sprite)
-    fb_set(51, 51, 7);
-    assert_eq(fb_get(51, 51), 7, "later draw overwrites (painter's algorithm)");
+    # Queue the NEAR patterned sprite first and the FAR solid one second,
+    # at the same spot. Drawn in queue order, the solid one would cover
+    # everything; depth-sorted, the solid one goes first and the pattern
+    # lands on top, its transparent corners showing the solid color.
+    var near = SpriteRegion { &_test_sprite_data, 4, 4 };
+    var far = SpriteRegion { &_solid_sprite_data, 4, 4 };
+    dl_add(&near, 50, 50, 1);
+    dl_add(&far, 50, 50, 5);
+    assert_eq(dl_draw(), 2, "draw list drew 2 sprites");
+    assert_eq(fb_get(51, 51), 2, "near sprite drawn over the far one");
+    assert_eq(fb_get(50, 50), 7, "far sprite shows through the near one's transparent corner");
     return 0;
 }
 

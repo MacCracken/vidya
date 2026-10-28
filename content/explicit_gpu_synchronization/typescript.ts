@@ -3,11 +3,10 @@
 // Timeline semaphores — monotonic counters with signal/wait/wait_all.
 
 class Timelines {
-  // Explicit `: bigint`. Without it TypeScript infers the literal type `0n`
-  // from the initializer, so every later `!== 5n` is flagged TS2367 as a
-  // comparison between non-overlapping types — the checker believes the
-  // field can never hold anything but 0n, which is exactly wrong for a
-  // monotonic counter.
+  // Explicit `: bigint` documents intent; it is not required. A mutable
+  // property initialized with `0n` widens to `bigint` on its own — only
+  // `readonly compute = 0n` would keep the literal type `0n`. The TS2367
+  // trap this file works around is call-site narrowing: see main().
   compute: bigint = 0n;
   transfer: bigint = 0n;
 
@@ -68,7 +67,7 @@ function main(): void {
   if (compute(t) !== 5n) throw new Error("after regress");
   nope(t.signal(0, 5n), "regress 5");
 
-  t.signal(1, 3n);
+  ok(t.signal(1, 3n), "signal transfer 3");
   if (transfer(t) !== 3n) throw new Error("transfer=3");
   ok(t.waitAll(5n, 3n), "all 5,3");
   nope(t.waitAll(5n, 4n), "all 5,4");

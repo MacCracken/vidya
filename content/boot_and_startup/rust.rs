@@ -119,6 +119,9 @@ impl BootPageTables {
     }
 
     fn map_higher_half(&mut self, vaddr: u64, paddr: u64, size: u64, label: &'static str) {
+        // A 2MB PDE stores physical address bits 51:21; bits 20:13 are reserved
+        // (Intel SDM Vol. 3A, Table 4-17), so both ends must be 2MB-aligned.
+        assert!(vaddr % HUGE_PAGE == 0 && paddr % HUGE_PAGE == 0, "2MB page must be 2MB-aligned");
         self.mappings.push((vaddr, paddr, size, label));
     }
 }
@@ -205,7 +208,8 @@ fn simulate_boot() {
         println!("    [{:02X}] {}", i * 8, entry);
     }
     println!("  Kernel CS: 0x{:02X}, DS: 0x{:02X}", kernel_cs, kernel_ds);
-    println!("  User CS: 0x{:02X}, DS: 0x{:02X}\n", user_cs, user_ds);
+    // Ring-3 selectors carry RPL=3 in their low two bits: index*8 | 3
+    println!("  User CS: 0x{:02X}, DS: 0x{:02X} (RPL 3)\n", user_cs | 3, user_ds | 3);
 
     // ── Step 3: Set up page tables ────────────────────────────────────
     println!("Step 3: Set up boot page tables (2MB huge pages)");
@@ -215,8 +219,8 @@ fn simulate_boot() {
     pages.identity_map_range(0, 4 * 1024 * 1024, "boot code (identity)");
     // Higher-half mapping for kernel
     let kernel_vaddr: u64 = 0xFFFF_8000_0000_0000;
-    pages.map_higher_half(kernel_vaddr, 0x100000, 2 * 1024 * 1024, "kernel text");
-    pages.map_higher_half(kernel_vaddr + HUGE_PAGE, 0x300000, 2 * 1024 * 1024, "kernel data");
+    pages.map_higher_half(kernel_vaddr, 0x200000, 2 * 1024 * 1024, "kernel text");
+    pages.map_higher_half(kernel_vaddr + HUGE_PAGE, 0x400000, 2 * 1024 * 1024, "kernel data");
 
     println!("  Page table mappings:");
     for (vaddr, paddr, size, label) in &pages.mappings {

@@ -2,7 +2,12 @@
 //
 // Go uses explicit error return values — no exceptions. Functions return
 // (result, error) pairs. The caller checks err != nil. Custom error types
-// implement the error interface. errors.Is and errors.As handle wrapping.
+// implement the error interface. errors.Is (sentinel values) and
+// errors.AsType (Go 1.26; typed errors) walk the wrap chain. The older
+// errors.As(err, &target) still works, but its docs now say "for most
+// uses, prefer AsType": the generic form returns the typed value and
+// cannot be handed a wrong-kind target, which As only catches at run time
+// (it panics) or via go vet's errorsas check.
 
 package main
 
@@ -103,26 +108,27 @@ func main() {
 	// ── Missing key error ──────────────────────────────────────────
 	_, err = readPort("host=localhost\n")
 	assert(err != nil, "should error on missing port")
-	var missingErr *MissingKeyError
-	assert(errors.As(err, &missingErr), "should be MissingKeyError")
+	missingErr, ok := errors.AsType[*MissingKeyError](err)
+	assert(ok, "should be MissingKeyError")
 	assert(missingErr.Key == "port", "key should be port")
 
 	// ── Parse error with wrapping ──────────────────────────────────
 	_, err = readPort("port=abc\n")
 	assert(err != nil, "should error on bad port")
-	var parseErr *ParseError
-	assert(errors.As(err, &parseErr), "should be ParseError")
+	parseErr, ok := errors.AsType[*ParseError](err)
+	assert(ok, "should be ParseError")
 	assert(parseErr.Key == "port", "parse error key")
 
 	// Unwrap to get the underlying strconv error
-	var numErr *strconv.NumError
-	assert(errors.As(err, &numErr), "should unwrap to NumError")
+	_, ok = errors.AsType[*strconv.NumError](err)
+	assert(ok, "should unwrap to NumError")
 
 	// ── fmt.Errorf with %w wraps the error ─────────────────────────
 	_, err = processConfig("port=abc\n")
 	assert(err != nil, "processConfig should error")
-	// errors.As traverses the wrap chain
-	assert(errors.As(err, &parseErr), "wrapped ParseError")
+	// errors.AsType traverses the wrap chain
+	_, ok = errors.AsType[*ParseError](err)
+	assert(ok, "wrapped ParseError")
 
 	// ── Sentinel errors with errors.Is ─────────────────────────────
 	name, err := findUser(1)

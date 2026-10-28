@@ -148,7 +148,17 @@ function testAbiCallingConvention(): void {
 
     const syscallRegs = ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"];
     assert(syscallRegs[0] === "rax", "syscall number");
-    assert(syscallRegs[4] === "r10", "r10 not rcx");
+
+    // The asserts above only restate the tables. The property worth
+    // checking is how they relate: a thin wrapper such as
+    // mmap(addr, len, prot, flags, fd, off) gets its args in SysV
+    // registers and passes them straight through to the kernel, except
+    // one — only ONE argument register differs between the conventions,
+    // because the SYSCALL instruction overwrites rcx (return RIP) and r11.
+    const differs = sysvRegs.filter((r, i) => syscallRegs[i + 1] !== r);
+    assert(differs.length === 1 && differs[0] === "rcx", "only arg 3 moves: rcx → r10");
+    assert(!syscallRegs.includes("rcx") && !syscallRegs.includes("r11"),
+        "syscall ABI avoids the registers SYSCALL clobbers");
 }
 
 // ── GDT Entry ─────────────────────────────────────────────────────────

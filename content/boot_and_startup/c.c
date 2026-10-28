@@ -174,52 +174,55 @@ typedef struct __attribute__((packed)) {
 } Tss;
 
 // ── Layout Verification ─────────────────────────────────────────────
+// static_assert (a C23 keyword; _Static_assert since C11) is legal at
+// block scope and offsetof is an integer constant expression, so a
+// wrong layout fails the BUILD instead of a run.
 
 static void verify_gdt_layout(void) {
     // GDT entry must be exactly 8 bytes
-    assert(sizeof(GdtEntry) == 8);
+    static_assert(sizeof(GdtEntry) == 8);
 
     // Field offsets
-    assert(offsetof(GdtEntry, limit_lo) == 0);
-    assert(offsetof(GdtEntry, base_lo) == 2);
-    assert(offsetof(GdtEntry, base_mid) == 4);
-    assert(offsetof(GdtEntry, access) == 5);
-    assert(offsetof(GdtEntry, flags_limit) == 6);
-    assert(offsetof(GdtEntry, base_hi) == 7);
+    static_assert(offsetof(GdtEntry, limit_lo) == 0);
+    static_assert(offsetof(GdtEntry, base_lo) == 2);
+    static_assert(offsetof(GdtEntry, base_mid) == 4);
+    static_assert(offsetof(GdtEntry, access) == 5);
+    static_assert(offsetof(GdtEntry, flags_limit) == 6);
+    static_assert(offsetof(GdtEntry, base_hi) == 7);
 }
 
 static void verify_idt_layout(void) {
     // IDT gate must be exactly 16 bytes in long mode
-    assert(sizeof(IdtGateDescriptor) == 16);
+    static_assert(sizeof(IdtGateDescriptor) == 16);
 
-    assert(offsetof(IdtGateDescriptor, offset_lo) == 0);
-    assert(offsetof(IdtGateDescriptor, selector) == 2);
-    assert(offsetof(IdtGateDescriptor, ist) == 4);
-    assert(offsetof(IdtGateDescriptor, type_attr) == 5);
-    assert(offsetof(IdtGateDescriptor, offset_mid) == 6);
-    assert(offsetof(IdtGateDescriptor, offset_hi) == 8);
-    assert(offsetof(IdtGateDescriptor, reserved) == 12);
+    static_assert(offsetof(IdtGateDescriptor, offset_lo) == 0);
+    static_assert(offsetof(IdtGateDescriptor, selector) == 2);
+    static_assert(offsetof(IdtGateDescriptor, ist) == 4);
+    static_assert(offsetof(IdtGateDescriptor, type_attr) == 5);
+    static_assert(offsetof(IdtGateDescriptor, offset_mid) == 6);
+    static_assert(offsetof(IdtGateDescriptor, offset_hi) == 8);
+    static_assert(offsetof(IdtGateDescriptor, reserved) == 12);
 }
 
 static void verify_multiboot_layout(void) {
-    assert(sizeof(MultibootHeader) == 12);
+    static_assert(sizeof(MultibootHeader) == 12);
 
-    assert(offsetof(MultibootHeader, magic) == 0);
-    assert(offsetof(MultibootHeader, flags) == 4);
-    assert(offsetof(MultibootHeader, checksum) == 8);
+    static_assert(offsetof(MultibootHeader, magic) == 0);
+    static_assert(offsetof(MultibootHeader, flags) == 4);
+    static_assert(offsetof(MultibootHeader, checksum) == 8);
 }
 
 static void verify_tss_layout(void) {
     // TSS in long mode is 104 bytes
-    assert(sizeof(Tss) == 104);
+    static_assert(sizeof(Tss) == 104);
 
-    assert(offsetof(Tss, reserved0) == 0);
-    assert(offsetof(Tss, rsp0) == 4);
-    assert(offsetof(Tss, rsp1) == 12);
-    assert(offsetof(Tss, rsp2) == 20);
-    assert(offsetof(Tss, ist1) == 36);
-    assert(offsetof(Tss, ist7) == 84);
-    assert(offsetof(Tss, iomap_base) == 102);
+    static_assert(offsetof(Tss, reserved0) == 0);
+    static_assert(offsetof(Tss, rsp0) == 4);
+    static_assert(offsetof(Tss, rsp1) == 12);
+    static_assert(offsetof(Tss, rsp2) == 20);
+    static_assert(offsetof(Tss, ist1) == 36);
+    static_assert(offsetof(Tss, ist7) == 84);
+    static_assert(offsetof(Tss, iomap_base) == 102);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -260,12 +263,14 @@ static void test_gdt_entries(void) {
     assert(gdt_dpl(&gdt[4]) == 3);
     assert(!gdt_is_code(&gdt[4]));
 
-    // Selector values = index * 8
-    assert(0 * 8 == 0x00);  // null
-    assert(1 * 8 == 0x08);  // kernel code
-    assert(2 * 8 == 0x10);  // kernel data
-    assert(3 * 8 == 0x18);  // user code
-    assert(4 * 8 == 0x20);  // user data
+    // Selector = index * 8 (bits 0-1 RPL, bit 2 TI). Resolve each selector
+    // the way the CPU does (selector >> 3) and check it lands on the
+    // descriptor it names.
+    assert(!gdt_is_present(&gdt[0x00 >> 3]));                          // null
+    assert(gdt_is_code(&gdt[0x08 >> 3]) && gdt_dpl(&gdt[0x08 >> 3]) == 0);   // kernel code
+    assert(!gdt_is_code(&gdt[0x10 >> 3]) && gdt_dpl(&gdt[0x10 >> 3]) == 0);  // kernel data
+    assert(gdt_is_code(&gdt[0x18 >> 3]) && gdt_dpl(&gdt[0x18 >> 3]) == 3);   // user code
+    assert(!gdt_is_code(&gdt[0x20 >> 3]) && gdt_dpl(&gdt[0x20 >> 3]) == 3);  // user data
 
     printf("GDT: 5 entries, %zu bytes total\n", sizeof(gdt));
     for (int i = 0; i < 5; i++) {
@@ -330,10 +335,19 @@ static void test_tss(void) {
     tss.ist2 = 0xFFFF800000030000ULL;  // NMI stack
     tss.iomap_base = sizeof(Tss);       // no I/O bitmap (base past TSS)
 
-    assert(tss.rsp0 == 0xFFFF800000010000ULL);
-    assert(tss.ist1 == 0xFFFF800000020000ULL);
-    assert(tss.ist2 == 0xFFFF800000030000ULL);
-    assert(tss.iomap_base == 104);
+    // Check the values landed at the byte offsets the CPU reads (asserting
+    // tss.rsp0 == the value just stored in tss.rsp0 could never fail).
+    const uint8_t *raw = (const uint8_t *)&tss;
+    uint64_t at4, at36, at44;
+    uint16_t at102;
+    memcpy(&at4,   raw + 4,   sizeof(at4));
+    memcpy(&at36,  raw + 36,  sizeof(at36));
+    memcpy(&at44,  raw + 44,  sizeof(at44));
+    memcpy(&at102, raw + 102, sizeof(at102));
+    assert(at4   == 0xFFFF800000010000ULL);  // RSP0 at +4
+    assert(at36  == 0xFFFF800000020000ULL);  // IST1 at +36
+    assert(at44  == 0xFFFF800000030000ULL);  // IST2 at +44
+    assert(at102 == 104);                    // I/O map base at +102
 
     printf("\nTSS: %zu bytes\n", sizeof(tss));
     printf("  RSP0 (kernel stack): 0x%016lX\n", (unsigned long)tss.rsp0);

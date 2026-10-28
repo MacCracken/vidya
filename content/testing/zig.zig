@@ -2,8 +2,11 @@
 //
 // Zig has built-in testing: `test "name" { ... }` blocks are compiled
 // and run by `zig test`. std.testing provides expect, expectEqual, etc.
-// Tests are first-class — they live alongside the code, run in parallel,
-// and support comptime testing. This file uses pub fn main for the
+// Tests are first-class — they live alongside the code and support
+// comptime testing. Within one test binary the default runner calls the
+// tests one after another (lib/compiler/test_runner.zig loops over
+// builtin.test_functions); only separate test steps run in parallel
+// under `zig build`. This file uses pub fn main for the
 // validation runner pattern.
 
 const std = @import("std");

@@ -18,6 +18,8 @@
 #   6. Cache miss after TTL expiry → re-query.
 #   7. Negative cache: NXDOMAIN cached for negative TTL.
 #   8. Different record types coexist for the same name.
+#   9. A CNAME'd answer expires with the shortest TTL in its chain.
+#  10. CNAMEs are followed for every query type, not only A.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -66,30 +68,41 @@ fn zone_add(name, rtype, ttl, value) {
 }
 
 # Origin lookup (no cache): linear scan. Returns value, or NXDOMAIN.
-# For A queries, follows CNAMEs up to CNAME_MAX_DEPTH.
+# For any query type except CNAME itself, follows CNAMEs up to
+# CNAME_MAX_DEPTH (RFC 1034 §3.6.2). Sets zone_last_ttl to the SMALLEST
+# TTL along the chain: an answer reached through a CNAME must not be
+# cached longer than any record it was built from.
+var zone_last_ttl = 0;
+
 fn zone_lookup(name, rtype) {
     var depth = 0;
     var cur = name;
+    zone_last_ttl = 0x7FFFFFFFFFFFFFFF;
     while (depth <= CNAME_MAX_DEPTH) {
         # Search for direct (cur, rtype) match
         var i = 0;
         while (i < rr_count) {
             if (load64(&rr_name + i * 8) == cur) {
                 if (load64(&rr_type + i * 8) == rtype) {
+                    var t = load64(&rr_ttl + i * 8);
+                    if (t < zone_last_ttl) { zone_last_ttl = t; }
                     return load64(&rr_value + i * 8);
                 }
             }
             i = i + 1;
         }
-        # No direct match; if rtype is A/AAAA, try CNAME indirection.
-        if (rtype == RR_A) {
+        # No direct match: unless the query is for the CNAME itself,
+        # follow the CNAME (RFC 1034 §3.6.2).
+        if (rtype != RR_CNAME) {
             var j = 0;
             var cname_target = 0;
             while (j < rr_count) {
                 if (load64(&rr_name + j * 8) == cur) {
                     if (load64(&rr_type + j * 8) == RR_CNAME) {
                         cname_target = load64(&rr_value + j * 8);
-                        j = rr_count;       # break-equivalent
+                        var ct = load64(&rr_ttl + j * 8);
+                        if (ct < zone_last_ttl) { zone_last_ttl = ct; }
+                        break;
                     }
                 }
                 j = j + 1;
@@ -175,7 +188,8 @@ fn cache_lookup(name, rtype) {
 
 # Resolver: cache lookup first; on miss go to origin and insert.
 # Returns the value (or NXDOMAIN). Uses a fixed default TTL for
-# the negative case; positive case uses the zone's TTL.
+# the negative case; a positive answer is cached for the smallest TTL
+# along its CNAME chain (zone_last_ttl).
 var NEGATIVE_TTL = 300;
 
 fn resolve(name, rtype) {
@@ -186,19 +200,7 @@ fn resolve(name, rtype) {
         cache_insert(name, rtype, NXDOMAIN, NEGATIVE_TTL);
         return NXDOMAIN;
     }
-    # Find the TTL for the matching record
-    var ttl = NEGATIVE_TTL;
-    var i = 0;
-    while (i < rr_count) {
-        if (load64(&rr_name + i * 8) == name) {
-            if (load64(&rr_type + i * 8) == rtype) {
-                ttl = load64(&rr_ttl + i * 8);
-                i = rr_count;
-            }
-        }
-        i = i + 1;
-    }
-    cache_insert(name, rtype, v, ttl);
+    cache_insert(name, rtype, v, zone_last_ttl);
     return v;
 }
 
@@ -287,6 +289,16 @@ fn main() {
     # AAAA not present → NXDOMAIN
     var aaaa = zone_lookup(1, RR_AAAA);
     assert_eq(aaaa, NXDOMAIN, "AAAA absent → NXDOMAIN");
+
+    # --- 9. CNAME'd answer: cdn (CNAME 600) → edge (A 60) caches for 60 ---
+    cache_init();
+    resolve(3, RR_A);
+    advance_time(61);      # edge's A record (ttl 60) has expired
+    resolve(3, RR_A);
+    assert_eq(cache_last_status, 0, "CNAME'd answer expires with the A record's TTL");
+
+    # --- 10. CNAME followed for MX: www → example.com MX ---
+    assert_eq(zone_lookup(2, RR_MX), 10, "www CNAME followed for an MX query");
 
     return assert_summary();
 }

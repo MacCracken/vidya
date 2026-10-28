@@ -52,17 +52,29 @@ line two"""
     sentence = " ".join(words)
     assert sentence == "hello world from python"
 
-    # BAD: += in a loop is O(n²) — new string every iteration
+    # BAD: += in a loop is O(n²) by the language rules — each += may copy
+    # the whole string. CPython often hides it for a plain local (it
+    # resizes in place when nothing else references the string; measured
+    # linear on 3.15), but `self.s += w` or a second reference makes it
+    # quadratic again, and other implementations never had the trick.
     # result = ""
     # for w in words: result += w + " "
 
     # ── Unicode support ─────────────────────────────────────────────
     cafe = "café"
-    assert len(cafe) == 4  # Python counts characters, not bytes
+    assert len(cafe) == 4  # Python counts CODE POINTS, not bytes
     assert cafe[3] == "é"  # direct indexing works (unlike Rust)
 
     emoji = "hello 🌍"
-    assert len(emoji) == 7  # emoji is one character
+    assert len(emoji) == 7  # this emoji is one code point
+
+    # Code points are not user-perceived characters. The same "café" in
+    # decomposed form (e + combining acute) is 5 code points, and a family
+    # emoji is 3 people joined by 2 zero-width joiners.
+    import unicodedata
+    assert len(unicodedata.normalize("NFD", cafe)) == 5
+    assert unicodedata.normalize("NFC", unicodedata.normalize("NFD", cafe)) == cafe
+    assert len("👨\u200d👩\u200d👧") == 5  # one glyph on screen
 
     # ── Encoding/decoding ───────────────────────────────────────────
     text = "café"

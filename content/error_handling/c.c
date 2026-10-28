@@ -2,7 +2,9 @@
 //
 // C has no exceptions. Error handling uses return codes, errno, and
 // explicit checks after every fallible operation. The caller must
-// check — nothing forces it. goto is the standard pattern for cleanup
+// check — the language only helps if you ask: mark the function C23
+// [[nodiscard]] and the compiler warns when a caller drops the result
+// (an error under -Werror). goto is the standard pattern for cleanup
 // on error in complex functions.
 
 #include <assert.h>
@@ -35,7 +37,7 @@ const char *error_string(ErrorCode err) {
 // ── Return code pattern ────────────────────────────────────────────
 // Return error code, pass result through output parameter
 
-ErrorCode parse_port(const char *config, int *out_port) {
+[[nodiscard]] ErrorCode parse_port(const char *config, int *out_port) {
     const char *p = strstr(config, "port=");
     if (p == NULL) {
         return ERR_NOT_FOUND;
@@ -63,7 +65,7 @@ typedef struct {
     int port;
 } Config;
 
-ErrorCode load_config(const char *text, Config *cfg) {
+[[nodiscard]] ErrorCode load_config(const char *text, Config *cfg) {
     // `rc` carries the reason all the way to the cleanup label. The label
     // used to `return ERR_NOT_FOUND` unconditionally, which discarded the
     // real cause: a text with a host but an unparseable port produced
@@ -117,10 +119,11 @@ void demonstrate_errno(void) {
     assert(f == NULL);
     assert(errno == ENOENT); // "No such file or directory"
 
-    // strerror converts errno to message
+    // strerror converts errno to message. The text is implementation-defined
+    // (this is glibc/musl's); an `|| strlen(msg) > 0` escape hatch would make
+    // the check unable to fail.
     const char *msg = strerror(errno);
-    assert(strstr(msg, "No such file") != NULL || strstr(msg, "not exist") != NULL
-           || strlen(msg) > 0);
+    assert(strstr(msg, "No such file") != NULL);
 
     // perror prints to stderr: "prefix: error message"
     // perror("fopen");  // prints: "fopen: No such file or directory"

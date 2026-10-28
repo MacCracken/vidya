@@ -67,6 +67,12 @@ _start:
     cmp     eax, -1
     jne     fail
 
+    # Negative is out of range too (the unsigned compare catches it)
+    mov     edi, -1
+    call    dispatch_jump_table
+    cmp     eax, -1
+    jne     fail
+
     # ── Byte-level pattern matching ─────────────────────────────────
     # Classify ASCII character
     mov     dil, '5'
@@ -158,10 +164,14 @@ classify_number:
 # ── dispatch_jump_table: computed jump for 0-3 ──────────────────────
 # edi = case value, returns eax = result
 dispatch_jump_table:
+    # The bounds check must be UNSIGNED: with a signed jge, -1 passes as
+    # "less than 4" and `jmp [table - 8]` jumps through whatever precedes
+    # the table. As unsigned, every negative value is huge and lands in
+    # the default case — one compare covers both ends (what compilers emit).
     cmp     edi, jump_table_size
-    jge     .jt_default
+    jae     .jt_default
     lea     rax, [jump_table]
-    movsxd  rcx, edi
+    mov     ecx, edi                    # zero-extends: index is 0..3 here
     jmp     [rax + rcx * 8]
 .case_0:
     mov     eax, 10

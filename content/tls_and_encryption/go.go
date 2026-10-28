@@ -152,77 +152,59 @@ func (h *Handshake) Advance(srv, cli []uint16, chain, trust []Cert, hostname uin
 	}
 }
 
+// checks counts the assertions this file runs, for the final tally.
+var checks int
+
+func check(cond bool, label string) {
+	checks++
+	if !cond {
+		panic(label)
+	}
+}
+
 func main() {
 	srv := []uint16{TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384}
 	cli := []uint16{TLS_AES_128_GCM_SHA256, TLS_CHACHA20_POLY1305_SHA256}
-	if pickCipher(srv, cli) != TLS_AES_128_GCM_SHA256 {
-		panic("pick")
-	}
-	if pickCipher([]uint16{TLS_RSA_AES_128_CBC_SHA}, cli) != 0 {
-		panic("legacy")
-	}
+	check(pickCipher(srv, cli) == TLS_AES_128_GCM_SHA256, "pick")
+	check(pickCipher([]uint16{TLS_RSA_AES_128_CBC_SHA}, cli) == 0, "legacy")
 
 	leaf := Cert{100, 200}
 	inter := Cert{200, 300}
 	root := Cert{300, 300}
 	chain := []Cert{leaf, inter, root}
 	trust := []Cert{root}
-	if !verifyChain(chain, trust) {
-		panic("chain")
-	}
-	if verifyChain(chain, []Cert{{999, 999}}) {
-		panic("bad trust")
-	}
-	if verifyChain([]Cert{{100, 100}}, trust) {
-		panic("ss leaf")
-	}
+	check(verifyChain(chain, trust), "chain")
+	check(!verifyChain(chain, []Cert{{999, 999}}), "bad trust")
+	check(!verifyChain([]Cert{{100, 100}}, trust), "ss leaf")
 
 	pt := []byte("secret message")
 	ct, tag := demoSeal(pt, 42, 7)
 	dec := demoOpen(ct, 42, 7, tag)
-	if !bytes.Equal(dec, pt) {
-		panic("roundtrip")
-	}
+	check(bytes.Equal(dec, pt), "roundtrip")
 	tampered := append([]byte{}, ct...)
 	tampered[5] ^= 1
-	if demoOpen(tampered, 42, 7, tag) != nil {
-		panic("tampered")
-	}
-	if demoOpen(ct, 42, 7, tag^1) != nil {
-		panic("wrong tag")
-	}
+	check(demoOpen(tampered, 42, 7, tag) == nil, "tampered")
+	check(demoOpen(ct, 42, 7, tag^1) == nil, "wrong tag")
 
 	hs := Handshake{State: StInit}
-	if hs.State != StInit {
-		panic("init")
-	}
+	check(hs.State == StInit, "init")
 	hs.Advance(srv, cli, chain, trust, 100)
-	if hs.State != StHelloSent {
-		panic("hello sent")
-	}
+	check(hs.State == StHelloSent, "hello sent")
 	hs.Advance(srv, cli, chain, trust, 100)
-	if hs.State != StServerHello {
-		panic("server hello")
-	}
-	if hs.Negotiated != TLS_AES_128_GCM_SHA256 {
-		panic("negotiated")
-	}
+	check(hs.State == StServerHello, "server hello")
+	check(hs.Negotiated == TLS_AES_128_GCM_SHA256, "negotiated")
 	hs.Advance(srv, cli, chain, trust, 100)
-	if hs.State != StCertVerified {
-		panic("cert verified")
-	}
+	check(hs.State == StCertVerified, "cert verified")
 	hs.Advance(srv, cli, chain, trust, 100)
-	if hs.State != StEstablished {
-		panic("established")
-	}
+	check(hs.State == StEstablished, "established")
 
 	hs2 := Handshake{State: StInit}
 	hs2.Advance(srv, cli, chain, trust, 100)
 	hs2.Advance(srv, cli, chain, trust, 100)
 	hs2.Advance(srv, cli, chain, trust, 999)
-	if hs2.State != StFailed {
-		panic("hostname mismatch")
-	}
+	check(hs2.State == StFailed, "hostname mismatch")
 
-	fmt.Println("tls_and_encryption: 16/16 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("tls_and_encryption: %d/%d ok\n", checks, checks)
 }

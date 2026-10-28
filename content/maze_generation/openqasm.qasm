@@ -26,23 +26,25 @@
 //      walker is in right now". Repeated runs sample cells with
 //      probabilities determined by the interference pattern.
 //
-// Real maze-generation applications of quantum walks aim at faster-
-// than-classical *connectivity* and *spanning-tree* sampling: Aharonov
-// et al. showed that a quantum walk on certain graphs hits all nodes
-// quadratically faster than the classical random walk. The structural
+// The maze-adjacent uses of quantum walks are faster-than-classical
+// *connectivity* and *spanning-tree* sampling, where the known gains
+// are polynomial: Aharonov, Ambainis, Kempe and
+// Vazirani (2001) showed a quantum walk on the n-cycle mixes in
+// O(n log n) steps against Θ(n²) for the classical walk, and that on
+// bounded-degree graphs the mixing speedup is at most quadratic. The structural
 // mapping to recursive backtracker is inexact (backtracker carves
 // walls; the quantum walk doesn't carve, it navigates), but both share
 // the same goal: visit every node of the grid.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // --- Position register: 2 qubits = 4 cells (a 2x2 sub-grid) ----------
 // pos[0] is column-bit, pos[1] is row-bit:
 //   00 = (0,0)  01 = (1,0)
 //   10 = (0,1)  11 = (1,1)
-qreg pos[2];
-creg pos_c[2];
+qubit[2] pos;
+bit[2] pos_c;
 
 // Uniform superposition over all 4 cells — the walker is "everywhere"
 // before the first measurement, just as recursive backtracker has not
@@ -53,16 +55,17 @@ h pos[1];
 // Measure: classical readout collapses the walker to one cell. Across
 // many runs, each cell is sampled with probability 1/4 — the quantum
 // equivalent of a uniformly random starting cell choice.
-measure pos -> pos_c;
+pos_c = measure pos;
+// @expect pos_c in {0, 1, 2, 3}
 
 
 // --- Coin + conditional step: discrete-time quantum walk -------------
 // A 1-qubit "coin" decides the step direction; a CNOT from coin to
 // position implements "if coin = 1, flip the column bit" — that is,
 // move east or west on the 2x2 grid.
-qreg pos2[2];
-qreg coin[1];
-creg pos2_c[2];
+qubit[2] pos2;
+qubit[1] coin;
+bit[2] pos2_c;
 
 // Initialize walker at (0,0) = |00>; coin starts in superposition.
 h coin[0];
@@ -73,7 +76,9 @@ cx coin[0], pos2[0];
 // The walker is now in superposition of (0,0) and (1,0). Measurement
 // samples one of them — the analog of "after one DFS step, which cell
 // does the backtracker visit next?".
-measure pos2 -> pos2_c;
+pos2_c = measure pos2;
+// pos2_c is 00 or 01 (the row bit never moves), each half the time
+// @expect pos2_c in {0, 1}
 
 
 // --- Wall-bit register: 4 qubits encode the 4 walls of one cell ------
@@ -82,17 +87,18 @@ measure pos2 -> pos2_c;
 // classical backtracker clears bits to carve passages; here we just
 // initialize them all to |1> so a measurement of the register reports
 // 1111 every time — the quantum analog of "freshly initialized cell".
-qreg walls[4];
-creg walls_c[4];
+qubit[4] walls;
+bit[4] walls_c;
 
 x walls[0];   // N wall present
 x walls[1];   // S wall present
 x walls[2];   // E wall present
 x walls[3];   // W wall present
 
-measure walls -> walls_c;
+walls_c = measure walls;
 // walls_c will read as "1111" with probability 1, mirroring
 // WALLS_ALL = 15 from the classical port's init state.
+// @expect walls_c == 15
 
 
 // --- Notes — classical backtracker vs quantum walk -------------------
@@ -107,7 +113,8 @@ measure walls -> walls_c;
 //   - Walker amplitude evolves under the graph Laplacian
 //   - Mixing/hitting time can be quadratically faster than classical
 //
-// Where the two regimes meet: hybrid algorithms (Magniez-Nayak-Roland-
-// Santha) use a quantum walk to find a marked vertex in a graph, with
-// the classical backtracker's spanning tree as scaffolding for the
-// transition operator.
+// Where the two regimes meet: Magniez-Nayak-Roland-Santha (2007)
+// search builds a quantum walk from a classical random walk and finds
+// a marked vertex in about the square root of that walk's hitting
+// time. Its scaffolding is the classical walk's transition matrix —
+// not a backtracker's spanning tree.

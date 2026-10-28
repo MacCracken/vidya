@@ -203,13 +203,18 @@ function testForwardReference(): void {
 }
 
 function testBackwardReference(): void {
-    // Simple loop: r0 starts at 0, add 1 three times via controlled jumps
-    // (We manually unroll since we don't have conditional jumps)
+    // Jump BACK to a label pass 1 has already recorded. With no conditional
+    // jumps there is no loop to write, so: hop over the tail, set r0, then
+    // jump backward into the tail that adds r1 to it.
     const asm = new Assembler();
-    asm.emit({ kind: "load_imm", reg: 0, value: 5 });
+    asm.emit({ kind: "jump", label: "start" });           // forward
+    asm.emit({ kind: "label", name: "back" });
     asm.emit({ kind: "load_imm", reg: 1, value: 3 });
     asm.emit({ kind: "add", dst: 0, src: 1 });
     asm.emit({ kind: "halt" });
+    asm.emit({ kind: "label", name: "start" });
+    asm.emit({ kind: "load_imm", reg: 0, value: 5 });
+    asm.emit({ kind: "jump", label: "back" });            // backward
 
     const code = asm.assemble();
     const vm = new VM();

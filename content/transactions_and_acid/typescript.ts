@@ -1,5 +1,9 @@
 // Vidya — Transactions and ACID — TypeScript port.
 // OCC store with read-set version snapshots.
+//
+// Durability is modeled as the split between the durable store
+// (`accounts`/`version`) and per-tx scratch (`reads`/`writes`): a "crash"
+// clears the scratch only. Real systems need a WAL fsync for this.
 
 const N_ACCOUNTS = 8;
 const N_TX = 2;
@@ -48,7 +52,13 @@ class Store {
     read(tx: number, k: number): number {
         if (this.status[tx] !== TxStatus.Active) throw new Error("read on non-active tx");
         if (this.writes[tx].has(k)) return this.writes[tx].get(k)!;
-        if (!this.reads[tx].has(k) && this.reads[tx].size < TX_CAP) {
+        if (!this.reads[tx].has(k)) {
+            // A read we cannot record is a read commit() cannot validate:
+            // returning it anyway would let a lost update commit. Abort.
+            if (this.reads[tx].size >= TX_CAP) {
+                this.status[tx] = TxStatus.Aborted;
+                throw new Error("read-set full: tx aborted");
+            }
             this.reads[tx].set(k, this.version[k]);
         }
         return this.accounts[k];
@@ -208,6 +218,15 @@ function check(cond: boolean, name: string): void {
     s.write(tx, 3, 4);
     const fifth = s.write(tx, 4, 5);
     check(fifth === 0, "5th write rejected (cap=4)");
+}
+{
+    const s = seed();
+    const tx = s.begin();
+    for (const k of [0, 1, 2, 3]) s.read(tx, k);
+    let threw = false;
+    try { s.read(tx, 4); } catch { threw = true; }
+    check(threw, "5th distinct read rejected (cap=4)");
+    check(s.status[tx] === TxStatus.Aborted, "untrackable read aborts the tx");
 }
 
 console.log("=== transactions_and_acid ===");

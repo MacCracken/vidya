@@ -4,12 +4,12 @@
 // like an OS scheduler assigning independent processes to cores.
 // Circuit depth = makespan of the schedule.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Two independent "processes" scheduled in parallel ────────────
-qreg proc[4];
-creg proc_c[4];
+qubit[4] proc;
+bit[4] proc_c;
 
 // Layer 1: two independent tasks run simultaneously
 h proc[0];         // process A
@@ -20,4 +20,6 @@ cx proc[0], proc[1]; // process A step 2
 cx proc[2], proc[3]; // process B step 2 (parallel)
 
 // Total depth = 2, despite 4 gates (parallel scheduling)
-measure proc -> proc_c;
+proc_c = measure proc;
+// Each process ends as its own Bell pair: 00 or 11 per pair
+// @expect proc_c in {0, 3, 12, 15}

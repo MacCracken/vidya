@@ -3,7 +3,8 @@
 // Zig gives you C-level performance with safety in debug mode. Key
 // levers: comptime evaluation, no hidden allocations, SIMD vectors,
 // cache-aligned data, and the ability to drop to inline assembly.
-// Release modes strip safety checks for maximum speed.
+// ReleaseFast and ReleaseSmall strip safety checks for maximum speed;
+// ReleaseSafe optimizes but keeps them.
 
 const std = @import("std");
 const expect = std.testing.expect;

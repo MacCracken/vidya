@@ -7,7 +7,8 @@
 //
 // AArch64 ABI notes (see field-note aarch64_callee_saved_and_imm_limits):
 // - x0–x18 caller-saved across `bl`; cache loop state in x19–x28.
-// - 64-bit immediates (MAGIC = 0x50415452) load via `ldr xN, =literal`.
+// - Immediates wider than 16 bits (MAGIC = 0x50415452) load via
+//   `ldr xN, =literal` (or a movz/movk pair).
 // - `cmp xN, #imm` is 12-bit unsigned; small numbers (1, 2, 42) inline.
 
 .global _start
@@ -49,7 +50,8 @@ hdr_init:
     str     x0, [x1]
     ret
 
-// page_alloc -> x0 = newly-allocated page id
+// page_alloc -> x0 = newly-allocated page id, or 0 when the arena is full
+// (page 0 is the header page, so 0 is never a valid allocation)
 page_alloc:
     adrp    x1, HDR_FREEHEAD
     add     x1, x1, :lo12:HDR_FREEHEAD
@@ -65,6 +67,8 @@ page_alloc:
     adrp    x1, HDR_PAGECOUNT
     add     x1, x1, :lo12:HDR_PAGECOUNT
     ldr     x0, [x1]
+    cmp     x0, #POOL_CAP          // PAGES/FREE_NEXT hold POOL_CAP slots
+    b.hs    .pa_full
     add     x2, x0, #1
     str     x2, [x1]
     // Zero the slot
@@ -72,6 +76,9 @@ page_alloc:
     add     x3, x3, :lo12:PAGES
     mov     x4, #0
     str     x4, [x3, x0, lsl #3]
+    ret
+.pa_full:
+    mov     x0, #0
     ret
 
 // page_free(x0=num)

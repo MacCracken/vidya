@@ -60,16 +60,27 @@ typedef struct {
     int len;
 } Log;
 
+// Advance an append cursor by snprintf's result. snprintf returns the
+// length it WOULD have written, not what fit: `len += snprintf(...)`
+// walks len past the buffer on truncation, the next `cap - len` size
+// argument underflows to a huge size_t, and the next append overflows.
+static int append_advance(int len, int written, size_t room) {
+    if (written < 0 || room == 0) return len;
+    return len + ((size_t)written < room ? written : (int)room - 1);
+}
+
 static void log_handler_a(const char *event, void *ctx) {
     Log *log = (Log *)ctx;
-    log->len += snprintf(log->entries + log->len,
-                         sizeof(log->entries) - (size_t)log->len, "A:%s ", event);
+    size_t room = sizeof(log->entries) - (size_t)log->len;
+    log->len = append_advance(log->len,
+        snprintf(log->entries + log->len, room, "A:%s ", event), room);
 }
 
 static void log_handler_b(const char *event, void *ctx) {
     Log *log = (Log *)ctx;
-    log->len += snprintf(log->entries + log->len,
-                         sizeof(log->entries) - (size_t)log->len, "B:%s ", event);
+    size_t room = sizeof(log->entries) - (size_t)log->len;
+    log->len = append_advance(log->len,
+        snprintf(log->entries + log->len, room, "B:%s ", event), room);
 }
 
 static void test_observer(void) {
@@ -84,6 +95,11 @@ static void test_observer(void) {
 
     assert(strstr(log.entries, "A:click") != NULL);
     assert(strstr(log.entries, "B:hover") != NULL);
+
+    // Many more events than fit: the log truncates instead of overflowing
+    for (int i = 0; i < 100; i++) emitter_emit(&em, "scroll");
+    assert(log.len == (int)sizeof(log.entries) - 1);
+    assert(log.entries[sizeof(log.entries) - 1] == '\0');
 }
 
 // ── State machine: enum + transition table ────────────────────────────
@@ -98,6 +114,9 @@ static const int transitions[3][ACT_COUNT] = {
 };
 
 static int door_transition(DoorState state, DoorAction action) {
+    // A -1 result cast back to DoorState must not index the table
+    if ((int)state < 0 || state > DOOR_OPEN || (int)action < 0 || action >= ACT_COUNT)
+        return -1;
     return transitions[state][action];
 }
 
@@ -112,6 +131,7 @@ static void test_state_machine(void) {
     assert(s == DOOR_LOCKED);
 
     assert(door_transition(DOOR_LOCKED, ACT_OPEN) == -1);
+    assert(door_transition((DoorState)-1, ACT_OPEN) == -1);  // chained invalid state
 }
 
 // ── RAII via goto cleanup ─────────────────────────────────────────────
@@ -121,11 +141,13 @@ static int test_goto_cleanup_inner(char *log, int log_size) {
 
     buf1 = malloc(64);
     if (!buf1) goto cleanup;
-    len += snprintf(log + len, (size_t)(log_size - len), "acquire:buf1 ");
+    len = append_advance(len, snprintf(log + len, (size_t)(log_size - len),
+                                       "acquire:buf1 "), (size_t)(log_size - len));
 
     buf2 = malloc(64);
     if (!buf2) goto cleanup;
-    len += snprintf(log + len, (size_t)(log_size - len), "acquire:buf2 ");
+    len = append_advance(len, snprintf(log + len, (size_t)(log_size - len),
+                                       "acquire:buf2 "), (size_t)(log_size - len));
 
     strcpy(buf1, "hello");
     strcpy(buf2, "world");
@@ -133,11 +155,13 @@ static int test_goto_cleanup_inner(char *log, int log_size) {
 cleanup:
     if (buf2) {
         free(buf2);
-        len += snprintf(log + len, (size_t)(log_size - len), "release:buf2 ");
+        len = append_advance(len, snprintf(log + len, (size_t)(log_size - len),
+                                           "release:buf2 "), (size_t)(log_size - len));
     }
     if (buf1) {
         free(buf1);
-        len += snprintf(log + len, (size_t)(log_size - len), "release:buf1 ");
+        len = append_advance(len, snprintf(log + len, (size_t)(log_size - len),
+                                           "release:buf1 "), (size_t)(log_size - len));
     }
     return len;
 }
@@ -174,9 +198,11 @@ typedef struct {
 
 static const char *test_log(void *self, const char *msg) {
     TestLogger *l = (TestLogger *)self;
-    l->len += snprintf(l->entries + l->len,
-                       sizeof(l->entries) - (size_t)l->len, "[test] %s\n", msg);
-    return l->entries + l->len;
+    const char *entry = l->entries + l->len;  // where THIS entry starts
+    size_t room = sizeof(l->entries) - (size_t)l->len;
+    l->len = append_advance(l->len,
+        snprintf(l->entries + l->len, room, "[test] %s\n", msg), room);
+    return entry;
 }
 
 typedef struct {
@@ -199,8 +225,9 @@ static void test_dependency_injection(void) {
     TestLogger tl = { .vtable = { .log = test_log }, .entries = "", .len = 0 };
     svc.logger = &tl;
     svc.vtable = &tl.vtable;
-    service_process(&svc, "order-1");
+    const char *entry = service_process(&svc, "order-1");
     assert(strstr(tl.entries, "[test] processing order-1") != NULL);
+    assert(strcmp(entry, "[test] processing order-1\n") == 0);  // returns the entry
 }
 
 // ── Factory: function table ───────────────────────────────────────────
@@ -233,13 +260,18 @@ static int shape_factory(const char *name, const double *params, Shape *out) {
 
 static void test_factory(void) {
     Shape s;
-    assert(shape_factory("circle", (double[]){5}, &s) == 0);
+    // shape_factory fills s, so it runs outside assert(): under -DNDEBUG
+    // assert's expression is not evaluated and s would stay uninitialised.
+    int rc = shape_factory("circle", (double[]){5}, &s);
+    assert(rc == 0);
     assert(fabs(s.area - 78.539) < 0.001);
 
-    assert(shape_factory("rectangle", (double[]){3, 4}, &s) == 0);
+    rc = shape_factory("rectangle", (double[]){3, 4}, &s);
+    assert(rc == 0);
     assert(s.area == 12);
 
-    assert(shape_factory("hexagon", NULL, &s) == -1);
+    rc = shape_factory("hexagon", NULL, &s);
+    assert(rc == -1);
 }
 
 int main(void) {

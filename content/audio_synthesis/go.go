@@ -59,11 +59,14 @@ type Adsr struct {
 	releaseSamples int64
 }
 
+// SetParams clamps each stage to at least one sample: Step divides by the
+// stage length, and a zero-length stage ("instant attack", a common
+// setting) would otherwise be an integer divide by zero.
 func (a *Adsr) SetParams(attack, decay, sustain, release int64) {
-	a.attackSamples = attack
-	a.decaySamples = decay
+	a.attackSamples = max(attack, 1)
+	a.decaySamples = max(decay, 1)
 	a.sustainLevel = sustain
-	a.releaseSamples = release
+	a.releaseSamples = max(release, 1)
 }
 
 func (a *Adsr) GateOn() {
@@ -239,6 +242,12 @@ func main() {
 		e.Step()
 		e.GateOff()
 		check(e.releaseStart == 8192, "release captures partial-attack level")
+	}
+	{
+		var e Adsr
+		e.SetParams(0, 4, 16384, 4) // instant attack
+		e.GateOn()
+		check(e.Step() == ONE, "zero-length attack reaches ONE in one step")
 	}
 	{
 		var e Adsr

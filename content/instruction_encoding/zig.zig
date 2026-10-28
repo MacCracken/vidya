@@ -54,7 +54,10 @@ const ModRM = packed struct {
         return .{ .mod = 0b11, .reg = reg, .rm = rm };
     }
 
-    /// Memory indirect via register, no displacement (mod=00)
+    /// Memory indirect via register, no displacement (mod=00).
+    /// Two rm values do NOT mean "[reg]" here: rm=100 (rsp) means a SIB
+    /// byte follows, and rm=101 (rbp) means [rip + disp32] in 64-bit mode.
+    /// [rsp] needs a SIB byte; [rbp] needs mod=01 with a zero disp8.
     fn memIndirect(reg: u3, rm: u3) ModRM {
         return .{ .mod = 0b00, .reg = reg, .rm = rm };
     }
@@ -102,7 +105,7 @@ const Rex = packed struct {
 fn encodeMoveRegImm64(reg: Reg, imm: u64) [10]u8 {
     var buf: [10]u8 = undefined;
     buf[0] = Rex.w64().toByte(); // REX.W
-    buf[1] = 0xB8 + @as(u8, @intFromEnum(reg)); // B8+rd
+    buf[1] = 0xB8 + @as(u8, @backingInt(reg)); // B8+rd
     // Little-endian immediate
     inline for (0..8) |i| {
         buf[2 + i] = @truncate(imm >> @intCast(i * 8));
@@ -115,7 +118,7 @@ fn encodeMoveRegReg(dst: Reg, src: Reg) [3]u8 {
     return .{
         Rex.w64().toByte(),
         0x89, // MOV r/m64, r64
-        ModRM.regDirect(@intFromEnum(src), @intFromEnum(dst)).toByte(),
+        ModRM.regDirect(@backingInt(src), @backingInt(dst)).toByte(),
     };
 }
 
@@ -124,7 +127,7 @@ fn encodeAddRegReg(dst: Reg, src: Reg) [3]u8 {
     return .{
         Rex.w64().toByte(),
         0x01, // ADD r/m64, r64
-        ModRM.regDirect(@intFromEnum(src), @intFromEnum(dst)).toByte(),
+        ModRM.regDirect(@backingInt(src), @backingInt(dst)).toByte(),
     };
 }
 
@@ -152,7 +155,7 @@ fn encodeNop() [1]u8 {
 // ── Tests ────────────────────────────────────────────────────────────
 fn testModRM() !void {
     // ModR/M for MOV rax, rcx (mod=11, reg=rcx(1), rm=rax(0))
-    const modrm = ModRM.regDirect(@intFromEnum(Reg.rcx), @intFromEnum(Reg.rax));
+    const modrm = ModRM.regDirect(@backingInt(Reg.rcx), @backingInt(Reg.rax));
     try expect(modrm.mod == 0b11);
     try expect(modrm.reg == 1); // rcx
     try expect(modrm.rm == 0); // rax
@@ -160,7 +163,7 @@ fn testModRM() !void {
     try expect(modrm.toByte() == 0xC8);
 
     // ModR/M for memory indirect [rbx], reg=rax
-    const mem_modrm = ModRM.memIndirect(@intFromEnum(Reg.rax), @intFromEnum(Reg.rbx));
+    const mem_modrm = ModRM.memIndirect(@backingInt(Reg.rax), @backingInt(Reg.rbx));
     try expect(mem_modrm.mod == 0b00);
     // Byte: 00_000_011 = 0x03
     try expect(mem_modrm.toByte() == 0x03);

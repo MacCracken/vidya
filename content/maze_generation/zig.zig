@@ -6,7 +6,8 @@
 // neighbour cell.
 //
 // Zig has no implicit overflow on `*` or `+`, so we use the wrapping
-// operators `*%` and `+%` for the PCG state update. Overflow is part
+// operators `*%` and `+%` for the LCG state update (PCG's 64-bit LCG
+// constants, but a plain top-bits output, not PCG's permuted output). Overflow is part
 // of the algorithm and the operators surface that at the call site —
 // byte-for-byte parity with cyrius is preserved.
 
@@ -35,7 +36,7 @@ fn rngSeed(s: u64) void {
 
 fn rngNext() i64 {
     // *% and +% are the explicit wrap-on-overflow forms — that's the
-    // mod-2^64 step PCG depends on.
+    // mod-2^64 step the LCG depends on.
     rng_state = rng_state *% PCG_MULT +% PCG_INC;
     return @intCast((rng_state >> 33) & 0x7fffffff);
 }

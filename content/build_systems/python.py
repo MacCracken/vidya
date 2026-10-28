@@ -122,10 +122,14 @@ def test_edit_leaf_rebuilds_transitively():
 def test_edit_other_leaf_skips_sibling():
     bs = build_graph()
     bs.build()
-    main_built = bs.built[1]
+    util_built, app_built = bs.built[0], bs.built[2]
     bs.set_src(0, 1999)  # edit util.c
     assert bs.build() == 2, "edit util.c rebuilds util.o + app"
-    assert bs.built[1] == main_built, "main.o left untouched"
+    # A rebuild of main.o would store the SAME signature (its inputs did not
+    # change), so comparing bs.built[1] cannot detect one. Instead: both
+    # rebuilds are accounted for by util.o and app, so main.o was skipped.
+    assert bs.built[0] != util_built and bs.built[2] != app_built, \
+        "the 2 rebuilds were util.o + app, so main.o was left untouched"
 
 
 def test_cycle_detected():

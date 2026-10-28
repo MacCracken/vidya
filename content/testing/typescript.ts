@@ -158,6 +158,9 @@ test("counter: zero max", () => {
 
 // ── Async test support ─────────────────────────────────────────────
 
+// testAsync returns a promise the report MUST await: the report below is
+// synchronous, so an un-awaited failing async test would print success and
+// exit 0, and only then log its FAIL.
 async function testAsync(name: string, fn: () => Promise<void>): Promise<void> {
     testsRun++;
     try {
@@ -168,6 +171,22 @@ async function testAsync(name: string, fn: () => Promise<void>): Promise<void> {
         console.error(`  FAIL: ${name}: ${e instanceof Error ? e.message : e}`);
     }
 }
+
+const asyncTests = [
+    testAsync("async: awaited value", async () => {
+        const v = await new Promise<number>((resolve) => setTimeout(() => resolve(42), 1));
+        assertEqual(v, 42, "resolved value");
+    }),
+    testAsync("async: rejection is caught", async () => {
+        let caught = false;
+        try {
+            await Promise.reject(new Error("boom"));
+        } catch {
+            caught = true;
+        }
+        assertEqual(caught, true, "rejection surfaced");
+    }),
+];
 
 // ── Type-level testing ─────────────────────────────────────────────
 // TypeScript can verify types at compile time
@@ -182,9 +201,11 @@ type _TestCounterValue = Expect<Equal<Counter["value"], number>>;
 
 // ── Report ─────────────────────────────────────────────────────────
 
-if (testsFailed > 0) {
-    console.error(`FAILED: ${testsPassed}/${testsRun} passed`);
-    process.exit(1);
-}
+void Promise.all(asyncTests).then(() => {
+    if (testsFailed > 0) {
+        console.error(`FAILED: ${testsPassed}/${testsRun} passed`);
+        process.exit(1);
+    }
 
-console.log("All testing examples passed.");
+    console.log("All testing examples passed.");
+});

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Vidya — Game AI Decision Making in Python
 
-Stat-driven AI scoring with PCG PRNG, urgency-multiplied shooting, and
-weighted action selection. Python's ints are arbitrary-precision, so to
-match the C/Rust 64-bit PCG state we mask explicitly with `& MASK64`.
+Stat-driven AI scoring with a 64-bit LCG PRNG, urgency-multiplied
+shooting, and weighted action selection. The constants are the PCG/MMIX
+LCG constants, but this is the bare LCG step returning high state bits:
+real PCG adds a permutation (xorshift + random rotate) on the output.
+Python's ints are arbitrary-precision, so to match the C/Rust 64-bit
+state we mask explicitly with `& MASK64`.
 The dataclass + IntEnum pair gives readable scoring and a self-
 documenting Action enum that round-trips through int.
 """

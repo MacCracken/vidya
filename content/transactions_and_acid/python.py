@@ -19,6 +19,10 @@ class Store:
         self.tx_status = [TX_FREE] * N_TX
         self.tx_writes = [{} for _ in range(N_TX)]
         self.tx_reads = [{} for _ in range(N_TX)]
+        # Set when a read could not be recorded (read-set full). Validation
+        # cannot check a key it never snapshotted, so such a tx must not
+        # commit — otherwise a stale read of that key commits silently.
+        self.read_overflow = [False] * N_TX
 
     def account_set_raw(self, k, v):
         self.accounts[k] = v
@@ -36,6 +40,7 @@ class Store:
                 self.tx_status[t] = TX_ACTIVE
                 self.tx_writes[t] = {}
                 self.tx_reads[t] = {}
+                self.read_overflow[t] = False
                 return t
         return -1
 
@@ -46,6 +51,8 @@ class Store:
         if k not in self.tx_reads[tx]:
             if len(self.tx_reads[tx]) < TX_CAP:
                 self.tx_reads[tx][k] = self.version[k]
+            else:
+                self.read_overflow[tx] = True  # untracked read: cannot validate
         return self.accounts[k]
 
     def write(self, tx, k, v):
@@ -60,6 +67,8 @@ class Store:
         return 1
 
     def validate(self, tx):
+        if self.read_overflow[tx]:
+            return False
         for k, snap in self.tx_reads[tx].items():
             if self.version[k] != snap:
                 return False
@@ -88,6 +97,7 @@ class Store:
             self.tx_status[t] = TX_FREE
             self.tx_writes[t] = {}
             self.tx_reads[t] = {}
+            self.read_overflow[t] = False
 
 
 def seed():
@@ -187,8 +197,29 @@ def test_durability_survives_crash():
     tx = s.begin()
     s.write(tx, 0, 12345)
     s.commit(tx)
+    in_flight = s.begin()
+    s.write(in_flight, 1, 777)  # never committed
     s.crash_recovery()
+    # Durability is half the property; the other half is that a crash must
+    # not let uncommitted work leak in (atomicity across the crash).
     check(s.account_get_raw(0) == 12345, "committed value survives crash")
+    check(s.account_get_raw(1) == 500, "in-flight write discarded by crash")
+    check(s.begin() == 0, "tx slots free after recovery")
+
+
+def test_readset_overflow_aborts():
+    s = seed()
+    s.account_set_raw(4, 50)
+    tx1 = s.begin()
+    for k in range(TX_CAP):
+        s.read(tx1, k)
+    stale = s.read(tx1, 4)        # 5th key: read-set full, not snapshotted
+    tx2 = s.begin()
+    s.write(tx2, 4, 999)
+    s.commit(tx2)                 # key 4 changes under tx1
+    s.write(tx1, 4, stale + 1)
+    check(s.commit(tx1) == 0, "untracked read aborts commit (no lost update)")
+    check(s.account_get_raw(4) == 999, "tx2's write survives")
 
 
 def test_no_double_commit():
@@ -222,6 +253,7 @@ if __name__ == "__main__":
     test_durability_survives_crash()
     test_no_double_commit()
     test_writeset_capacity()
+    test_readset_overflow_aborts()
     print(f"=== transactions_and_acid ===")
     print(f"{PASS} passed, {FAIL} failed ({PASS + FAIL} total)")
     raise SystemExit(0 if FAIL == 0 else 1)

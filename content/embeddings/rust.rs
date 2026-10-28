@@ -98,8 +98,10 @@ fn main() {
     assert_eq!(top_k_neighbors(&[32767, 0, 0, 0], 10).len(), 4);
 
     {
+        // Dot-product ranking is invariant to positive scaling of the query
+        // (comparing nearest(&q) with itself could never fail).
         let q: [i64; 4] = [29490, 0, 0, 0];
-        assert_eq!(nearest(&q), nearest(&q));
+        assert_eq!(nearest(&[14745, 0, 0, 0]), nearest(&q));
     }
 
     println!("embeddings: 13 tests, 16 assertions ok");

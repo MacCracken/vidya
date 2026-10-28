@@ -1,9 +1,11 @@
 # Vidya — Concurrency in Python
 #
-# Python has the GIL (Global Interpreter Lock), which means threads
-# don't run Python code in parallel. Use threading for I/O-bound work,
-# multiprocessing for CPU-bound work, and asyncio for high-concurrency
-# I/O (thousands of connections).
+# The default CPython build has the GIL (Global Interpreter Lock), which
+# means threads don't run Python code in parallel. (The separate
+# free-threaded build, supported since 3.14 per PEP 779, has no GIL and
+# its threads do run in parallel.) On the default build, use threading
+# for I/O-bound work, multiprocessing for CPU-bound work, and asyncio for
+# high-concurrency I/O (thousands of connections).
 
 import threading
 import queue
@@ -78,7 +80,14 @@ def main():
         nonlocal counter
         for _ in range(n):
             with counter_lock:  # context manager handles acquire/release
-                counter += 1
+                # Read, yield, write: the sleep(0) hands the GIL to another
+                # thread mid-update, so without the lock this loses updates
+                # (measured: ~1000 of 4000 survive). A bare `counter += 1`
+                # almost never races under the GIL, so it would pass with
+                # the lock deleted and prove nothing.
+                current = counter
+                time.sleep(0)
+                counter = current + 1
 
     threads = [threading.Thread(target=increment, args=(1000,)) for _ in range(4)]
     for t in threads:
@@ -106,11 +115,16 @@ def main():
     barrier = threading.Barrier(3)
     arrival_order = []
     order_lock = threading.Lock()
+    arrived = [0]
+    seen_after_barrier = []
 
     def sync_worker(worker_id):
+        with order_lock:
+            arrived[0] += 1
         # All threads must reach the barrier before any proceed
         barrier.wait()
         with order_lock:
+            seen_after_barrier.append(arrived[0])
             arrival_order.append(worker_id)
 
     threads = [threading.Thread(target=sync_worker, args=(i,)) for i in range(3)]
@@ -119,12 +133,20 @@ def main():
     for t in threads:
         t.join()
     assert len(arrival_order) == 3
+    # Every thread got past wait() only after all 3 had arrived
+    assert seen_after_barrier == [3, 3, 3]
 
     # ── Thread-local data ───────────────────────────────────────────
     local = threading.local()
+    all_set = threading.Barrier(3)
 
     def set_and_get(value):
         local.data = value
+        # Wait until EVERY thread has written before reading back. Without
+        # this, a plain shared object also passes (each thread reads its own
+        # write before anyone else writes); with it, a shared object would
+        # make all three read the last writer's value.
+        all_set.wait()
         return local.data
 
     results = {}
@@ -158,9 +180,13 @@ def main():
     # Python 3.14 the default start method on Linux is `forkserver`
     # (it was `fork` through 3.13). forkserver and spawn re-IMPORT the
     # main module inside every child, so unguarded top-level Pool()
-    # code runs again in the child, which then aborts. The parent sees
-    # `ConnectionResetError: [Errno 104] Connection reset by peer` from
-    # the forkserver handshake — a symptom that names nothing. The
+    # code runs again in the child, which then aborts. On 3.14 the
+    # parent died with `ConnectionResetError: [Errno 104] Connection
+    # reset by peer` from the forkserver handshake, a symptom that names
+    # nothing. On 3.15 each child prints "RuntimeError: An attempt has
+    # been made to start a new process before the current process has
+    # finished its bootstrapping phase" and the Pool keeps respawning
+    # the dying workers, so the parent HANGS instead of exiting. The
     # worker must also live at module scope so it can be pickled by
     # qualified name; a closure or nested def is not picklable.
     #

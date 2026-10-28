@@ -5,7 +5,8 @@
 //   2. Dead code elimination (DCE) — remove unused instructions
 //   3. Constant propagation — replace variables with known constant values
 //   4. Strength reduction — replace expensive ops with cheaper ones
-//   5. Peephole optimization — pattern-match and simplify instruction sequences
+//      (x * 2^k → x << k), plus single-instruction algebraic identities
+//      (x * 1, x + 0, x * 0) of the kind a peephole pass applies
 //
 // Each pass transforms the IR, and passes compose: run them iteratively
 // until no more changes occur (fixed point).
@@ -29,6 +30,8 @@ enum Inst {
     Const { dst: Reg, value: i64 },
     BinOp { dst: Reg, op: Op, lhs: Reg, rhs: Reg },
     Copy { dst: Reg, src: Reg },
+    /// dst = src << shift (immediate) — the target of strength reduction
+    ShlImm { dst: Reg, src: Reg, shift: u32 },
     Return { src: Reg },
 }
 
@@ -55,6 +58,7 @@ impl fmt::Display for Inst {
             Inst::Const { dst, value } => write!(f, "{} = {}", dst, value),
             Inst::BinOp { dst, op, lhs, rhs } => write!(f, "{} = {} {} {}", dst, lhs, op, rhs),
             Inst::Copy { dst, src } => write!(f, "{} = {}", dst, src),
+            Inst::ShlImm { dst, src, shift } => write!(f, "{} = {} << {}", dst, src, shift),
             Inst::Return { src } => write!(f, "return {}", src),
         }
     }
@@ -102,6 +106,14 @@ fn constant_fold(prog: &mut Program) -> usize {
                     constants.insert(*dst, val);
                 }
             }
+            Inst::ShlImm { dst, src, shift } => {
+                if let Some(&v) = constants.get(src) {
+                    let result = v << *shift;
+                    constants.insert(*dst, result);
+                    *inst = Inst::Const { dst: *dst, value: result };
+                    folded += 1;
+                }
+            }
             Inst::Return { .. } => {}
         }
     }
@@ -121,7 +133,7 @@ fn dead_code_elimination(prog: &mut Program) -> usize {
                 used.insert(*lhs);
                 used.insert(*rhs);
             }
-            Inst::Copy { src, .. } => {
+            Inst::Copy { src, .. } | Inst::ShlImm { src, .. } => {
                 used.insert(*src);
             }
             Inst::Return { src } => {
@@ -135,9 +147,10 @@ fn dead_code_elimination(prog: &mut Program) -> usize {
     let before = prog.instructions.len();
     prog.instructions.retain(|inst| {
         match inst {
-            Inst::Const { dst, .. } | Inst::BinOp { dst, .. } | Inst::Copy { dst, .. } => {
-                used.contains(dst)
-            }
+            Inst::Const { dst, .. }
+            | Inst::BinOp { dst, .. }
+            | Inst::Copy { dst, .. }
+            | Inst::ShlImm { dst, .. } => used.contains(dst),
             Inst::Return { .. } => true,
         }
     });
@@ -158,23 +171,17 @@ fn constant_propagation(prog: &mut Program) -> usize {
         }
     }
 
-    // Second pass: replace uses of constant registers
+    // Second pass: replace copies of constant registers with the constant.
+    // (BinOps with constant operands are left to constant_fold, which reads
+    // the same table. Counting them here without changing anything would
+    // report "progress" every iteration and the fixed-point loop would
+    // never terminate for a program with a non-constant input.)
     for inst in &mut prog.instructions {
-        match inst {
-            Inst::BinOp { lhs, rhs, .. } => {
-                // Replace constant operands with Const instructions
-                // (This sets up for constant folding on the next iteration)
-                if constants.contains_key(lhs) || constants.contains_key(rhs) {
-                    propagated += 1;
-                }
+        if let Inst::Copy { dst, src } = inst {
+            if let Some(&val) = constants.get(src) {
+                *inst = Inst::Const { dst: *dst, value: val };
+                propagated += 1;
             }
-            Inst::Copy { dst, src } => {
-                if let Some(&val) = constants.get(src) {
-                    *inst = Inst::Const { dst: *dst, value: val };
-                    propagated += 1;
-                }
-            }
-            _ => {}
         }
     }
 
@@ -195,15 +202,12 @@ fn strength_reduction(prog: &mut Program) -> usize {
 
     for inst in &mut prog.instructions {
         if let Inst::BinOp { dst, op: Op::Mul, lhs, rhs } = inst {
-            // Multiply by power of 2 where both operands are constants → fold to shift result
-            if let (Some(&l), Some(&val)) = (constants.get(lhs), constants.get(rhs)) {
-                if val > 0 && (val as u64).is_power_of_two() {
-                    let shift = val.trailing_zeros();
-                    let result = l << shift;
-                    constants.insert(*dst, result);
-                    *inst = Inst::Const { dst: *dst, value: result };
-                    reduced += 1;
-                }
+            // x * 2^k → x << k, for x NOT known at compile time (when both
+            // operands are constant, constant_fold has already done better)
+            let pow2 = constants.get(rhs).copied().filter(|&v| v > 1 && (v as u64).is_power_of_two());
+            if let (None, Some(val)) = (constants.get(lhs), pow2) {
+                *inst = Inst::ShlImm { dst: *dst, src: *lhs, shift: val.trailing_zeros() };
+                reduced += 1;
             }
             // Multiply by 0 → const 0
             else if constants.get(rhs) == Some(&0) || constants.get(lhs) == Some(&0) {
@@ -305,11 +309,15 @@ fn main() {
     println!("  After optimization ({} instructions):", prog.instructions.len());
     print!("{}", prog);
 
-    // Example 2: Strength reduction — multiply by power of 2
+    assert_eq!(prog.instructions.len(), 2);
+    assert!(matches!(prog.instructions[0], Inst::Const { value: 150, .. }));
+
+    // Example 2: Strength reduction — multiply by power of 2. x must be
+    // unknown at compile time (v0 is a function input with no defining
+    // instruction); a constant x would simply be folded.
     println!("\n2. Strength reduction: x * 8 → x << 3");
     let mut prog2 = Program {
         instructions: vec![
-            Inst::Const { dst: Reg(0), value: 42 },         // v0 = 42 (x)
             Inst::Const { dst: Reg(1), value: 8 },          // v1 = 8
             Inst::BinOp { dst: Reg(2), op: Op::Mul, lhs: Reg(0), rhs: Reg(1) }, // v2 = x * 8
             Inst::Return { src: Reg(2) },
@@ -323,6 +331,8 @@ fn main() {
 
     println!("  After:");
     print!("{}", prog2);
+    assert!(matches!(prog2.instructions[0], Inst::ShlImm { src: Reg(0), shift: 3, .. }));
+    assert_eq!(prog2.instructions.len(), 2); // v1 = 8 is now dead and removed
 
     // Example 3: Dead code
     println!("\n3. Dead code elimination:");
@@ -344,4 +354,6 @@ fn main() {
 
     println!("  After ({} instructions):", prog3.instructions.len());
     print!("{}", prog3);
+    assert_eq!(prog3.instructions.len(), 2);
+    assert!(matches!(prog3.instructions[0], Inst::Const { value: 3, .. }));
 }

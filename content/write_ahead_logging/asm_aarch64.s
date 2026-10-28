@@ -210,6 +210,10 @@ store_get:
     ret
 
 // replay -> x0 = applied count
+// The log is NOT trusted on replay: recovery is exactly when a torn or
+// corrupt record shows up. A record whose op is not SET/DEL, or whose
+// key is outside [0, STORE_KEYS), ends the durable prefix — replay stops
+// there instead of indexing data_vals[] with it.
 replay:
     stp     x29, x30, [sp, #-32]!
     mov     x29, sp
@@ -234,11 +238,13 @@ replay:
     ldr     x15, [x9, x14]              // key
     add     x14, x19, #16
     ldr     x16, [x9, x14]              // val
+    cmp     x15, #STORE_KEYS            // unsigned: negative keys fail too
+    b.hs    .Lrp_done                   // corrupt key: end of durable log
     cmp     x13, #OP_SET
     b.eq    .Lrp_set
     cmp     x13, #OP_DEL
     b.eq    .Lrp_del
-    b       .Lrp_next
+    b       .Lrp_done                   // unknown op: end of durable log
 .Lrp_set:
     str     x16, [x11, x15, lsl #3]
     mov     w17, #1
@@ -422,6 +428,27 @@ _start:
     add     x21, x21, #1
     b       .Lmono_loop
 .Lmono_done:
+
+    // --- test_replay_stops_at_corrupt_record ---
+    bl      reset_all
+    mov     x0, #3
+    mov     x1, #77
+    bl      store_set
+    mov     x0, #4
+    mov     x1, #88
+    bl      store_set
+    bl      log_commit
+    adrp    x9, log_buf
+    add     x9, x9, :lo12:log_buf
+    ldr     x10, =1000000
+    str     x10, [x9, #8]               // record 0's key, torn to 1000000
+    bl      replay
+    mov     x1, #0                      // nothing at or after the bad record
+    bl      expect_eq
+    mov     x0, #4
+    bl      store_get
+    mov     x1, #-1
+    bl      expect_eq
 
     // --- test_log_capacity_limit ---
     bl      reset_all

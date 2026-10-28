@@ -1,9 +1,9 @@
 // Vidya — Input/Output in Zig
 //
-// Zig I/O uses the std.Io.Reader and std.Io.Writer interfaces. As of Zig
-// 0.16 ("Writergate"), these are concrete structs driven by a vtable rather
-// than the old generic comptime streams, and all OS-backed I/O takes an
-// explicit `Io` instance so the same code runs blocking or async. No hidden
+// Zig I/O uses the std.Io.Reader and std.Io.Writer interfaces. Since Zig
+// 0.15.1 ("Writergate"), these are concrete structs driven by a vtable rather
+// than the old generic comptime streams; since 0.16 all OS-backed I/O also
+// takes an explicit `Io` instance so the same code runs blocking or async. No hidden
 // buffering — writers buffer until you flush. File I/O goes through std.Io.Dir.
 
 const std = @import("std");

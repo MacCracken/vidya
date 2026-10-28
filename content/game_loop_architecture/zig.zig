@@ -3,7 +3,7 @@
 // Fixed-timestep accumulator loop with spiral-of-death cap. The driver
 // `loopStep` takes an elapsed-microsecond delta and returns the number
 // of fixed-step updates fired this frame. Zig's `i64` (with no implicit
-// conversions) makes the monotonic-time math explicit at every step —
+// narrowing or sign changes) makes the monotonic-time math explicit at every step —
 // no surprises from u32 wrap or signed/unsigned mixups. A real game
 // would source deltas from the clock. NB: `std.time.nanoTimestamp()` no
 // longer exists in Zig 0.16 — `std.time` is duration constants now, and

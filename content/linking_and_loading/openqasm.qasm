@@ -1,24 +1,28 @@
 // Vidya — Linking and Loading in OpenQASM (Include Resolution)
 //
-// Analogy: `include "qelib1.inc"` is link-time symbol resolution.
+// Analogy: `include "stdgates.inc"` is link-time symbol resolution.
 // The standard library gates (h, cx, t, s) are "linked in" from
-// the include file, like a shared library loaded at program start.
+// the include file, like a library linked in at build time.
 
-OPENQASM 2.0;
-include "qelib1.inc";  // "linking" the standard gate library
+OPENQASM 3.1;
+include "stdgates.inc";  // "linking" the standard gate library
 
 // ── Using "linked" symbols from the standard library ─────────────
-qreg q[2];
-creg c[2];
+qubit[2] q;
+bit[2] c;
 
-// These gates are defined in qelib1.inc, not built-in
-h q[0];            // resolved from include: u2(0, pi)
-t q[0];            // resolved from include: u1(pi/4)
-cx q[0], q[1];     // resolved from include: CX primitive
-// swap q[0], q[1] expanded — qelib1.inc doesn't define it as a gate;
-// the 3-CNOT decomposition IS the "linking" of three primitives.
+// These gates are defined in stdgates.inc, not built-in (OpenQASM 3's
+// only built-in gates are U and gphase)
+h q[0];            // resolved from include: U(pi/2, 0, pi)
+t q[0];            // resolved from include: pow(0.5) @ s = phase pi/4
+cx q[0], q[1];     // resolved from include: ctrl @ x
+// swap q[0], q[1] expanded — stdgates.inc defines `swap` as exactly
+// these three CNOTs; spelled out so the "linked" body is visible.
 cx q[0], q[1];
 cx q[1], q[0];
 cx q[0], q[1];
 
-measure q -> c;
+c = measure q;
+// h + cx make a Bell pair (t only adds a phase) and the swap exchanges
+// two equal bits: c reads 00 or 11
+// @expect c in {0, 3}

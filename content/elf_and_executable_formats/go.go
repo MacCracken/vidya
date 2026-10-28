@@ -218,7 +218,6 @@ func main() {
 
 	// Verify critical field offsets
 	var hdr Elf64Header
-	hdrBase := unsafe.Pointer(&hdr)
 
 	fields := []fieldInfo{
 		{"e_ident", 0, 16},
@@ -249,8 +248,6 @@ func main() {
 	assert(unsafe.Offsetof(hdr.Entry) == 24, "e_entry at offset 24")
 	assert(unsafe.Offsetof(hdr.PhOff) == 32, "e_phoff at offset 32")
 	assert(unsafe.Offsetof(hdr.ShOff) == 40, "e_shoff at offset 40")
-
-	_ = hdrBase // used to establish the base for offset verification
 
 	// ── 2. Program header structure ──────────────────────────────────
 	fmt.Println("\n2. Program header (Elf64_Phdr):")
@@ -408,7 +405,8 @@ func main() {
 	fmt.Println("  Sections (.text, .data, .bss) = linker's view")
 	fmt.Println("    - Organize code and data by type")
 	fmt.Println("    - Used for symbol resolution, relocation, linking")
-	fmt.Println("    - Optional for execution (strip -s removes them)")
+	fmt.Println("    - Optional for execution (strip -s drops .symtab/.strtab and")
+	fmt.Println("      debug info but keeps the section headers; sstrip removes those)")
 	fmt.Println()
 	fmt.Println("  Segments (PT_LOAD) = loader's view")
 	fmt.Println("    - Describe memory mappings with permissions")

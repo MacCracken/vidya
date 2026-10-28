@@ -113,15 +113,17 @@ _start:
     jne     fail
 
     # ── Test 8: Complex multiply operation count ───────────────────────
-    # Each complex mul = 4 real muls + 2 adds = 6 FLOPs
-    # Gate on n-qubit state: 2^n complex muls → 6 × 2^n FLOPs
-    # 20-qubit Hadamard: 6 × 2^20 = 6291456 FLOPs
+    # Each complex mul = 4 real muls + 2 adds = 6 FLOPs; complex add = 2.
+    # A 1-qubit gate on an n-qubit state is a dense 2x2 matrix applied to
+    # each of the 2^(n-1) amplitude pairs: 4 complex muls + 2 complex adds
+    # per pair = 2^(n+1) muls + 2^n adds → (12 + 2) × 2^n = 14 × 2^n FLOPs
+    # 20 qubits, general 1-qubit gate: 14 × 2^20 = 14680064 FLOPs
     mov     ecx, 20
     mov     rax, 1
     shl     rax, cl
-    mov     rcx, 6
+    mov     rcx, 14
     mul     rcx
-    mov     rbx, 6291456
+    mov     rbx, 14680064
     cmp     rax, rbx
     jne     fail
 

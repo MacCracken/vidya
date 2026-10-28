@@ -6,8 +6,10 @@
 #   A — Atomicity   commit installs every write or none; abort discards.
 #   C — Consistency a transfer preserves the sum-of-balances invariant.
 #   I — Isolation   no dirty reads (tx2 cannot see tx1's uncommitted
-#                   writes); read-set version snapshot detects
-#                   write-write conflicts (lost-update prevention).
+#                   writes); read-set version snapshots detect stale
+#                   reads, so a read-modify-write that raced another
+#                   commit aborts (lost-update prevention). Blind writes
+#                   (no read) are not validated.
 #   D — Durability  committed state lives in `accounts[]` outside the
 #                   per-tx scratch buffers — clearing tx state ("crash")
 #                   does NOT drop committed values. Real systems pair
@@ -144,14 +146,18 @@ fn tx_read(tx, key) {
     }
 
     # Fall back to durable; record OCC version snapshot once per key.
+    # A read the read-set cannot track would escape validation, so a full
+    # read-set aborts the tx instead of returning an unchecked value.
     if (tx_has_read(tx, key) == 0) {
         var rn = load64(&tx_rcount + tx * 8);
-        if (rn < TX_CAP) {
-            store64(&tx_rkeys + (tx * TX_CAP + rn) * 8, key);
-            store64(&tx_rsnaps + (tx * TX_CAP + rn) * 8,
-                    load64(&accounts_version + key * 8));
-            store64(&tx_rcount + tx * 8, rn + 1);
+        if (rn >= TX_CAP) {
+            store64(&tx_status + tx * 8, TX_ABORTED);
+            return 0 - 1;
         }
+        store64(&tx_rkeys + (tx * TX_CAP + rn) * 8, key);
+        store64(&tx_rsnaps + (tx * TX_CAP + rn) * 8,
+                load64(&accounts_version + key * 8));
+        store64(&tx_rcount + tx * 8, rn + 1);
     }
     return load64(&accounts + key * 8);
 }
@@ -385,6 +391,22 @@ fn test_writeset_capacity_bounded() {
     return 0;
 }
 
+fn test_readset_capacity_aborts() {
+    # A 5th distinct read cannot be snapshotted; returning it untracked
+    # would let a stale read commit. It must abort the tx instead.
+    seed_accounts();
+    var tx = tx_begin();
+    tx_read(tx, 0);
+    tx_read(tx, 1);
+    tx_read(tx, 2);
+    tx_read(tx, 3);
+    var fifth = tx_read(tx, 4);
+    assert_eq(fifth, 0 - 1, "5th distinct read refused (read-set cap = 4)");
+    assert_eq(tx_status_of(tx), TX_ABORTED, "untrackable read aborts the tx");
+    assert_eq(tx_commit(tx), 0, "aborted tx cannot commit");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_group("transactions_and_acid");
@@ -398,6 +420,7 @@ fn main() {
     test_durability_committed_survives_crash();
     test_no_double_commit();
     test_writeset_capacity_bounded();
+    test_readset_capacity_aborts();
 
     return assert_summary();
 }

@@ -81,15 +81,21 @@ impl Task {
         }
     }
 
-    /// CFS weight based on nice value. Nice 0 = weight 1024.
+    /// CFS weight based on nice value. Nice 0 = weight 1024, and each nice
+    /// level is ~1.25x (so one level ≈ 10% CPU between two competing tasks).
+    /// These are Linux's sched_prio_to_weight values (kernel/sched/core.c).
     fn weight(&self) -> u64 {
-        // Simplified: each nice level is ~1.25x
-        let base = 1024u64;
-        if self.nice >= 0 {
-            base >> (self.nice as u32).min(10)
-        } else {
-            base << ((-self.nice) as u32).min(10)
-        }
+        const SCHED_PRIO_TO_WEIGHT: [u64; 40] = [
+            /* -20 */ 88761, 71755, 56483, 46273, 36291,
+            /* -15 */ 29154, 23254, 18705, 14949, 11916,
+            /* -10 */ 9548, 7620, 6100, 4904, 3906,
+            /*  -5 */ 3121, 2501, 1991, 1586, 1277,
+            /*   0 */ 1024, 820, 655, 526, 423,
+            /*   5 */ 335, 272, 215, 172, 137,
+            /*  10 */ 110, 87, 70, 56, 45,
+            /*  15 */ 36, 29, 23, 18, 15,
+        ];
+        SCHED_PRIO_TO_WEIGHT[(self.nice.clamp(-20, 19) + 20) as usize]
     }
 }
 
@@ -226,10 +232,15 @@ impl CfsScheduler {
         self.tick += 1;
         if let Some(idx) = self.current {
             self.tasks[idx].cpu_time += 1;
-            // Update vruntime: actual_time * (default_weight / task_weight)
-            // Higher weight (lower nice) → vruntime grows slower → gets more CPU
+            // Update vruntime: actual_time * (NICE_0_WEIGHT / task_weight)
+            // Higher weight (lower nice) → vruntime grows slower → gets more CPU.
+            // Measure time in fine units (1 tick = 1_000_000 ns, as Linux uses
+            // ns) and multiply BEFORE dividing: `1024 / weight` truncates to 0
+            // for any weight > 1024, so a high-priority task's vruntime would
+            // never grow and it would starve everyone else.
+            const TICK_NS: u64 = 1_000_000;
             let weight = self.tasks[idx].weight();
-            self.tasks[idx].vruntime += 1024 / weight;
+            self.tasks[idx].vruntime += TICK_NS * 1024 / weight;
         }
     }
 }
@@ -282,6 +293,9 @@ fn main() {
     }
 
     println!("   Timeline (30 ticks): {:?}", &cfs_history[..20]);
+    // Fair share ∝ weight (3121 : 1024 : 335): everyone runs, high-prio most.
+    let cpu: Vec<u64> = cfs.tasks.iter().map(|t| t.cpu_time).collect();
+    assert!(cpu[0] > cpu[1] && cpu[1] > cpu[2] && cpu[2] > 0, "weighted shares, no starvation: {cpu:?}");
     println!("   ...");
     println!("   Task states:");
     for task in &cfs.tasks {

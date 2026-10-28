@@ -28,6 +28,9 @@ static int decode_varint(const uint8_t *buf, int buf_len, uint64_t *value) {
     for (int i = 0; i < MAX_VARINT_BYTES; i++) {
         if (i >= buf_len) return -1;
         uint8_t b = buf[i];
+        /* The 10th byte carries only bit 63; anything above 1 would need
+         * bits 64+ and is silently shifted out — reject it as overflow. */
+        if (i == MAX_VARINT_BYTES - 1 && b > 1) return -1;
         *value += ((uint64_t)(b & 0x7F)) << shift;
         if ((b & 0x80) == 0) return i + 1;
         shift += 7;
@@ -41,13 +44,18 @@ static int encode_frame(const uint8_t *payload, int payload_len, uint8_t *out) {
     return n + payload_len;
 }
 
-/* Returns bytes consumed, or -1 on failure. payload_out filled. */
-static int decode_frame(const uint8_t *buf, int buf_len, uint8_t *payload_out, uint64_t max_msg) {
+/* Returns bytes consumed, or -1 on failure. payload_out (out_cap bytes)
+ * filled. max_msg is the protocol's DoS limit; out_cap is the size of the
+ * caller's buffer. Both are needed: a length under max_msg can still be
+ * larger than the buffer it is about to be copied into. */
+static int decode_frame(const uint8_t *buf, int buf_len, uint8_t *payload_out,
+                        size_t out_cap, uint64_t max_msg) {
     uint64_t length;
     int hdr = decode_varint(buf, buf_len, &length);
     if (hdr < 0) return -1;
     if (length > max_msg) return -1;
-    if (hdr + (int)length > buf_len) return -1;
+    if (length > out_cap) return -1;
+    if (length > (uint64_t)(buf_len - hdr)) return -1;
     memcpy(payload_out, buf + hdr, length);
     return hdr + (int)length;
 }
@@ -56,15 +64,24 @@ int main(void) {
     uint8_t buf[64], pl_out[64];
     uint64_t v;
 
+    /* Encoders and decoders write through their buffer/out arguments, so
+     * they run outside assert(): under -DNDEBUG assert's expression is not
+     * evaluated, and buf / v would keep stale contents. */
+
     /* Varint sizes */
-    assert(encode_varint(0, buf) == 1);
+    int len = encode_varint(0, buf);
+    assert(len == 1);
     assert(buf[0] == 0);
-    assert(encode_varint(127, buf) == 1);
+    len = encode_varint(127, buf);
+    assert(len == 1);
     assert(buf[0] == 0x7F);
-    assert(encode_varint(128, buf) == 2);
+    len = encode_varint(128, buf);
+    assert(len == 2);
     assert(buf[0] == 0x80 && buf[1] == 0x01);
-    assert(encode_varint(16383, buf) == 2);
-    assert(encode_varint(16384, buf) == 3);
+    len = encode_varint(16383, buf);
+    assert(len == 2);
+    len = encode_varint(16384, buf);
+    assert(len == 3);
 
     /* Round-trip */
     int n = encode_varint(1234567890, buf);
@@ -75,14 +92,21 @@ int main(void) {
     /* Overflow guard */
     uint8_t bomb[16];
     memset(bomb, 0xFF, 11);
-    assert(decode_varint(bomb, 11, &v) == -1);
+    dn = decode_varint(bomb, 11, &v);
+    assert(dn == -1);
+    bomb[9] = 0x7F;                       /* 10 bytes, but needs 70 bits */
+    dn = decode_varint(bomb, 10, &v);
+    assert(dn == -1);
+    bomb[9] = 0x01;                       /* 10 bytes, exactly UINT64_MAX */
+    dn = decode_varint(bomb, 10, &v);
+    assert(dn == 10 && v == UINT64_MAX);
 
     /* Frame round-trip */
     const uint8_t *payload = (const uint8_t *)"hello, world";
     int frame_n = encode_frame(payload, 12, buf);
     assert(frame_n == 13);
     assert(buf[0] == 12);
-    int consumed = decode_frame(buf, frame_n, pl_out, MAX_MSG_SIZE);
+    int consumed = decode_frame(buf, frame_n, pl_out, sizeof pl_out, MAX_MSG_SIZE);
     assert(consumed == 13);
     assert(memcmp(pl_out, payload, 12) == 0);
 
@@ -94,7 +118,7 @@ int main(void) {
     off += encode_frame((const uint8_t *)"CCCCC", 5, stream + off);
     int pos = 0, msg_count = 0;
     while (pos < off) {
-        int c = decode_frame(stream + pos, off - pos, pl_out, MAX_MSG_SIZE);
+        int c = decode_frame(stream + pos, off - pos, pl_out, sizeof pl_out, MAX_MSG_SIZE);
         if (c < 0) break;
         msg_count++;
         pos += c;
@@ -102,14 +126,23 @@ int main(void) {
     assert(msg_count == 3);
 
     /* Truncated frame */
-    uint8_t trunc[6] = {100, 'B', 'C', 'D', 'E', 'F'};
-    assert(decode_frame(trunc, 6, pl_out, MAX_MSG_SIZE) == -1);
+    uint8_t trunc[6] = {10, 'B', 'C', 'D', 'E', 'F'};  /* claims 10, has 5 */
+    consumed = decode_frame(trunc, 6, pl_out, sizeof pl_out, MAX_MSG_SIZE);
+    assert(consumed == -1);
 
     /* Oversize length rejected */
     uint8_t over[16];
     int oh = encode_varint(9999, over);
-    assert(decode_frame(over, oh, pl_out, MAX_MSG_SIZE) == -1);
+    consumed = decode_frame(over, oh, pl_out, sizeof pl_out, MAX_MSG_SIZE);
+    assert(consumed == -1);
 
-    printf("serialization: 19/19 ok\n");
+    /* Under the DoS limit but larger than the destination buffer */
+    uint8_t big[100], wire[128];
+    memset(big, 'X', sizeof big);
+    int wn = encode_frame(big, (int)sizeof big, wire);
+    consumed = decode_frame(wire, wn, pl_out, sizeof pl_out, MAX_MSG_SIZE);
+    assert(consumed == -1);
+
+    printf("serialization: 21/21 ok\n");
     return 0;
 }

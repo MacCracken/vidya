@@ -4,9 +4,10 @@
  *   {0, BYTE}      literal
  *   {OFFSET, LEN}  match: copy LEN bytes from out[pos - OFFSET..]
  * Greedy O(n^2) match-finder over a 255-byte window. Decoder enforces
- * an output-cap. Match copy is byte-by-byte so offset=1 replicates the
- * trailing byte (RLE) — `memcpy` would be wrong because src and dst
- * overlap.
+ * an output-cap AND rejects back-references that reach before the start
+ * of the output — token bytes are untrusted input. Match copy is
+ * byte-by-byte so offset=1 replicates the trailing byte (RLE) —
+ * `memcpy` would be wrong because src and dst overlap.
  */
 
 #include <assert.h>
@@ -62,7 +63,8 @@ static size_t encode(const uint8_t *src, size_t src_len, uint8_t *tok) {
     return tpos;
 }
 
-/* Returns -1 on bomb-guard trigger, else output length. */
+/* Returns -1 on bomb-guard trigger or a corrupt back-reference, else
+ * output length. */
 static int decode(const uint8_t *tok, size_t tok_len, size_t out_cap, uint8_t *out) {
     size_t pos = 0;
     for (size_t i = 0; i + 1 < tok_len; i += 2) {
@@ -71,6 +73,8 @@ static int decode(const uint8_t *tok, size_t tok_len, size_t out_cap, uint8_t *o
             if (pos + 1 > out_cap) return -1;
             out[pos++] = b1;
         } else {
+            /* offset > pos would read out[pos - b0] before the buffer */
+            if (b0 > pos) return -1;
             if (pos + b1 > out_cap) return -1;
             for (int k = 0; k < b1; k++) {
                 out[pos + k] = out[pos - b0 + k];
@@ -99,7 +103,7 @@ int main(void) {
     size_t t2 = encode((const uint8_t *)s2, n2, tok);
     int d2 = decode(tok, t2, BUF_CAP, out);
     assert(d2 == (int)n2 && memcmp(out, s2, n2) == 0 && "AAAAAAAA roundtrip");
-    assert(t2 < n2 + 4 && "AAAAAAAA actually compresses");
+    assert(t2 < n2 && "AAAAAAAA actually compresses");
 
     /* 3. Mostly literals */
     const char *s3 = "Hello, World!";
@@ -109,9 +113,14 @@ int main(void) {
     assert(d3 == (int)n3 && memcmp(out, s3, n3) == 0 && "Hello roundtrip");
 
     /* 4. Bomb guard */
-    uint8_t bomb[2] = {1, 200};
-    int dbomb = decode(bomb, 2, 10, out);
+    uint8_t bomb[4] = {0, 'A', 1, 200};   /* valid offset, oversize length */
+    int dbomb = decode(bomb, 4, 10, out);
     assert(dbomb == -1 && "bomb guard rejects oversize");
+
+    /* 4b. Back-reference before the start of output (hostile stream) */
+    uint8_t evil[2] = {1, 3};
+    int devil = decode(evil, 2, BUF_CAP, out);   /* call outside assert() */
+    assert(devil == -1 && "offset > pos rejected");
 
     /* 5. Empty input */
     size_t t5 = encode((const uint8_t *)"", 0, tok);
@@ -119,6 +128,6 @@ int main(void) {
     int d5 = decode(tok, 0, BUF_CAP, out);
     assert(d5 == 0 && "empty tokens → zero output");
 
-    printf("compression: 11/11 ok\n");
+    printf("compression: 9/9 ok\n");
     return 0;
 }

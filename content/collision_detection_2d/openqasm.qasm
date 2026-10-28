@@ -13,19 +13,21 @@
 //   2. Orthogonal states (no overlap, "disjoint") — distant circles
 //   3. Partial overlap via interference            — touching circles
 //
-// qelib1.inc gives us no `swap` gate, so the controlled-SWAP is
-// expanded as 3 CNOTs (Toffoli-style) per the standard decomposition
-// `cx a,b ; cx b,a ; cx a,b` with the ancilla controlling each.
+// stdgates.inc has the controlled-SWAP as `cswap`; it is spelled out
+// here to show its standard decomposition. Of a SWAP's 3 CNOTs
+// (`cx a,b ; cx b,a ; cx a,b`) only the middle one needs the ancilla
+// as a control: CSWAP = cx b,a ; ccx anc,a,b ; cx b,a. With anc = 0 the
+// two outer CNOTs cancel.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Primitive 1: identical states — "fully overlapping" shapes ────────
 // Both states |a⟩ = |b⟩ = |0⟩. Swap-test ancilla measures 0 with p=1.
-qreg a1[1];
-qreg b1[1];
-qreg anc1[1];
-creg out1[1];
+qubit[1] a1;
+qubit[1] b1;
+qubit[1] anc1;
+bit[1] out1;
 
 h anc1[0];
 // Controlled-SWAP(anc, a1[0], b1[0]) decomposed via Toffolis:
@@ -36,16 +38,17 @@ cx b1[0], a1[0];
 ccx anc1[0], a1[0], b1[0];
 cx b1[0], a1[0];
 h anc1[0];
-measure anc1[0] -> out1[0];
+out1[0] = measure anc1[0];
 // Expectation: out1 = 0 with probability 1 (states are equal)
+// @expect out1 == 0
 
 // ── Primitive 2: orthogonal states — "disjoint" shapes ────────────────
 // |a⟩ = |0⟩, |b⟩ = |1⟩.  ⟨0|1⟩ = 0, so p(0) = 1/2 — the swap test
 // can no longer distinguish, marking maximal "non-overlap."
-qreg a2[1];
-qreg b2[1];
-qreg anc2[1];
-creg out2[1];
+qubit[1] a2;
+qubit[1] b2;
+qubit[1] anc2;
+bit[1] out2;
 
 x b2[0];                     // |b⟩ = |1⟩
 h anc2[0];
@@ -53,17 +56,18 @@ cx b2[0], a2[0];
 ccx anc2[0], a2[0], b2[0];
 cx b2[0], a2[0];
 h anc2[0];
-measure anc2[0] -> out2[0];
+out2[0] = measure anc2[0];
 // Expectation: out2 = 0 with probability 1/2 (orthogonal)
+// @expect out2 in {0, 1}
 
 // ── Primitive 3: partial overlap via interference ─────────────────────
 // |a⟩ = |0⟩, |b⟩ = (|0⟩ + |1⟩)/√2. ⟨a|b⟩ = 1/√2, so |⟨a|b⟩|² = 1/2,
 // and p(0) = 3/4 — between full overlap and full disjoint, like
 // "circles touching at one point."
-qreg a3[1];
-qreg b3[1];
-qreg anc3[1];
-creg out3[1];
+qubit[1] a3;
+qubit[1] b3;
+qubit[1] anc3;
+bit[1] out3;
 
 h b3[0];                     // |b⟩ = |+⟩
 h anc3[0];
@@ -71,8 +75,9 @@ cx b3[0], a3[0];
 ccx anc3[0], a3[0], b3[0];
 cx b3[0], a3[0];
 h anc3[0];
-measure anc3[0] -> out3[0];
+out3[0] = measure anc3[0];
 // Expectation: out3 = 0 with probability 3/4 (partial overlap)
+// @expect out3 in {0, 1}
 
 // ── Notes — collision testing in the quantum regime ───────────────────
 //

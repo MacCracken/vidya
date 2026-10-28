@@ -7,10 +7,10 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"iter"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -68,9 +68,13 @@ func main() {
 	assertSliceEq(sorted, []int{1, 1, 2, 3, 4, 5, 6, 9}, "sorted")
 
 	// ── Sorting with custom comparator ──────────────────────────────
+	// "banana" and "cherry" tie on length, so asserting their order needs
+	// a STABLE sort. sort.Slice / slices.SortFunc are not stable: they only
+	// happen to keep ties in order for tiny inputs (insertion-sort cutoff);
+	// on a few dozen elements pdqsort reorders equal keys.
 	words := []string{"banana", "apple", "cherry"}
-	sort.Slice(words, func(i, j int) bool {
-		return len(words[i]) < len(words[j])
+	slices.SortStableFunc(words, func(a, b string) int {
+		return cmp.Compare(len(a), len(b))
 	})
 	assertStrSliceEq(words, []string{"apple", "banana", "cherry"}, "sort by length")
 
@@ -189,7 +193,8 @@ func foldInts(s []int, init int, f func(int, int) int) int {
 // Trap: yield returning false means the consumer left the loop (break,
 // return, panic). You MUST return immediately — calling yield again after
 // it returned false panics with "range function continued iteration after
-// loop body exit". Every hand-written Seq needs this guard.
+// function for loop body returned false". Every hand-written Seq needs
+// this guard.
 func countUp(n int) iter.Seq[int] {
 	return func(yield func(int) bool) {
 		for i := 1; i <= n; i++ {

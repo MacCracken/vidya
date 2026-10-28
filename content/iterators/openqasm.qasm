@@ -3,13 +3,19 @@
 // Quantum "iteration" is gate repetition and circuit layering.
 // Applying H to all qubits is "map". Building a GHZ state by
 // chaining CNOT is "fold". Circuit depth is iteration count.
+//
+// OpenQASM 3 also has real loops: `for uint i in [0:3] { h map_q[i]; }`
+// (ranges are inclusive). qiskit's importer (qiskit-qasm3-import 0.6.0)
+// cannot yet index a register by the loop variable, so map and fold are
+// unrolled by hand below; the repeated-application section, whose body
+// does not use the index, is a real `for` loop.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Map: apply H to every qubit (parallel) ────────────────────────
-qreg map_q[4];
-creg map_c[4];
+qubit[4] map_q;
+bit[4] map_c;
 
 h map_q[0];
 h map_q[1];
@@ -17,12 +23,14 @@ h map_q[2];
 h map_q[3];
 // Creates equal superposition of all 16 basis states
 
-measure map_q -> map_c;
+map_c = measure map_q;
+// Measurement picks one of the 16, uniformly
+// @expect map_c in {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
 
 // ── Fold: chain CNOT to build GHZ state ───────────────────────────
 // GHZ = (|00000> + |11111>)/√2
-qreg ghz[5];
-creg ghz_c[5];
+qubit[5] ghz;
+bit[5] ghz_c;
 
 h ghz[0];              // seed with superposition
 cx ghz[0], ghz[1];    // propagate entanglement
@@ -31,21 +39,25 @@ cx ghz[2], ghz[3];
 cx ghz[3], ghz[4];
 // Result: only |00000> and |11111> have nonzero amplitude
 
-measure ghz -> ghz_c;
+ghz_c = measure ghz;
+// @expect ghz_c in {0, 31}
 
 // ── Repeated application: H twice = identity ──────────────────────
-qreg rep[1];
-creg rep_c[1];
+qubit[1] rep;
+bit[1] rep_c;
 
-h rep[0];              // |0> → |+>
-h rep[0];              // |+> → |0>  (H·H = I)
+// Two iterations ([0:1] includes both ends): |0> → |+> → |0>  (H·H = I)
+for uint i in [0:1] {
+    h rep[0];
+}
 
-measure rep -> rep_c;
+rep_c = measure rep;
 // Always measures 0
+// @expect rep_c == 0
 
 // ── Layer-by-layer: alternating single and two-qubit gates ────────
-qreg layer[3];
-creg layer_c[3];
+qubit[3] layer;
+bit[3] layer_c;
 
 // Layer 1: single-qubit
 h layer[0];
@@ -61,4 +73,7 @@ rz(pi/4) layer[0];
 rz(pi/2) layer[1];
 rz(pi) layer[2];
 
-measure layer -> layer_c;
+layer_c = measure layer;
+// Layer 1 made all 8 basis states equally likely, CNOTs only permute
+// them, and Z-rotations change only phases — so layer_c is uniform.
+// @expect layer_c in {0, 1, 2, 3, 4, 5, 6, 7}

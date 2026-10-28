@@ -35,14 +35,18 @@ exp_abcabc:   .ascii "ABCABCABC"
 tok_bomb:     .byte 1, 200
 .equ tok_bomb_len, . - tok_bomb
 
-msg_pass:     .ascii "compression: 5/5 ok\n"
+tok_back:     .byte 200, 5        // match 200 bytes back with no output yet
+.equ tok_back_len, . - tok_back
+
+msg_pass:     .ascii "compression: 6/6 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail:     .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
 
 .text
 
-// decode(x0=tok_ptr, x1=tok_len, x2=out_cap) -> x0 = output length, or -1 on bomb.
+// decode(x0=tok_ptr, x1=tok_len, x2=out_cap) -> x0 = output length, or -1 on
+// bomb or on a match whose offset reaches back before the start of the output.
 decode:
     stp     x29, x30, [sp, #-16]!
     stp     x19, x20, [sp, #-16]!
@@ -65,6 +69,10 @@ decode:
     add     x23, x23, #2
     cbz     x0, .dec_lit
     // match: offset=x0, length=x1
+    // offset > out pos would read before out_buf (an out-of-bounds read
+    // that untrusted input controls) — reject it like a bomb.
+    cmp     x0, x22
+    b.hi    .dec_bomb
     add     x4, x22, x1
     cmp     x4, x21
     b.gt    .dec_bomb
@@ -204,6 +212,15 @@ _start:
     mov     x2, #BUF_CAP
     bl      decode
     cmp     x0, #0
+    b.ne    fail_exit
+
+    // Test 6: back-reference before the output start returns -1
+    adrp    x0, tok_back
+    add     x0, x0, :lo12:tok_back
+    mov     x1, #tok_back_len
+    mov     x2, #BUF_CAP
+    bl      decode
+    cmn     x0, #1
     b.ne    fail_exit
 
     mov     x0, #1

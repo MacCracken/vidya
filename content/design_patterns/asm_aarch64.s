@@ -105,6 +105,12 @@ _start:
     cmn     w0, #1              // compare with -1
     b.ne    fail
 
+    // ── Test 9b: chaining the -1 from an invalid transition is rejected
+    mov     w1, #2              // w0 = -1 from Test 9; action = close
+    bl      state_transition
+    cmn     w0, #1
+    b.ne    fail
+
     // ── Test 10: cleanup pattern — resource counter ─────────────────
     bl      test_cleanup
     cmp     w0, #0              // should be back to 0
@@ -174,7 +180,14 @@ strat_flat_five:
 
 // ── state_transition(w0=state, w1=action) → w0 (next or -1) ─────────
 // Looks up transition_table[state * 4 + action].
+// Rejects an out-of-range state or action (unsigned compares, so the -1
+// an invalid transition returns is rejected too if a caller chains it:
+// otherwise (-1 << 2) + action, zero-extended, indexes ~4 GB past the table).
 state_transition:
+    cmp     w0, #3              // 3 states
+    b.hs    .st_invalid
+    cmp     w1, #4              // 4 actions
+    b.hs    .st_invalid
     adr     x2, transition_table
     lsl     w3, w0, #2             // state * 4
     add     w3, w3, w1             // + action
@@ -187,14 +200,36 @@ state_transition:
     ret
 
 // ── test_cleanup() → w0 (resource counter, should be 0) ─────────────
-// Structured acquire/release using stack discipline.
+// Structured acquire/release using stack discipline: each acquire pushes
+// the resource id, each release pops one, so the stack itself enforces
+// LIFO order. The release loop checks the popped id (3, 2, 1) — a
+// release out of order returns -1 instead of 0.
 test_cleanup:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
     mov     w0, #0              // counter = 0
-    add     w0, w0, #1          // acquire resource 1 (counter = 1)
-    add     w0, w0, #1          // acquire resource 2 (counter = 2)
-    add     w0, w0, #1          // acquire resource 3 (counter = 3)
-    // Release in reverse order (LIFO)
-    sub     w0, w0, #1          // release resource 3 (counter = 2)
-    sub     w0, w0, #1          // release resource 2 (counter = 1)
-    sub     w0, w0, #1          // release resource 1 (counter = 0)
+    mov     x1, #1
+    str     x1, [sp, #-16]!     // acquire resource 1 (16-byte slot keeps SP aligned)
+    add     w0, w0, #1          // counter = 1
+    mov     x1, #2
+    str     x1, [sp, #-16]!     // acquire resource 2
+    add     w0, w0, #1          // counter = 2
+    mov     x1, #3
+    str     x1, [sp, #-16]!     // acquire resource 3
+    add     w0, w0, #1          // counter = 3
+    // Release in reverse order (LIFO): pop must yield 3, then 2, then 1
+    mov     x2, #3
+.tc_release:
+    ldr     x1, [sp], #16       // release the most recent acquisition
+    cmp     x1, x2
+    b.ne    .tc_bad
+    sub     w0, w0, #1
+    subs    x2, x2, #1
+    b.ne    .tc_release
+    ldp     x29, x30, [sp], #16
+    ret
+.tc_bad:
+    mov     sp, x29             // drop any still-pushed resources
+    mov     w0, #-1
+    ldp     x29, x30, [sp], #16
     ret

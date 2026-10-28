@@ -6,7 +6,8 @@
 
 from dataclasses import dataclass, field
 from contextlib import contextmanager
-from typing import Protocol, Callable
+from collections.abc import Callable  # typing.Callable: deprecated alias since 3.9
+from typing import Protocol
 
 
 def main():
@@ -122,7 +123,7 @@ def test_observer_pattern():
     assert log == ["A:click", "B:click", "A:hover", "B:hover"]
 
 
-# ── State machine as enum ─────────────────────────────────────────────
+# ── State machine as a transition table ───────────────────────────────
 
 class DoorState:
     LOCKED = "locked"

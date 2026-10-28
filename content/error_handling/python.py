@@ -110,6 +110,7 @@ def main():
 
     try:
         process_config("port=bad\n")
+        assert False, "should have raised"
     except RuntimeError as e:
         assert "failed to process config" in str(e)
         assert isinstance(e.__cause__, ParseError)

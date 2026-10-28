@@ -5,19 +5,21 @@
 // logical operations to physical hardware (like virtual memory),
 // and measurement-based feedback is the quantum interrupt handler.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Bit-Flip Error Correction Code ────────────────────────────────────
 // The 3-qubit repetition code protects against single bit-flip (X) errors.
 // Analogous to triple modular redundancy in classical hardware.
-// Encode: |ψ⟩ → |ψψψ⟩ via CNOT. Detect: measure syndromes. Correct: apply X.
+// Encode: α|0⟩+β|1⟩ → α|000⟩+β|111⟩ via CNOT — NOT |ψψψ⟩, which the
+// no-cloning theorem forbids: the CNOTs copy the basis value, not the
+// state. Detect: measure syndromes. Correct: apply X.
 
-qreg data_bf[1];       // logical qubit
-qreg anc_bf[2];        // ancilla (redundancy)
-creg syn_bf[2];        // syndrome bits
+qubit[1] data_bf;       // logical qubit
+qubit[2] anc_bf;        // ancilla (redundancy)
+bit[2] syn_bf;        // syndrome bits
 
-// Encode: |ψ⟩ → |ψψψ⟩
+// Encode: α|0⟩+β|1⟩ → α|000⟩+β|111⟩
 // If data = |1⟩, all three become |1⟩
 x data_bf[0];          // prepare |1⟩ as our data
 cx data_bf[0], anc_bf[0];
@@ -33,18 +35,20 @@ x anc_bf[0];
 cx data_bf[0], anc_bf[0];
 cx data_bf[0], anc_bf[1];
 // Measure ancillas to get syndrome
-measure anc_bf[0] -> syn_bf[0];
-measure anc_bf[1] -> syn_bf[1];
-// syndrome = 10 → error on anc[0]. Correction: apply X to anc[0]
+syn_bf[0] = measure anc_bf[0];
+syn_bf[1] = measure anc_bf[1];
+// syndrome = 10 (syn_bf[0]=1, syn_bf[1]=0: value 1) → error on anc[0].
+// Correction: apply X to anc[0]
+// @expect syn_bf == 1
 
 // ── Phase-Flip Error Correction ───────────────────────────────────────
 // Protects against Z (phase flip) errors. Same structure as bit-flip
 // but in the Hadamard basis. Together with bit-flip code, forms
 // the Shor 9-qubit code — full single-qubit error correction.
 
-qreg data_pf[1];
-qreg anc_pf[2];
-creg syn_pf[2];
+qubit[1] data_pf;
+qubit[2] anc_pf;
+bit[2] syn_pf;
 
 // Prepare and encode in Hadamard basis
 h data_pf[0];
@@ -65,23 +69,28 @@ h anc_pf[0];
 h anc_pf[1];
 cx data_pf[0], anc_pf[0];
 cx data_pf[0], anc_pf[1];
-measure anc_pf[0] -> syn_pf[0];
-measure anc_pf[1] -> syn_pf[1];
+syn_pf[0] = measure anc_pf[0];
+syn_pf[1] = measure anc_pf[1];
+// syndrome = 11: both checks disagree with qubit 0, so the phase error
+// is on the data qubit
+// @expect syn_pf == 3
 
 // ── Qubit Routing (SWAP network) ──────────────────────────────────────
 // Physical qubits have limited connectivity. To apply a gate between
 // non-adjacent qubits, we SWAP qubits along the path — like the
 // kernel's page migration for NUMA locality.
 
-qreg route[4];
-creg route_out[4];
+qubit[4] route;
+bit[4] route_out;
 
 // Prepare: qubit 0 = |1⟩, qubit 3 = |0⟩
 x route[0];
 
 // Goal: apply CNOT(0, 3) but they're not adjacent
 // Route: SWAP 0↔1, then SWAP 1↔2, now original qubit 0 is at position 2
-// SWAP = cx a,b; cx b,a; cx a,b
+// SWAP = cx a,b; cx b,a; cx a,b — stdgates.inc's `swap` is exactly
+// this; it is spelled out because those 3 CNOTs per hop are the
+// routing cost the compiler pays.
 cx route[0], route[1];
 cx route[1], route[0];
 cx route[0], route[1];    // SWAP 0,1
@@ -102,61 +111,73 @@ cx route[0], route[1];
 cx route[1], route[0];
 cx route[0], route[1];
 
-measure route -> route_out;
+route_out = measure route;
+// route[0] is back to 1 and the CNOT reached route[3]: 1001 = 9
+// @expect route_out == 9
 
 // ── Measurement-Based Feedback (Quantum "Interrupt") ──────────────────
 // Mid-circuit measurement + classical feedback: measure a qubit,
 // and conditionally apply corrections. This is the quantum analog
 // of an interrupt handler — hardware event triggers corrective action.
 
-qreg fb[2];
-creg fb_meas[1];
-creg fb_out[1];
+qubit[2] fb;
+bit[1] fb_meas;
+bit[1] fb_out;
 
 // Prepare entangled state
 h fb[0];
 cx fb[0], fb[1];
 
 // "Interrupt": measure qubit 0
-measure fb[0] -> fb_meas[0];
+fb_meas[0] = measure fb[0];
 
 // Conditional correction: if measured 1, flip qubit 1 to get |0⟩
 // This is quantum teleportation's correction step
-if(fb_meas==1) x fb[1];
+if (fb_meas == 1) { x fb[1]; }
 
-measure fb[1] -> fb_out[0];
+fb_out[0] = measure fb[1];
+// fb_meas is 0 or 1 at random; the correction makes fb_out 0 either way
+// @expect fb_meas in {0, 1}
+// @expect fb_out == 0
 
 // ── Quantum Memory Management (Qubit Reset) ──────────────────────────
 // Qubits are a scarce resource. After use, reset them to |0⟩ for
 // reuse — like freeing memory. Reset = measure + conditional X.
 
-qreg mem[2];
-// ⚠ ONE-BIT registers, deliberately. In OpenQASM 2.0 `if(creg==N)` compares
-// the ENTIRE register as an integer, not a single bit. With a 2-bit
-// `mem_check`, the entangled state below only ever yields 00 or 11 — so
-// `if(mem_check==1)` (binary 01) can never be true and the reset silently
-// never fires. Measured on the previous version: 2059 of 4000 shots came
-// back with both qubits still |1⟩ while the file claimed they were reset.
-// Splitting into per-qubit registers makes each comparison a real bit test.
-creg mem_check0[1];
-creg mem_check1[1];
-creg mem_reset[2];
+qubit[2] mem;
+// ⚠ `if (reg == N)` compares the ENTIRE register as an integer, not a
+// single bit. With a 2-bit `mem_check`, the entangled state below only
+// ever yields 00 or 11 — so `if (mem_check == 1)` (binary 01) can never
+// be true and the reset silently never fires. Measured on an earlier
+// version: 2059 of 4000 shots came back with both qubits still |1⟩
+// while the file claimed they were reset. OpenQASM 2.0 had only the
+// whole-register compare, so this file split the check into one-bit
+// registers; OpenQASM 3 can also test one bit directly,
+// `if (mem_check[0]) x mem[0];`. Either way, compare bits, not the
+// register.
+bit[1] mem_check0;
+bit[1] mem_check1;
+bit[2] mem_reset;
 
 // Use qubits: create entangled state
 h mem[0];
 cx mem[0], mem[1];
 
 // "Free" the qubits: measure then reset to |0⟩
-measure mem[0] -> mem_check0[0];
-measure mem[1] -> mem_check1[0];
+mem_check0[0] = measure mem[0];
+mem_check1[0] = measure mem[1];
 
 // Reset: conditionally flip back to |0⟩
-// (OpenQASM 2.0 also has a native `reset` instruction, which three other
+// (OpenQASM also has a native `reset` instruction, which three other
 // files in this corpus use; the measure-then-conditional-X form is spelled
 // out here because that is the mechanism the section is teaching.)
-if(mem_check0==1) x mem[0];
-if(mem_check1==1) x mem[1];
+if (mem_check0 == 1) { x mem[0]; }
+if (mem_check1 == 1) { x mem[1]; }
 
 // Verify reset: should both be |0⟩ now
-measure mem[0] -> mem_reset[0];
-measure mem[1] -> mem_reset[1];
+mem_reset[0] = measure mem[0];
+mem_reset[1] = measure mem[1];
+// mem_check0/1 agree and are 0 or 1 at random; the reset always lands
+// @expect mem_check0 in {0, 1}
+// @expect mem_check1 in {0, 1}
+// @expect mem_reset == 0

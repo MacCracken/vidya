@@ -163,6 +163,9 @@ function testQuantumPhase(): void {
     pauliX(state, 0, 1);
     phaseShift(state, 0, 1, Math.PI / 4);
     assertNear(prob(state, 1), 1.0, "phase preserves prob");
+    // The probability alone cannot see the phase; check the amplitude e^{iπ/4}
+    assertNear(state[1][0], Math.cos(Math.PI / 4), "phase: real part");
+    assertNear(state[1][1], Math.sin(Math.PI / 4), "phase: imaginary part");
 }
 
 function testGHZState(): void {
@@ -176,16 +179,72 @@ function testGHZState(): void {
     assertNear(total, 1.0, "normalization");
 }
 
+// ── Noise channels ────────────────────────────────────────────────────
+// Noise turns a pure state into a statistical mixture, which a state
+// vector cannot hold: apply it to the density matrix ρ = |ψ⟩⟨ψ| as
+// ρ → Σ_k K_k ρ K_k†, with Kraus operators satisfying Σ_k K_k† K_k = I.
+type Mat2 = Gate2x2;
+const I2: Mat2 = [[[1, 0], [0, 0]], [[0, 0], [1, 0]]];
+const Y_GATE: Mat2 = [[[0, 0], [0, -1]], [[0, 1], [0, 0]]];
+
+function matMul(a: Mat2, b: Mat2): Mat2 {
+    const e = (r: number, c: number): Complex =>
+        cxAdd(cxMul(a[r][0], b[0][c]), cxMul(a[r][1], b[1][c]));
+    return [[e(0, 0), e(0, 1)], [e(1, 0), e(1, 1)]];
+}
+function dagger(a: Mat2): Mat2 {
+    const c = (z: Complex): Complex => [z[0], -z[1]];
+    return [[c(a[0][0]), c(a[1][0])], [c(a[0][1]), c(a[1][1])]];
+}
+function scaleMat(a: Mat2, s: number): Mat2 {
+    return [[cxScale(a[0][0], s), cxScale(a[0][1], s)], [cxScale(a[1][0], s), cxScale(a[1][1], s)]];
+}
+function densityOf(psi: Complex[]): Mat2 { // ρ_ij = ψ_i · conj(ψ_j)
+    const e = (i: number, j: number): Complex => cxMul(psi[i], [psi[j][0], -psi[j][1]]);
+    return [[e(0, 0), e(0, 1)], [e(1, 0), e(1, 1)]];
+}
+function applyChannel(rho: Mat2, kraus: Mat2[]): Mat2 {
+    let out: Mat2 = [[[0, 0], [0, 0]], [[0, 0], [0, 0]]];
+    for (const k of kraus) {
+        const term = matMul(matMul(k, rho), dagger(k));
+        out = [[cxAdd(out[0][0], term[0][0]), cxAdd(out[0][1], term[0][1])],
+               [cxAdd(out[1][0], term[1][0]), cxAdd(out[1][1], term[1][1])]];
+    }
+    return out;
+}
+const trace = (rho: Mat2): number => rho[0][0][0] + rho[1][1][0];
+
 function testNoiseChannels(): void {
+    // Depolarizing: X, Y or Z each with probability p/3. On |0⟩, X and Y
+    // flip the bit, so prob(1) = 2p/3.
     const p = 0.1;
-    assertNear(1 - 2 * p / 3 + 2 * p / 3, 1.0, "depolarize");
+    const depol = [scaleMat(I2, Math.sqrt(1 - p)), scaleMat(X_GATE, Math.sqrt(p / 3)),
+                   scaleMat(Y_GATE, Math.sqrt(p / 3)), scaleMat(Z_GATE, Math.sqrt(p / 3))];
+    const rhoD = applyChannel(densityOf(newState(1)), depol);
+    assertNear(rhoD[1][1][0], 2 * p / 3, "depolarize: prob(1) = 2p/3");
+    assertNear(trace(rhoD), 1.0, "depolarize preserves trace");
 
+    // Amplitude damping (T1): |1⟩ decays to |0⟩ with probability γ
     const gamma = 0.05;
-    assertNear(gamma + (1 - gamma), 1.0, "damping");
+    const damp: Mat2[] = [[[[1, 0], [0, 0]], [[0, 0], [Math.sqrt(1 - gamma), 0]]],
+                          [[[0, 0], [Math.sqrt(gamma), 0]], [[0, 0], [0, 0]]]];
+    const one = newState(1);
+    pauliX(one, 0, 1);
+    const rhoA = applyChannel(densityOf(one), damp);
+    assertNear(rhoA[0][0][0], gamma, "damping: prob(0) = γ");
+    assertNear(rhoA[1][1][0], 1 - gamma, "damping: prob(1) = 1-γ");
 
-    const dephased = 0.5 * (1 - 0.2);
-    assertNear(dephased, 0.4, "dephasing");
+    // Dephasing (T2) as a phase flip with probability λ/2: the populations
+    // of |+⟩ stay 1/2, the coherence ρ01 = 1/2 decays to (1-λ)/2
+    const lambda = 0.2;
+    const dephase = [scaleMat(I2, Math.sqrt(1 - lambda / 2)), scaleMat(Z_GATE, Math.sqrt(lambda / 2))];
+    const plus = newState(1);
+    hadamard(plus, 0, 1);
+    const rhoP = applyChannel(densityOf(plus), dephase);
+    assertNear(rhoP[0][1][0], 0.4, "dephasing: coherence 0.5 → 0.4");
+    assertNear(rhoP[0][0][0], 0.5, "dephasing keeps populations");
 
+    // Independent gate errors compound: F ≈ (1-p)^n for n gates
     const fidelity = Math.pow(1 - 0.001, 100);
     assertNear(fidelity, 0.9048, "circuit fidelity", 0.001);
 }

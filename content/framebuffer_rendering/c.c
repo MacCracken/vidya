@@ -76,8 +76,12 @@ int main(void) {
     assert(count_lit() == lit_before && "OOB rejected");
 
     /* 5 */
-    assert(fb_set(3, 3, 0x0000FF) == 1 && "in-bounds 1");
-    assert(fb_set(-5, 3, 0x0000FF) == 0 && "OOB 0");
+    /* fb_set writes a pixel, so it runs outside assert(): under -DNDEBUG
+     * assert's expression is not evaluated and the write would vanish. */
+    int set = fb_set(3, 3, 0x0000FF);
+    assert(set == 1 && "in-bounds 1");
+    set = fb_set(-5, 3, 0x0000FF);
+    assert(set == 0 && "OOB 0");
 
     /* 6: hline */
     fb_clear();

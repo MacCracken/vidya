@@ -29,9 +29,10 @@ const mem = std.mem;
 //       .log_level = .info,
 //   };
 //
-// We cannot override std_options here because we need to capture log
-// output for testing. Instead, we build our own logging system that
-// demonstrates the same patterns.
+// A logFn CAN capture output for testing: point it at a global buffer
+// and assert on what landed there (that works under 0.17). This file
+// builds its own small logger instead, so each section below can start
+// from a fresh, independent one and assert on it directly.
 
 // ── Log levels ───────────────────────────────────────────────────────
 //
@@ -96,7 +97,7 @@ const Logger = struct {
     /// Log a message at the given level with scope.
     fn log(self: *Logger, level: LogLevel, scope: []const u8, msg: []const u8) void {
         // Level filtering: skip messages below minimum level
-        if (@intFromEnum(level) < @intFromEnum(self.min_level)) return;
+        if (@backingInt(level) < @backingInt(self.min_level)) return;
         if (self.count >= MAX_LOG_ENTRIES) return;
 
         var entry = &self.entries[self.count];
@@ -201,7 +202,7 @@ fn ComptimeLogger(comptime min: LogLevel) type {
         fn log(self: *Self, comptime level: LogLevel, msg: []const u8) void {
             // comptime check: if level < min, this entire function
             // body is eliminated. Zero runtime cost.
-            if (comptime @intFromEnum(level) < @intFromEnum(min)) return;
+            if (comptime @backingInt(level) < @backingInt(min)) return;
             _ = msg;
             self.call_count += 1;
         }
@@ -433,7 +434,7 @@ pub fn main() void {
         //
         //   fn myCustomLog(
         //       comptime level: std.log.Level,
-        //       comptime scope: @TypeOf(.enum_literal),
+        //       comptime scope: @EnumLiteral(), // the 0.17 std spelling
         //       comptime fmt: []const u8,
         //       args: anytype,
         //   ) void {

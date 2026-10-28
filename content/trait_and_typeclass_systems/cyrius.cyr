@@ -1,13 +1,19 @@
 # Trait and Typeclass Systems — Cyrius reference (runnable)
 #
-# Cyrius has no trait system. Polymorphism is manual:
+# Cyrius has traits since 6.7.0: `trait Shape { fn area(self): i64; }`,
+# `impl Shape for T { ... }` (checked against the trait: a missing or
+# extra method, a wrong arity or return type is a compile error), static
+# dispatch by default, and `dyn Shape` trait objects since 6.7.8 — a
+# 16-byte (data word, vtable pointer) pair the compiler builds and checks
+# (test_native_trait_and_dyn, at the end).
+#
+# The first half of this file builds the same thing BY HAND — the C
+# vtable pattern expressed in Cyrius syntax — because that is what a
+# `dyn` is at the machine level:
 #   - Vtable pattern: struct of function pointers
 #   - trait_obj_new: create a fat pointer (data_ptr, vtable_ptr)
-#   - trait_call: dispatch through vtable by slot index
-#   - Display trait convention: StructName_display(self) returns string ptr
-#
-# This documents the trait.cyr pattern used in Cyrius programs.
-# It is the C vtable pattern expressed in Cyrius syntax.
+#   - shape_area / shape_name: dispatch through the vtable by slot index
+#   - Display convention: StructName_display(self) returns string ptr
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -23,7 +29,7 @@ include "lib/assert.cyr"
 # occupies a slot at a known offset.
 #
 # Layout for a Shape vtable:
-#   slot 0: area(self) -> i64 (fixed-point * 100)
+#   slot 0: area(self) -> i64 (integer area, pi taken as 314/100)
 #   slot 1: name(self) -> string ptr
 
 fn vtable_new(fn_area, fn_name) {
@@ -40,9 +46,9 @@ fn vtable_get(vt, slot) {
 # ================================================================
 # Trait object: fat pointer (data, vtable)
 # ================================================================
-# Like Rust's dyn Trait — a pair of pointers.
+# Like Rust's dyn Trait (and Cyrius's own `dyn Shape`) — a pair of pointers.
 # trait_obj_new(data, vtable) creates one.
-# trait_call(obj, slot, ...) dispatches through the vtable.
+# shape_area(obj) / shape_name(obj) dispatch through the vtable.
 
 fn trait_obj_new(data, vtable) {
     var obj = alloc(16);
@@ -68,8 +74,8 @@ fn circle_radius(c) { return load64(c); }
 
 fn circle_area(self) {
     var r = load64(self);
-    # Fixed-point: area * 100 for integer math
-    # pi ≈ 314/100, area = pi * r^2
+    # Integer area, truncated: pi ≈ 314/100, area = 314 * r^2 / 100
+    # (r = 10 → 314, true 314.16)
     return 314 * r * r / 100;
 }
 
@@ -222,6 +228,37 @@ fn test_display_convention() {
     return 0;
 }
 
+# ================================================================
+# The language feature: trait + impl + dyn (6.7.0 / 6.7.8)
+# ================================================================
+
+trait Shape {
+    fn area(self): i64;
+    fn twice(self): i64 { return self.area() * 2; }   # a default method
+}
+
+struct Disc { r; }
+struct Rect2 { w; h; }
+
+impl Shape for Disc { fn area(self): i64 { return 314 * self.r * self.r / 100; } }
+impl Shape for Rect2 { fn area(self): i64 { return self.w * self.h; } }
+
+# One fn, any Shape: the call goes through the vtable the compiler built.
+fn scaled_area(o: dyn Shape, k): i64 { return o.area() * k; }
+
+fn test_native_trait_and_dyn() {
+    var d = Disc { 10 };
+    var r = Rect2 { 4, 6 };
+    # Static dispatch: d.area() is a direct call to Disc_area.
+    assert_eq(d.area(), 314, "static dispatch: Disc area");
+    assert_eq(r.twice(), 48, "default method instantiated for Rect2");
+    # Dynamic dispatch through dyn Shape — same results as the hand vtable.
+    var a: dyn Shape = &d;
+    var b: dyn Shape = &r;
+    assert_eq(scaled_area(a, 1) + scaled_area(b, 1), 338, "dyn: 314 + 24");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_vtable_dispatch();
@@ -229,6 +266,7 @@ fn main() {
     test_static_dispatch();
     test_polymorphic_array();
     test_display_convention();
+    test_native_trait_and_dyn();
     return assert_summary();
 }
 var exit_code = main();

@@ -19,7 +19,9 @@ assert_eq() {
 
 # ── Multiboot header magic numbers ────────────────────────────────────
 # GRUB and other multiboot-compliant bootloaders check for a magic
-# number in the first 8KB of the kernel image.
+# number near the start of the kernel image: within the first 8 KiB
+# (32-bit aligned) for Multiboot 1, the first 32 KiB (64-bit aligned) for
+# Multiboot 2.
 
 MULTIBOOT1_MAGIC=0x1BADB002          # magic in header
 MULTIBOOT1_BOOTLOADER=0x2BADB002     # magic passed by bootloader in eax
@@ -37,7 +39,10 @@ verify=$(( (MULTIBOOT1_MAGIC + multiboot1_flags + multiboot1_checksum) & 0xFFFFF
 assert_eq "$verify" "0" "multiboot1 checksum validates to zero"
 
 # Multiboot2 checksum works the same way but includes header_length
-multiboot2_header_len=16  # minimum header: magic(4) + arch(4) + len(4) + checksum(4)
+# Minimum header: magic(4) + arch(4) + len(4) + checksum(4) = 16 bytes of
+# fixed fields, PLUS the mandatory end tag (type 0, size 8) that terminates
+# the tag list — so the smallest valid header_length is 24, not 16.
+multiboot2_header_len=24
 multiboot2_arch=0         # 0 = i386 protected mode
 mb2_sum=$(( MULTIBOOT2_MAGIC + multiboot2_arch + multiboot2_header_len ))
 multiboot2_checksum=$(( (0x100000000 - (mb2_sum & 0xFFFFFFFF)) & 0xFFFFFFFF ))
@@ -249,10 +254,9 @@ if [[ -d /sys/firmware/efi ]]; then
 else
     boot_mode="BIOS"
 fi
-# Both are valid — just verify we can detect it
-if [[ "$boot_mode" != "UEFI" && "$boot_mode" != "BIOS" ]]; then
-    echo "FAIL: unrecognized boot mode" >&2
-    exit 1
-fi
+# No assertion here: either value is valid and depends on the host, and
+# checking "$boot_mode is UEFI or BIOS" right after an if/else that can
+# only assign one of those two would be a test that cannot fail.
+echo "boot mode: $boot_mode"
 
 echo "All boot and startup examples passed."

@@ -4,7 +4,7 @@
 // per-OPEN; each fd has independent lock state.
 //
 // AArch64 syscall numbers (generic table):
-//   SYS_OPENAT    = 56     (open via AT_FDCWD; SYS_OPEN deprecated)
+//   SYS_OPENAT    = 56     (open via AT_FDCWD; AArch64 has no SYS_open)
 //   SYS_CLOSE     = 57
 //   SYS_WRITE     = 64
 //   SYS_READ      = 63

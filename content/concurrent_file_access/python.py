@@ -8,15 +8,16 @@
 import fcntl
 import os
 import struct
-
-PATH = "/tmp/vidya_cfa_python.bin"
+import tempfile
 
 
 def main():
-    try:
-        os.remove(PATH)
-    except FileNotFoundError:
-        pass
+    # A fixed name in /tmp ("/tmp/vidya_cfa_python.bin") is the classic
+    # insecure temp file: anyone can pre-create it or plant a symlink there,
+    # and open("w+b") follows it. mkstemp creates a fresh file with O_EXCL
+    # and mode 0600; we reopen the PATH twice below for two independent OPENs.
+    fd, PATH = tempfile.mkstemp(prefix="vidya_cfa_", suffix=".bin")
+    os.close(fd)
 
     # --- Test 1: exclusive write ---
     f1 = open(PATH, "w+b")
@@ -43,12 +44,12 @@ def main():
         blocked = True
     assert blocked, "fd2 non-blocking exclusive blocked while fd1 holds"
 
-    # --- Test 4: release fd1, fd2 can acquire ---
+    # --- Test 4: release fd1, fd2 can acquire (LOCK_NB raises if not) ---
     fcntl.flock(f1.fileno(), fcntl.LOCK_UN)
     fcntl.flock(f2.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     fcntl.flock(f2.fileno(), fcntl.LOCK_UN)
 
-    # --- Test 5: shared locks coexist ---
+    # --- Test 5: shared locks coexist (either LOCK_NB would raise) ---
     fcntl.flock(f1.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
     fcntl.flock(f2.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
     fcntl.flock(f1.fileno(), fcntl.LOCK_UN)
@@ -57,7 +58,7 @@ def main():
     f1.close()
     f2.close()
     os.remove(PATH)
-    print("concurrent_file_access: 12/12 ok")
+    print("concurrent_file_access: 5/5 ok")
 
 
 main()

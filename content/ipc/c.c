@@ -84,33 +84,51 @@ static int64_t chan_recv(Ipc *i, int endpoint) {
 int main(void) {
     Ipc ipc; ipc_init(&ipc);
 
-    assert(shm_write(&ipc, 1, 5, 0xA1));
+    // Each operation runs OUTSIDE assert() and its saved result is checked:
+    // under -DNDEBUG assert's expression is not evaluated, so
+    // assert(shm_write(...)) would compile the write itself out.
+    int r = shm_write(&ipc, 1, 5, 0xA1);
+    assert(r);
     assert(shm_read(&ipc, 1, 5) == 0xA1);
     assert(shm_read(&ipc, 2, 5) == 0);
-    assert(!shm_write(&ipc, 1, 99, 0xFF));
+    r = shm_write(&ipc, 1, 99, 0xFF);
+    assert(!r);
     assert(shm_read(&ipc, 1, 99) == -1);
 
     pipe_write(&ipc, 65); pipe_write(&ipc, 66); pipe_write(&ipc, 67);
-    assert(pipe_read(&ipc) == 65);
-    assert(pipe_read(&ipc) == 66);
-    assert(pipe_read(&ipc) == 67);
-    assert(pipe_read(&ipc) == -1);
+    r = pipe_read(&ipc);
+    assert(r == 65);
+    r = pipe_read(&ipc);
+    assert(r == 66);
+    r = pipe_read(&ipc);
+    assert(r == 67);
+    r = pipe_read(&ipc);
+    assert(r == -1);
 
     Ipc ipc2; ipc_init(&ipc2);
     for (int k = 0; k < PIPE_CAP; k++) pipe_write(&ipc2, (uint8_t)(k + 100));
-    assert(!pipe_write(&ipc2, 99));
+    r = pipe_write(&ipc2, 99);
+    assert(!r);
     pipe_read(&ipc2);
-    assert(pipe_write(&ipc2, 99));
+    r = pipe_write(&ipc2, 99);
+    assert(r);
 
     Ipc ipc3; ipc_init(&ipc3);
-    assert(!chan_send(&ipc3, 1, 0xDEADBEEFULL));
+    r = chan_send(&ipc3, 1, 0xDEADBEEFULL);
+    assert(!r);
     chan_listen(&ipc3, 1);
-    assert(chan_send(&ipc3, 1, 0xCAFE));
-    assert(chan_send(&ipc3, 1, 0xBABE));
-    assert(chan_recv(&ipc3, 1) == 0xCAFE);
-    assert(chan_recv(&ipc3, 1) == 0xBABE);
-    assert(chan_recv(&ipc3, 1) == -1);
-    assert(chan_recv(&ipc3, 2) == -1);
+    r = chan_send(&ipc3, 1, 0xCAFE);
+    assert(r);
+    r = chan_send(&ipc3, 1, 0xBABE);
+    assert(r);
+    int64_t msg = chan_recv(&ipc3, 1);
+    assert(msg == 0xCAFE);
+    msg = chan_recv(&ipc3, 1);
+    assert(msg == 0xBABE);
+    msg = chan_recv(&ipc3, 1);
+    assert(msg == -1);
+    msg = chan_recv(&ipc3, 2);
+    assert(msg == -1);
 
     printf("ipc: 18/18 ok\n");
     return 0;

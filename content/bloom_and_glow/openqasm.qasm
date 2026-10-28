@@ -17,35 +17,38 @@
 //
 // Operations:
 //   - X q[0]               — make the source pixel "bright" (|1>)
-//   - cry(pi/2) q[0],q[k]  — leak ~50% amplitude to each neighbor.
-//                            (cry decomposes via Hadamard sandwich +
-//                             two controlled-RZ rotations in qelib1.)
+//   - cry(pi/2) q[0],q[k]  — leak half the source's intensity to each
+//                            neighbor: P(neighbor on) = sin²(π/4) = ½.
 //
 // Measuring all 5 qubits collapses the register; with the source at
-// |1> and ~50% leak per neighbor, the most likely outcome is the
-// source on with each neighbor having ~25% chance of also being on
-// — exactly the visual analog of a 1-pixel bloom with GLOW_FRAC=2.
+// |1> and a 50% leak per neighbor, the source is always on and each
+// neighbor is independently on half the time, so all 16 neighbor
+// patterns are equally likely and each neighbor's expected intensity
+// is half the source's — the visual analog of a 1-pixel bloom with
+// GLOW_FRAC=2 (glow = v / 2).
 //
 // Real quantum image processing uses controlled rotations like this
 // for *quantum convolutional filters* (QCNN); the structural mapping
 // is exactly the classical bloom kernel applied via amplitude
 // transfer instead of byte arithmetic.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[5];
-creg c[5];
+qubit[5] q;
+bit[5] c;
 
 // Make the source "bright"
 x q[0];
 
-// Leak amplitude to 4 neighbors via controlled rotation.
-// cry decomposes to two cu1's around a Hadamard sandwich;
-// qelib1 exposes cu1 directly.
-h q[1]; cu1(0.785398) q[0], q[1]; h q[1];
-h q[2]; cu1(0.785398) q[0], q[2]; h q[2];
-h q[3]; cu1(0.785398) q[0], q[3]; h q[3];
-h q[4]; cu1(0.785398) q[0], q[4]; h q[4];
+// Leak amplitude to 4 neighbors via controlled Y-rotation (cry is in
+// stdgates.inc; it decomposes as ry(θ/2), cx, ry(-θ/2), cx).
+cry(pi/2) q[0], q[1];
+cry(pi/2) q[0], q[2];
+cry(pi/2) q[0], q[3];
+cry(pi/2) q[0], q[4];
 
-measure q -> c;
+c = measure q;
+// c[0] (the source) is 1 on every shot; c[1..4] take all 16 patterns,
+// so c is one of the 16 odd values 1, 3, ..., 31.
+// @expect c in {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31}

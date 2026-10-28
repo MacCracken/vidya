@@ -19,17 +19,17 @@
 // qubit-register measurement does: each qubit's measurement outcome is
 // independent of the others, recoverable by classical-bit index.
 //
-// In real systems, this is the structure of *circuit slicing* in
-// quantum compilers (Qiskit's Layouter, Cirq's CircuitOperation): a
-// circuit is treated as a sequence of "records" (sub-circuits with no
-// shared qubits) that can be scheduled independently — exactly like
-// JSONL records that can be parsed in any order.
+// In real systems, this is the structure compilers exploit when a
+// circuit splits into sub-circuits with no shared qubits (Qiskit's
+// `DAGCircuit.separable_circuits()` returns them): each piece can be
+// scheduled or simulated independently — exactly like JSONL records
+// that can be parsed in any order.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // Record 0: |0> — no gate needed
 // Record 1: |1>
@@ -40,4 +40,7 @@ h q[2];
 h q[3];
 
 // "Index and extract" — each measurement reads one record independently
-measure q -> c;
+c = measure q;
+// c[0] = 0 and c[1] = 1 every shot; c[2], c[3] are each 50/50 — so c is
+// one of 0010, 0110, 1010, 1110.
+// @expect c in {2, 6, 10, 14}

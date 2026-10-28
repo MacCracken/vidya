@@ -137,8 +137,10 @@ function main(): void {
     const cat: Pet = { kind: "cat", meow: () => "meow!" };
     const dog: Pet = { kind: "dog", bark: () => "woof!" };
 
+    assert(isCat(cat), "type guard accepts cat");
+    assert(!isCat(dog), "type guard rejects dog");
     if (isCat(cat)) {
-        assert(cat.meow() === "meow!", "type guard cat");
+        assert(cat.meow() === "meow!", "type guard cat"); // narrowed to Cat
     }
 
     // ── in operator for narrowing ──────────────────────────────────
@@ -153,10 +155,16 @@ function main(): void {
     assert(getSound(dog) === "woof!", "in narrowing dog");
 
     // ── Mapped types: compile-time pattern transformation ──────────
-    type Readonly<T> = { readonly [K in keyof T]: T[K] };
-    type Partial<T> = { [K in keyof T]?: T[K] };
+    // (Readonly<T> and Partial<T> are built in; these re-derive them.)
+    type MyReadonly<T> = { readonly [K in keyof T]: T[K] };
+    type MyPartial<T> = { [K in keyof T]?: T[K] };
 
     // These transform types at compile time — no runtime cost
+    const frozen: MyReadonly<{ port: number }> = { port: 80 };
+    // @ts-expect-error — port is readonly after the mapping
+    frozen.port = 81;
+    const partial: MyPartial<{ host: string; port: number }> = { host: "h" }; // port optional
+    assert(partial.port === undefined, "mapped Partial makes fields optional");
 
     // ── String literal pattern matching ────────────────────────────
     type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";

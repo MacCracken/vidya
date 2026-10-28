@@ -98,13 +98,12 @@ class Task {
         this.regs = defaultRegisters();
     }
 
-    /** CFS weight based on nice value. Nice 0 = weight 1024. */
+    /** CFS weight based on nice value. Nice 0 = weight 1024.
+     *  Each nice level is ~1.25x (about 10% CPU), approximating the
+     *  kernel's sched_prio_to_weight table (nice -5 = 3121, nice 5 = 335). */
     weight(): number {
         const base = 1024;
-        if (this.nice >= 0) {
-            return base >> Math.min(this.nice, 10);
-        }
-        return base << Math.min(-this.nice, 10);
+        return Math.round(base * 1.25 ** -this.nice);
     }
 
     toString(): string {
@@ -120,17 +119,17 @@ function testPriorityWeight(): void {
     // Nice -5: higher weight, gets MORE CPU
     const high = new Task(2, "high", -5);
     assert(high.weight() > normal.weight(), "negative nice = higher weight");
-    assert(high.weight() === 1024 << 5, "nice -5 weight");
+    assert(high.weight() === 3125, "nice -5 weight (kernel table: 3121)");
 
     // Nice 5: lower weight, gets LESS CPU
     const low = new Task(3, "low", 5);
     assert(low.weight() < normal.weight(), "positive nice = lower weight");
-    assert(low.weight() === 1024 >> 5, "nice 5 weight");
+    assert(low.weight() === 336, "nice 5 weight (kernel table: 335)");
 
-    // Nice -10 vs nice 10: ~1000x weight difference
+    // Nice -10 vs nice 10: ~87x weight difference (1.25^20)
     const vhigh = new Task(4, "vhigh", -10);
     const vlow = new Task(5, "vlow", 10);
-    assert(vhigh.weight() / vlow.weight() > 500, "large weight spread");
+    assert(vhigh.weight() / vlow.weight() > 80, "large weight spread");
 }
 
 // ── Round-Robin Scheduler ───────────────────────────────────────────
@@ -274,8 +273,11 @@ function testRoundRobinScheduler(): void {
 class CfsScheduler {
     private tasks: Task[] = [];
     private currentIdx: number | null = null;
+    private ranTicks = 0; // ticks the current task has run since it was picked
     tick = 0;
 
+    // A running task is not preempted before it has run minGranularity
+    // ticks, which bounds the switch rate when vruntimes are close.
     constructor(private minGranularity: number) {}
 
     addTask(task: Task): void {
@@ -293,6 +295,11 @@ class CfsScheduler {
 
     /** Pick the task with the smallest vruntime. */
     schedule(): number | null {
+        if (this.currentIdx !== null && this.tasks[this.currentIdx].state === "running"
+            && this.ranTicks < this.minGranularity) {
+            return this.tasks[this.currentIdx].pid;
+        }
+
         let bestIdx: number | null = null;
         let bestVrt = Infinity;
 
@@ -312,6 +319,7 @@ class CfsScheduler {
                 this.tasks[this.currentIdx].state = "ready";
             }
             this.tasks[bestIdx].switches++;
+            this.ranTicks = 0;
         }
 
         this.tasks[bestIdx].state = "running";
@@ -326,13 +334,16 @@ class CfsScheduler {
 
         const task = this.tasks[this.currentIdx];
         task.cpuTime++;
+        this.ranTicks++;
 
         // vruntime increases inversely with weight:
         // vruntime_delta = actual_time * (base_weight / task_weight)
         // High-weight tasks: vruntime grows slowly → they run longer
         // Low-weight tasks: vruntime grows quickly → they run less
+        // Keep the fraction: rounding up to whole ticks would give every
+        // task with weight >= 1024 the same +1, erasing the priority.
         const weight = task.weight();
-        task.vruntime += Math.ceil(1024 / weight);
+        task.vruntime += 1024 / weight;
     }
 
     getTask(pid: number): Task | undefined {
@@ -344,9 +355,9 @@ function testCfsScheduler(): void {
     const cfs = new CfsScheduler(1);
 
     // Three tasks with different priorities
-    cfs.addTask(new Task(1, "high-prio", -5));  // weight 32768, vruntime grows slowly
+    cfs.addTask(new Task(1, "high-prio", -5));  // weight 3125, vruntime grows slowly
     cfs.addTask(new Task(2, "normal", 0));       // weight 1024
-    cfs.addTask(new Task(3, "low-prio", 5));     // weight 32, vruntime grows fast
+    cfs.addTask(new Task(3, "low-prio", 5));     // weight 336, vruntime grows fast
 
     // Run for 60 ticks
     for (let i = 0; i < 60; i++) {
@@ -369,7 +380,7 @@ function testCfsScheduler(): void {
     // They should be within a small range of each other
     assert(maxVrt - minVrt <= 5, "vruntimes converge (fairness)");
 
-    // Low-priority task has fewer context switches (longer quanta between preemptions)
+    // Low-priority task is picked less often, so it is switched in fewer times
     assert(low.switches <= normal.switches, "low-prio: fewer switches");
 }
 

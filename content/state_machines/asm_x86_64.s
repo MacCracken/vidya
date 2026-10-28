@@ -1,8 +1,10 @@
 # Vidya — State Machines in x86_64 Assembly
 #
-# Finite state machines using jump tables and enum dispatch.
+# Finite state machines using enum dispatch (compare-and-branch chains;
+# a jump table — see pattern_matching — is the dense alternative) and a
+# bitmask transition table.
 # Demonstrates: player state transitions, committed states with timers,
-# game state hierarchy, and transition validation.
+# and validated game-state transitions.
 
 .intel_syntax noprefix
 .global _start
@@ -75,12 +77,45 @@ msg_t4:     .ascii "dunk is committed for 45 frames"
 msg_t4_len = . - msg_t4
 msg_t5:     .ascii "transition detection (prev != current)"
 msg_t5_len = . - msg_t5
-msg_t6:     .ascii "game state: menu -> select -> playing"
+msg_t6:     .ascii "game state: menu -> select -> tipoff -> playing, menu -> playing refused"
 msg_t6_len = . - msg_t6
 
 .section .text
 
+.section .rodata
+# Allowed game-state transitions: bit N of game_allowed[from] set means
+# from -> N is legal. Anything else is refused, so the state can only move
+# along these edges.
+.align 8
+game_allowed:
+    .quad (1 << GS_SELECT) | (1 << GS_ATTRACT)                       # MENU
+    .quad (1 << GS_TIPOFF) | (1 << GS_MENU)                          # SELECT
+    .quad (1 << GS_PLAYING)                                          # TIPOFF
+    .quad (1 << GS_HALFTIME) | (1 << GS_OVERTIME) | (1 << GS_GAMEOVER) # PLAYING
+    .quad (1 << GS_PLAYING)                                          # HALFTIME
+    .quad (1 << GS_GAMEOVER)                                         # OVERTIME
+    .quad (1 << GS_MENU)                                             # GAMEOVER
+    .quad (1 << GS_MENU)                                             # ATTRACT
+
+.section .text
+
 # --- State machine functions ---
+
+# game_transition: rdi = requested state -> rax = 1 (moved) / 0 (refused)
+game_transition:
+    cmp     rdi, GS_ATTRACT
+    ja      .gt_refuse                  # unsigned: also rejects negatives
+    mov     rax, [rip + game_state]
+    lea     rcx, [rip + game_allowed]
+    mov     rax, [rcx + rax * 8]        # allowed mask for current state
+    bt      rax, rdi                    # CF = bit rdi
+    jnc     .gt_refuse
+    mov     [rip + game_state], rdi
+    mov     eax, 1
+    ret
+.gt_refuse:
+    xor     eax, eax
+    ret
 
 # is_committed: returns 1 if current state is committed (cannot be interrupted)
 is_committed:
@@ -276,6 +311,24 @@ _start:
     mov     rcx, msg_t4_len
     call    assert_eq
 
+    # ...for exactly 45 frames: still DUNK after 44 ticks, IDLE after 45
+    mov     r12, DUNK_FRAMES - 1
+.tick_dunk:
+    call    player_tick
+    dec     r12
+    jnz     .tick_dunk
+    mov     rdi, [rip + player_state]
+    mov     rsi, PS_DUNK
+    lea     rdx, [rip + msg_t4]
+    mov     rcx, msg_t4_len
+    call    assert_eq
+    call    player_tick
+    mov     rdi, [rip + player_state]
+    mov     rsi, PS_IDLE
+    lea     rdx, [rip + msg_t4]
+    mov     rcx, msg_t4_len
+    call    assert_eq
+
     # --- Test 5: Transition detection ---
     call    reset_player
     mov     rdi, INPUT_SHOOT
@@ -287,12 +340,31 @@ _start:
     mov     rcx, msg_t5_len
     call    assert_eq
 
-    # --- Test 6: Game state progression ---
+    # --- Test 6: Game state progression (validated) ---
+    # Storing GS_PLAYING and reading it back would prove nothing; each
+    # step goes through game_transition, which checks the edge.
     mov     qword ptr [rip + game_state], GS_MENU
-    # menu -> select
-    mov     qword ptr [rip + game_state], GS_SELECT
-    # select -> playing
-    mov     qword ptr [rip + game_state], GS_PLAYING
+    mov     rdi, GS_PLAYING             # menu -> playing: no such edge
+    call    game_transition
+    mov     rdi, rax
+    mov     rsi, 0
+    lea     rdx, [rip + msg_t6]
+    mov     rcx, msg_t6_len
+    call    assert_eq
+    mov     rdi, GS_SELECT              # menu -> select
+    call    game_transition
+    mov     r12, rax
+    mov     rdi, GS_TIPOFF              # select -> tipoff
+    call    game_transition
+    and     r12, rax
+    mov     rdi, GS_PLAYING             # tipoff -> playing
+    call    game_transition
+    and     r12, rax
+    mov     rdi, r12                    # all three accepted
+    mov     rsi, 1
+    lea     rdx, [rip + msg_t6]
+    mov     rcx, msg_t6_len
+    call    assert_eq
     mov     rdi, [rip + game_state]
     mov     rsi, GS_PLAYING
     lea     rdx, [rip + msg_t6]

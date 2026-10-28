@@ -7,7 +7,9 @@
  *   4. VFS-like operations: create, write, read, unlink, stat
  *   5. File descriptor table
  *
- * This mirrors how ext4 works internally, simplified to the essentials.
+ * This mirrors the classic Unix inode layout (ext2/ext3 direct blocks),
+ * simplified to the essentials. ext4 replaces the block map with extents
+ * by default.
  */
 
 #include <assert.h>
@@ -261,17 +263,19 @@ static size_t fs_read(simple_fs_t *fs, uint32_t fd, void *buf, size_t count) {
         unsigned block_idx = (unsigned)(pos / BLOCK_SIZE);
         unsigned block_offset = (unsigned)(pos % BLOCK_SIZE);
 
-        if (inode->blocks[block_idx] < 0) break; /* sparse hole */
-
         size_t avail = inode->size - pos;
         size_t chunk = count - nread;
         if (chunk > avail) chunk = avail;
         if (chunk > BLOCK_SIZE - block_offset)
             chunk = BLOCK_SIZE - block_offset;
 
-        const uint8_t *block_data = bdev_read(&fs->dev,
-                                               (unsigned)inode->blocks[block_idx]);
-        memcpy(dst + nread, block_data + block_offset, chunk);
+        if (inode->blocks[block_idx] < 0) {
+            memset(dst + nread, 0, chunk); /* sparse hole reads as zeros */
+        } else {
+            const uint8_t *block_data = bdev_read(&fs->dev,
+                                                   (unsigned)inode->blocks[block_idx]);
+            memcpy(dst + nread, block_data + block_offset, chunk);
+        }
         pos += chunk;
         nread += chunk;
     }
@@ -304,6 +308,9 @@ static void fs_unlink(simple_fs_t *fs, const char *name) {
     assert(inode != NULL);
     inode->nlink--;
 
+    /* POSIX defers freeing until the last open fd closes too (the VFS
+     * keeps an open-reference count beside nlink). This demo has no such
+     * count, so callers must close every fd before unlinking. */
     if (inode->nlink == 0) {
         /* Free all blocks */
         for (int b = 0; b < DIRECT_BLOCKS; b++) {
@@ -395,6 +402,7 @@ int main(void) {
 
     /* ── 6. Unlink ───────────────────────────────────────────────────── */
     printf("\n6. Unlink (delete) hello.txt:\n");
+    fs_close(&fs, fd1);  /* no open fds may remain: see fs_unlink */
     unsigned blocks_before = fs.dev.used;
     fs_unlink(&fs, "hello.txt");
     printf("   Blocks freed: %u -> %u (%u freed)\n",

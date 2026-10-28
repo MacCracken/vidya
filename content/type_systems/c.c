@@ -3,7 +3,9 @@
 // C is statically typed but with weak enforcement. Types exist at
 // compile time but can be cast between freely. void* erases all type
 // info. typedef and structs provide structure; enums provide named
-// constants. There are no generics — use void* or macros.
+// constants. There are no parametric generics (no templates): use void*,
+// macros, or C11 `_Generic` (compile-time dispatch on a type); C23
+// `typeof` lets macros declare temporaries of the argument's type.
 
 #include <assert.h>
 #include <stdio.h>

@@ -45,10 +45,12 @@ static void adsr_init(Adsr *a) {
 
 static void adsr_set_params(Adsr *a, long long attack, long long decay,
                             long long sustain, long long release) {
-    a->attack_samples = attack;
-    a->decay_samples = decay;
+    /* adsr_step divides by each stage length: a 0 ("instant") stage would
+     * be integer division by zero (UB, SIGFPE on x86). Clamp to 1 sample. */
+    a->attack_samples = attack > 0 ? attack : 1;
+    a->decay_samples = decay > 0 ? decay : 1;
     a->sustain_level = sustain;
-    a->release_samples = release;
+    a->release_samples = release > 0 ? release : 1;
 }
 
 static void adsr_gate_on(Adsr *a) {

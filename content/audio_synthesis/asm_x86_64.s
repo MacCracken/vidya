@@ -69,7 +69,16 @@ osc_square:
     ret
 
 # env_set_params(rdi=attack, rsi=decay, rdx=sustain, rcx=release)
+# Stage lengths are clamped to >= 1 sample: env_step divides by them, and
+# a zero-length stage ("instant attack") would be idiv by 0 — #DE, SIGFPE.
 env_set_params:
+    mov     eax, 1
+    cmp     rdi, 1
+    cmovl   rdi, rax
+    cmp     rsi, 1
+    cmovl   rsi, rax
+    cmp     rcx, 1
+    cmovl   rcx, rax
     mov     [rip + env_attack_samples], rdi
     mov     [rip + env_decay_samples], rsi
     mov     [rip + env_sustain_level], rdx
@@ -231,6 +240,20 @@ _start:
     mov     rsi, -32767
     call    assert_eq
 
+    # zero-length stages are clamped, not divided by: an instant attack
+    # reaches full level in one step instead of raising SIGFPE
+    xor     edi, edi
+    mov     rsi, 4
+    mov     rdx, 16384
+    mov     rcx, 4
+    call    env_set_params
+    call    env_reset
+    call    env_gate_on
+    call    env_step
+    mov     rdi, rax
+    mov     rsi, ONE
+    call    assert_eq
+
     # env attack
     mov     rdi, 4
     mov     rsi, 4
@@ -239,7 +262,14 @@ _start:
     call    env_set_params
     call    env_reset
     call    env_gate_on
-    mov     rcx, 4
+    # Check mid-ramp: the end of each stage snaps the level to its
+    # target, so an end-only check passes even with no ramp at all.
+    call    env_step
+    call    env_step                # 2 of 4 attack steps: half way up
+    mov     rdi, rax
+    mov     rsi, ONE / 2
+    call    assert_eq
+    mov     rcx, 2
 .env_at:
     push    rcx
     call    env_step
@@ -261,7 +291,17 @@ _start:
     call    env_set_params
     call    env_reset
     call    env_gate_on
-    mov     rcx, 8
+    mov     rcx, 6
+.env_dc6:
+    push    rcx
+    call    env_step
+    pop     rcx
+    dec     rcx
+    jnz     .env_dc6
+    mov     rdi, [rip + env_level]  # 4 attack + 2 of 4 decay steps
+    mov     rsi, ONE - 2 * ((ONE - 16384) / 4)
+    call    assert_eq
+    mov     rcx, 2
 .env_dc:
     push    rcx
     call    env_step
@@ -292,7 +332,12 @@ _start:
     mov     rdi, [rip + env_release_start]
     mov     rsi, 16384
     call    assert_eq
-    mov     rcx, 4
+    call    env_step
+    call    env_step                # 2 of 4 release steps: half way down
+    mov     rdi, rax
+    mov     rsi, 16384 / 2
+    call    assert_eq
+    mov     rcx, 2
 .env_rl:
     push    rcx
     call    env_step

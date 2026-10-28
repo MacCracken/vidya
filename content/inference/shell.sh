@@ -9,6 +9,12 @@ TOK_EOS=1
 
 _RET=0
 
+# Mask value for logits removed by top-k. Bash has no -inf, so use the most
+# negative int64. Masking to 0 would be wrong: logits are unnormalised and
+# can be negative, so a "removed" 0 can outrank every survivor (and
+# softmax would give it weight e^0 = 1, not 0).
+LOGIT_NEG_INF=$(( -9223372036854775807 - 1 ))
+
 # Bigram table flat: bigram[prev * VOCAB_SIZE + next]
 declare -a bigram
 init_bigram() {
@@ -39,7 +45,8 @@ argmax_logits() {
     _RET=$best_idx
 }
 
-# topk_filter arr_name n k → _RET = number actually picked
+# topk_filter arr_name n k → _RET = number actually picked; every logit
+# outside the top k is masked to LOGIT_NEG_INF
 topk_filter() {
     local -n arr=$1
     local n=$2 k=$3
@@ -68,7 +75,7 @@ topk_filter() {
     done
     local m
     for (( m=0; m<n; m++ )); do
-        if (( marks[m] == 0 )); then arr[m]=0; fi
+        if (( marks[m] == 0 )); then arr[m]=$LOGIT_NEG_INF; fi
     done
     _RET=$picked
 }
@@ -126,8 +133,13 @@ declare -a tk1=(10 50 30 20 40 5 60 25)
 topk_filter tk1 8 3; eq $_RET 3; check $_RET "topk picked 3"
 [[ ${tk1[6]} -eq 60 && ${tk1[1]} -eq 50 && ${tk1[4]} -eq 40 ]] && check 1 "top 3 kept" || check 0 "top 3 kept"
 for i in 0 2 3 5 7; do
-    eq ${tk1[$i]} 0; check $_RET "idx $i zeroed"
+    eq ${tk1[$i]} $LOGIT_NEG_INF; check $_RET "idx $i masked"
 done
+
+# all-negative logits: a masked token must never win argmax
+declare -a tkn=(-100 -50 -200 -10)
+topk_filter tkn 4 2
+argmax_logits tkn 4; eq $_RET 3; check $_RET "masked tokens never win argmax"
 
 declare -a tk2=(1 2 3)
 topk_filter tk2 3 3; eq $_RET 3; check $_RET "topk(3,3) keeps all"

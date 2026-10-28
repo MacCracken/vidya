@@ -51,10 +51,10 @@
 // range (1.0.0 and 1.5.0) the resolver wants the HIGHEST, 1.5.0 = idx 01.
 // So the oracle marks idx == 01 and diffusion amplifies it.
 //
-// qelib1.inc gates only — h, x, z, cx, ccx; no `swap`, no custom gates.
+// Gates used: h, x, cx, ccx; no custom gates.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Registers ─────────────────────────────────────────────────────────
 //   idx[1:0] : 2-qubit index selecting one of 4 candidate C versions.
@@ -63,9 +63,9 @@ include "qelib1.inc";
 //              onto it imprints a PHASE flip on the marked index (the
 //              standard phase-kickback oracle trick).
 //   out[1:0] : classical bits — the resolved version index after collapse.
-qreg idx[2];
-qreg anc[1];
-creg out[2];
+qubit[2] idx;
+qubit[1] anc;
+bit[2] out;
 
 // ── Superposition: "consider every candidate version of C at once" ────
 // Hadamard the index register: idx is now an equal mix of |00>,|01>,|10>,
@@ -110,9 +110,9 @@ h idx[0];
 h idx[1];
 x idx[0];
 x idx[1];
-// controlled-Z on idx via H-CX-H sandwich. (`cz` IS available — it is in
-// qiskit's default table — but the H-CX-H decomposition is shown because it
-// is what a compiler emits for a target lacking a native CZ.)
+// controlled-Z on idx via H-CX-H sandwich. (`cz` is in stdgates.inc, but
+// the H-CX-H decomposition is shown because it is what a compiler emits
+// for a target lacking a native CZ.)
 h   idx[1];
 cx  idx[0], idx[1];
 h   idx[1];
@@ -127,7 +127,8 @@ h idx[1];
 // of the diamond dependency. (Had the carets been disjoint, no index was
 // marked and out would be a uniform-random 2-bit value: resolution
 // failure, the quantum echo of an empty range intersection.)
-measure idx -> out;
+out = measure idx;
+// @expect out == 1
 
 // ── Notes — the resolver / quantum bridge ─────────────────────────────
 //

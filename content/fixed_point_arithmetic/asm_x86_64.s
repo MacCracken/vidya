@@ -9,22 +9,23 @@
 
 .section .data
 
-# Quarter-wave sine table (256 entries, 16.16 fixed-point)
-# sin(i * pi/512) * 65536 for i = 0..255
-# Full sine via symmetry: sin(256+i) = sin(255-i), sin(512+i) = -sin(i)
+# Quarter-wave sine table (257 entries, 16.16 fixed-point)
+# sin(i * pi/512) * 65536 for i = 0..256 — both ends of the quarter wave,
+# so sin(256) = table[256] = 65536 is exact rather than a neighbour.
+# Full sine via symmetry: sin(512-i) = sin(i), sin(512+i) = -sin(i)
 sine_table:
     .quad 0, 402, 804, 1206, 1608, 2010, 2412, 2814
     .quad 3216, 3617, 4019, 4420, 4821, 5222, 5623, 6023
     .quad 6424, 6824, 7224, 7623, 8022, 8421, 8820, 9218
     .quad 9616, 10014, 10411, 10808, 11204, 11600, 11996, 12391
-    .quad 12785, 13179, 13573, 13966, 14359, 14751, 15143, 15534
+    .quad 12785, 13180, 13573, 13966, 14359, 14751, 15143, 15534
     .quad 15924, 16314, 16703, 17091, 17479, 17867, 18253, 18639
-    .quad 19024, 19409, 19793, 20176, 20558, 20939, 21320, 21699
-    .quad 22078, 22456, 22834, 23210, 23586, 23960, 24334, 24707
-    .quad 25079, 25450, 25821, 26190, 26558, 26925, 27291, 27656
+    .quad 19024, 19409, 19792, 20175, 20557, 20939, 21320, 21699
+    .quad 22078, 22457, 22834, 23210, 23586, 23961, 24335, 24708
+    .quad 25080, 25451, 25821, 26190, 26558, 26925, 27291, 27656
     .quad 28020, 28383, 28745, 29106, 29466, 29824, 30182, 30538
     .quad 30893, 31248, 31600, 31952, 32303, 32652, 33000, 33347
-    .quad 33692, 34036, 34379, 34721, 35062, 35401, 35738, 36075
+    .quad 33692, 34037, 34380, 34721, 35062, 35401, 35738, 36075
     .quad 36410, 36744, 37076, 37407, 37736, 38064, 38391, 38716
     .quad 39040, 39362, 39683, 40002, 40320, 40636, 40951, 41264
     .quad 41576, 41886, 42194, 42501, 42806, 43110, 43412, 43713
@@ -41,10 +42,11 @@ sine_table:
     .quad 61705, 61839, 61971, 62101, 62228, 62353, 62476, 62596
     .quad 62714, 62830, 62943, 63054, 63162, 63268, 63372, 63473
     .quad 63572, 63668, 63763, 63854, 63944, 64031, 64115, 64197
-    .quad 64277, 64355, 64430, 64503, 64573, 64641, 64707, 64770
-    .quad 64830, 64889, 64945, 64998, 65049, 65098, 65144, 65188
-    .quad 65229, 65268, 65305, 65339, 65371, 65400, 65427, 65451
-    .quad 65473, 65493, 65510, 65525, 65537, 65547, 65554, 65559
+    .quad 64277, 64354, 64429, 64501, 64571, 64639, 64704, 64766
+    .quad 64827, 64884, 64940, 64993, 65043, 65091, 65137, 65180
+    .quad 65220, 65259, 65294, 65328, 65358, 65387, 65413, 65436
+    .quad 65457, 65476, 65492, 65505, 65516, 65525, 65531, 65535
+    .quad 65536                                    # i = 256: peak
 
 test_count: .quad 0
 pass_count: .quad 0
@@ -75,7 +77,8 @@ msg_not_len = . - msg_not_all
 .section .text
 
 # fx_mul: (rdi * rsi) >> 16
-# Standard fixed-point multiply. Overflows on large inputs.
+# Standard fixed-point multiply. One-operand imul keeps the full 128-bit
+# product in rdx:rax, so this overflows only when the RESULT does not fit.
 fx_mul:
     mov     rax, rdi
     imul    rsi             # rdx:rax = rdi * rsi (128-bit result)
@@ -83,7 +86,8 @@ fx_mul:
     ret
 
 # fx_mul_safe: (rdi >> 8) * (rsi >> 8)
-# Overflow-safe multiply. Trades 8 bits of precision for safety.
+# Overflow-safe multiply for code limited to a 64-bit product (no
+# rdx:rax — e.g. Cyrius i64 math). Trades 8 bits of precision for safety.
 fx_mul_safe:
     mov     rax, rdi
     sar     rax, 8
@@ -129,8 +133,8 @@ sin_lookup:
     mov     rax, [rax + rdi * 8]
     ret
 .sin_mirror:
-    # Second quadrant (256-511): mirror = table[511 - angle]
-    mov     rax, 511
+    # Second quadrant (256-511): mirror = table[512 - angle]
+    mov     rax, 512
     sub     rax, rdi
     lea     rcx, [rip + sine_table]
     mov     rax, [rcx + rax * 8]
@@ -145,7 +149,7 @@ sin_lookup:
     neg     rax
     ret
 .sin_neg_mirror:
-    mov     rax, 511
+    mov     rax, 512
     sub     rax, rdi
     lea     rcx, [rip + sine_table]
     mov     rax, [rcx + rax * 8]
@@ -217,21 +221,17 @@ _start:
     call    assert_eq
 
     # Test 3: fx_mul_safe with large values (1000.0 * 1000.0)
-    # 1000.0 = 65536000. Normal fx_mul would overflow.
+    # 1000.0 = 65536000. The raw product 65536000^2 ~ 4.3e15 still fits in
+    # 64 bits; a 64-bit product only overflows once |a*b| >= 2^63 (about
+    # 46341.0 squared). fx_mul above never hits that — rdx:rax holds all
+    # 128 bits — so fx_mul_safe is for code without a 128-bit product.
     # fx_mul_safe: (65536000 >> 8) * (65536000 >> 8) = 256000 * 256000 = 65536000000
     # Expected: 1000000.0 in fixed-point = 65536000000 (fits in 64-bit)
     mov     rdi, 65536000
     mov     rsi, 65536000
     call    fx_mul_safe
-    # Result should be positive and large (not wrapped negative)
-    test    rax, rax
-    mov     rdi, 1          # set to 1 (pass) if positive
-    js      .ovf_neg
-    jmp     .ovf_check
-.ovf_neg:
-    xor     rdi, rdi        # 0 (fail) if negative
-.ovf_check:
-    mov     rsi, 1
+    mov     rdi, rax
+    mov     rsi, 65536000000
     lea     rdx, [rip + msg_overflow]
     mov     rcx, msg_ovf_len
     call    assert_eq
@@ -246,12 +246,10 @@ _start:
     call    assert_eq
 
     # Test 5: sin(256) == 65536 (1.0) — peak of sine wave
-    # Actually sin(256) mirrors to table[255] which is near 65536
     mov     rdi, 256
     call    sin_lookup
-    # Should be close to 65536 (within table[255] = 65559)
     mov     rdi, rax
-    mov     rsi, 65559      # table[255] value
+    mov     rsi, 65536      # table[256], exactly 1.0
     lea     rdx, [rip + msg_sin256]
     mov     rcx, msg_s256_len
     call    assert_eq

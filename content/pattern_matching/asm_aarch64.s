@@ -60,6 +60,11 @@ _start:
     cmn     w0, #1              // -1 = default
     b.ne    fail
 
+    mov     w0, #-1             // negative index must also hit the default
+    bl      dispatch_table
+    cmn     w0, #1
+    b.ne    fail
+
     // ── Character classification ───────────────────────────────────
     mov     w0, #'5'
     bl      classify_char
@@ -152,9 +157,12 @@ classify_number:
     ret
 
 // dispatch_table: w0 = index -> w0 = result
+// The bounds check MUST be unsigned (b.hs): a signed b.ge lets a negative
+// index through, and `uxtw #3` then turns -1 into a 32 GB offset, so `br`
+// jumps through whatever pointer lies there.
 dispatch_table:
     cmp     w0, bt_size
-    b.ge    .Ldt_default
+    b.hs    .Ldt_default
     adr     x1, branch_table
     ldr     x1, [x1, w0, uxtw #3]
     br      x1

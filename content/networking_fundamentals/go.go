@@ -1,6 +1,13 @@
 // Vidya — Networking Fundamentals in Go
 //
 // In-memory simulation of TCP socket state machine + lifecycle.
+//
+// Simplification: Connect moves the listening socket itself to
+// ESTABLISHED, as in RFC 9293's single-TCB state diagram. The sockets
+// API does not work that way: the listener stays in LISTEN and accept()
+// returns a NEW socket per connection, which is how one port serves many
+// clients. SYN_RCVD and FIN_WAIT are declared but the handshake and
+// teardown are not modeled.
 
 package main
 
@@ -136,16 +143,21 @@ func (n *Net) Close(s int) bool {
 }
 
 func ok(b bool, label string) {
+	checks++
 	if !b {
 		panic(label)
 	}
 }
 
 func eq(got, want int, label string) {
+	checks++
 	if got != want {
 		panic(fmt.Sprintf("%s: got %d want %d", label, got, want))
 	}
 }
+
+// checks counts the assertions this file runs, for the final tally.
+var checks int
 
 func main() {
 	n := newNet()
@@ -181,5 +193,7 @@ func main() {
 	n.Close(srv)
 	ok(n.Bind(srv2, 8080), "rebind after close")
 
-	fmt.Println("networking_fundamentals: 19/19 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("networking_fundamentals: %d/%d ok\n", checks, checks)
 }

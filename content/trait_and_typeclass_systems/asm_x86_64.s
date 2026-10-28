@@ -3,8 +3,10 @@
 # Traits/interfaces compile down to vtables: arrays of function pointers.
 # Virtual dispatch = load a pointer from the table, then indirect call.
 # The CPU sees no types — just addresses and data. The "object" is a
-# pointer pair: [data_ptr, vtable_ptr]. This is exactly what Rust's
-# dyn Trait and C++ virtual calls become at the machine level.
+# pointer pair: [data_ptr, vtable_ptr] — the shape of Rust's &dyn Trait
+# fat pointer (Rust's real vtable also holds drop_in_place, size and align
+# ahead of the methods). C++ differs: the vtable pointer (vptr) lives
+# INSIDE the object, so a pointer to a polymorphic object stays one word.
 
 .intel_syntax noprefix
 .global _start
@@ -94,7 +96,7 @@ _start:
 
     # ── Fat pointer dispatch (dyn Trait pattern) ───────────────────
     # Given only a trait object pointer, extract data + vtable, dispatch.
-    # This is exactly what Rust does for &dyn Shape.
+    # This is the &dyn Shape pattern (minus Rust's drop/size/align slots).
     lea     r12, [circle_trait_obj]
     mov     edi, 0              # method index 0 = area
     call    dispatch_trait

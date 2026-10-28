@@ -100,8 +100,19 @@ assert_eq "${#parts[@]}" "4" "split count"
 assert_eq "${parts[1]}" "b" "split element"
 
 # ── Trimming whitespace ────────────────────────────────────────────
+# Parameter expansion, no subprocess: strip the longest leading run of
+# whitespace, then the longest trailing run. (`echo "$s" | xargs` is a
+# common "trim" that is wrong: xargs parses quotes and backslashes — "it's"
+# fails with "unmatched single quote", C:\path loses its \ — and it
+# squeezes internal runs of spaces.)
+trim() {
+    local s=$1
+    s=${s#"${s%%[![:space:]]*}"}
+    s=${s%"${s##*[![:space:]]}"}
+    printf '%s' "$s"
+}
 padded="  hello  "
-trimmed=$(echo "$padded" | xargs)
-assert_eq "$trimmed" "hello" "trim whitespace"
+assert_eq "$(trim "$padded")" "hello" "trim whitespace"
+assert_eq "$(trim "  it's  a  test  ")" "it's  a  test" "trim keeps quotes and inner spaces"
 
 echo "All string examples passed."

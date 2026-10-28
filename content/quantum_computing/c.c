@@ -179,12 +179,35 @@ static void test_ghz(void) {
 }
 
 static void test_noise(void) {
+    // Depolarizing channel on |0⟩: with probability p one of X, Y, Z (p/3
+    // each) hits the qubit. X and Y flip it, so P(0) = 1 - 2p/3. Built as a
+    // mixture of the four branches, using the simulator's own gates.
     double p = 0.1;
-    double noisy_p0 = 1.0 - 2 * p / 3;
-    assert_near(noisy_p0 + 2 * p / 3, 1.0, "depolarize");
+    double noisy_p0 = 0.0;
+    for (int k = 0; k < 4; k++) {               // 0=I, 1=X, 2=Y, 3=Z
+        cx s[2];
+        state_init(s, 1);
+        if (k == 2) pauli_z(s, 0, 1);           // Y = iXZ (global phase dropped)
+        if (k == 1 || k == 2) pauli_x(s, 0, 1);
+        if (k == 3) pauli_z(s, 0, 1);
+        noisy_p0 += (k == 0 ? 1.0 - p : p / 3.0) * prob(s, 0);
+    }
+    assert_near(noisy_p0, 1.0 - 2 * p / 3, "depolarize");
 
+    // Amplitude damping on |1⟩ via its Kraus operators: K0 keeps |1⟩ with
+    // probability 1-γ, K1 decays it to |0⟩ with probability γ.
     double gamma = 0.05;
-    assert_near(gamma + (1 - gamma), 1.0, "damping");
+    cx k0[2][2] = {{1, 0}, {0, sqrt(1 - gamma)}};
+    cx k1[2][2] = {{0, sqrt(gamma)}, {0, 0}};
+    cx keep[2], decay[2];
+    state_init(keep, 1);
+    pauli_x(keep, 0, 1);
+    apply_gate(keep, 0, 1, k0);
+    state_init(decay, 1);
+    pauli_x(decay, 0, 1);
+    apply_gate(decay, 0, 1, k1);
+    assert_near(prob(keep, 1), 1 - gamma, "damping keeps |1⟩");
+    assert_near(prob(decay, 0), gamma, "damping decays to |0⟩");
 
     double fidelity = pow(1 - 0.001, 100);
     assert(fabs(fidelity - 0.9048) < 0.001);

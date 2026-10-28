@@ -17,8 +17,10 @@
 //   Bit 1:    Table/Block (1=table at L0-L2, 1=page at L3)
 //   [4:2]:    AttrIndx — index into MAIR_EL1
 //   Bit 5:    NS — Non-Secure (for TrustZone)
-//   Bit 6:    AP[1] — 0=RW, 1=RO
-//   Bit 7:    AP[2] — 0=EL1 only, 1=EL0 accessible
+//   Bit 6:    AP[1] — 0=EL1 only, 1=EL0 accessible
+//   Bit 7:    AP[2] — 0=RW, 1=RO
+//   (AP[2:1]: 00 EL1 RW, 01 EL1+EL0 RW, 10 EL1 RO, 11 EL1+EL0 RO —
+//    Linux pgtable-hwdef.h: PTE_USER = 1<<6, PTE_RDONLY = 1<<7)
 //   [9:8]:    SH — Shareability (00=non, 10=outer, 11=inner)
 //   Bit 10:   AF — Access Flag (must be 1 or hardware sets it)
 //   [47:12]:  Output address (physical page frame)
@@ -37,8 +39,8 @@ PTE_PAGE        = 1 << 1        // 0x002 — page descriptor (L3)
 PTE_ATTRINDX_0  = 0 << 2        // Device memory (MAIR index 0)
 PTE_ATTRINDX_1  = 1 << 2        // Normal cacheable (MAIR index 1)
 PTE_AP_RW_EL1   = 0 << 6        // Read/Write, EL1 only
-PTE_AP_RO_EL1   = 1 << 6        // Read-only, EL1 only
-PTE_AP_RW_EL0   = 1 << 7        // EL0 accessible (user)
+PTE_AP_RO_EL1   = 1 << 7        // AP[2]: read-only (EL1 only unless AP[1] set)
+PTE_AP_RW_EL0   = 1 << 6        // AP[1]: EL0 accessible (user)
 PTE_SH_INNER    = 3 << 8        // Inner shareable
 PTE_SH_OUTER    = 2 << 8        // Outer shareable
 PTE_AF          = 1 << 10       // Access Flag (set = accessed)
@@ -57,7 +59,9 @@ PTE_KERN_RO  = PTE_VALID | PTE_AF | PTE_ATTRINDX_1 | PTE_SH_INNER | PTE_AP_RO_EL
 PTE_USER_RW  = PTE_VALID | PTE_AF | PTE_ATTRINDX_1 | PTE_SH_INNER | PTE_AP_RW_EL0
 PTE_USER_RO  = PTE_VALID | PTE_AF | PTE_ATTRINDX_1 | PTE_SH_INNER | PTE_AP_RO_EL1 | PTE_AP_RW_EL0
 
-// Physical address mask stored in memory (not representable as AArch64 immediate)
+// Masks kept in memory to show the load-from-data pattern. (PHYS_ADDR_MASK
+// itself IS a valid bitmask immediate — one run of 36 ones — so section 6
+// loads it with a plain `mov`; a value like 0x0000FFFFFFFFF0F0 would not be.)
 .align 8
 phys_mask:  .quad PHYS_ADDR_MASK
 user_rw_flags: .quad PTE_USER_RW
@@ -134,7 +138,7 @@ _start:
     tst     x0, x1
     b.eq    fail
 
-    // Test it's NOT user-accessible (AP[2] = bit 7 should be 0)
+    // Test it's NOT user-accessible (AP[1] = bit 6 should be 0)
     tst     x0, PTE_AP_RW_EL0
     b.ne    fail                // kernel data must not be EL0 accessible
 
@@ -273,16 +277,28 @@ _start:
     mov     x0, x19
     svc     #0
 
-    // Write portion of maps to stdout
+    // Write the first whole lines of maps (at most 200 bytes) to stdout.
+    // Cutting at 200 bytes mid-line would glue the pass message onto a
+    // half-printed mapping, so back up to the last '\n' in range.
     mov     x2, x20
     cmp     x2, #200
-    b.le    .maps_write
+    b.le    .maps_trim
     mov     x2, #200
+.maps_trim:
+    adr     x1, maps_buf
+.maps_back:
+    cbz     x2, .maps_skip          // no complete line: print nothing
+    sub     x3, x2, #1
+    ldrb    w4, [x1, x3]
+    cmp     w4, #'\n'
+    b.eq    .maps_write
+    mov     x2, x3
+    b       .maps_back
 .maps_write:
     mov     x8, #64
     mov     x0, #1
-    adr     x1, maps_buf
     svc     #0
+.maps_skip:
 
     // ════════════════════════════════════════════════════════════════
     // 9. AArch64 split address space
@@ -290,8 +306,11 @@ _start:
     // AArch64 uses TTBR0 for low addresses and TTBR1 for high:
     //   User:   0x0000_0000_0000_0000 — 0x0000_FFFF_FFFF_FFFF
     //   Kernel: 0xFFFF_0000_0000_0000 — 0xFFFF_FFFF_FFFF_FFFF
-    // Unlike x86_64's canonical form, AArch64 checks top bits directly.
-    // Our SP should be in user space (top 16 bits = 0x0000)
+    // Like x86_64's canonical form, an address in neither range faults —
+    // but Linux enables Top Byte Ignore (TCR_EL1.TBI0) for EL0, so bits
+    // [63:56] of a user pointer are ignored by translation (pointer tags,
+    // MTE) and only bits [55:48] must be 0. The kernel never tags SP, so
+    // our SP should be in user space (top 16 bits = 0x0000)
     mov     x0, sp
     lsr     x0, x0, #48         // get top 16 bits
     cmp     x0, #0              // should be 0 for user space

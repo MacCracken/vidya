@@ -15,16 +15,16 @@
 // allocation*: the compiler tracks a free-pool of physical qubits and
 // recycles them via reset, exactly like the classical bindless free-
 // list pattern. The structural advantage of the quantum form:
-// because all "handles" live in one entangled register, batched
+// because all "handles" live in one register, batched
 // resource updates can be expressed as multi-qubit gates (e.g., all
 // uniform buffers updated via a multi-controlled gate) rather than
 // per-handle ioctl calls.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // Allocate handles 0, 1, 2 (mark them occupied)
 x q[0];
@@ -37,5 +37,6 @@ reset q[1];
 // Re-allocate (X again — the freed slot gets reused)
 x q[1];
 
-// Measure: handles 0, 1, 2 should read 1; handle 3 should read 0
-measure q -> c;
+// Measure: handles 0, 1, 2 read 1; handle 3 reads 0 (c = 0111 = 7)
+c = measure q;
+// @expect c == 7

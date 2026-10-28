@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 )
 
 func appendRecord(buf *[]byte, rec []byte) {
@@ -30,12 +31,21 @@ func buildIndex(buf []byte) (offsets, lengths []int) {
 	return
 }
 
-// Returns escaped bytes, or nil on bounds-check failure.
+// Returns escaped bytes, or nil on bounds-check failure. RFC 8259 §7
+// requires EVERY control byte U+0000..U+001F to be escaped, not just
+// \n \t \r: the rest go out as \u00XX (6 bytes, hence the 6x worst case).
 func jsonEscape(src []byte, dstCap int) []byte {
-	if len(src)*2 > dstCap {
+	worst := len(src) * 2
+	for _, c := range src {
+		if c < 0x20 && c != '\n' && c != '\t' && c != '\r' {
+			worst += 4 // \u00XX is 6 bytes, not 2
+		}
+	}
+	if worst > dstCap {
 		return nil
 	}
-	out := make([]byte, 0, len(src)*2)
+	const hexDigits = "0123456789abcdef"
+	out := make([]byte, 0, worst)
 	for _, c := range src {
 		switch c {
 		case '"':
@@ -49,7 +59,11 @@ func jsonEscape(src []byte, dstCap int) []byte {
 		case '\r':
 			out = append(out, '\\', 'r')
 		default:
-			out = append(out, c)
+			if c < 0x20 {
+				out = append(out, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xF])
+			} else {
+				out = append(out, c)
+			}
 		}
 	}
 	return out
@@ -75,6 +89,16 @@ func jsonUnescape(src []byte) []byte {
 			case 'r':
 				out = append(out, '\r')
 				i += 2
+			case 'u': // \u00XX: the byte-range escapes jsonEscape emits
+				if i+6 <= len(src) {
+					if v, err := strconv.ParseUint(string(src[i+2:i+6]), 16, 8); err == nil {
+						out = append(out, byte(v))
+						i += 6
+						continue
+					}
+				}
+				out = append(out, src[i])
+				i++
 			default:
 				out = append(out, src[i])
 				i++
@@ -87,6 +111,16 @@ func jsonUnescape(src []byte) []byte {
 	return out
 }
 
+// checks counts the assertions this file runs, for the final tally.
+var checks int
+
+func check(cond bool, label string) {
+	checks++
+	if !cond {
+		panic(label)
+	}
+}
+
 func main() {
 	var buf []byte
 
@@ -95,16 +129,10 @@ func main() {
 	appendRecord(&buf, []byte(`{"id":2}`))
 	appendRecord(&buf, []byte(`{"id":3}`))
 	offs, lens := buildIndex(buf)
-	if len(offs) != 3 {
-		panic("3 records indexed")
-	}
-	if lens[2] != 8 {
-		panic("third record length 8")
-	}
+	check(len(offs) == 3, "3 records indexed")
+	check(lens[2] == 8, "third record length 8")
 	third := buf[offs[2] : offs[2]+lens[2]]
-	if !bytes.Equal(third, []byte(`{"id":3}`)) {
-		panic("third record bytes")
-	}
+	check(bytes.Equal(third, []byte(`{"id":3}`)), "third record bytes")
 
 	// Test 2: no trailing newline
 	buf2 := make([]byte, len(buf))
@@ -113,31 +141,28 @@ func main() {
 		buf2 = buf2[:len(buf2)-1]
 	}
 	offs2, _ := buildIndex(buf2)
-	if len(offs2) != 3 {
-		panic("3 records indexed without trailing newline")
-	}
+	check(len(offs2) == 3, "3 records indexed without trailing newline")
 
 	// Test 3: escape
 	s3 := []byte{'s', 'a', 'y', ' ', '"', 'h', 'i', '"', '\t', '\n', '\r', '\\'}
 	esc := jsonEscape(s3, 256)
-	if len(esc) != 18 {
-		panic(fmt.Sprintf("escape: got %d want 18", len(esc)))
-	}
+	check(len(esc) == 18, fmt.Sprintf("escape: got %d want 18", len(esc)))
+
+	// Test 3b: other control bytes escape as \u00XX and round-trip
+	ctl := jsonEscape([]byte{'a', 0x01, 0x1f}, 64)
+	check(bytes.Equal(ctl, []byte(`a\u0001\u001f`)), fmt.Sprintf("control escape: got %q", ctl))
+	check(bytes.Equal(jsonUnescape(ctl), []byte{'a', 0x01, 0x1f}), "control round-trip")
 
 	// Test 4: bounds check
 	s4 := []byte{'"', '"', '"', '"'}
-	if jsonEscape(s4, 4) != nil {
-		panic("escape refuses tight cap")
-	}
+	check(jsonEscape(s4, 4) == nil, "escape refuses tight cap")
 
 	// Test 5: roundtrip
 	un := jsonUnescape(esc)
-	if len(un) != 12 {
-		panic("unescape recovers 12")
-	}
-	if !bytes.Equal(un, s3) {
-		panic("round-trip bytes")
-	}
+	check(len(un) == 12, "unescape recovers 12")
+	check(bytes.Equal(un, s3), "round-trip bytes")
 
-	fmt.Println("jsonl_format: 8/8 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("jsonl_format: %d/%d ok\n", checks, checks)
 }

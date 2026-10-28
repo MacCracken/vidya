@@ -14,7 +14,8 @@
 //
 // The CNOT chain models the continuation-bit dependency: each byte
 // only "matters" if the previous byte's high bit was set. Measurement
-// collapses the chain to the bytes-actually-used count.
+// collapses the chain all-or-nothing: 0000 or 1111, each half the time
+// (the chain copies q[0], so it can never stop partway).
 //
 // In real quantum information theory, this is the structural pattern
 // of *adaptive measurements*: each qubit's measurement decision
@@ -22,11 +23,11 @@
 // same dependency chain that LEB128 uses to pack arbitrary-sized
 // integers into variable byte counts.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // Value with continuation through all 4 bytes
 h q[0];
@@ -36,4 +37,5 @@ cx q[0], q[1];
 cx q[1], q[2];
 cx q[2], q[3];
 
-measure q -> c;
+c = measure q;
+// @expect c in {0, 15}

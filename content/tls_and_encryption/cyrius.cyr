@@ -80,6 +80,11 @@ fn verify_chain(chain, n_certs, trust_store, n_roots) {
         var here_cert = load64(chain + i * 8);
         var next_cert = load64(chain + (i + 1) * 8);
         if (cert_issuer(here_cert) != cert_subject(next_cert)) { return 0; }
+        # A self-signed cert below the top of the chain is an attacker's
+        # "intermediate": refuse it (only the trust anchor signs itself).
+        if (i > 0) {
+            if (cert_subject(here_cert) == cert_issuer(here_cert)) { return 0; }
+        }
         i = i + 1;
     }
     # Last cert's subject must be in trust store
@@ -115,9 +120,10 @@ fn cert_matches_hostname(cert, hostname) {
 # is exactly the attack a real AEAD exists to stop.
 #
 # What this IS for: the structural shape of the real thing — seal
-# writes ciphertext and returns a tag; open recomputes the tag over
-# what it actually received and refuses to hand back plaintext on
-# mismatch. That control flow is the lesson. Real code uses AES-GCM or
+# writes ciphertext and returns a tag; open recomputes the tag over the
+# decrypted bytes and, on mismatch, wipes them before returning -1, so
+# no unverified plaintext reaches the caller (RFC 5116 §2.2). That
+# control flow is the lesson. Real code uses AES-GCM or
 # ChaCha20-Poly1305 from a vetted library and never hand-rolls a tag.
 
 fn xor_stream(out, src, len, key) {
@@ -151,7 +157,10 @@ fn demo_seal(pt, pt_len, key, nonce, ct_out) {
 fn demo_open(ct, ct_len, key, nonce, claimed_tag, pt_out) {
     xor_stream(pt_out, ct, ct_len, key);
     var actual = weak_checksum(pt_out, ct_len, key, nonce);
-    if (actual != claimed_tag) { return 0 - 1; }
+    if (actual != claimed_tag) {
+        memset(pt_out, 0, ct_len);      # never leave unverified plaintext behind
+        return 0 - 1;
+    }
     return ct_len;
 }
 
@@ -276,6 +285,19 @@ fn main() {
     var ss_ok = verify_chain(&ss_chain, 1, &trust, 1);
     assert_eq(ss_ok, 0, "self-signed leaf rejected (not in trust)");
 
+    # Self-signed cert at an INTERMEDIATE slot: every issuer/subject link
+    # matches and the top is trusted, so only the self-signed check stops it.
+    var ss_mid[16];
+    store64(&ss_mid + 0, 200);
+    store64(&ss_mid + 8, 200);      # self-signed "intermediate"
+    var mitm_chain: i64[4];
+    mitm_chain[0] = &leaf_cert;     # 100 <- 200
+    mitm_chain[1] = &ss_mid;        # 200 <- 200
+    mitm_chain[2] = &intermediate_cert;  # 200 <- 300
+    mitm_chain[3] = &root_cert;     # 300 (trusted)
+    assert_eq(verify_chain(&mitm_chain, 4, &trust, 1), 0,
+              "self-signed intermediate rejected");
+
     # === Demo seal/open (NOT authenticated encryption) ===
 
     var pt = "secret message";
@@ -299,6 +321,13 @@ fn main() {
     store8(&ct_buf + 5, orig_byte ^ 1);
     var tampered = demo_open(&ct_buf, pt_len, key, nonce, tag, &pt_buf);
     assert_eq(tampered, 0 - 1, "tampered ciphertext rejected");
+    var leaked = 0;
+    i = 0;
+    while (i < pt_len) {
+        if (load8(&pt_buf + i) != 0) { leaked = leaked + 1; }
+        i = i + 1;
+    }
+    assert_eq(leaked, 0, "rejected open leaves no plaintext in pt_out");
     store8(&ct_buf + 5, orig_byte);    # restore
 
     # Wrong tag (flipped one bit) → -1

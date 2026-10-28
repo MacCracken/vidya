@@ -1,13 +1,17 @@
 # Vidya — JSON Lines (JSONL) in x86_64 Assembly
 #
 # Asm port focuses on the JSON-string escape/unescape with bounds-
-# check — the algorithmically meaningful piece. Line indexing is
-# trivial scanning that doesn't gain anything in asm, so it's
-# elided. The 8-assertion equivalent here:
-#   1. escape produces 18 bytes from 12-byte input (5 special chars)
+# check — the algorithmically meaningful piece. Like the C and AArch64
+# ports it escapes " \ \n \t \r only, and REFUSES (-1) any other
+# control byte (U+0000..U+001F): RFC 8259 §7 requires those to become
+# \u00XX, which this minimal encoder has no form for, and emitting them
+# raw would be invalid JSON. Line indexing is trivial scanning that
+# doesn't gain anything in asm, so it's elided. The assertions here:
+#   1. escape produces 18 bytes from 12-byte input (6 bytes of the 5 escaped kinds)
 #   2. escape with cap=4 returns -1 (bounds check)
 #   3. unescape recovers 12 bytes
 #   4. round-trip bytes match
+#   5. a control byte without a short escape is refused (-1)
 
 .intel_syntax noprefix
 .global _start
@@ -15,6 +19,8 @@
 .section .data
 src:          .byte 's', 'a', 'y', ' ', '"', 'h', 'i', '"', 9, 10, 13, 92
 .equ src_len, . - src
+ctl_src:      .byte 'a', 1          # U+0001 has no short escape
+.equ ctl_len, . - ctl_src
 
 .section .bss
 .align 8
@@ -22,7 +28,7 @@ esc_buf:      .skip 256
 unesc_buf:    .skip 256
 
 .section .rodata
-msg_pass:     .ascii "jsonl_format: 4/4 ok\n"
+msg_pass:     .ascii "jsonl_format: 5/5 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail:     .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
@@ -52,6 +58,8 @@ json_escape:
     je      .je_tab
     cmp     r9, 13                # \r
     je      .je_cr
+    cmp     r9, 0x20              # any other control byte: refuse
+    jb      .je_bomb
     # plain
     mov     [rdi + rax], r9b
     inc     rax
@@ -196,7 +204,8 @@ _start:
     cmp     rax, -1
     jne     fail_exit
 
-    # Re-escape into esc_buf for unescape (test 2 clobbered first 4 bytes)
+    # Re-escape into esc_buf for unescape. (Defensive only: test 2 wrote
+    # nothing — the size check rejects before the first store.)
     lea     rdi, [rip + esc_buf]
     mov     rsi, 256
     lea     rdx, [rip + src]
@@ -217,6 +226,15 @@ _start:
     mov     rdx, src_len
     call    memeq
     cmp     rax, 1
+    jne     fail_exit
+
+    # 5. control byte without a short escape is refused, not emitted raw
+    lea     rdi, [rip + esc_buf]
+    mov     rsi, 256
+    lea     rdx, [rip + ctl_src]
+    mov     rcx, ctl_len
+    call    json_escape
+    cmp     rax, -1
     jne     fail_exit
 
     mov     rax, 1

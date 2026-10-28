@@ -5,14 +5,16 @@
 # syscalls — we model the kernel's per-socket state so the test
 # surface is byte-deterministic and language-portable.
 #
-# The 6-state subset modeled here (RFC 793 has 11; we collapse the
+# The 5-state subset named here (RFC 793 has 11; we collapse the
 # transient ones for clarity):
 #
 #   CLOSED → bind+listen → LISTEN
-#   LISTEN → connect-from-peer → SYN_RCVD
-#   SYN_RCVD → established → ESTABLISHED
+#   LISTEN → connect-from-peer → (SYN_RCVD) → ESTABLISHED
 #   ESTABLISHED → close → FIN_WAIT
 #   FIN_WAIT → peer-acks → CLOSED
+#
+# SYN_RCVD is named for the real handshake but never entered: the
+# single-thread connect() completes both ends at once.
 #
 # Tests:
 #   1. New socket starts CLOSED.
@@ -73,7 +75,7 @@ fn sock_create() {
 }
 
 fn sock_state_get(s) {
-    if (s == 0) { return 0 - 1; }
+    if (s <= 0) { return 0 - 1; }                 # 0 = null; negative ids are out of range
     if (s >= SOCK_CAP) { return 0 - 1; }
     return load64(&sock_state + s * 8);
 }
@@ -85,8 +87,10 @@ fn sock_state_get(s) {
 # demo versions. That class of shadow segfaulted gpu_memory_pooling once a
 # single stdlib allocation was added.
 fn demo_sock_bind(s, port) {
-    if (s == 0) { return 0; }
+    if (s <= 0) { return 0; }                     # 0 = null; a negative id would index before the table
     if (s >= SOCK_CAP) { return 0; }
+    if (port <= 0) { return 0; }                  # port indexes port_to_sock:
+    if (port > 65535) { return 0; }               # range-check before using it
     if (load64(&port_to_sock + port * 8) != 0) { return 0; }
     if (load64(&sock_port + s * 8) != 0) { return 0; }
     store64(&sock_port + s * 8, port);
@@ -96,7 +100,7 @@ fn demo_sock_bind(s, port) {
 
 # listen(sock) → 1 on transition CLOSED→LISTEN, 0 otherwise.
 fn demo_sock_listen(s) {
-    if (s == 0) { return 0; }
+    if (s <= 0) { return 0; }                     # 0 = null; a negative id would index before the table
     if (s >= SOCK_CAP) { return 0; }
     if (load64(&sock_state + s * 8) != ST_CLOSED) { return 0; }
     if (load64(&sock_port + s * 8) == 0) { return 0; }
@@ -107,7 +111,7 @@ fn demo_sock_listen(s) {
 # connect(client_sock, server_port) — handshake completes immediately
 # in single-thread sim. Returns 1 on success.
 fn demo_sock_connect(client, port) {
-    if (client == 0) { return 0; }
+    if (client <= 0) { return 0; }
     if (client >= SOCK_CAP) { return 0; }
     var server = load64(&port_to_sock + port * 8);
     if (server == 0) { return 0; }
@@ -123,7 +127,7 @@ fn demo_sock_connect(client, port) {
 # send(sock, byte) — write one byte to the peer's rx buffer.
 # Returns 1 on success, 0 if not ESTABLISHED or rx buf full.
 fn sock_send_byte(s, b) {
-    if (s == 0) { return 0; }
+    if (s <= 0) { return 0; }                     # 0 = null; a negative id would index before the table
     if (s >= SOCK_CAP) { return 0; }
     if (load64(&sock_state + s * 8) != ST_ESTABLISHED) { return 0; }
     var peer = load64(&sock_peer + s * 8);
@@ -138,7 +142,7 @@ fn sock_send_byte(s, b) {
 # recv(sock) — pop one byte from this socket's rx buf.
 # Returns the byte (0..255) or -1 if no data / not connected.
 fn sock_recv_byte(s) {
-    if (s == 0) { return 0 - 1; }
+    if (s <= 0) { return 0 - 1; }                 # 0 = null; negative ids are out of range
     if (s >= SOCK_CAP) { return 0 - 1; }
     var st = load64(&sock_state + s * 8);
     if (st != ST_ESTABLISHED) {
@@ -162,7 +166,7 @@ fn sock_recv_byte(s) {
 # close(sock) — ESTABLISHED→FIN_WAIT→CLOSED in one step (single-thread
 # sim collapses the FIN/ACK round-trip).
 fn demo_sock_close(s) {
-    if (s == 0) { return 0; }
+    if (s <= 0) { return 0; }                     # 0 = null; a negative id would index before the table
     if (s >= SOCK_CAP) { return 0; }
     var st = load64(&sock_state + s * 8);
     if (st == ST_CLOSED) { return 0; }
@@ -217,6 +221,8 @@ fn main() {
     var srv2 = sock_create();
     var bind_dup = demo_sock_bind(srv2, 8080);  # 8080 still bound to srv
     assert_eq(bind_dup, 0, "bind to in-use port rejected");
+    assert_eq(demo_sock_bind(srv2, 70000), 0, "bind to port > 65535 rejected");
+    assert_eq(demo_sock_bind(srv2, 0 - 1), 0, "bind to negative port rejected");
 
     # --- 7. recv on CLOSED returns -1 ---
     var recv_closed = sock_recv_byte(cli);

@@ -66,16 +66,21 @@ func (f *FrameBuffer) CountLit() int {
 }
 
 func mustEq[T comparable](got, want T, label string) {
+	checks++
 	if got != want {
 		panic(fmt.Sprintf("%s: got %v want %v", label, got, want))
 	}
 }
 
 func mustTrue(b bool, label string) {
+	checks++
 	if !b {
 		panic(label)
 	}
 }
+
+// checks counts the assertions this file runs, for the final tally.
+var checks int
 
 func main() {
 	var fb FrameBuffer
@@ -128,5 +133,7 @@ func main() {
 	fb.DrawHLine(14, 5, 4, 0xFF0000)
 	mustEq(fb.CountLit(), 2, "hline clipped")
 
-	fmt.Println("framebuffer_rendering: 18/18 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("framebuffer_rendering: %d/%d ok\n", checks, checks)
 }

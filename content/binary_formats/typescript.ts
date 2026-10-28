@@ -39,11 +39,15 @@ function detectFormat(data: Uint8Array): string {
         return "PE (MZ)";
     }
 
-    // Mach-O: 0xFEEDFACF (64-bit) or 0xFEEDFACE (32-bit)
+    // Mach-O: 0xFEEDFACF (64-bit) or 0xFEEDFACE (32-bit), stored in the
+    // file's own byte order. x86_64 and arm64 Mach-O are little-endian, so
+    // on disk the bytes are CF FA ED FE; FE ED FA CF is big-endian (PowerPC).
     const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    const magic32be = dv.getUint32(0, false);
-    if (magic32be === MACHO_MAGIC_64) return "Mach-O 64-bit";
-    if (magic32be === MACHO_MAGIC_32) return "Mach-O 32-bit";
+    for (const littleEndian of [true, false]) {
+        const magic = dv.getUint32(0, littleEndian);
+        if (magic === MACHO_MAGIC_64) return "Mach-O 64-bit";
+        if (magic === MACHO_MAGIC_32) return "Mach-O 32-bit";
+    }
 
     return "unknown";
 }
@@ -57,9 +61,11 @@ function testMagicNumbers(): void {
     const peData = new Uint8Array([0x4D, 0x5A, 0x90, 0x00]);
     assert(detectFormat(peData) === "PE (MZ)", "detect PE");
 
-    // Mach-O 64-bit detection
-    const machoData = new Uint8Array([0xFE, 0xED, 0xFA, 0xCF]);
+    // Mach-O 64-bit detection: x86_64/arm64 files start CF FA ED FE
+    const machoData = new Uint8Array([0xCF, 0xFA, 0xED, 0xFE]);
     assert(detectFormat(machoData) === "Mach-O 64-bit", "detect Mach-O 64");
+    const machoBE = new Uint8Array([0xFE, 0xED, 0xFA, 0xCF]);
+    assert(detectFormat(machoBE) === "Mach-O 64-bit", "detect big-endian Mach-O 64");
 
     // Unknown format
     const unknown = new Uint8Array([0x00, 0x00, 0x00, 0x00]);
@@ -214,7 +220,7 @@ function buildPeModel(): PeHeaderInfo {
         peSignature: "PE\\0\\0",
         machine: 0x8664,             // IMAGE_FILE_MACHINE_AMD64
         numberOfSections: 3,         // .text, .rdata, .data
-        imageBase: 0x0040_0000n,     // default for executables
+        imageBase: 0x1_4000_0000n,   // default for 64-bit EXEs (0x400000 is the PE32 default)
         entryPoint: 0x1000,          // RVA of entry point
     };
 }
@@ -223,7 +229,7 @@ function testPeHeaderModel(): void {
     const pe = buildPeModel();
     assert(pe.dosSignature === "MZ", "PE starts with MZ");
     assert(pe.machine === 0x8664, "PE AMD64 machine");
-    assert(pe.imageBase === 0x0040_0000n, "PE default image base");
+    assert(pe.imageBase === 0x1_4000_0000n, "PE32+ default image base");
     assert(pe.entryPoint > 0, "PE entry point set");
 }
 
@@ -292,7 +298,7 @@ function getFormatInfos(): FormatInfo[] {
         {
             name: "PE",
             magic: "MZ",
-            headerSize: 248, // DOS + COFF + optional header (PE32+)
+            headerSize: 264, // "PE\0\0" (4) + COFF (20) + PE32+ optional header (240), after a 64-byte DOS header
             segmentConcept: "sections (.text, .data, .rdata)",
             platforms: ["Windows"],
         },

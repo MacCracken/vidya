@@ -154,6 +154,11 @@ function check(cond: boolean, msg: string): void {
   check(w.load64(8) === 5n, "log[0].key = 5");
   check(w.load64(16) === 42n, "log[0].val = 42");
   check(w.storeGet(5) === 42n, "data has key 5 = 42");
+  // The observable half of "log BEFORE data": when the append fails, the
+  // data must be untouched. Fill the log, then try one more write.
+  while (w.storeSet(6, 1n) === 1) { /* fill to capacity */ }
+  check(w.storeSet(5, 99n) === 0, "write refused once the log is full");
+  check(w.storeGet(5) === 42n, "refused write did not reach the data store");
 }
 
 // test_uncommitted_writes_lost_on_crash
@@ -223,7 +228,8 @@ function check(cond: boolean, msg: string): void {
     const ok = w.storeSet(0, BigInt(i));
     if (ok === 0) failures++;
   }
-  check(failures > 0, "log capacity is bounded");
+  check(failures === 300 - LOG_CAP_BYTES / REC_SZ, "exactly 256 records fit");
+  check(w.storeGet(0) === 255n, "data holds the last LOGGED value, not 299");
 }
 
 // OP_INVALID is exported by spec; reference it so the lint doesn't bite.

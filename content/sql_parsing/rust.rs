@@ -47,7 +47,10 @@ fn classify_keyword(text: &str) -> TokenKind {
     }
 }
 
-fn tokenize(sql: &str) -> Vec<Token<'_>> {
+/// Returns the tokens, or Err(byte offset) of the first character the lexer
+/// does not know. Silently skipping it would turn `id < 5` into `id 5` and
+/// let `t; DROP TABLE t` reach the validator as plain identifiers.
+fn tokenize(sql: &str) -> Result<Vec<Token<'_>>, usize> {
     let bytes = sql.as_bytes();
     let mut pos = 0usize;
     let mut out: Vec<Token<'_>> = Vec::new();
@@ -90,10 +93,7 @@ fn tokenize(sql: &str) -> Vec<Token<'_>> {
             b'(' => TokenKind::LParen,
             b')' => TokenKind::RParen,
             b',' => TokenKind::Comma,
-            _ => {
-                pos += 1;
-                continue;
-            }
+            _ => return Err(pos),
         };
         out.push(Token {
             kind,
@@ -106,7 +106,7 @@ fn tokenize(sql: &str) -> Vec<Token<'_>> {
         kind: TokenKind::Eof,
         text: "",
     });
-    out
+    Ok(out)
 }
 
 /// Minimal SELECT validator: returns true if the token stream looks like
@@ -125,7 +125,17 @@ fn is_valid_select(toks: &[Token<'_>]) -> bool {
     if i + 1 >= toks.len() || toks[i + 1].kind != TokenKind::Ident {
         return false;
     }
-    true
+    // ...then end of input, or exactly WHERE <ident> = <val>. Without this,
+    // anything after the table name ("FROM t DROP TABLE t") was accepted.
+    use TokenKind::*;
+    match &toks[i + 2..] {
+        [eof] => eof.kind == Eof,
+        [w, c, e, v, eof] => {
+            w.kind == Where && c.kind == Ident && e.kind == Eq
+                && matches!(v.kind, Int | Ident) && eof.kind == Eof
+        }
+        _ => false,
+    }
 }
 
 fn assert_kinds(toks: &[Token<'_>], expected: &[TokenKind], msg: &str) {
@@ -146,7 +156,7 @@ fn main() {
     use TokenKind::*;
 
     // ── Test 1: canonical SELECT (mirrors cyrius reference) ──────────
-    let toks = tokenize("SELECT * FROM users WHERE id = 1");
+    let toks = tokenize("SELECT * FROM users WHERE id = 1").unwrap();
     assert_kinds(
         &toks,
         &[Select, Star, From, Ident, Where, Ident, Eq, Int, Eof],
@@ -157,18 +167,18 @@ fn main() {
     assert_eq!(toks[7].text, "1");
 
     // ── Test 2: case insensitive keywords ──────────────────────────
-    let toks = tokenize("select * from T");
+    let toks = tokenize("select * from T").unwrap();
     assert_kinds(&toks, &[Select, Star, From, Ident, Eof], "lowercase");
-    let toks = tokenize("Select * From T");
+    let toks = tokenize("Select * From T").unwrap();
     assert_kinds(&toks, &[Select, Star, From, Ident, Eof], "mixed case");
 
     // ── Test 3: identifiers vs keywords ─────────────────────────────
-    let toks = tokenize("selected");
+    let toks = tokenize("selected").unwrap();
     assert_eq!(toks[0].kind, Ident, "'selected' is identifier, not SELECT");
     assert_eq!(toks[0].text, "selected");
 
     // ── Test 4: parentheses + comma ─────────────────────────────────
-    let toks = tokenize("SELECT (a, b) FROM t");
+    let toks = tokenize("SELECT (a, b) FROM t").unwrap();
     assert_kinds(
         &toks,
         &[Select, LParen, Ident, Comma, Ident, RParen, From, Ident, Eof],
@@ -176,20 +186,25 @@ fn main() {
     );
 
     // ── Test 5: integer literal scanning ────────────────────────────
-    let toks = tokenize("12345");
+    let toks = tokenize("12345").unwrap();
     assert_eq!(toks[0].kind, Int);
     assert_eq!(toks[0].text, "12345");
 
     // ── Test 6: validator accepts good, rejects bad ─────────────────
-    assert!(is_valid_select(&tokenize("SELECT * FROM t")));
-    assert!(is_valid_select(&tokenize("SELECT a FROM t WHERE id = 1")));
-    assert!(!is_valid_select(&tokenize("FROM t")));
-    assert!(!is_valid_select(&tokenize("SELECT FROM t")));
-    assert!(!is_valid_select(&tokenize("SELECT * FROM")));
+    assert!(is_valid_select(&tokenize("SELECT * FROM t").unwrap()));
+    assert!(is_valid_select(&tokenize("SELECT a FROM t WHERE id = 1").unwrap()));
+    assert!(!is_valid_select(&tokenize("FROM t").unwrap()));
+    assert!(!is_valid_select(&tokenize("SELECT FROM t").unwrap()));
+    assert!(!is_valid_select(&tokenize("SELECT * FROM").unwrap()));
 
     // ── Test 7: whitespace tolerance ───────────────────────────────
-    let toks = tokenize("  SELECT\t*\nFROM\tt  ");
+    let toks = tokenize("  SELECT\t*\nFROM\tt  ").unwrap();
     assert_kinds(&toks, &[Select, Star, From, Ident, Eof], "whitespace");
+
+    // ── Test 8: unknown characters and trailing junk are errors ──────
+    assert_eq!(tokenize("SELECT * FROM t WHERE id < 5").err(), Some(25), "'<' rejected");
+    assert!(tokenize("SELECT * FROM t; DROP TABLE t").is_err(), "';' rejected");
+    assert!(!is_valid_select(&tokenize("SELECT * FROM t DROP TABLE t").unwrap()));
 
     println!("All sql_parsing examples passed.");
 }

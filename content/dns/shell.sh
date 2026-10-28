@@ -13,7 +13,14 @@ readonly RR_MX=4
 readonly RR_TXT=5
 
 readonly CNAME_MAX_DEPTH=16
-readonly NXDOMAIN=-1
+# Three negative outcomes, three answers. NXDOMAIN tells an RFC 8020
+# resolver that nothing exists at or below the name, so answering it for a
+# name that exists but lacks the type (AAAA for name 1 below) would deny
+# that name's other records too; that case is NODATA. A CNAME loop or an
+# over-deep chain is a failure to resolve (RFC 1034 §3.6.2): SERVFAIL.
+readonly NXDOMAIN=-1   # the name does not exist at all (RCODE 3)
+readonly NODATA=-2     # the name exists, but has no record of this type (RFC 2308 §2.2)
+readonly SERVFAIL=-3   # CNAME loop or chain too deep
 readonly NEGATIVE_TTL=300
 
 declare -a Z_NAME Z_TYPE Z_TTL Z_VALUE
@@ -22,6 +29,10 @@ declare -a C_NAME C_TYPE C_VALUE C_EXPIRES
 C_COUNT=0
 NOW=0
 LAST_STATUS=0
+# TTL of the last successful zone_lookup: the MINIMUM over every record on
+# the CNAME chain. Each link expires on its own TTL, so the collapsed
+# answer may be cached no longer than its shortest-lived link.
+ZL_TTL=0
 
 zone_add() {
     Z_NAME[Z_COUNT]=$1
@@ -33,11 +44,15 @@ zone_add() {
 
 zone_lookup() {
     local name=$1 rtype=$2
-    local depth=0 cur=$name i
+    local depth=0 cur=$name i min_ttl=-1 miss
     while (( depth <= CNAME_MAX_DEPTH )); do
+        miss=$NXDOMAIN
         for (( i = 0; i < Z_COUNT; i++ )); do
+            if (( Z_NAME[i] == cur )); then miss=$NODATA; fi
             if (( Z_NAME[i] == cur && Z_TYPE[i] == rtype )); then
                 ZL_OUT=${Z_VALUE[i]}
+                ZL_TTL=${Z_TTL[i]}
+                if (( min_ttl >= 0 && min_ttl < ZL_TTL )); then ZL_TTL=$min_ttl; fi
                 return
             fi
         done
@@ -46,18 +61,19 @@ zone_lookup() {
             for (( i = 0; i < Z_COUNT; i++ )); do
                 if (( Z_NAME[i] == cur && Z_TYPE[i] == RR_CNAME )); then
                     cn=${Z_VALUE[i]}
+                    if (( min_ttl < 0 || Z_TTL[i] < min_ttl )); then min_ttl=${Z_TTL[i]}; fi
                     break
                 fi
             done
-            if (( cn == 0 )); then ZL_OUT=$NXDOMAIN; return; fi
+            if (( cn == 0 )); then ZL_OUT=$miss; return; fi
             cur=$cn
             depth=$((depth + 1))
         else
-            ZL_OUT=$NXDOMAIN
+            ZL_OUT=$miss
             return
         fi
     done
-    ZL_OUT=$NXDOMAIN
+    ZL_OUT=$SERVFAIL
 }
 
 cache_init() { C_COUNT=0; NOW=0; C_NAME=(); C_TYPE=(); C_VALUE=(); C_EXPIRES=(); }
@@ -99,16 +115,14 @@ resolve() {
     if (( LAST_STATUS == 1 )); then RESOLVE_OUT=$CL_OUT; return; fi
     zone_lookup $name $rtype
     local v=$ZL_OUT
-    if (( v == NXDOMAIN )); then
-        cache_insert $name $rtype $NXDOMAIN $NEGATIVE_TTL
-        RESOLVE_OUT=$NXDOMAIN
+    if (( v < 0 )); then   # NXDOMAIN, NODATA and SERVFAIL are all cached briefly
+        cache_insert $name $rtype $v $NEGATIVE_TTL
+        RESOLVE_OUT=$v
         return
     fi
-    local ttl=$NEGATIVE_TTL i
-    for (( i = 0; i < Z_COUNT; i++ )); do
-        if (( Z_NAME[i] == name && Z_TYPE[i] == rtype )); then ttl=${Z_TTL[i]}; break; fi
-    done
-    cache_insert $name $rtype $v $ttl
+    # Not "the TTL of a (name, rtype) record": for 3 -> CNAME -> 4 no such
+    # record exists, and that fallback cached 4's 60 s A for 300 s.
+    cache_insert $name $rtype $v $ZL_TTL
     RESOLVE_OUT=$v
 }
 
@@ -130,8 +144,8 @@ zone_add 37 $RR_A 60 305419896        # 0x12345678
 zone_lookup 1 $RR_A; check $ZL_OUT 2130706433 "a1"
 zone_lookup 2 $RR_A; check $ZL_OUT 2130706433 "cname"
 zone_lookup 3 $RR_A; check $ZL_OUT 134744072 "cname2"
-zone_lookup 10 $RR_A; check $ZL_OUT $NXDOMAIN "loop"
-zone_lookup 20 $RR_A; check $ZL_OUT $NXDOMAIN "deep"
+zone_lookup 10 $RR_A; check $ZL_OUT $SERVFAIL "loop"   # 10 -> 11 -> 10
+zone_lookup 20 $RR_A; check $ZL_OUT $SERVFAIL "deep"   # 17 hops > CNAME_MAX_DEPTH
 
 cache_init
 resolve 1 $RR_A; first=$RESOLVE_OUT
@@ -145,6 +159,13 @@ resolve 1 $RR_A
 check $LAST_STATUS 0 "expired"
 check $RESOLVE_OUT 2130706433 "requery"
 
+# CNAME chain 3 -> 4 (A ttl 60): the cached answer expires with the A
+cache_init
+resolve 3 $RR_A; check $RESOLVE_OUT 134744072 "cname answer"
+advance_time 61
+resolve 3 $RR_A
+check $LAST_STATUS 0 "cname answer expires with the 60 s A, not 300 s"
+
 cache_init
 resolve 99 $RR_A; check $RESOLVE_OUT $NXDOMAIN "nxdomain"
 resolve 99 $RR_A
@@ -152,6 +173,7 @@ check $LAST_STATUS 1 "neg cache"
 
 zone_lookup 1 $RR_MX; check $ZL_OUT 10 "mx"
 zone_lookup 1 $RR_TXT; check $ZL_OUT 99 "txt"
-zone_lookup 1 $RR_AAAA; check $ZL_OUT $NXDOMAIN "aaaa"
+zone_lookup 1 $RR_AAAA; check $ZL_OUT $NODATA "aaaa on an existing name is NODATA"
+zone_lookup 99 $RR_AAAA; check $ZL_OUT $NXDOMAIN "aaaa on a missing name is NXDOMAIN"
 
-echo "dns: $PASS/15 ok"
+echo "dns: $PASS/18 ok"

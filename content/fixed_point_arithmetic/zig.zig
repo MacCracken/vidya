@@ -2,12 +2,15 @@
 //
 // 16.16 fixed-point on i64. Zig's `>>` on signed integers is arithmetic
 // (sign-extending), and overflow is checked at runtime in safe modes —
-// so `*%` (wrapping multiply) is the explicit way to ask for C-style
-// silent wraparound. This makes intent visible at every site.
+// so `*%` (wrapping multiply) is the explicit way to ask for silent
+// wraparound (which C gives only unsigned types; signed overflow is UB in
+// C). This makes intent visible at every site.
 //
-// fx_mul uses the i128 builtin to compute the product without overflow,
-// then truncates back to i64. Zig's @intCast / @as / @intFromFloat are
-// explicit-by-design — no implicit conversions.
+// fxMul widens to i128 to compute the product without overflow, then
+// narrows back to i64 with @intCast — a CHECKED conversion (panics in safe
+// modes if the result does not fit), not a truncation. Zig's @intCast /
+// @as / @intFromFloat are explicit-by-design — no implicit narrowing
+// (only value-preserving widening such as i64 -> i128 is implicit).
 
 const std = @import("std");
 const math = std.math;
@@ -38,6 +41,8 @@ fn fxMul(a: i64, b: i64) i64 {
     return @intCast(wide >> FX_SHIFT);
 }
 
+// No i128: pre-shift each operand by 8 so the product fits i64 for larger
+// inputs, at the cost of the low 8 fraction bits of each. Not overflow-proof.
 fn fxMulSafe(a: i64, b: i64) i64 {
     return (a >> 8) * (b >> 8);
 }
@@ -48,13 +53,18 @@ fn fxDiv(a: i64, b: i64) i64 {
     return @intCast(@divTrunc(wide, @as(i128, b)));
 }
 
-// ── Sine table — quarter-wave, 256 entries ────────────────────────────
+// ── Sine table — quarter-wave, 256 steps (257 entries) ─────────────────
+// 1024 steps per full turn, so a quarter is 256 steps and needs 257
+// entries (0..256 inclusive, sin(pi/2) included). Mirroring the 2nd and 4th
+// quadrants is then sin_table[512 - a] / sin_table[1024 - a]. A 256-entry
+// table forces `511 - a`, which is one step off: every descending-quadrant
+// lookup returns the previous angle's value (up to 402 LSB, ~0.6%, wrong).
 
-var sin_table: [256]i64 = undefined;
+var sin_table: [257]i64 = undefined;
 
 fn buildSinTable() void {
     var i: usize = 0;
-    while (i < 256) : (i += 1) {
+    while (i <= 256) : (i += 1) {
         const angle: f64 = @as(f64, @floatFromInt(i)) * (math.pi / 2.0) / 256.0;
         const v: f64 = @sin(angle) * @as(f64, @floatFromInt(FX_ONE));
         sin_table[i] = @intFromFloat(v);
@@ -63,10 +73,10 @@ fn buildSinTable() void {
 
 fn sinLookup(angle: i64) i64 {
     const a: usize = @intCast(angle & 1023);
-    if (a < 256) return sin_table[a];
-    if (a < 512) return sin_table[511 - a];
-    if (a < 768) return -sin_table[a - 512];
-    return -sin_table[1023 - a];
+    if (a <= 256) return sin_table[a];
+    if (a < 512) return sin_table[512 - a];
+    if (a <= 768) return -sin_table[a - 512];
+    return -sin_table[1024 - a];
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -83,7 +93,7 @@ pub fn main() !void {
     assert(fxMul(FX_HALF, FX_HALF) == 16384);
 
     const big = fxFromInt(1000);
-    assert(fxMulSafe(big, big) > 0);
+    assert(fxMulSafe(big, big) == fxFromInt(1_000_000));
 
     assert(fxDiv(fxFromInt(10), fxFromInt(4)) == 163840);
     assert(fxDiv(FX_ONE, 0) == 0);
@@ -94,9 +104,13 @@ pub fn main() !void {
 
     buildSinTable();
     assert(sinLookup(0) == 0);
-    assert(sinLookup(256) > 60000);
+    assert(sinLookup(256) == FX_ONE); // sin(pi/2) = 1.0 exactly
     assert(sinLookup(512) == 0);
-    assert(sinLookup(768) < -60000);
+    assert(sinLookup(768) == -FX_ONE);
+    // Mirror symmetry: sin(pi - x) == sin(x), sin(2pi - x) == -sin(x)
+    assert(sinLookup(511) == sinLookup(1));
+    assert(sinLookup(1023) == -sinLookup(1));
+    assert(sinLookup(1) > 0);
 
     var i: i64 = 0;
     while (i < 100) : (i += 1) {

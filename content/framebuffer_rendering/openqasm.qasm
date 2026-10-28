@@ -12,23 +12,26 @@
 //   - measure   — "fb_get": collapse and read pixel state
 //
 // The quantum framebuffer has one structural advantage over classical:
-// because all pixels exist as a single entangled register, sub-grid
+// because all pixels exist as a single register, sub-grid
 // effects (cellular automata, convolutions, region fills) can be
 // expressed as gate sequences over the whole register at once. This
 // is the structural argument for "GPU-as-quantum-processor": both
 // fundamentally parallelize across the entire pixel grid in one shot,
 // rather than per-pixel like the CPU framebuffer model.
 //
-// In real quantum image processing (Quantum Image Representations,
-// FRQI, NEQR), this is exactly how images are encoded — each pixel
-// is a basis state of a qubit register, and image transformations
-// are unitary gate sequences.
+// Real quantum image representations are denser than one qubit per
+// pixel: FRQI (Le et al. 2011) and NEQR (Zhang et al. 2013) use
+// log2(#pixels) position qubits holding every pixel address in
+// superposition, entangled with color qubits (FRQI: one qubit whose
+// rotation angle is the intensity; NEQR: the gray value as a basis
+// state). Image transformations are unitary gate sequences on that
+// register.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // Initial state: all pixels dark (|0000>) — analog of fb_clear.
 
@@ -40,4 +43,6 @@ x q[3];     // pixel (1,1)
 x q[1];     // pixel (1,0) — q[0] already lit
 
 // fb_get: measure all four pixels
-measure q -> c;
+c = measure q;
+// c = 1011 on every shot: q[0], q[1], q[3] lit, q[2] dark
+// @expect c == 11

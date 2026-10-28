@@ -4,6 +4,11 @@ const std = @import("std");
 
 const VOCAB_SIZE: usize = 8;
 const TOK_EOS: usize = 1;
+// Mask value for filtered-out logits. Logits are unnormalized and can be
+// negative, so masking with 0 can make a REMOVED token the new argmax
+// ({-100,-50,-200,-10}, top-2 -> {0,-50,0,-10} picks index 0), and
+// softmax would still give it weight e^0 = 1. Mask with -inf instead.
+const LOGIT_NEG_INF: i64 = std.math.minInt(i64);
 
 var BIGRAM: [VOCAB_SIZE][VOCAB_SIZE]i64 = init_blk: {
     var b: [VOCAB_SIZE][VOCAB_SIZE]i64 = @splat(@splat(0));
@@ -58,7 +63,7 @@ fn topkFilter(logits: []i64, k: usize) usize {
     }
     var m: usize = 0;
     while (m < logits.len) : (m += 1) {
-        if (!marks[m]) logits[m] = 0;
+        if (!marks[m]) logits[m] = LOGIT_NEG_INF;
     }
     return picked;
 }
@@ -112,11 +117,18 @@ pub fn main() !void {
         var l = [_]i64{ 10, 50, 30, 20, 40, 5, 60, 25 };
         check(topkFilter(l[0..], 3) == 3, "topk picked 3");
         check(l[6] == 60 and l[1] == 50 and l[4] == 40, "top 3 kept");
-        check(l[0] == 0, "idx 0 zeroed");
-        check(l[2] == 0, "idx 2 zeroed");
-        check(l[3] == 0, "idx 3 zeroed");
-        check(l[5] == 0, "idx 5 zeroed");
-        check(l[7] == 0, "idx 7 zeroed");
+        check(l[0] == LOGIT_NEG_INF, "idx 0 masked");
+        check(l[2] == LOGIT_NEG_INF, "idx 2 masked");
+        check(l[3] == LOGIT_NEG_INF, "idx 3 masked");
+        check(l[5] == LOGIT_NEG_INF, "idx 5 masked");
+        check(l[7] == LOGIT_NEG_INF, "idx 7 masked");
+    }
+    {
+        // All-negative logits: a masked token must never win argmax
+        var l = [_]i64{ -100, -50, -200, -10 };
+        _ = topkFilter(l[0..], 2);
+        const w = argmaxLogits(l[0..]);
+        check(w == 3, "masked tokens never win argmax");
     }
     {
         var l = [_]i64{ 1, 2, 3 };

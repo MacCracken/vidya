@@ -88,7 +88,8 @@ int main(void) {
     assert(*endptr == 'a'); // stopped at non-digit
 
     // ── Dynamic string allocation ──────────────────────────────────
-    // Heap-allocated string for unknown sizes
+    // Heap-allocated string for unknown sizes. (C23 made strdup/strndup
+    // standard, 7.26.2.6-7: strdup(src) does this malloc + copy in one call.)
     const char *src = "hello dynamic";
     char *heap_str = malloc(strlen(src) + 1);
     assert(heap_str != NULL);
@@ -97,12 +98,17 @@ int main(void) {
     free(heap_str);
 
     // ── String builder pattern ─────────────────────────────────────
-    // Build a string incrementally with snprintf offset tracking
+    // Build a string incrementally with snprintf offset tracking.
+    // snprintf returns the length it WANTED to write, not what fit: adding
+    // it blindly runs offset past the end, `sizeof - offset` wraps to a
+    // huge size_t, and the next call overflows the buffer. Check first.
     char builder[128];
-    int offset = 0;
+    size_t offset = 0;
     for (int i = 0; i < 5; i++) {
-        offset += snprintf(builder + offset, sizeof(builder) - offset,
-                          "%d ", i);
+        int n = snprintf(builder + offset, sizeof(builder) - offset,
+                         "%d ", i);
+        if (n < 0 || (size_t)n >= sizeof(builder) - offset) break;  // error or truncated
+        offset += (size_t)n;
     }
     // Trim trailing space
     if (offset > 0) builder[offset - 1] = '\0';

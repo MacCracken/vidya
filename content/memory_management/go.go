@@ -9,6 +9,7 @@ package main
 import (
 	"fmt"
 	"runtime"
+	"testing"
 )
 
 func main() {
@@ -20,9 +21,18 @@ func main() {
 	x := 42
 	assert(x == 42, "stack value")
 
-	// Escapes to heap — returned pointer
+	// "Returning a pointer escapes to the heap" is true of newInt's own
+	// body (go build -gcflags=-m: "moved to heap: n"), but newInt is
+	// small enough to inline, and once inlined here p never leaves main,
+	// so n stays on main's stack: 0 allocations. Escape analysis runs
+	// after inlining and judges the CALLER's use. Storing p somewhere
+	// that outlives the call (heapSink) is what forces a real allocation.
 	p := newInt(42)
-	assert(*p == 42, "heap pointer")
+	assert(*p == 42, "pointer to inlined local")
+	allocs := testing.AllocsPerRun(100, func() { q := newInt(7); _ = *q })
+	assert(allocs == 0, "inlined newInt: pointer stays on the stack")
+	allocs = testing.AllocsPerRun(100, func() { heapSink = newInt(7) })
+	assert(allocs == 1, "pointer stored in a global escapes: one heap allocation")
 
 	// ── Slices: length, capacity, and reallocation ─────────────────
 	s := make([]int, 0, 10) // length 0, capacity 10
@@ -116,8 +126,11 @@ func main() {
 	fmt.Println("All memory management examples passed.")
 }
 
+// heapSink outlives every call, so anything stored here must be on the heap.
+var heapSink *int
+
 func newInt(n int) *int {
-	return &n // n escapes to heap because pointer is returned
+	return &n // escapes from newInt's frame — unless the call is inlined
 }
 
 func modifyMap(m map[string]int) {

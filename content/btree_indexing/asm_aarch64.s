@@ -1,7 +1,8 @@
 // Vidya — B+ Tree Indexing in AArch64 Assembly
 //
-// Simplified in-memory B+ tree (order 8, max 7 keys per node) — exactly
-// the layout declared by cyrius.cyr. Static .bss arenas back the tree:
+// Simplified in-memory B+ tree (order 8, max 7 keys per node) — the
+// cyrius.cyr node layout plus one key slot and one child slot (so
+// BN_VALS moves 72 -> 80 and BN_SZ 136 -> 160). Static .bss arenas back the tree:
 // a `node_pool` of fixed-size 160-byte slots and a `next_id` counter.
 // Each slot has the layout
 //     +0   BN_LEAF      (i64 — 1 = leaf)
@@ -9,14 +10,12 @@
 //     +16  BN_KEYS[8]   (i64 × 8, slot 7 is the transient overflow slot)
 //     +80  BN_VALS[9]   (i64 × 9 — vals when leaf, child node-ids when
 //                         internal; +1 for the final right child).
-// Matches cyrius's BN_LEAF/BN_NK/BN_KEYS/BN_VALS struct-by-offset
-// pattern with BN_SZ bumped to 160 for the +1 child slot.
+// Same BN_LEAF/BN_NK/BN_KEYS/BN_VALS struct-by-offset pattern as cyrius.
 //
 // AArch64 conventions used here:
 //   - Every function calling `bl` saves x29/x30 in its prologue.
-//   - 64-bit literals come in via `ldr xN, =literal` (BN_SZ etc. fit in
-//     16 bits, so `mov` is fine — but we still use the safe `=imm` form
-//     for clarity in a few places).
+//   - Every constant (BN_SZ etc.) fits a 16-bit `mov` immediate, so no
+//     `ldr xN, =literal` pool loads are needed.
 //   - x19–x28 are callee-saved and used to cache loop state across
 //     `bl` calls (manhattan-style — see cyrius.cyr's gotcha).
 
@@ -361,8 +360,8 @@ split_root_leaf:
     ldp     x29, x30, [sp], #112
     ret
 
-// bt_insert(x0=key, x1=val) — operates on root_id.
-// Callee-saved: x19=key, x20=val, x21=root_id, x22=root_ptr.
+// bt_insert(x0=key, x1=val) -> x0 = 1 inserted, 0 rejected — operates on root_id.
+// Callee-saved: x19=key, x20=val, x21=root_id (then child id), x22=root_ptr.
 bt_insert:
     stp     x29, x30, [sp, #-64]!
     mov     x29, sp
@@ -413,16 +412,29 @@ bt_insert:
     b       .Lbi_scan
 .Lbi_descend:
     add     x12, x22, #BN_VALS
-    ldr     x0, [x12, x10, lsl #3]    // child id
+    ldr     x21, [x12, x10, lsl #3]   // child id
+    // A full child cannot take another key: splitting a non-root leaf is
+    // not implemented, and inserting anyway would run keys[8] into vals[0].
+    mov     x0, x21
+    bl      node_addr
+    ldr     x9, [x0, #BN_NK]
+    cmp     x9, #BT_MAX
+    b.ge    .Lbi_full
+    mov     x0, x21
     mov     x1, x19
     mov     x2, x20
     bl      leaf_insert
 
 .Lbi_done:
+    mov     x0, #1
+.Lbi_ret:
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #64
     ret
+.Lbi_full:
+    mov     x0, #0
+    b       .Lbi_ret
 
 // _start: run all tests; sp is 16-byte aligned at entry.
 // We use x19 as a callee-saved scratch index for loops.
@@ -554,6 +566,31 @@ _start:
     mov     x1, #999
     bl      bt_search
     cmn     x0, #1
+    b.ne    fail
+
+    // A full child leaf rejects the key instead of overrunning: the right
+    // leaf holds 4..7, so keys 100..102 fit (nk 7) and 103 is refused.
+    mov     x19, #100
+.Lt3_fill:
+    cmp     x19, #103
+    b.ge    .Lt3_fill_done
+    mov     x0, x19
+    mov     x1, #7
+    bl      bt_insert
+    cbz     x0, fail                  // these three must be accepted
+    add     x19, x19, #1
+    b       .Lt3_fill
+.Lt3_fill_done:
+    mov     x0, #103
+    mov     x1, #7
+    bl      bt_insert
+    cbnz    x0, fail                  // child full -> rejected
+    adrp    x9, root_id
+    add     x9, x9, :lo12:root_id
+    ldr     x0, [x9]
+    mov     x1, #4
+    bl      bt_search
+    cmp     x0, #40                   // neighbours intact
     b.ne    fail
 
     // ──────── Test 4: descending inserts are sorted ────────

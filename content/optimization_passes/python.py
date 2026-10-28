@@ -65,6 +65,19 @@ class Copy(Inst):
         return f"v{self.dst} = v{self.src}"
 
 
+class Shl(Inst):
+    """Shift left by an immediate: what strength reduction turns x * 2^k into."""
+    __slots__ = ("dst", "src", "amount")
+
+    def __init__(self, dst, src, amount):
+        self.dst = dst
+        self.src = src
+        self.amount = amount
+
+    def __str__(self):
+        return f"v{self.dst} = v{self.src} << {self.amount}"
+
+
 class Return(Inst):
     __slots__ = ("src",)
 
@@ -125,7 +138,7 @@ def dead_code_elimination(prog):
         if isinstance(inst, BinOp):
             used.add(inst.lhs)
             used.add(inst.rhs)
-        elif isinstance(inst, Copy):
+        elif isinstance(inst, (Copy, Shl)):
             used.add(inst.src)
         elif isinstance(inst, Return):
             used.add(inst.src)
@@ -157,9 +170,9 @@ def constant_propagation(prog):
             if inst.src in constants:
                 prog.instructions[i] = Const(inst.dst, constants[inst.src])
                 propagated += 1
-        elif isinstance(inst, BinOp):
-            if inst.lhs in constants or inst.rhs in constants:
-                propagated += 1  # marks as ready for constant folding
+        # Count only rewrites. Counting "BinOp with a constant operand" here
+        # (as a hint for folding) reports a change that never happened, so
+        # the pass manager never reaches its fixed point on `x * 8`.
 
     return propagated
 
@@ -208,6 +221,13 @@ def strength_reduction(prog):
                 prog.instructions[i] = Copy(inst.dst, inst.rhs)
                 reduced += 1
                 continue
+
+            # The real strength reduction: x * 2^k -> x << k, x unknown
+            for k_val, other in ((rhs_val, inst.lhs), (lhs_val, inst.rhs)):
+                if k_val is not None and k_val > 1 and (k_val & (k_val - 1)) == 0:
+                    prog.instructions[i] = Shl(inst.dst, other, k_val.bit_length() - 1)
+                    reduced += 1
+                    break
 
         elif inst.op == Op.ADD:
             # Add 0 -> copy
@@ -304,28 +324,34 @@ def main():
     for inst in prog1.instructions:
         if isinstance(inst, Const) and inst.dst == ret.src:
             assert inst.value == 150, f"expected 150, got {inst.value}"
+            break
+    else:
+        raise AssertionError("result was not folded to a constant")
 
     # ── Test 2: Strength reduction ─────────────────────────────────
     print("\n2. Strength reduction: x * 8 -> x << 3")
+    # v0 is the function's argument x: NOT a constant. (With x = 42 known,
+    # constant folding would just compute 336 and strength reduction would
+    # never run, which is what this test used to show.)
     prog2 = Program([
-        Const(0, 42),
         Const(1, 8),
-        BinOp(2, Op.MUL, 0, 1),
+        BinOp(2, Op.MUL, 0, 1),               # v2 = x * 8
         Return(2),
     ])
 
     print(f"  Before:")
     print(prog2)
 
-    optimize(prog2)
+    iters2 = optimize(prog2)
 
     print(f"  After:")
     print(prog2)
 
-    # 42 * 8 = 336
-    for inst in prog2.instructions:
-        if isinstance(inst, Const) and inst.dst == 2:
-            assert inst.value == 336, f"expected 336, got {inst.value}"
+    shl = prog2.instructions[0]
+    assert isinstance(shl, Shl) and shl.src == 0 and shl.amount == 3, \
+        f"expected v2 = v0 << 3, got {shl}"
+    assert len(prog2.instructions) == 2, "the constant 8 is dead after the rewrite"
+    assert iters2 <= 3, f"must reach a fixed point quickly, took {iters2}"
 
     # ── Test 3: Dead code elimination ──────────────────────────────
     print("\n3. Dead code elimination:")
@@ -388,6 +414,7 @@ def main():
 
     # Now DCE removes the unused constants (v0 and v1)
     d = dead_code_elimination(prog5)
+    assert d == 2, f"DCE should remove v0 and v1, removed {d}"
     print(f"  After strength reduction + DCE: {len(prog5.instructions)} instructions")
     print(prog5)
 
@@ -409,11 +436,14 @@ def main():
     print(f"  Converged in {iters} iterations")
 
     # Verify final result is 19
+    ret_inst = prog6.instructions[-1]
+    assert isinstance(ret_inst, Return)
     for inst in prog6.instructions:
-        if isinstance(inst, Const) and hasattr(inst, 'dst'):
-            ret_inst = prog6.instructions[-1]
-            if isinstance(ret_inst, Return) and inst.dst == ret_inst.src:
-                assert inst.value == 19, f"expected 19, got {inst.value}"
+        if isinstance(inst, Const) and inst.dst == ret_inst.src:
+            assert inst.value == 19, f"expected 19, got {inst.value}"
+            break
+    else:
+        raise AssertionError("result was not folded to a constant")
 
     # ── Test 7: Identity operations ────────────────────────────────
     print("\n7. Identity operations:")

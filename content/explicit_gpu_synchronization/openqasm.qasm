@@ -14,33 +14,35 @@
 //   q[2] — second dependent (transfer queue waiting on compute)
 //   q[3] — final consumer (waits on BOTH q[1] and q[2] — wait_all)
 //
-// CNOT chains entangle the dependents; q[3] is XORed with q[1] and
-// q[2], so it observes the joint signaled state. Measurement of all
-// four reveals the synchronization fan-out — the quantum equivalent
-// of a render-graph topological sort over signal/wait relationships.
+// CNOT chains entangle the dependents; a Toffoli sets q[3] to the AND
+// of q[1] and q[2], so it reads "signaled" only when both are — the
+// wait_all. (XORing q[3] with both, two CNOTs, would leave it 0 on
+// every shot: two equal signals cancel.) Measurement of all four
+// reveals the synchronization fan-out — the quantum equivalent of a
+// render-graph topological sort over signal/wait relationships.
 //
-// In real quantum networking, this is exactly the *quantum-fence*
-// pattern proposed in distributed-quantum-computing drafts: producer
-// qubits broadcast their state to consumer qubits via entanglement,
-// and consumers can only proceed once their producer signals via a
-// measurement on the entangled pair.
+// The closest real pattern is teleportation in distributed quantum
+// computing: a consumer can use its half of a shared entangled pair
+// only after the producer's measurement result reaches it over a
+// classical channel — that classical message is the "signal".
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
-// Producer: signal at value 1 (Hadamard prep into superposition)
+// Producer: signaled (1) or not (0) with equal probability (Hadamard)
 h q[0];
 
 // Two dependents wait on the producer
 cx q[0], q[1];
 cx q[0], q[2];
 
-// Final consumer waits on BOTH dependents (wait_all)
-cx q[1], q[3];
-cx q[2], q[3];
+// Final consumer waits on BOTH dependents (wait_all = AND)
+ccx q[1], q[2], q[3];
 
 // Measure: all four collapse together; q[3] reflects the joint state
-measure q -> c;
+c = measure q;
+// c is 0000 (nothing signaled) or 1111 (all signaled), never a mix
+// @expect c in {0, 15}

@@ -54,9 +54,11 @@ read_le64() {
     echo $(( (hi << 32) | lo ))
 }
 
-# ── Use /proc/self/exe as our test binary ─────────────────────────────
-# This is always a valid ELF on Linux — it's the bash interpreter.
-ELF="/proc/self/exe"
+# ── Use /proc/$$/exe as our test binary ───────────────────────────────
+# This is always a valid ELF on Linux — it's the bash interpreter. Not
+# /proc/self/exe: every read below runs od, and "self" resolves in the
+# process that opens the path, so /proc/self/exe would parse od's binary.
+ELF="/proc/$$/exe"
 
 # ── Parse e_ident (bytes 0-15) ────────────────────────────────────────
 # The first 16 bytes of every ELF file are the identification array.
@@ -186,7 +188,7 @@ fi
 
 readelf_output=$(cat <<HEADER
 ELF Header:
-  Magic:   7f 45 4c 46 $ei_class $ei_data $ei_version $(printf '%02x' 0) 00 00 00 00 00 00 00 00
+  Magic:   7f 45 4c 46 $ei_class $ei_data $ei_version $ei_osabi $(read_byte "$ELF" 8) 00 00 00 00 00 00 00
   Class:                             $class_name
   Data:                              $data_name
   Version:                           $e_version (current)

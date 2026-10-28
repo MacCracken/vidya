@@ -10,7 +10,7 @@
 // analysis trivial because every use has exactly one reaching definition.
 //
 // TypeScript idioms: discriminated unions for IR operations,
-// generics for the block graph, type guards for instruction filtering.
+// exhaustive switches over them, a type-guard predicate for terminators.
 
 // ── Three-Address Code (TAC) ─────────────────────────────────────────
 // Each instruction has at most one operation, two sources, one destination.
@@ -30,8 +30,10 @@ type TACOp =
     | { kind: "return"; value: Operand }
     | { kind: "phi"; dst: Operand; sources: Array<{ value: Operand; block: string }> };
 
-// Type guard: is this a branching instruction?
-function isTerminator(op: TACOp): boolean {
+// Type guard: is this a branching instruction? The `op is …` return type is
+// what makes it a guard — a plain `boolean` return narrows nothing.
+type Terminator = Extract<TACOp, { kind: "jump" | "cjump" | "return" }>;
+function isTerminator(op: TACOp): op is Terminator {
     return op.kind === "jump" || op.kind === "cjump" || op.kind === "return";
 }
 
@@ -310,18 +312,26 @@ function testSSARenaming(): void {
 }
 
 function testPhiNode(): void {
-    // After if/else merge, y could be y_0 (from "then") or y_1 (from "else")
+    // then: y = 10    else: y = 20    — rename both arms, THEN merge.
+    // The phi must define a fresh version; reusing y_0 would assign it twice.
     const ssa = new SSABuilder();
+    const thenArm = ssa.renameBlock([
+        { kind: "assign", dst: { kind: "var", name: "y" }, src: { kind: "const", value: 10 } },
+    ]);
+    const elseArm = ssa.renameBlock([
+        { kind: "assign", dst: { kind: "var", name: "y" }, src: { kind: "const", value: 20 } },
+    ]);
+    assert(tacToString(thenArm[0]) === "y_0 = 10", "then defines y_0");
+    assert(tacToString(elseArm[0]) === "y_1 = 20", "else defines y_1");
+
     const phi = ssa.buildPhi("y", [
         { block: "then", version: 0 },
         { block: "else", version: 1 },
     ]);
 
     assert(phi.kind === "phi", "should create phi node");
-    const phiStr = tacToString(phi);
-    assert(phiStr.includes("phi("), "should format as phi");
-    assert(phiStr.includes("y_0[then]"), "should reference y_0 from then");
-    assert(phiStr.includes("y_1[else]"), "should reference y_1 from else");
+    assert(tacToString(phi) === "y_2 = phi(y_0[then], y_1[else])",
+        `phi defines a new version: ${tacToString(phi)}`);
 }
 
 function testTerminatorDetection(): void {

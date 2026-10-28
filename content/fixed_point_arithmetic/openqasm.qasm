@@ -15,21 +15,22 @@
 //      shape as binary fixed-point)
 //   3. Inverse-QFT readout that recovers a 3-bit fixed-point estimate
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Primitive 1: phase kickback as a 1-bit fixed-point write ──────────
-// |+⟩ ── Rz(θ) ── = (|0⟩ + e^(iθ)|1⟩)/√2
+// |+⟩ ── Rz(θ) ── = (|0⟩ + e^(iθ)|1⟩)/√2   (up to a global phase)
 // θ = π corresponds to the fixed-point value 0.5 (half a full circle).
 // Measurement in the X basis (H then Z-basis read) recovers the bit.
 
-qreg pk[1];
-creg pk_c[1];
+qubit[1] pk;
+bit[1] pk_c;
 
 h pk[0];                     // |+⟩
 rz(pi) pk[0];                // write 0.5 — phase = π
 h pk[0];                     // X-basis measurement
-measure pk[0] -> pk_c[0];    // expect 1 with probability 1
+pk_c[0] = measure pk[0];    // expect 1 with probability 1
+// @expect pk_c == 1
 
 // ── Primitive 2: binary-weighted controlled rotations ─────────────────
 // For an n-bit fixed-point value x = b_{n-1}…b_1 b_0 / 2^n, the phase
@@ -39,8 +40,8 @@ measure pk[0] -> pk_c[0];    // expect 1 with probability 1
 // identical in shape to fixed-point: high bit = π = 0.5, next = π/2 =
 // 0.25, etc. Three control bits write a 3-bit fractional value.
 
-qreg fp[4];                  // 3 control bits (fp[0..2]) + 1 target (fp[3])
-creg fp_c[4];
+qubit[4] fp;                  // 3 control bits (fp[0..2]) + 1 target (fp[3])
+bit[4] fp_c;
 
 // Prepare control register in the basis state |x⟩ where x = 0.625 = 0.101
 // (b2=1, b1=0, b0=1). This is the value we will encode into the phase.
@@ -50,42 +51,55 @@ x fp[2];                     // b2 = 1
 // Target qubit in |+⟩
 h fp[3];
 
-// Apply binary-weighted controlled rotations. The smaller-weight rotation
-// goes first because in OpenQASM 2.0 we use cu1 (controlled phase) with
-// fixed angle arguments — pi/4 for b0, pi/2 for b1, pi for b2.
-cu1(pi/4) fp[0], fp[3];      // b0 contributes 1/8 of full circle
-cu1(pi/2) fp[1], fp[3];      // b1 contributes 1/4 of full circle (b1=0, no-op)
-cu1(pi)   fp[2], fp[3];      // b2 contributes 1/2 of full circle
+// Apply binary-weighted controlled rotations: cp (controlled phase;
+// OpenQASM 2.0 called it cu1) with fixed angle arguments — pi/4 for b0,
+// pi/2 for b1, pi for b2. Their order does not matter: controlled-phase
+// gates are diagonal, so they commute.
+cp(pi/4) fp[0], fp[3];      // b0 contributes 1/8 of full circle
+cp(pi/2) fp[1], fp[3];      // b1 contributes 1/4 of full circle (b1=0, no-op)
+cp(pi)   fp[2], fp[3];      // b2 contributes 1/2 of full circle
 
 // fp[3] now carries phase 2π · 0.625 = 5π/4 in its |1⟩ component.
+
+fp_c = measure fp;
+// The control bits read back 101; fp[3] reads 0 or 1 with equal
+// probability — a Z-basis measurement cannot see a phase, which is why
+// the readout needs the inverse QFT below. fp_c is 0101 or 1101.
+// @expect fp_c in {5, 13}
 
 // ── Primitive 3: inverse QFT to read the phase as fixed-point bits ────
 // 3-qubit inverse QFT on a separate readout register — applied here as
 // a self-contained example. A real phase-estimation circuit would run
-// the controlled rotations onto a |+⟩ register and then inverse-QFT it
-// to recover the 3 fractional bits in the computational basis.
+// controlled-U^(2^k) onto a |+⟩ register and then inverse-QFT it to
+// recover the 3 fractional bits in the computational basis.
 
-qreg rd[3];
-creg rd_c[3];
+qubit[3] rd;
+bit[3] rd_c;
 
-// Seed the readout register in superposition + a known phase
+// Seed the readout register with the phases phase estimation would
+// kick back for x = 0.625: qubit k gets 2π · 2^k · x (mod 2π).
 h rd[0]; h rd[1]; h rd[2];
-rz(pi/2) rd[0];               // fractional offset to make readout interesting
+p(5*pi/4) rd[0];              // 2π · 0.625
+p(pi/2) rd[1];                // 2π · 1.25 ≡ π/2
+p(pi) rd[2];                  // 2π · 2.5  ≡ π
 
-// Inverse QFT (3 qubits, manual decomposition for OpenQASM 2.0).
-// qelib1.inc doesn't define `swap`; expand as 3 CNOTs (the standard
-// SWAP decomposition: cx a,b ; cx b,a ; cx a,b).
+// Inverse QFT (3 qubits, written out gate by gate). The bit-reversal
+// swap is spelled out as its 3-CNOT expansion (cx a,b ; cx b,a ;
+// cx a,b); stdgates.inc's `swap rd[0], rd[2];` is the same gate.
 cx rd[0], rd[2];
 cx rd[2], rd[0];
 cx rd[0], rd[2];
 h rd[0];
-cu1(-pi/2) rd[0], rd[1];
+cp(-pi/2) rd[0], rd[1];
 h rd[1];
-cu1(-pi/4) rd[0], rd[2];
-cu1(-pi/2) rd[1], rd[2];
+cp(-pi/4) rd[0], rd[2];
+cp(-pi/2) rd[1], rd[2];
 h rd[2];
 
-measure rd -> rd_c;
+rd_c = measure rd;
+// rd_c = 101 on every shot: 5/8 = 0.625, the value written above,
+// recovered as 3 fixed-point bits.
+// @expect rd_c == 5
 
 // ── Notes — the fixed-point/quantum bridge ────────────────────────────
 //

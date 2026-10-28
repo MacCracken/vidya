@@ -1,8 +1,9 @@
 // Vidya — Game AI Decision Making in C
 //
-// Stat-driven AI scoring with PCG PRNG, urgency-multiplied shooting, and
+// Stat-driven AI scoring with an LCG PRNG (PCG's constants, plain top-bits
+// output rather than PCG's permutation), urgency-multiplied shooting, and
 // weighted action selection. C's `uint64_t` arithmetic is defined to wrap
-// modulo 2^64 — which is exactly what the PCG state update needs. The
+// modulo 2^64 — which is exactly what the LCG state update needs. The
 // signed `int64_t` for scores keeps the negative-distance-penalty path
 // well-defined without resorting to __int128.
 
@@ -106,10 +107,19 @@ int main(void) {
     assert(apply_urgency(50, 0) == 300);
 
     // prob_check
+    // prob_check advances the RNG, so it runs outside assert(): under
+    // -DNDEBUG assert's expression is not evaluated and the RNG stream the
+    // determinism checks below see would shift.
     rng_seed(42);
-    for (int i = 0; i < 20; i++) assert(prob_check(10));
+    for (int i = 0; i < 20; i++) {
+        bool hit = prob_check(10);
+        assert(hit);
+    }
     rng_seed(99);
-    for (int i = 0; i < 20; i++) assert(!prob_check(0));
+    for (int i = 0; i < 20; i++) {
+        bool hit = prob_check(0);
+        assert(!hit);
+    }
 
     // PRNG determinism
     rng_seed(77777);

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import tempfile
 
 
@@ -152,18 +153,30 @@ def test_path_traversal_prevention():
 
 # ── Parameterized query pattern ────────────────────────────────────────
 def test_parameterized_query_pattern():
-    user_input = "'; DROP TABLE users; --"
+    # Run both against a real (in-memory) database, so the test shows what
+    # each query DOES, not just what its text contains.
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE users (name TEXT, secret TEXT)")
+    db.executemany("INSERT INTO users VALUES (?, ?)",
+                   [("alice", "a-pass"), ("bob", "b-pass")])
 
-    # BAD: string formatting puts user input into SQL
-    bad_query = f"SELECT * FROM users WHERE name = '{user_input}'"
-    assert "DROP TABLE" in bad_query  # injection present!
+    user_input = "nobody' OR '1'='1"
 
-    # GOOD: parameterized query — data is never parsed as SQL
-    # With sqlite3: cursor.execute("SELECT * FROM users WHERE name = ?", (user_input,))
-    template = "SELECT * FROM users WHERE name = ?"
-    params = (user_input,)
-    assert "DROP TABLE" not in template
-    assert params[0] == user_input  # treated as data, not code
+    # BAD: string formatting puts user input into SQL — the quote closes
+    # the literal and OR '1'='1' matches every row: both secrets leak.
+    bad_query = f"SELECT secret FROM users WHERE name = '{user_input}'"
+    assert len(db.execute(bad_query).fetchall()) == 2  # injection worked!
+
+    # GOOD: parameterized query — data is never parsed as SQL. The whole
+    # string is compared as a name, and no user has that name.
+    rows = db.execute("SELECT secret FROM users WHERE name = ?", (user_input,)).fetchall()
+    assert rows == []
+
+    # Same for a destructive payload: it is just an odd name.
+    drop = "'; DROP TABLE users; --"
+    assert db.execute("SELECT secret FROM users WHERE name = ?", (drop,)).fetchall() == []
+    assert db.execute("SELECT count(*) FROM users").fetchone()[0] == 2  # table intact
+    db.close()
 
 
 # ── Integer / size bounds ──────────────────────────────────────────────
@@ -198,9 +211,21 @@ def test_safe_deserialization():
     assert safe_data["name"] == "alice"
     assert safe_data["age"] == 30
 
-    # Reject unexpected types even in JSON
-    data = json.loads('{"admin": true}')
-    assert isinstance(data.get("admin"), bool)
+    # Reject unexpected types even in JSON: json.loads gives you whatever
+    # type the sender chose, so check before trusting a field.
+    def admin_flag(doc: dict) -> bool:
+        flag = doc.get("admin", False)
+        if not isinstance(flag, bool):
+            raise ValueError(f"admin must be a JSON boolean, got {type(flag).__name__}")
+        return flag
+
+    assert admin_flag(json.loads('{"admin": true}')) is True
+    for bad in ('{"admin": "true"}', '{"admin": 1}'):  # truthy, but wrong type
+        try:
+            admin_flag(json.loads(bad))
+            assert False, f"should have rejected {bad}"
+        except ValueError:
+            pass
 
 
 if __name__ == "__main__":

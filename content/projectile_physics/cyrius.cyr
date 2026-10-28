@@ -20,15 +20,13 @@ var RESTITUTION = 45875;         # 0.7 in 16.16
 struct Ball { x; y; vx; vy; }
 
 # TRAP: `var b = Ball { … }; return &b;` looks like a constructor and
-# compiles clean, but Cyrius gives every local a FIXED address (static
-# storage, not a stack slot). So the pointer does not dangle in the C
-# sense (it never faults), but the data is NOT safe: two hazards, neither
-# of which crashes. (1) ALIASING — every call returns the same address, so
-# a second call silently overwrites the first call's object. (2) REUSE —
-# the compiler overlays frames, so an unrelated function's local can take
-# the same address. Measured: a helper returning &local read back 4242,
-# then 999888 after one call to an unrelated function. Heap the storage so
-# each call owns its own object.
+# compiles clean, but `b` lives in ball_new's stack frame (as in C), so
+# the returned address dangles the moment the function returns. Nothing
+# faults: the next call reuses that frame and overwrites the Ball — two
+# "different" balls from the same caller share one address. Measured: a
+# helper returning &local read back 4242, then 0 after one unrelated
+# call. Heap the storage so each call owns its own object (or return the
+# struct by value: `var t: Ball = Ball { .. }; return t;`).
 fn ball_new(x, y, vx, vy) {
     var b = alloc(32);              # 4 fields * 8 bytes
     if (b == 0) { return 0; }
@@ -209,8 +207,9 @@ fn test_energy_decay() {
 }
 
 fn test_semi_implicit_stability() {
-    # Semi-implicit Euler should not gain energy over time.
-    # A bouncing ball should never go higher than its start.
+    # Semi-implicit Euler should not gain energy over time: a ball
+    # launched upward should never rise above what its launch speed
+    # allows (v²/2g = 500 units).
     var start_y = FLOOR_Y - 655360;   # 10.0 above floor
     var b = Ball { 0, start_y, 0, 0 };
     var p: *i64 = &b;
@@ -228,10 +227,9 @@ fn test_semi_implicit_stability() {
     }
 
     # Analytical max rise for vy=10.0, gravity=0.1 is v²/(2g) = 500 units
-    # (≈ 32768000 in 16.16). Allow 2× as a generous bound — the test is
-    # really about "doesn't gain energy frame after frame," i.e. the
-    # rise is bounded, not arbitrarily growing.
-    var max_rise = 1000 * 65536;   # 1000 units
+    # (≈ 32768000 in 16.16). Semi-implicit Euler reaches 494; a stepper
+    # that gained energy on any bounce would pass 500.
+    var max_rise = 500 * 65536;    # 500 units
     assert(min_y > (start_y - max_rise),
            "semi-implicit euler does not explode");
     return 0;

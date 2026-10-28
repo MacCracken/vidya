@@ -28,8 +28,11 @@ msg_len = . - msg_pass
 
 _start:
     // ── Atomic load/store ──────────────────────────────────────────
-    // LDAR: load-acquire (all prior loads/stores visible)
-    // STLR: store-release (visible to subsequent loads)
+    // LDAR: load-acquire — no LATER load/store (in program order) can
+    //       be performed before it.
+    // STLR: store-release — every EARLIER load/store is observed before
+    //       the store itself. A reader whose LDAR sees the STLR's value
+    //       therefore also sees everything the writer did before it.
     adr     x9, counter
 
     mov     x0, #42

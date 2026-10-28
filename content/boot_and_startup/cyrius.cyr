@@ -30,6 +30,9 @@ fn test_multiboot_magic() {
     # In AGNOS kernel assembly: dd -(0x1BADB002 + 0x03)
     var sum = MULTIBOOT1_MAGIC_REQUEST + flags;
     assert_eq(sum, 0x1BADB005, "magic + flags");
+    var checksum = (0 - sum) & 0xFFFFFFFF;
+    assert_eq(checksum, 0xE4524FFB, "checksum = -(magic + flags) mod 2^32");
+    assert_eq((sum + checksum) & 0xFFFFFFFF, 0, "magic + flags + checksum == 0 (mod 2^32)");
     return 0;
 }
 
@@ -39,15 +42,20 @@ fn test_multiboot_magic() {
 #   0x00 = null descriptor (required, always zero)
 #   0x08 = kernel code (64-bit, DPL=0)
 #   0x10 = kernel data (DPL=0)
-#   0x18 = user code (64-bit, DPL=3)
-#   0x20 = user data (DPL=3)
+#   0x18 = user data (DPL=3)
+#   0x20 = user code (64-bit, DPL=3)
 #   0x28 = TSS descriptor (16 bytes, spans 0x28-0x2F)
+# User DATA sits below user CODE on purpose: 64-bit SYSRET loads
+# SS = STAR[63:48] + 8 and CS = STAR[63:48] + 16 (Intel SDM Vol. 2B,
+# SYSRET), so with STAR[63:48] = 0x10 it needs data at 0x18 and code at
+# 0x20 (selectors 0x1B / 0x23 with RPL 3). The C-style "code, then data"
+# order cannot satisfy SYSRET with any base.
 
 var GDT_NULL       = 0x00;
 var GDT_KERNEL_CS  = 0x08;
 var GDT_KERNEL_DS  = 0x10;
-var GDT_USER_CS    = 0x18;
-var GDT_USER_DS    = 0x20;
+var GDT_USER_DS    = 0x18;
+var GDT_USER_CS    = 0x20;
 var GDT_TSS        = 0x28;
 var GDT_ENTRY_SIZE = 8;
 
@@ -55,16 +63,21 @@ fn test_gdt_selectors() {
     assert_eq(GDT_NULL,      0x00, "null selector");
     assert_eq(GDT_KERNEL_CS, 0x08, "kernel code selector");
     assert_eq(GDT_KERNEL_DS, 0x10, "kernel data selector");
-    assert_eq(GDT_USER_CS,   0x18, "user code selector");
-    assert_eq(GDT_USER_DS,   0x20, "user data selector");
+    assert_eq(GDT_USER_DS,   0x18, "user data selector");
+    assert_eq(GDT_USER_CS,   0x20, "user code selector");
     assert_eq(GDT_TSS,       0x28, "TSS selector");
 
     # Selectors are index * 8
     assert_eq(0 * GDT_ENTRY_SIZE, GDT_NULL,      "null = idx 0");
     assert_eq(1 * GDT_ENTRY_SIZE, GDT_KERNEL_CS, "code = idx 1");
     assert_eq(2 * GDT_ENTRY_SIZE, GDT_KERNEL_DS, "data = idx 2");
-    assert_eq(3 * GDT_ENTRY_SIZE, GDT_USER_CS,   "user_code = idx 3");
-    assert_eq(4 * GDT_ENTRY_SIZE, GDT_USER_DS,   "user_data = idx 4");
+    assert_eq(3 * GDT_ENTRY_SIZE, GDT_USER_DS,   "user_data = idx 3");
+    assert_eq(4 * GDT_ENTRY_SIZE, GDT_USER_CS,   "user_code = idx 4");
+
+    # SYSRET's fixed offsets from the STAR base (kernel DS selector 0x10)
+    var star_base = GDT_KERNEL_DS;
+    assert_eq(star_base + 8, GDT_USER_DS, "SYSRET: SS = base + 8 = user data");
+    assert_eq(star_base + 16, GDT_USER_CS, "SYSRET: CS = base + 16 = user code");
     assert_eq(5 * GDT_ENTRY_SIZE, GDT_TSS,       "tss = idx 5");
     return 0;
 }

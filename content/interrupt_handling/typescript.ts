@@ -178,9 +178,10 @@ function testExceptionTable(): void {
     // Trap: RIP points to next instruction (for debugging)
     // Abort: CPU state is undefined (cannot recover)
 
-    // Count exceptions with error codes
+    // Count exceptions with error codes. This table stops at #CP (21);
+    // the full architectural set also includes #VC (29) and #SX (30).
     const withError = EXCEPTIONS.filter((e) => e.hasErrorCode).length;
-    assert(withError === 8, "8 exceptions push error codes");
+    assert(withError === 8, "8 exceptions in this table push error codes");
 }
 
 // ── Error Code Decoding ─────────────────────────────────────────────
@@ -299,13 +300,18 @@ class PicSimulator {
         this.irr |= (1 << irq);
     }
 
-    /** Get the highest-priority pending interrupt (lowest IRQ number). */
+    /** Get the highest-priority pending interrupt (lowest IRQ number).
+     *  Like the real 8259 in fully nested mode, an IRQ is held while any
+     *  IRQ of equal or higher priority is still in service — which is why
+     *  a handler that forgets EOI silences its own line and every
+     *  lower-priority one. */
     poll(): number | null {
         const pending = this.irr & ~this.imr;
         if (pending === 0) return null;
 
         // Find lowest set bit (highest priority)
         for (let i = 0; i < 8; i++) {
+            if (this.isr & (1 << i)) return null; // IRQ i in service blocks i and below
             if (pending & (1 << i)) {
                 this.irr &= ~(1 << i);    // clear from IRR
                 this.isr |= (1 << i);     // mark in-service
@@ -350,6 +356,10 @@ function testPicSimulation(): void {
     assert(vec === 32, "timer = vector 32");
 
     // Must send EOI before the same IRQ can fire again
+    pic.raise(0);
+    assert(pic.poll() === null, "no EOI yet: timer held behind itself");
+    pic.eoi(0);
+    assert(pic.poll() === 32, "after EOI the held timer IRQ is delivered");
     pic.eoi(0);
 
     // Priority: lower IRQ number = higher priority
@@ -357,22 +367,23 @@ function testPicSimulation(): void {
     pic.raise(0); // timer (higher priority)
     const first = pic.poll();
     assert(first === 32, "timer wins over keyboard");
+    assert(pic.poll() === null, "keyboard held while timer is in service");
     pic.eoi(0);
 
     const second = pic.poll();
     assert(second === 33, "keyboard delivered after timer EOI");
     pic.eoi(1);
 
-    assert(pic.eois === 3, "3 EOIs sent");
+    assert(pic.eois === 4, "4 EOIs sent");
 }
 
 // ── Interrupt Dispatch Simulation ───────────────────────────────────
 
 // When an interrupt fires, the CPU:
 // 1. Looks up the IDT entry for the vector
-// 2. Pushes SS, RSP, RFLAGS, CS, RIP onto the stack
-// 3. If error code: pushes error code
-// 4. If IST > 0: switches to IST stack
+// 2. Switches stacks if IST > 0 (or to TSS.RSP0 on a ring 3 → 0 change)
+// 3. Pushes SS, RSP, RFLAGS, CS, RIP onto the (new) stack
+// 4. If error code: pushes error code
 // 5. Clears IF (for interrupt gates) or not (for trap gates)
 // 6. Jumps to the handler address
 
@@ -467,21 +478,25 @@ interface InterruptFrame {
     ss: bigint;      // stack segment
 }
 
+// Selectors use the Linux x86_64 GDT layout (user CS 0x33, user SS 0x2B).
+// SYSRET forces user SS = STAR[63:48]+8 and user CS = STAR[63:48]+16,
+// so the user data descriptor must sit directly BELOW user code.
 function buildFrame(rip: bigint, userMode: boolean): InterruptFrame {
     return {
         rip,
-        cs: userMode ? 0x2Bn : 0x08n,
+        cs: userMode ? 0x33n : 0x08n,
         rflags: 0x202n,  // IF set
         rsp: userMode ? 0x7FFF_F000n : 0xFFFF_C000_0001_0000n,
-        ss: userMode ? 0x33n : 0x10n,
+        ss: userMode ? 0x2Bn : 0x10n,
     };
 }
 
 function testInterruptStackFrame(): void {
     // User-mode interrupt (ring 3 → ring 0)
     const userFrame = buildFrame(0x40_1234n, true);
-    assert(userFrame.cs === 0x2Bn, "user CS");
-    assert(userFrame.ss === 0x33n, "user SS");
+    assert(userFrame.cs === 0x33n, "user CS");
+    assert(userFrame.ss === 0x2Bn, "user SS");
+    assert(userFrame.ss === userFrame.cs - 8n, "SYSRET layout: user SS = CS - 8");
     // User→kernel causes stack switch (RSP loaded from TSS)
 
     // Kernel-mode interrupt (ring 0 → ring 0, no stack switch unless IST)
@@ -489,9 +504,11 @@ function testInterruptStackFrame(): void {
     assert(kernFrame.cs === 0x08n, "kernel CS");
     assert(kernFrame.ss === 0x10n, "kernel SS");
 
-    // The frame is pushed in this order (top of stack first):
+    // The frame is pushed in this order (SS first, so it sits at the
+    // highest address; the last push ends up on top of the stack):
     //   SS → RSP → RFLAGS → CS → RIP [→ error code]
-    // Handler accesses them as a struct.
+    // Handler accesses them as a struct starting at RSP (RIP, or the
+    // error code, first).
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

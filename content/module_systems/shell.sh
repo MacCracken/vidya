@@ -27,7 +27,7 @@ assert_eq() {
 
 # ── Setup: temp directory for module files ─────────────────────────
 MOD_DIR=$(mktemp -d)
-trap "rm -rf '$MOD_DIR'" EXIT
+trap 'rm -rf "$MOD_DIR"' EXIT   # single-quoted: expands at EXIT, stays one word
 
 # ── source: the basic inclusion mechanism ─────────────────────────
 # source (or .) reads a file and executes it in the current shell.

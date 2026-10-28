@@ -37,10 +37,14 @@ func (p *Pool) AllocAligned(size, align int64) int64 {
 }
 
 func eq(got, want int64, label string) {
+	checks++
 	if got != want {
 		panic(fmt.Sprintf("%s: got %d want %d", label, got, want))
 	}
 }
+
+// checks counts the assertions this file runs, for the final tally.
+var checks int
 
 func main() {
 	var p Pool
@@ -73,5 +77,7 @@ func main() {
 	}
 	eq(p.Used(), 80, "10x8")
 
-	fmt.Println("gpu_memory_pooling: 16/16 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("gpu_memory_pooling: %d/%d ok\n", checks, checks)
 }

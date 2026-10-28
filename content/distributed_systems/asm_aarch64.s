@@ -1,6 +1,6 @@
 // Vidya — Distributed Systems Foundations — AArch64 Assembly
 //
-// Quorum-replication core (3 nodes, W=R=2). Same 5 tests / 11
+// Quorum-replication core (3 nodes, W=R=2). Same 5 tests / 9
 // asserts as the x86_64 port. Vector clocks live in cyrius.cyr.
 
 .global _start
@@ -17,7 +17,7 @@ node_alive:  .skip 24
 global_seq:  .skip 8
 
 .section .rodata
-msg_pass: .ascii "distributed_systems: 11/11 ok\n"
+msg_pass: .ascii "distributed_systems: 9/9 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail: .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail

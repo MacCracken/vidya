@@ -15,10 +15,11 @@ msg_len = . - msg_pass
 
 _start:
     // ── Syscall error checking ─────────────────────────────────────
-    // sys_write to stdout (should succeed)
+    // sys_write to stdout (should succeed). The byte written is the
+    // message's trailing '\n', so the final output line stays intact.
     mov     x8, #64             // sys_write
     mov     x0, #1              // fd = stdout
-    adr     x1, msg_pass
+    adr     x1, msg_pass + msg_len - 1
     mov     x2, #1              // write 1 byte
     svc     #0
     cmp     x0, #1              // should return 1
@@ -59,16 +60,19 @@ _start:
     bl      check_bounds
     cbz     w0, fail            // should be out of bounds (1)
 
-    // ── Flags-based error: subtraction overflow ────────────────────
+    // ── Flags-based error: unsigned subtraction borrow ─────────────
+    // AArch64's carry is an inverted borrow (the opposite of x86's CF):
+    // SUBS sets C=1 when there is NO borrow, C=0 when it borrows.
+    // b.lo (= b.cc) fires on C=0, i.e. unsigned underflow.
     mov     x0, #100
     mov     x1, #50
-    subs    x0, x0, x1          // 100 - 50, sets flags
-    b.lo    fail                // carry clear = no underflow, good
+    subs    x0, x0, x1          // 100 - 50: no borrow, C=1
+    b.lo    fail                // C=0 would mean underflow
 
     mov     x0, #50
     mov     x1, #100
-    subs    x0, x0, x1          // 50 - 100, sets flags
-    b.hs    fail                // carry set = underflow expected
+    subs    x0, x0, x1          // 50 - 100: borrows, C=0
+    b.hs    fail                // C=1 would mean no underflow
 
     // ── Conditional select for error handling ──────────────────────
     // CSEL: branchless error result selection

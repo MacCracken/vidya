@@ -5,9 +5,12 @@ A reproducible build is a pure function of its inputs: the same sources
 produce a byte-identical artifact, on any machine, at any time. Three
 classic sources of non-determinism, and their fixes:
 
-  1. Embedded wall-clock timestamps  -> clamp every timestamp to
+  1. Embedded wall-clock timestamps  -> the build stamps
      SOURCE_DATE_EPOCH (a fixed build time taken from the sources, e.g.
-     the last commit date) so "now" never leaks in.
+     the last commit date) instead of "now", so the clock never reaches
+     the output, fast or slow. Clamping (min(t, SDE)) is for FILE mtimes:
+     a fresh checkout's newer mtimes are pinned down to SDE. Clamping the
+     clock itself would still leak any clock that runs behind SDE.
   2. Filesystem iteration order      -> readdir() returns entries in
      inode/hash order, which varies; SORT filenames before processing
      so the output doesn't depend on directory layout.
@@ -32,9 +35,11 @@ def fold(h, v):
     return (h * HB + v) % HM
 
 
-# --- 1. Deterministic timestamps: clamp "now" to SOURCE_DATE_EPOCH ---
-def normalize_ts(now, sde):
-    return sde if now > sde else now
+# --- 1. Deterministic timestamps: the mtime clamp (tar --clamp-mtime).
+#     A file mtime newer than SOURCE_DATE_EPOCH is pinned down to it; an
+#     older one is kept. The build time itself is SDE, not this. ---
+def normalize_ts(mtime, sde):
+    return sde if mtime > sde else mtime
 
 
 # --- 3. Content-addressed artifact path: a pure function of content ---
@@ -55,7 +60,7 @@ def files_sort(files):
 def build_digest(do_sort, do_norm, files, now, sde):
     if do_sort:
         files = files_sort(files)
-    ts = normalize_ts(now, sde) if do_norm else now
+    ts = sde if do_norm else now  # build time comes from the sources
     h = fold(HSEED, ts)
     for name, content in files:
         h = fold(h, name)
@@ -69,17 +74,19 @@ order_b = [(20, 333), (30, 111), (10, 222)]
 
 
 if __name__ == "__main__":
-    # 1. Timestamp clamping.
-    assert normalize_ts(9999, 5000) == 5000, "clamp future now to SOURCE_DATE_EPOCH"
-    assert normalize_ts(3000, 5000) == 3000, "keep timestamp already <= SDE"
+    # 1. The mtime clamp.
+    assert normalize_ts(9999, 5000) == 5000, "newer mtime clamped to SOURCE_DATE_EPOCH"
+    assert normalize_ts(3000, 5000) == 3000, "older mtime kept"
 
     # 2. Sorted iteration keeps content paired with its name.
     s = files_sort(order_a)
     assert [nc[0] for nc in s] == [10, 20, 30], "names sorted ascending"
     assert s[0][1] == 222, "content followed name 10"
 
-    # 3. Content addressing is a pure function of content.
-    assert cas_path(111) == cas_path(111), "same content -> same path"
+    # 3. Content addressing is a pure function of content, so equal content
+    #    maps to an equal path by construction (asserting
+    #    cas_path(x) == cas_path(x) could never fail). What can fail is
+    #    distinct content colliding on one path:
     assert cas_path(111) != cas_path(222), "different content -> different path"
 
     # Deterministic pipeline (sort + normalize): two builds that differ in
@@ -95,10 +102,15 @@ if __name__ == "__main__":
         "naive build drifts with order + timestamp"
 
     # Normalization alone kills clock drift: same order, differing clock,
-    # both clamped to SDE -> identical digest.
+    # both stamped with SDE -> identical digest.
     assert build_digest(True, True, order_a, 9999, 5000) == \
         build_digest(True, True, order_a, 7777, 5000), \
         "normalized timestamp removes clock dependence"
+    # ...including a clock that runs BEHIND the epoch: min(now, sde) would
+    # stamp 3000 here and 5000 above, and the digests would differ.
+    assert build_digest(True, True, order_a, 3000, 5000) == \
+        build_digest(True, True, order_a, 9999, 5000), \
+        "a slow clock does not leak into the build either"
 
     print("All reproducible_builds examples passed.")
     raise SystemExit(0)

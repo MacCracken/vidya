@@ -259,6 +259,18 @@ impl Mmu {
         self.tlb.insert(vpage, pframe);
         Some(pframe | offset)
     }
+
+    /// Demand paging: on a fault, allocate a frame, map it, and retry —
+    /// what a kernel's #PF handler does for a valid-but-unpopulated page.
+    /// (`translate` alone only DETECTS the fault.)
+    fn access(&mut self, vaddr: u64) -> u64 {
+        if let Some(p) = self.translate(vaddr) {
+            return p;
+        }
+        let frame = self.phys.alloc_frame();
+        self.map_page(vaddr & !0xFFF, frame, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+        self.translate(vaddr).expect("mapped by the fault handler")
+    }
 }
 
 fn main() {
@@ -307,9 +319,10 @@ fn main() {
     ];
 
     for addr in &test_addrs {
+        let hits_before = mmu.tlb.hits;
         match mmu.translate(*addr) {
             Some(phys) => {
-                let hit = if mmu.tlb.hits > 0 { "" } else { "" };
+                let hit = if mmu.tlb.hits > hits_before { " (TLB hit)" } else { " (TLB miss → page walk)" };
                 println!("   0x{:08X} → 0x{:08X}{}", addr, phys, hit);
             }
             None => {
@@ -317,6 +330,13 @@ fn main() {
             }
         }
     }
+
+    // Demand paging: the same unmapped address, now through the fault handler
+    let faults_before = mmu.page_faults;
+    let p = mmu.access(0x0050_0000);
+    assert_eq!(mmu.page_faults, faults_before + 1);
+    assert_eq!(mmu.translate(0x0050_0000), Some(p)); // mapped now: no second fault
+    println!("   0x00500000 → 0x{:08X} (demand paging: fault, frame allocated, retried)", p);
 
     println!(
         "\n4. TLB statistics: {} hits, {} misses ({:.0}% hit rate)",
@@ -329,5 +349,6 @@ fn main() {
         }
     );
     println!("   Page faults: {}", mmu.page_faults);
-    println!("   Page table frames used: {}", mmu.phys.allocated);
+    println!("   Frames allocated: {} (7 page tables + 1 demand-paged data frame)", mmu.phys.allocated);
+    assert_eq!(mmu.phys.allocated, 8);
 }

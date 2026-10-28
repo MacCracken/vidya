@@ -62,12 +62,22 @@ fn main() {
 
     // ── Write to multiple destinations ─────────────────────────────
     // std::io doesn't have tee built-in, but you can implement it
-    let mut dest1 = Vec::new();
-    let mut dest2 = Vec::new();
-    let data = b"shared data";
-    dest1.write_all(data).unwrap();
-    dest2.write_all(data).unwrap();
-    assert_eq!(dest1, dest2);
+    struct Tee<A: Write, B: Write>(A, B);
+    impl<A: Write, B: Write> Write for Tee<A, B> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let n = self.0.write(buf)?;     // may be a short write...
+            self.1.write_all(&buf[..n])?;   // ...so mirror exactly those n bytes
+            Ok(n)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.0.flush()?;
+            self.1.flush()
+        }
+    }
+    let mut tee = Tee(Vec::new(), Vec::new());
+    tee.write_all(b"shared data").unwrap();
+    assert_eq!(tee.0, b"shared data");
+    assert_eq!(tee.1, b"shared data");
 
     // ── Formatting with write! ─────────────────────────────────────
     let mut buf = Vec::new();

@@ -83,6 +83,12 @@ _start:
     //   [21:10] imm12=8
     //   [9:5]   Rn=00000 (x0)
     //   [4:0]   Rd=00010 (x2)
+    adr     x9, enc_samples
+    ldr     w10, [x9, #8]          // word 2: add x2, x0, #8
+    mov     w11, #0x2002
+    movk    w11, #0x9100, lsl #16   // expected 0x91002002
+    cmp     w10, w11
+    b.ne    fail
     mov     x0, #42
     add     x2, x0, #8
     cmp     x2, #50
@@ -100,6 +106,12 @@ _start:
     //   [15:10] imm6=000000 (shift amount=0)
     //   [9:5]   Rn=00000 (x0)
     //   [4:0]   Rd=00011 (x3)
+    adr     x9, enc_samples
+    ldr     w10, [x9, #12]         // word 3: add x3, x0, x1
+    mov     w11, #0x0003
+    movk    w11, #0x8B01, lsl #16   // expected 0x8B010003
+    cmp     w10, w11
+    b.ne    fail
     mov     x0, #30
     mov     x1, #12
     add     x3, x0, x1
@@ -112,6 +124,12 @@ _start:
     // sub x4, x3, #2             → 0xD1000864
     //   [30] op=1 (SUB vs ADD)
     //   Otherwise same encoding as ADD immediate
+    adr     x9, enc_samples
+    ldr     w10, [x9, #16]         // word 4: sub x4, x3, #2
+    mov     w11, #0x0864
+    movk    w11, #0xD100, lsl #16   // expected 0xD1000864
+    cmp     w10, w11
+    b.ne    fail
     sub     x4, x3, #2
     cmp     x4, #40
     b.ne    fail
@@ -128,6 +146,12 @@ _start:
     //   [21:10] imm12 = offset/8 (scaled by access size)
     //   [9:5]   Rn = base register
     //   [4:0]   Rt = destination register
+    adr     x9, enc_samples
+    ldr     w10, [x9, #20]         // word 5: ldr x5, [x6, #8]
+    mov     w11, #0x04C5
+    movk    w11, #0xF940, lsl #16   // expected 0xF94004C5
+    cmp     w10, w11
+    b.ne    fail
     adr     x6, array
     ldr     x5, [x6, #8]       // array[1] = 20
     cmp     x5, #20
@@ -142,6 +166,12 @@ _start:
     // ════════════════════════════════════════════════════════════════
     // str x0, [x6]               → 0xF90000C0
     //   Same class as LDR, opc=00 (STR)
+    adr     x9, enc_samples
+    ldr     w10, [x9, #24]         // word 6: str x0, [x6]
+    mov     w11, #0x00C0
+    movk    w11, #0xF900, lsl #16   // expected 0xF90000C0
+    cmp     w10, w11
+    b.ne    fail
     mov     x0, #99
     sub     sp, sp, #16
     str     x0, [sp]
@@ -256,6 +286,11 @@ _start:
 enc_samples:
     mov     x0, #42                 // -> 0xD2800540
     mov     w1, #1                  // -> 0x52800021
+    add     x2, x0, #8              // -> 0x91002002
+    add     x3, x0, x1              // -> 0x8B010003
+    sub     x4, x3, #2              // -> 0xD1000864
+    ldr     x5, [x6, #8]            // -> 0xF94004C5
+    str     x0, [x6]                // -> 0xF90000C0
 
 fail:
     mov     x8, #93

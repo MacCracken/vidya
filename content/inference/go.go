@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 )
 
@@ -41,6 +42,12 @@ func argmaxLogits(logits []int64) int {
 	return bestIdx
 }
 
+// LogitNegInf masks a filtered-out token. Logits are unnormalized and can
+// be negative, so masking with 0 would let a "removed" token outrank every
+// survivor (and softmax gives e^0 = 1, not 0). The concept's own
+// good_example passes NEG_INF.
+const LogitNegInf = math.MinInt64
+
 func topkFilter(logits []int64, k int) int {
 	marks := make([]bool, len(logits))
 	picked := 0
@@ -66,7 +73,7 @@ func topkFilter(logits []int64, k int) int {
 	}
 	for m := 0; m < len(logits); m++ {
 		if !marks[m] {
-			logits[m] = 0
+			logits[m] = LogitNegInf
 		}
 	}
 	return picked
@@ -128,7 +135,7 @@ func main() {
 		check(picked == 3, "topk picked 3")
 		check(l[6] == 60 && l[1] == 50 && l[4] == 40, "top 3 kept")
 		for _, i := range []int{0, 2, 3, 5, 7} {
-			check(l[i] == 0, fmt.Sprintf("idx %d zeroed", i))
+			check(l[i] == LogitNegInf, fmt.Sprintf("idx %d masked", i))
 		}
 	}
 	{
@@ -137,16 +144,23 @@ func main() {
 		check(l[0] == 1 && l[1] == 2 && l[2] == 3, "all preserved")
 	}
 
+	{
+		// All-negative logits: a masked token must never win argmax.
+		l := []int64{-100, -50, -200, -10}
+		topkFilter(l, 2)
+		check(argmaxLogits(l) == 3, "masked tokens never win argmax")
+	}
+
 	check(argmaxLogits(bigramLogits(2)) == 3, "after hello → world")
 
 	check(intsEq(decodeSequence(2, 10), []int{3, 6, 7, 1}), "hello → world,the,end,EOS")
 	check(intsEq(decodeSequence(5, 10), []int{1}), "bar → EOS")
 	check(intsEq(decodeSequence(2, 2), []int{3, 6}), "capped at 2")
-	{
-		o1 := decodeSequence(2, 10)
-		o2 := decodeSequence(2, 10)
-		check(intsEq(o1, o2), "deterministic")
-	}
+	// Greedy decoding is deterministic because argmax has a fixed
+	// tie-break (first index wins), not because two calls of a pure
+	// function agree. UNK's row is all zeros, so every step ties and picks
+	// token 0 again: greedy decoding stuck repeating until the length cap.
+	check(intsEq(decodeSequence(TokUnk, 3), []int{TokUnk, TokUnk, TokUnk}), "all-tie row → deterministic repeat, capped")
 
 	fmt.Println("=== inference ===")
 	fmt.Printf("%d passed, %d failed (%d total)\n", passCount, failCount, passCount+failCount)

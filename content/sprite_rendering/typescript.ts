@@ -137,11 +137,15 @@ function main(): void {
     blit(fb, sprite, 318, 0);
     assertEq(fb.get(319, 1), 2, "clipped sprite visible at right edge");
     assertEq(fb.get(318, 0), 0, "clipped transparent pixel");
+    // Without the right clip, columns 2-3 land at the next row's x = 0-1.
+    assertEq(fb.get(0, 1), 0, "right clip: no wrap into the next row");
 
     // clipping left
     fb.clear(0);
     blit(fb, sprite, -2, 0);
     assertEq(fb.get(0, 1), 2, "left-clipped sprite visible");
+    // Without the left clip, row 1's columns 0-1 land at the end of row 0.
+    assertEq(fb.get(319, 0), 0, "left clip: no wrap into the previous row");
 
     // scaled blit
     fb.clear(0);
@@ -149,12 +153,19 @@ function main(): void {
     assertEq(fb.get(22, 22), 2, "2x scaled center pixel");
     assertEq(fb.get(23, 23), 2, "2x scaled adjacent center");
 
-    // depth sort
+    // depth sort (painter's algorithm): sort far → near, then draw, so
+    // the nearer sprite lands last and wins wherever the two overlap.
     fb.clear(0);
-    blit(fb, sprite, 50, 50);
-    assertEq(fb.get(51, 51), 2, "first sprite drawn");
-    fb.set(51, 51, 7);
-    assertEq(fb.get(51, 51), 7, "later draw overwrites");
+    const solid: Sprite = { data: new Uint8Array(16).fill(7), width: 4, height: 4 };
+    const draws = [
+        { sprite: solid, x: 51, y: 51, depth: 1 },  // near, listed first
+        { sprite, x: 50, y: 50, depth: 5 },         // far
+    ];
+    for (const d of draws.toSorted((a, b) => b.depth - a.depth)) {
+        blit(fb, d.sprite, d.x, d.y);
+    }
+    assertEq(fb.get(51, 51), 7, "nearer sprite wins the overlap");
+    assertEq(fb.get(50, 51), 1, "far sprite still visible outside the overlap");
 
     // scaled shrink
     fb.clear(0);

@@ -13,8 +13,8 @@
 //
 //   • A dependency edge  upstream -> downstream  becomes a CNOT
 //     cx upstream, downstream : the dependent qubit is "rebuilt"
-//     (its bit flips) controlled by its dependency. Entanglement
-//     encodes "downstream depends on upstream."
+//     (its bit flips) controlled by its dependency. The CNOT's
+//     controlled flip encodes "downstream depends on upstream."
 //
 //   • Topological order becomes GATE order. A CNOT's control must carry
 //     its final value before it fires, so every dependency's gates must
@@ -34,10 +34,10 @@
 //               ├──► app        (app depends on util.o AND main.o)
 //      main.o ──┘
 //
-// qelib1.inc gates only — no `swap`, no custom gates.
+// Gates used: x and cx only — no custom gates.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Qubit assignment: one qubit per build target ──────────────────────
 //   tgt[0] = util.o   (a source/leaf target — no dependencies)
@@ -45,8 +45,8 @@ include "qelib1.inc";
 //   tgt[2] = app      (depends on util.o + main.o — the DAG sink)
 //
 // A qubit reads |0> = "clean / up to date", |1> = "dirty / rebuilt".
-qreg tgt[3];
-creg out[3];
+qubit[3] tgt;
+bit[3] out;
 
 // ── Scenario A: cold build vs. clean build ────────────────────────────
 // All qubits start |0> (a fresh checkout: nothing built yet, but also
@@ -82,7 +82,8 @@ cx  tgt[1], tgt[2];       // main.o -> app : dirty control flips app dirty
 // out[2] (app) now reads dirty (1): it rebuilt because main.o changed.
 // out[1] (main.o) reads dirty (1): the edited source.
 // out[0] (util.o) reads clean (0): untouched, not rebuilt.
-measure tgt -> out;
+out = measure tgt;
+// @expect out == 6
 
 // ── Notes — the build-system / quantum bridge ─────────────────────────
 //
@@ -94,7 +95,9 @@ measure tgt -> out;
 //                              transitive over the dependency edges.
 //
 // CNOT cascade analog:
-//   • Edge = cx upstream, downstream — entangles dependent on dependency.
+//   • Edge = cx upstream, downstream — flips dependent on dependency.
+//     (Every control here is a basis state, so each CNOT is a plain
+//     XOR and nothing is entangled.)
 //   • Topological order = gate order — a control must be final before
 //     its CNOT fires, the same constraint Kahn's algorithm enforces.
 //   • Dirty propagation = a flip on a source riding the cascade to every
@@ -103,7 +106,9 @@ measure tgt -> out;
 // Where the analogy stops: a quantum circuit is itself a DAG and MUST be
 // acyclic, so it cannot even *represent* the cyclic-dependency error the
 // Cyrius reference detects (0 <-> 1). And CNOT propagation is linear
-// (XOR), whereas real dirty-tracking compares content signatures. The
+// (XOR): edit BOTH util.o and main.o and the two flips cancel, leaving
+// app reading clean — real dirtiness is an OR, and real dirty-tracking
+// compares content signatures. The
 // classical ports remain the ground truth — this file documents the
 // structural analogy so the reference is honest about which build ideas
 // the circuit captures (edges, ordering, ripple) and which it cannot

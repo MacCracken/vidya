@@ -25,11 +25,11 @@
 // resolution but with the lookup happening "all at once" in the
 // register state rather than sequentially across hops.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // Origin name in superposition (could resolve to anywhere)
 h q[0];
@@ -40,4 +40,6 @@ cx q[1], q[2];
 cx q[2], q[3];
 
 // "Resolve" — measure all four; q[3] is the final answer
-measure q -> c;
+c = measure q;
+// Every link in the chain agrees with the origin: c is 0000 or 1111
+// @expect c in {0, 15}

@@ -1,7 +1,8 @@
 // Vidya — Performance in AArch64 Assembly
 //
-// AArch64 performance: branchless code with CSEL/CSINC, SIMD via NEON,
-// alignment for cache lines, and understanding the weak memory model.
+// AArch64 performance: branchless code with CSEL/CNEG, multiply-add,
+// shifts, unrolling, prefetch, paired stores, alignment for cache lines,
+// and bit-manipulation instructions (CLZ/RBIT/REV).
 // Key differences from x86_64: no variable-length instructions,
 // fixed 4-byte instruction width enables simpler fetch/decode.
 
@@ -32,6 +33,8 @@ _start:
     cmp     w2, #42
     b.ne    fail
 
+    cmp     w0, w1              // re-compare: `cmp w2, #42` above replaced
+                                // the flags, and CSEL reads whatever is there
     csel    w2, w0, w1, gt      // w2 = max(42, 99) = 99
     cmp     w2, #99
     b.ne    fail
@@ -43,8 +46,10 @@ _start:
     cmp     w0, #42
     b.ne    fail
 
-    // ── MADD/MSUB: fused multiply-add (1 cycle) ───────────────────
-    // w0 = w1 * w2 + w3 in one instruction
+    // ── MADD/MSUB: integer multiply-add ───────────────────────────
+    // w0 = w1 * w2 + w3 in one instruction. One per cycle throughput,
+    // but 2-4 cycles latency (LLVM scheduling models: A76/N1/V2 = 2,
+    // A72 = 3, A55/M1 = 4), so a dependent chain still pays latency.
     mov     w1, #10
     mov     w2, #5
     mov     w3, #7
@@ -109,10 +114,13 @@ _start:
     b       .Lfill_loop
 .Lfill_done:
 
-    // Verify fill
-    ldr     x1, [x0]
+    // Verify fill: first and last quad must hold the PATTERN (comparing
+    // them with each other would pass on an untouched, all-zero buffer)
+    ldr     x2, [x0]
+    cmp     x2, x1
+    b.ne    fail
     ldr     x2, [x0, #248]
-    cmp     x1, x2
+    cmp     x2, x1
     b.ne    fail
 
     // ── CLZ: count leading zeros (hardware log2) ───────────────────

@@ -23,6 +23,7 @@ class BuildSystem {
     deps: number[][] = [];   // dependency lists
     built: number[] = [];    // signature last built against (-1 = never)
     out: number[] = [];      // current output signature
+    runs: number[] = [];     // times each target's recipe actually ran
     order: number[] = [];    // topological order (target ids)
 
     constructor(n: number) {
@@ -31,6 +32,7 @@ class BuildSystem {
             this.deps.push([]);
             this.built.push(-1);   // never built
             this.out.push(0);
+            this.runs.push(0);
         }
     }
 
@@ -87,6 +89,7 @@ class BuildSystem {
             if (s !== this.built[t]) {
                 this.out[t] = s;     // produce output
                 this.built[t] = s;   // remember what we built
+                this.runs[t]++;
                 rebuilt++;
             }
         }
@@ -144,10 +147,12 @@ function assert(cond: boolean, name: string): void {
     // edit util.c rebuilds util.o + app, leaves main.o untouched
     const bs = buildGraph();
     bs.build();
-    const mainBuilt = bs.built[1];
+    // Not `built[1]`: rebuilding main.o from unchanged inputs would store the
+    // same signature again, so only a run count can see that it did not run.
+    const mainRuns = bs.runs[1];
     bs.setSrc(0, 1999);   // edit util.c
     assert(bs.build() === 2, "edit util.c rebuilds util.o + app");
-    assert(bs.built[1] === mainBuilt, "main.o left untouched");
+    assert(bs.runs[1] === mainRuns, "main.o left untouched");
 }
 {
     // 0 <-> 1 cycle leaves targets unordered

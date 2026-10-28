@@ -38,15 +38,20 @@ class QCluster {
     aliveCount(): number { return this.alive.filter(a => a).length; }
 
     write(value: number): boolean {
+        // Refuse up front when a quorum is clearly unreachable (no partial
+        // write), but decide success by counted acks, not by the pre-check:
+        // a replica can drop between the check and the send.
         if (this.aliveCount() < W) return false;
         this.globalSeq += 1;
+        let acks = 0;
         for (let i = 0; i < N_NODES; i++) {
             if (this.alive[i]) {
                 this.accounts[i] = value;
                 this.writeSeq[i] = this.globalSeq;
+                acks++;
             }
         }
-        return true;
+        return acks >= W;
     }
     read(): number | null {
         if (this.aliveCount() < R) return null;

@@ -4,13 +4,16 @@
 # function handles text vs binary mode. Context managers (with)
 # ensure files are closed. io.StringIO/BytesIO provide in-memory streams.
 #
-# Every text-mode open() below passes encoding= explicitly. Omitting it
-# does NOT mean UTF-8 — it means locale.getencoding(), which is cp1252
-# on a stock Windows box and ASCII under LC_ALL=C. The same code then
-# round-trips fine on the author's machine and corrupts or raises on
-# someone else's. Run with `python3 -X warn_default_encoding
-# -W error::EncodingWarning` to turn every implicit-encoding site into
-# a hard error (PEP 597). Binary mode ("rb"/"wb") takes no encoding.
+# Every text-mode open() below passes encoding= explicitly. What omitting
+# it means depends on the interpreter, not the file: Python 3.15 turns
+# UTF-8 Mode on by default (PEP 686), so it means UTF-8 there; before
+# 3.15, or with PYTHONUTF8=0 / -X utf8=0, it means locale.getencoding(),
+# which is cp1252 on a stock Windows box. The same code then round-trips
+# fine on the author's machine and corrupts or raises on someone else's.
+# Run with `python3 -X warn_default_encoding -W error::EncodingWarning`
+# to turn every implicit-encoding site into a hard error (PEP 597; it
+# still fires under 3.15's UTF-8 default). Binary mode ("rb"/"wb") takes
+# no encoding.
 
 import io
 import os

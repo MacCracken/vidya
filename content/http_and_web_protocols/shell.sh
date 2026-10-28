@@ -3,6 +3,11 @@
 #
 # HTTP/1.1 request parser. Bash uses arrays for parsed fields; raw
 # bytes flow through as strings (CRLF preserved with $'...').
+#
+# The body is framed by Content-Length (RFC 9112 §6.3), never "whatever
+# follows the headers": on a keep-alive connection the rest of the buffer
+# is the next pipelined request, and treating it as body is the root of
+# request smuggling. Chunked Transfer-Encoding is out of scope.
 
 set -uo pipefail
 
@@ -13,8 +18,10 @@ declare -a HDR_NAMES HDR_VALUES
 HDR_COUNT=0
 REQ_BODY=""
 PARSE_OK=0
+BODY_CAP=$(( 1 << 20 ))   # 413 Content Too Large above this
 
-# parse_request RAW_TEXT — sets the globals. Returns 1 on success.
+# parse_request RAW_TEXT — sets the globals; PARSE_OK=1 on success, 0 on
+# malformed input. (The exit status is not the result: it is 0 either way.)
 parse_request() {
     local raw=$1
     REQ_METHOD=""; REQ_PATH=""; REQ_VERSION=""
@@ -47,14 +54,37 @@ parse_request() {
     for (( i = 1; i < ${#lines[@]}; i++ )); do
         local hl=${lines[i]}
         [[ -z "$hl" ]] && continue
+        # A header line without ':' is malformed — reject, like cyrius.cyr.
+        [[ $hl == *:* ]] || return
         local name=${hl%%:*}
-        local value=${hl#*: }
+        # Value = after the first ':', minus optional leading whitespace
+        # (RFC 9112 OWS). `${hl#*: }` would demand exactly one space and
+        # return the whole line for "Host:x".
+        local value=${hl#*:}
+        value=${value#"${value%%[![:blank:]]*}"}
         # Lowercase name
         name=${name,,}
         HDR_NAMES[HDR_COUNT]=$name
         HDR_VALUES[HDR_COUNT]=$value
         HDR_COUNT=$((HDR_COUNT + 1))
     done
+
+    # Content-Length counts BYTES; in a UTF-8 locale ${#s} and ${s:0:n}
+    # count characters. The C locale makes both byte-wise (restored on
+    # return, since it is local).
+    local LC_ALL=C
+    local body_len=0                              # no Content-Length, no body
+    header_lookup "content-length"
+    if (( HDR_FOUND )); then
+        [[ $HDR_OUT =~ ^[0-9]+$ ]] || return      # 400 Bad Request
+        # Strip leading zeros: "010" would otherwise be read as octal,
+        # and a 20-digit value would wrap bash's 64-bit arithmetic.
+        local v=${HDR_OUT#"${HDR_OUT%%[!0]*}"}
+        (( ${#v} <= 7 && 10#${v:-0} <= BODY_CAP )) || return   # 413
+        body_len=$(( 10#${v:-0} ))
+    fi
+    (( body_len <= ${#REQ_BODY} )) || return     # body not fully received
+    REQ_BODY=${REQ_BODY:0:body_len}
     PARSE_OK=1
 }
 
@@ -119,12 +149,32 @@ check_n $PARSE_OK 0 "malformed rejected"
 parse_request "$req1"
 header_lookup "authorization"
 check_n $HDR_FOUND 0 "absent header"
+check "$REQ_BODY" "" "no Content-Length, no body"
+
+# 8. Content-Length frames the body: trailing bytes are the next request
+parse_request $'POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET / HTTP/1.1\r\n\r\n'
+check_n $PARSE_OK 1 "pipelined req ok"
+check "$REQ_BODY" "hello" "body stops at Content-Length"
+
+# 9. A short body is incomplete, not accepted
+parse_request $'POST /x HTTP/1.1\r\nContent-Length: 20\r\n\r\nshort'
+check_n $PARSE_OK 0 "short body rejected"
+
+# 10. Non-numeric and oversize Content-Length are rejected
+parse_request $'POST /x HTTP/1.1\r\nContent-Length: 5x\r\n\r\nhello'
+check_n $PARSE_OK 0 "non-numeric Content-Length rejected"
+parse_request $'POST /x HTTP/1.1\r\nContent-Length: 18446744073709551621\r\n\r\nhello'
+check_n $PARSE_OK 0 "Content-Length past 64 bits rejected (no wrap to 5)"
+
+# 11. Content-Length is bytes: "é" is 2 bytes (1 character in UTF-8)
+parse_request $'POST /x HTTP/1.1\r\nContent-Length: 2\r\n\r\n\xc3\xa9'
+check_n $PARSE_OK 1 "2-byte body accepted under CL 2"
 
 # The denominator is a CLAIM about how many checks this file runs, and it
 # had drifted to 24 while the file actually runs 16. The gate only
 # reads the exit status, so the wrong number shipped green. Assert the
 # count so it can never drift silently again.
-EXPECTED=16
+EXPECTED=23
 if [[ $PASS -ne $EXPECTED ]]; then
     echo "FAIL: ran $PASS checks, expected $EXPECTED" >&2
     exit 1

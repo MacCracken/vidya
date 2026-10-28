@@ -19,7 +19,8 @@ readonly MAX_MATCH=255
 readonly WIN_SIZE=255
 
 # Encode src array (SRC[], SRC_LEN) into TOK[]; sets TOK_LEN.
-# Decode TOK[] (TOK_LEN, OUT_CAP) into OUT[]; sets OUT_LEN, or -1 on bomb.
+# Decode TOK[] (TOK_LEN, OUT_CAP) into OUT[]; sets OUT_LEN, or -1 on bomb
+# or on a match offset that reaches before the start of the output.
 
 encode() {
     local -n src=$1
@@ -60,7 +61,7 @@ encode() {
     done
 }
 
-# Sets OUT[], OUT_LEN. OUT_LEN = -1 on bomb-guard trigger.
+# Sets OUT[], OUT_LEN. OUT_LEN = -1 on bomb-guard trigger or bad offset.
 decode() {
     local -n tok=$1
     local tok_len=$2
@@ -84,6 +85,13 @@ decode() {
                 OUT_LEN=-1
                 return 0
             fi
+            # A back-reference before the start of the output is malformed
+            # input. Reject it: bash would read OUT[negative], which counts
+            # from the END of the array and silently copies the wrong bytes.
+            if (( b0 > OUT_LEN )); then
+                OUT_LEN=-1
+                return 0
+            fi
             local k=0
             while (( k < b1 )); do
                 OUT[OUT_LEN + k]=${OUT[OUT_LEN - b0 + k]}
@@ -94,8 +102,11 @@ decode() {
     done
 }
 
-# Convert ASCII string to indexed byte array.
+# Convert a string to an indexed byte array. `local LC_ALL=C` makes ${#s},
+# ${s:i:1} and printf "'c" work in bytes; in a UTF-8 locale they work in
+# characters, and "é" would become one element, 233, not 195 169.
 str_to_bytes() {
+    local LC_ALL=C
     local -n arr=$1
     local s=$2
     arr=()

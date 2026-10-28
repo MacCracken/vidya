@@ -1,7 +1,8 @@
-# Concurrency — Cyrius reference (compile-only)
-# Patterns: fork/wait constants, pipe layout, callback patterns
-# Real fork/exec tests need process isolation; this validates constants and logic.
+# Concurrency — Cyrius reference (runnable)
+# Patterns: fork/wait syscall numbers, a real pipe round-trip, callback patterns
+# The pipe test runs in one process: pipe(2) needs no fork to show its layout.
 
+include "lib/syscalls.cyr"
 include "lib/string.cyr"
 include "lib/fmt.cyr"
 include "lib/alloc.cyr"
@@ -10,11 +11,9 @@ include "lib/fnptr.cyr"
 include "lib/assert.cyr"
 include "lib/callback.cyr"
 
-# Syscall numbers used for concurrency
-var SYS_FORK = 57;
-var SYS_WAIT4 = 61;
-var SYS_PIPE = 22;
-var SYS_CLONE = 56;
+# Syscall numbers come from lib/syscalls.cyr's enum (x86_64 Linux values).
+# Redeclaring them as `var SYS_FORK = 57;` and asserting the var equals 57
+# would test nothing; asserting the stdlib's constants checks the table.
 
 fn _dbl(x) { return x * 2; }
 fn _sum(a, x) { return a + x; }
@@ -29,18 +28,31 @@ fn test_syscall_constants() {
 }
 
 fn test_pipe_layout() {
-    # Pipe returns two fds in a buffer: [read_fd, write_fd]
-    # Validate the layout (offset 0 = read, offset 8 = write)
-    var pipefd[2];
-    store64(&pipefd, 3);
-    store64(&pipefd + 8, 4);
-    assert_eq(load64(&pipefd), 3, "pipe read fd");
-    assert_eq(load64(&pipefd + 8), 4, "pipe write fd");
+    # pipe(2) fills an `int[2]`: two 32-bit fds, read end at offset 0 and
+    # write end at offset 4 (not 8). `var fds: i32[2]` is exactly that.
+    var fds: i32[2];
+    var rc = sys_pipe(&fds);
+    assert_eq(rc, 0, "pipe() succeeds");
+    if (rc != 0) { return 0; }
+    var rfd = load32(&fds);
+    var wfd = load32(&fds + 4);
+    assert(rfd >= 0, "pipe read fd valid");
+    assert(wfd >= 0, "pipe write fd valid");
+    assert_neq(rfd, wfd, "read and write ends differ");
+    # Data written to the write end comes out of the read end.
+    var out: u8[8];
+    var inb: u8[8];
+    store8(&out, 0x5A);
+    assert_eq(sys_write(wfd, &out, 1), 1, "write 1 byte to pipe");
+    assert_eq(sys_read(rfd, &inb, 1), 1, "read 1 byte from pipe");
+    assert_eq(load8(&inb), 0x5A, "byte round-trips through the pipe");
+    assert_eq(sys_close(wfd), 0, "close write end");
+    assert_eq(sys_close(rfd), 0, "close read end");
     return 0;
 }
 
 fn test_callback_concurrency() {
-    # Callback patterns ready for future parallelism
+    # map / fold / filter take a fn pointer: the shape a parallel map uses
     var v = vec_new();
     vec_push(v, 1);
     vec_push(v, 2);

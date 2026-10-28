@@ -35,6 +35,9 @@ func main() {
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
 	}
+	// Scan returns false on EOF *and* on error (e.g. bufio.ErrTooLong for
+	// a line over 64 KiB); only Err tells them apart.
+	assertNoErr(scanner.Err())
 	assert(len(lines) == 3, "scanner lines")
 	assert(lines[0] == "line1", "first line")
 
@@ -78,7 +81,9 @@ func main() {
 	for i := 0; i < 100; i++ {
 		fmt.Fprintf(bw, "line %d\n", i)
 	}
-	bw.Flush() // must flush!
+	// must flush! — and check it: a buffered writer reports write errors
+	// late, so Flush's error is the only place a failed write shows up.
+	assertNoErr(bw.Flush())
 	assert(strings.Contains(backing.String(), "line 99"), "buffered writer")
 
 	// ── File I/O with temp file ────────────────────────────────────
@@ -88,7 +93,7 @@ func main() {
 
 	_, err = tmpfile.WriteString("file content\n")
 	assertNoErr(err)
-	tmpfile.Close()
+	assertNoErr(tmpfile.Close()) // Close can report a deferred write error
 
 	// Read back
 	content, err := os.ReadFile(tmpfile.Name())
@@ -96,10 +101,13 @@ func main() {
 	assert(string(content) == "file content\n", "file roundtrip")
 
 	// ── Seek ───────────────────────────────────────────────────────
-	f, _ := os.Open(tmpfile.Name())
+	f, err := os.Open(tmpfile.Name())
+	assertNoErr(err)
 	defer f.Close()
-	f.Seek(5, io.SeekStart) // skip "file "
-	rest, _ := io.ReadAll(f)
+	_, err = f.Seek(5, io.SeekStart) // skip "file "
+	assertNoErr(err)
+	rest, err := io.ReadAll(f)
+	assertNoErr(err)
 	assert(string(rest) == "content\n", "seek+read")
 
 	// ── Pipe: connected reader/writer ──────────────────────────────

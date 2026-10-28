@@ -133,8 +133,10 @@ pub fn main() !void {
         check(n == 4, "top_k caps");
     }
     {
-        const q = [_]i64{ 29490, 0, 0, 0 };
-        check(nearest(q[0..]) == nearest(q[0..]), "deterministic");
+        // All four similarities tie at 0: the strict `>` keeps the first,
+        // so ties resolve to the lowest index, deterministically.
+        const q = [_]i64{ 0, 0, 0, 0 };
+        check(nearest(q[0..]) == 0, "tie → lowest index (deterministic)");
     }
 
     std.debug.print("=== embeddings ===\n", .{});

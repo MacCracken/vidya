@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Vidya — Game AI Decision Making in Shell (Bash)
 #
-# Stat-driven AI scoring with PCG PRNG and weighted action selection.
-# Bash's `$(( ))` arithmetic uses 64-bit signed ints with two's-complement
-# wrap on overflow (defined behavior in modern bash). For the PCG state,
+# Stat-driven AI scoring with a PCG-constant LCG PRNG and weighted action
+# selection. (It uses PCG's 64-bit multiplier/increment, but returns the
+# top 31 state bits by plain truncation — real PCG adds a permutation
+# output step, e.g. XSH-RR.) Bash's `$(( ))` arithmetic uses 64-bit signed
+# ints; the manual promises only "no check for overflow", and in practice
+# (x86_64/aarch64 builds) it wraps two's-complement. For the LCG state,
 # the bit pattern after `state*MULT + INC` is the same whether you call
 # the type signed or unsigned — we then mask the high 31 bits for the
 # return value, which fits comfortably in a positive int64.

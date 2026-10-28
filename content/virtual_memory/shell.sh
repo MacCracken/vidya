@@ -104,7 +104,7 @@ PTE_WRITABLE=$((1 << 1))    # page is writable
 PTE_USER=$((1 << 2))        # accessible from ring 3
 PTE_PWT=$((1 << 3))         # page-level write-through
 PTE_PCD=$((1 << 4))         # page-level cache disable
-PTE_ACCESSED=$((1 << 5))    # CPU has read this page
+PTE_ACCESSED=$((1 << 5))    # CPU has accessed (read OR written) this page
 PTE_DIRTY=$((1 << 6))       # CPU has written to this page
 PTE_HUGE=$((1 << 7))        # 2MB/1GB page (in PD/PDPT entry)
 PTE_GLOBAL=$((1 << 8))      # don't flush from TLB on CR3 switch
@@ -124,7 +124,7 @@ assert_eq "$(( user_data_pte & PTE_NX ))" "$PTE_NX" "user data: no execute"
 # Extract physical page frame from PTE
 pte_phys_page() {
     local pte=$1
-    echo $(( (pte >> 12) & 0xFFFFFFFFF ))  # bits 12-51
+    echo $(( (pte >> 12) & 0xFFFFFFFFFF ))  # bits 12-51: 40 bits = 10 hex F's
 }
 
 # PTE with physical address 0x1000 (page frame 1)
@@ -135,12 +135,18 @@ assert_eq "$(pte_phys_page $test_pte)" "1" "page frame number = 1"
 test_pte2=$(( (512 << 12) | PTE_PRESENT ))
 assert_eq "$(pte_phys_page $test_pte2)" "512" "page frame number = 512"
 
+# A frame above 2^48 bytes (bit 50 of the PTE) must survive extraction —
+# a 36-bit mask (bits 12-47) silently drops it
+test_pte3=$(( (1 << 50) | PTE_PRESENT ))
+assert_eq "$(pte_phys_page $test_pte3)" "$(( 1 << 38 ))" "frame bit 50 kept (bits 12-51)"
+
 # ── Parse /proc/self/maps ────────────────────────────────────────────
 # Format: start-end perms offset dev inode pathname
 # Example: 55a4c8200000-55a4c8230000 r--p 00000000 fe:01 1234 /usr/bin/bash
 
-# Snapshot maps — /proc/self resolves per-open, so cat captures it
-# for the bash process before any redirection forks occur.
+# Snapshot maps once. "self" resolves to whichever process OPENS the path
+# (`awk ... /proc/self/maps` would read awk's maps). $(<file) is read by
+# this shell itself, without forking, since bash 5.2 (CHANGES 5.2-alpha y.).
 maps_snapshot=$(</proc/self/maps)
 
 declare -A region_types
@@ -248,11 +254,14 @@ while IFS= read -r line; do
     start_dec=$(( 16#$start_hex ))
     end_dec=$(( 16#$end_hex ))
 
+    # misaligned=$(( ... + 1 )), not (( misaligned++ )): from 0 the latter
+    # returns status 1 and set -e would kill the script before the assert
+    # below could report anything
     if (( (start_dec & PAGE_OFFSET_MASK) != 0 )); then
-        (( misaligned++ ))
+        misaligned=$(( misaligned + 1 ))
     fi
     if (( (end_dec & PAGE_OFFSET_MASK) != 0 )); then
-        (( misaligned++ ))
+        misaligned=$(( misaligned + 1 ))
     fi
 done <<< "$maps_snapshot"
 
@@ -294,9 +303,13 @@ assert_eq "$pages_per_huge" "512" "512 small pages per huge page"
 if [[ -f /proc/meminfo ]]; then
     huge_total=$(awk '/^HugePages_Total:/ {print $2}' /proc/meminfo)
     huge_size=$(awk '/^Hugepagesize:/ {print $2}' /proc/meminfo)
-    # These are informational — values depend on system configuration
+    # The value depends on configuration: 2048 kB by default on x86_64, but
+    # 1048576 kB with default_hugepagesz=1G (and other sizes on arm64). So
+    # assert the invariant, not one value: a whole multiple of the base page.
     if [[ -n "$huge_size" ]]; then
-        assert_eq "$huge_size" "2048" "system hugepage size = 2048 kB"
+        huge_bytes=$(( huge_size * 1024 ))
+        assert_eq "$(( huge_bytes > PAGE_SIZE && huge_bytes % PAGE_SIZE == 0 ))" "1" \
+            "system hugepage size is a multiple of the base page"
     fi
 fi
 

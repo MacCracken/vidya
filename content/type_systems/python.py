@@ -5,7 +5,7 @@
 # changing runtime behavior. Protocols and ABCs provide structural and
 # nominal typing. Duck typing remains the Pythonic default.
 
-from typing import Protocol, TypeVar, Generic
+from typing import Protocol
 from abc import ABC, abstractmethod
 
 def main():
@@ -97,10 +97,11 @@ def main():
     assert abs(c.area() - math.pi) < 1e-10
     assert "3.14" in c.describe()
 
-    # ── Generics with TypeVar ───────────────────────────────────────
-    T = TypeVar("T")
-
-    def first(items: list[T]) -> T | None:
+    # ── Generics: PEP 695 syntax (3.12+) ────────────────────────────
+    # `def first[T](...)` declares T in place. The pre-3.12 spelling,
+    # T = TypeVar("T") at module level plus Generic[T] as a base class,
+    # still works but is the legacy form.
+    def first[T](items: list[T]) -> T | None:
         return items[0] if items else None
 
     assert first([1, 2, 3]) == 1
@@ -108,7 +109,7 @@ def main():
     assert first([]) is None
 
     # ── Generic classes ─────────────────────────────────────────────
-    class Stack(Generic[T]):
+    class Stack[T]:
         def __init__(self):
             self._items: list[T] = []
 
@@ -158,7 +159,7 @@ def main():
 
     p = Point(3.0, 4.0)
     assert p.distance() == 5.0
-    assert p == Point(3.0, 4.0)  # structural equality by default
+    assert p == Point(3.0, 4.0)  # field-by-field equality, same class only
 
     # Frozen dataclass — immutable
     @dataclass(frozen=True)

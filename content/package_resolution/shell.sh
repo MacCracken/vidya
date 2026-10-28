@@ -9,7 +9,10 @@
 # A semver major.minor.patch is encoded as one integer
 #   enc = major*1000000 + minor*1000 + patch
 # so version comparison IS integer comparison. A constraint is a half-open
-# range [lo, hi). A caret ^X.Y.Z allows [X.Y.Z, (X+1).0.0).
+# range [lo, hi). A caret ^X.Y.Z allows [X.Y.Z, (X+1).0.0) — except below
+# 1.0.0, where npm and cargo treat the MINOR as the breaking axis:
+# ^0.Y.Z allows [0.Y.Z, 0.(Y+1).0) (concept.toml gotcha "Caret on 0.x"),
+# and ^0.0.Z only [0.0.Z, 0.0.(Z+1)).
 #
 # Helpers return via the `_RET` global, never via stdout, because `$(...)`
 # runs in a subshell and discards array mutations on exit (cyrius field-note
@@ -26,9 +29,20 @@ _RET=0
 sv() { _RET=$(( $1 * VMAJ + $2 * VMIN + $3 )); }
 sv_major() { _RET=$(( $1 / VMAJ )); }
 
-# --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0) ---
+# --- Caret range [lo, hi): bump the leftmost non-zero field.
+#     ^X.Y.Z = [X.Y.Z, (X+1).0.0); ^0.Y.Z = [0.Y.Z, 0.(Y+1).0);
+#     ^0.0.Z = [0.0.Z, 0.0.(Z+1)) — npm and cargo alike ---
 caret_lo() { _RET=$1; }
-caret_hi() { sv_major "$1"; _RET=$(( (_RET + 1) * VMAJ )); }
+caret_hi() {
+    sv_major "$1"
+    if (( _RET > 0 )); then
+        _RET=$(( (_RET + 1) * VMAJ ))        # ^1.2.3 -> <2.0.0
+    elif (( $1 / VMIN > 0 )); then
+        _RET=$(( ($1 / VMIN + 1) * VMIN ))   # ^0.2.3 -> <0.3.0: minor is the breaking axis
+    else
+        _RET=$(( $1 + 1 ))                   # ^0.0.3 -> <0.0.4: only that patch
+    fi
+}
 
 # --- Constraint satisfaction over a half-open range ---
 # satisfies v lo hi  -> _RET=1 if lo<=v<hi else 0
@@ -170,6 +184,12 @@ test_caret() {
     sv 1 4 0; satisfies "$_RET" "$lo" "$hi"; assert_eq "$_RET" 1 "1.4.0 in ^1.2.0"
     sv 2 0 0; satisfies "$_RET" "$lo" "$hi"; assert_eq "$_RET" 0 "2.0.0 not in ^1.2.0"
     sv 1 1 0; satisfies "$_RET" "$lo" "$hi"; assert_eq "$_RET" 0 "1.1.0 below ^1.2.0"
+    # 0.x: the caret stops at the next MINOR, not at 1.0.0
+    sv 0 2 3; caret_hi "$_RET"; local hi0=$_RET; sv 0 3 0
+    assert_eq "$hi0" "$_RET" "^0.2.3 upper bound = 0.3.0"
+    # 0.0.x: every patch may break, so the caret pins the patch
+    sv 0 0 3; caret_hi "$_RET"; local hi00=$_RET; sv 0 0 4
+    assert_eq "$hi00" "$_RET" "^0.0.3 upper bound = 0.0.4"
 }
 
 test_intersect() {

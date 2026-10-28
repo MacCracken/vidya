@@ -2,7 +2,7 @@
 //
 // Processes are the OS abstraction for running programs. Each has its
 // own address space, register state, and scheduling priority. Zig's
-// explicit memory management and packed structs model the kernel data
+// explicit memory management and extern structs model the kernel data
 // structures cleanly: saved register contexts, process control blocks,
 // and scheduler run queues.
 
@@ -276,8 +276,11 @@ fn testRoundRobinScheduler() !void {
 }
 
 // ── CFS (Completely Fair Scheduler) ──────────────────────────────────
-// Linux's default scheduler since 2.6.23. Uses a red-black tree sorted
-// by vruntime. Process with lowest vruntime runs next.
+// Linux's default fair scheduler from 2.6.23 until 6.6, which replaced
+// it with EEVDF (Earliest Eligible Virtual Deadline First): still
+// weight-scaled vruntime in a red-black tree, but it runs the eligible
+// task with the earliest virtual deadline. This models the classic CFS
+// rule: the process with the lowest vruntime runs next.
 // vruntime = wall_time * (weight_nice0 / weight_process)
 const CfsScheduler = struct {
     procs: [MAX_PROCS]*Process,
@@ -303,26 +306,24 @@ const CfsScheduler = struct {
         }
     }
 
-    // Weight for a nice value (simplified — real kernel uses a lookup table)
+    // The kernel's own table (kernel/sched/core.c, sched_prio_to_weight):
+    // each nice step is ~1.25x, i.e. about 10% CPU between neighbours.
+    // Repeated `w * 5 / 4` only approximates it (1280 for nice -1, 3125
+    // for nice -5) and drifts further at the ends.
+    const prio_to_weight = [40]u64{
+        88761, 71755, 56483, 46273, 36291, // -20 .. -16
+        29154, 23254, 18705, 14949, 11916, // -15 .. -11
+        9548, 7620, 6100, 4904, 3906, //      -10 .. -6
+        3121, 2501, 1991, 1586, 1277, //      -5 .. -1
+        1024, 820, 655, 526, 423, //          0 .. 4
+        335, 272, 215, 172, 137, //           5 .. 9
+        110, 87, 70, 56, 45, //               10 .. 14
+        36, 29, 23, 18, 15, //                15 .. 19
+    };
+
     fn niceToWeight(nice: i8) u64 {
-        // Each nice level is ~1.25x ratio
-        // nice 0 = 1024, nice -1 = 1277, nice 1 = 820
-        if (nice == 0) return NICE0_WEIGHT;
-        if (nice < 0) {
-            var w: u64 = NICE0_WEIGHT;
-            var n: i8 = nice;
-            while (n < 0) : (n += 1) {
-                w = w * 5 / 4;
-            }
-            return w;
-        } else {
-            var w: u64 = NICE0_WEIGHT;
-            var n: i8 = nice;
-            while (n > 0) : (n -= 1) {
-                w = w * 4 / 5;
-            }
-            return w;
-        }
+        const n = std.math.clamp(nice, -20, 19);
+        return prio_to_weight[@intCast(@as(i16, n) + 20)];
     }
 
     // Update vruntime: higher weight → slower vruntime growth → more CPU
@@ -387,6 +388,10 @@ fn testCfsScheduler() !void {
     try expect(w_high > CfsScheduler.NICE0_WEIGHT);
     try expect(w_low < CfsScheduler.NICE0_WEIGHT);
     try expect(w_high > w_low); // higher weight = more CPU time
+    try expect(CfsScheduler.niceToWeight(0) == CfsScheduler.NICE0_WEIGHT);
+    try expect(CfsScheduler.niceToWeight(-1) == 1277);
+    try expect(CfsScheduler.niceToWeight(1) == 820);
+    try expect(w_high == 3121 and w_low == 335);
 }
 
 // ── Context Switch ───────────────────────────────────────────────────
@@ -423,8 +428,10 @@ fn testContextSwitch() !void {
 // ── Priority Levels ──────────────────────────────────────────────────
 fn testPriorityLevels() !void {
     // Linux priority model:
-    // Real-time: 0-99 (higher = more priority)
-    // Normal (CFS): 100-139 (maps to nice -20 to +19)
+    // One kernel `prio` scale, LOWER = more urgent throughout:
+    // Real-time: 0-99 (prio = 99 - sched_priority; the user-facing
+    //            sched_priority 1-99 is the one where higher wins)
+    // Normal (fair class): 100-139 (maps to nice -20 to +19)
 
     // nice to kernel priority
     const nice_min: i8 = -20; // highest normal priority
@@ -438,11 +445,11 @@ fn testPriorityLevels() !void {
         stop = 0, // CPU stopper (migration)
         deadline = 1, // SCHED_DEADLINE: earliest deadline first
         realtime = 2, // SCHED_FIFO / SCHED_RR
-        fair = 3, // SCHED_NORMAL (CFS)
+        fair = 3, // SCHED_NORMAL (CFS; EEVDF since Linux 6.6)
         idle = 4, // SCHED_IDLE
     };
 
-    try expect(@intFromEnum(SchedClass.deadline) < @intFromEnum(SchedClass.realtime));
-    try expect(@intFromEnum(SchedClass.realtime) < @intFromEnum(SchedClass.fair));
-    try expect(@intFromEnum(SchedClass.fair) < @intFromEnum(SchedClass.idle));
+    try expect(@backingInt(SchedClass.deadline) < @backingInt(SchedClass.realtime));
+    try expect(@backingInt(SchedClass.realtime) < @backingInt(SchedClass.fair));
+    try expect(@backingInt(SchedClass.fair) < @backingInt(SchedClass.idle));
 }

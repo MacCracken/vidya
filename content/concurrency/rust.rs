@@ -120,7 +120,7 @@ fn main() {
     assert_eq!(counter.load(Ordering::Relaxed), 4000);
 
     // ── Best practice: hold locks briefly ──────────────────────────
-    let shared = Arc::new(Mutex::new(vec![1, 2, 3]));
+    let shared = Mutex::new(vec![1, 2, 3]); // no threads here, so no Arc (see above)
 
     // GOOD: lock, copy what you need, unlock
     let snapshot = {

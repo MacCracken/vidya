@@ -93,8 +93,10 @@ fn buf_eq(a, b, n) {
 }
 
 # --- JSON string escape ---
-# Escapes " \ \n \t \r — the JSON-required minimum for printable ASCII
-# values. Worst-case output is 2x input (every byte is a 2-byte escape).
+# Escapes " \ \n \t \r. RFC 8259 §7 requires EVERY control byte
+# U+0000-U+001F to be escaped; this sketch has no \u00XX form, so it
+# REFUSES (-1) any other control byte rather than emit invalid JSON.
+# Worst-case output is 2x input (every byte is a 2-byte escape).
 # Returns the escaped length, or -1 if the destination buffer can't
 # fit the worst-case expansion (bounds-check gotcha from concept.toml).
 
@@ -114,6 +116,8 @@ fn json_escape(dst, dst_cap, src, src_len) {
             store8(dst + w, 92); store8(dst + w + 1, 116); w = w + 2;
         } elif (c == 13) {         # \r
             store8(dst + w, 92); store8(dst + w + 1, 114); w = w + 2;
+        } elif (c < 32) {          # other control byte: would need \u00XX
+            return 0 - 1;
         } else {
             store8(dst + w, c); w = w + 1;
         }
@@ -122,7 +126,10 @@ fn json_escape(dst, dst_cap, src, src_len) {
     return w;
 }
 
+# Unescaped output is never longer than its input, so src_len <= dst_cap
+# is the whole bounds check.
 fn json_unescape(dst, dst_cap, src, src_len) {
+    if (src_len > dst_cap) { return 0 - 1; }
     var w = 0;
     var i = 0;
     while (i < src_len) {
@@ -188,6 +195,15 @@ fn main() {
     var un = json_unescape(&unesc_buf, 256, &esc_buf, en);
     assert_eq(un, 12, "unescape recovers 12 bytes");
     assert(buf_eq(&unesc_buf, &s3, 12), "round-trip bytes match");
+
+    # --- Test 6: a control byte with no 2-byte escape is refused ---
+    var s6: u8[8];
+    store8(&s6 + 0, 65); store8(&s6 + 1, 1);    # 'A', U+0001
+    var tmp_buf: u8[16];
+    assert_eq(json_escape(&tmp_buf, 16, &s6, 2), 0 - 1, "U+0001 refused (needs \\u0001)");
+
+    # --- Test 7: unescape honours dst_cap ---
+    assert_eq(json_unescape(&tmp_buf, 4, &esc_buf, en), 0 - 1, "unescape refuses a too-small dst");
 
     return assert_summary();
 }

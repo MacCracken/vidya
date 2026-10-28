@@ -18,18 +18,16 @@
 // across q[0] and q[3]) just like Bresenham lights pixels (0,0) and
 // (1,1) for a 2x2 diagonal.
 //
-// In real quantum computing, this is exactly how *coherent state
-// preparation* works for graphics applications: a quantum image
-// renderer entangles control qubits with target pixel qubits to
-// "draw" patterns into the register without touching each pixel
-// individually — a structural advantage over classical Bresenham,
-// which must visit every pixel along the line.
+// Where the analogy stops: every lit pixel still needs its own gate
+// (a line of n pixels costs n-1 CNOTs from the source), so there is
+// no saving over Bresenham's one step per pixel — and reading the
+// image back out costs a measurement per pixel per shot.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // Source qubit in superposition
 h q[0];
@@ -38,4 +36,6 @@ h q[0];
 cx q[0], q[3];
 
 // Measure: q[0] and q[3] agree (00 or 11); q[1] and q[2] stay |0>
-measure q -> c;
+c = measure q;
+// So c is 0000 or 1001
+// @expect c in {0, 9}

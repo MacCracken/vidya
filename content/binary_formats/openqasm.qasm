@@ -4,12 +4,12 @@
 // Register declarations are the header, gates are the instruction
 // stream, measurements are the output section — structured format.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Header section: register declarations (like ELF headers) ────
-qreg data[3];
-creg out[3];
+qubit[3] data;
+bit[3] out;
 
 // ── Code section: gate instructions (like .text segment) ─────────
 h data[0];
@@ -17,4 +17,7 @@ cx data[0], data[1];
 cx data[1], data[2];
 
 // ── Output section: measurement (like program output/exit) ───────
-measure data -> out;
+out = measure data;
+// out reads 000 or 111 with equal probability, never a mix: the three
+// qubits are in a GHZ state.
+// @expect out in {0, 7}

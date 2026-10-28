@@ -10,7 +10,8 @@
 #
 # Compared to Rust macros:
 #   Decorator     ≈ attribute macro (#[derive], #[test])
-#   Metaclass     ≈ procedural macro (full AST manipulation)
+#   Metaclass     ≈ procedural macro (rewrites the class namespace: live
+#                   objects, never an AST; AST rewriting needs `ast` + an import hook)
 #   __init_subclass__ ≈ derive macro with trait bounds
 
 
@@ -118,8 +119,10 @@ def main():
     #   - Validate the class definition
     #   - Register the class in a global registry
     #
-    # This is the Python equivalent of procedural macros: full control
-    # over the generated code (class body).
+    # This is the closest Python gets to procedural macros: full control
+    # over the class being created. Unlike a proc macro it never sees
+    # source or syntax; the body has already run and it gets the
+    # resulting namespace dict of live objects.
 
     class ValidatedMeta(type):
         """Metaclass that enforces all methods have docstrings."""

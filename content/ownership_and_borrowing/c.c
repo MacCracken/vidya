@@ -9,7 +9,9 @@
 //   4. Memory leaks — forgetting to free
 //   5. Manual RAII patterns — the C workarounds
 //
-// Every bug shown here is a compile-time error in Rust.
+// Bugs 1-3 are compile-time errors in safe Rust. Leaks (4) are not:
+// Rust considers leaking memory-safe (Box::leak and mem::forget are safe
+// fns, Rc cycles leak), so Drop makes leaks rare, not impossible.
 
 #include <assert.h>
 #include <stdio.h>
@@ -47,8 +49,8 @@ static void demonstrate_use_after_free_prevention(void) {
 // Freeing the same pointer twice corrupts the allocator's free list.
 // This can cause crashes, silent data corruption, or security exploits.
 //
-// Rust prevents this: ownership is affine — each value is freed
-// exactly once when its owner goes out of scope.
+// Rust prevents this: ownership is affine — each value is dropped
+// at most once (exactly once unless deliberately leaked).
 
 static void demonstrate_double_free_prevention(void) {
     // BAD pattern (commented out — UB):
@@ -170,8 +172,9 @@ static size_t safe_strlen(const char *s) {
 }
 
 static void mutate_buffer(char *buf, size_t len) {
-    // Non-const pointer: exclusive borrow (&mut T equivalent)
-    // We're allowed to modify the data
+    // Non-const pointer: mutable access, but NOT exclusive like &mut T —
+    // other aliases may exist (see "Aliasing dangers" below). `restrict`
+    // promises exclusivity, but nothing checks the promise.
     for (size_t i = 0; i < len; i++) {
         if (buf[i] >= 'a' && buf[i] <= 'z') {
             buf[i] = (char)(buf[i] - 32);  // uppercase
@@ -203,6 +206,7 @@ int main(void) {
     assert(strstr(buf, "safe") != NULL);
 
     char *heap_str = good_return_heap("heap owned");
+    assert(heap_str != NULL);  // returning ownership can fail: check it
     assert(strcmp(heap_str, "heap owned") == 0);
     free(heap_str);  // caller's responsibility
 

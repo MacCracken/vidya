@@ -90,8 +90,14 @@ assert_eq "$patch" "456" "patch version"
 #   @(pattern) — exactly one
 #   !(pattern) — not matching
 #
-# Note: extglob must be enabled before parsing (can't use in -n check).
-# Use regex matching as a portable alternative:
+# For `case` and pathname expansion, `shopt -s extglob` must already be on
+# when the line using the pattern is PARSED (so a `bash -n` syntax check,
+# which never runs the shopt, rejects them). Inside [[ == ]] and [[ != ]],
+# bash 4.1+ turns extglob on while parsing the pattern — no shopt needed:
+if [[ "1234" == +([0-9]) ]]; then ext="digits"; else ext="other"; fi
+assert_eq "$ext" "digits" "extglob +(...) in [[ ]] without shopt"
+
+# Regex via [[ =~ ]] is the other route (bash/ksh/zsh only — not POSIX sh):
 
 classify_number() {
     if [[ "$1" =~ ^[0-9]+$ ]]; then

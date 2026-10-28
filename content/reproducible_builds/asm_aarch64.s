@@ -4,9 +4,12 @@
 // sources produce a byte-identical artifact, on any machine, at any
 // time. Three classic sources of non-determinism, and their fixes:
 //
-//   1. Embedded wall-clock timestamps  -> clamp every timestamp to
+//   1. Embedded wall-clock timestamps  -> the build stamps
 //      SOURCE_DATE_EPOCH (a fixed build time taken from the sources)
-//      so "now" never leaks in.
+//      instead of "now", so the clock never reaches the output, fast or
+//      slow. Clamping (normalize_ts: min(t, SDE)) is for FILE mtimes: a
+//      fresh checkout's newer mtimes are pinned down to SDE. Clamping the
+//      clock itself would still leak any clock that runs behind SDE.
 //   2. Filesystem iteration order      -> readdir() order varies; SORT
 //      filenames before processing so output doesn't depend on layout.
 //   3. Non-deterministic artifact names -> name artifacts by the HASH
@@ -52,10 +55,11 @@ fold:
     msub    x0, x12, x11, x10        // h - (h/HM)*HM
     ret
 
-// normalize_ts(x0 = now, x1 = sde) -> x0 = (now > sde) ? sde : now
+// normalize_ts(x0 = mtime, x1 = sde) -> x0 = (mtime > sde) ? sde : mtime
+// The mtime clamp (tar --clamp-mtime style). The build time itself is SDE.
 normalize_ts:
     cmp     x0, x1
-    csel    x0, x1, x0, gt           // gt -> sde, else now
+    csel    x0, x1, x0, gt           // gt -> sde, else mtime
     ret
 
 // cas_path(x0 = content) -> x0 = (content*HB + 7) % HM
@@ -152,13 +156,11 @@ build_digest:
     mov     x2, x25
     mov     x3, x26
 .Lbd_nosort:
-    // ts = do_norm ? normalize_ts(now, sde) : now
+    // ts = do_norm ? sde : now — the build time comes from the sources,
+    // never from the clock
     mov     x10, x2                  // ts = now
     cbz     x1, .Lbd_nonorm
-    mov     x0, x2
-    mov     x1, x3
-    bl      normalize_ts
-    mov     x10, x0                  // ts = normalize_ts(now, sde)
+    mov     x10, x3                  // ts = SOURCE_DATE_EPOCH
 .Lbd_nonorm:
     // h = fold(HSEED, ts)
     mov     x0, #HSEED
@@ -244,7 +246,7 @@ setup_order_b:
 // _start: run all tests; sp is 16-byte aligned at entry.
 // Callee-saved x19/x20 hold digests across calls.
 _start:
-    // ---- Test 1: normalize_ts clamps future, keeps past ----
+    // ---- Test 1: normalize_ts clamps a newer mtime, keeps an older one ----
     mov     x0, #9999
     mov     x1, #5000
     bl      normalize_ts
@@ -279,12 +281,13 @@ _start:
     b.ne    fail
 
     // ---- Test 3: content-addressing is a pure function of content ----
+    // (Calling cas_path(111) twice and comparing could never fail; check
+    // the value instead: (111*131 + 7) mod HM = 14548.)
     mov     x0, #111
     bl      cas_path
     mov     x19, x0                  // cas(111)
-    mov     x0, #111
-    bl      cas_path
-    cmp     x0, x19                  // same content -> same path
+    mov     x9, #14548
+    cmp     x0, x9                   // the path is the content's hash
     b.ne    fail
     mov     x0, #222
     bl      cas_path
@@ -332,14 +335,25 @@ _start:
     mov     x2, #9999
     mov     x3, #5000
     bl      build_digest
-    mov     x19, x0                  // norm1 (clamps 9999 -> 5000)
+    mov     x19, x0                  // norm1 (stamps 5000, not 9999)
     bl      setup_order_a
     mov     x0, #1
     mov     x1, #1
     mov     x2, #7777
     mov     x3, #5000
     bl      build_digest
-    cmp     x0, x19                  // norm2 (clamps 7777 -> 5000)
+    cmp     x0, x19                  // norm2 (stamps 5000, not 7777)
+    b.ne    fail
+
+    // ---- Test 7: ...including a clock that runs BEHIND the epoch ----
+    // min(now, sde) would stamp 3000 here and 5000 above: still drift.
+    bl      setup_order_a
+    mov     x0, #1
+    mov     x1, #1
+    mov     x2, #3000
+    mov     x3, #5000
+    bl      build_digest
+    cmp     x0, x19
     b.ne    fail
 
     // ---- All passed ----

@@ -280,12 +280,16 @@ int main(void) {
     printf("   +0x20   SS        8     stack segment (padded to 8)\n");
     printf("   Total: 40 bytes (5 quadwords)\n");
 
+    /* A user-mode frame with Linux's 64-bit selectors: __USER_CS = 0x33
+     * (GDT entry 6, RPL 3) and __USER_DS/SS = 0x2B (entry 5, RPL 3).
+     * SYSRET forces this order: it loads CS = STAR[63:48] + 16 and
+     * SS = STAR[63:48] + 8, so the user SS must sit one entry BELOW CS. */
     interrupt_frame_t frame = {
         .rip    = 0x0000000000401234ULL,
-        .cs     = 0x2B,
+        .cs     = 0x33,
         .rflags = 0x202,
         .rsp    = 0x00007FFFFFFEF000ULL,
-        .ss     = 0x33,
+        .ss     = 0x2B,
     };
     printf("   Example: RIP=0x%016llX CS=0x%04llX RFLAGS=0x%08llX\n",
            (unsigned long long)frame.rip,
@@ -302,7 +306,7 @@ int main(void) {
         { 0x05, "user read, protection" },
         { 0x06, "user write, not present" },
         { 0x07, "user write, protection" },
-        { 0x14, "user instruction fetch (NX)" },
+        { 0x15, "user instruction fetch, NX (page present)" },
     };
 
     char buf[256];

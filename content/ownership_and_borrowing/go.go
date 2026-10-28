@@ -5,7 +5,7 @@
 // shows how Go handles the problems that Rust's ownership model
 // solves: dangling pointers (impossible — GC keeps referents alive),
 // aliased mutation (runtime races, not compile errors), slice sharing,
-// sync.Pool for object reuse, and runtime.SetFinalizer for cleanup.
+// sync.Pool for object reuse, and runtime.AddCleanup for cleanup.
 //
 // Key contrast with Rust:
 //   Rust: compile-time ownership → zero-cost safety, no GC
@@ -40,8 +40,10 @@ func main() {
 // the value to the heap. The GC keeps it alive.
 
 func createPointer() *int {
-	x := 42   // escape analysis moves x to heap
-	return &x // safe — GC ensures x lives as long as the pointer
+	x := 42   // escapes createPointer's frame ("moved to heap: x")...
+	return &x // ...unless inlined into a caller where it doesn't escape
+	//           (the case below: -gcflags=-m shows it inlined, so x lives
+	//           on the caller's stack). Either way the pointer is valid.
 }
 
 func testNoDanglingPointers() {
@@ -189,15 +191,20 @@ func testSyncPool() {
 	*bufPtr = buf[:0] // reset length, keep capacity
 	pool.Put(bufPtr)
 
-	// Next Get may return the same buffer (if GC hasn't cleared pool)
+	// Next Get may return the same buffer (if GC hasn't cleared pool) or a
+	// fresh one from New — both have cap 1024, so this can't tell which.
 	bufPtr2 := pool.Get().(*[]byte)
-	assert(cap(*bufPtr2) == 1024, "reused buffer from pool")
+	assert(cap(*bufPtr2) == 1024, "pooled or fresh buffer has cap 1024")
 }
 
-// ── runtime.SetFinalizer: Cleanup Notifications ─────────────────────
-// Go's finalizer is a callback run when an object is about to be
-// collected. Unlike Rust's Drop trait, finalizers are NOT guaranteed
-// to run, they run at unpredictable times, and they add GC overhead.
+// ── runtime.AddCleanup: Cleanup Notifications ───────────────────────
+// A cleanup is a callback run after an object becomes unreachable.
+// Go 1.24 added runtime.AddCleanup, and SetFinalizer's docs now say "New
+// Go code should consider using AddCleanup instead, which is much less
+// error-prone": a cleanup gets a separate argument rather than the object
+// (so it can't resurrect it), several can be attached, and cycles don't
+// leak. Unlike Rust's Drop trait, cleanups are NOT guaranteed to run,
+// they run at unpredictable times, and they add GC overhead.
 
 type Resource struct {
 	name    string
@@ -209,22 +216,24 @@ var finalizerRan = false
 func testFinalizer() {
 	r := &Resource{name: "db-conn"}
 
-	runtime.SetFinalizer(r, func(res *Resource) {
+	// The cleanup receives r.name, not r: referencing r from the cleanup
+	// would keep r reachable forever and the cleanup would never run.
+	runtime.AddCleanup(r, func(name string) {
 		finalizerRan = true
-	})
+	}, r.name)
 
 	// In Rust, Drop::drop is called deterministically when the value
-	// goes out of scope. In Go, the finalizer runs "eventually" during
+	// goes out of scope. In Go, the cleanup runs "eventually" after
 	// GC — or never if the program exits first.
 	//
-	// Best practice: don't rely on finalizers for correctness.
+	// Best practice: don't rely on cleanups or finalizers for correctness.
 	// Use explicit Close() methods with defer instead.
 
 	// Keep r alive for the assertion
 	assert(r.name == "db-conn", "resource exists")
 
-	// Note: we deliberately don't test that the finalizer ran,
-	// because that's the whole point — Go finalizers are unreliable.
+	// Note: we deliberately don't test that the cleanup ran,
+	// because that's the whole point — Go cleanups are unreliable.
 	// Rust's Drop is reliable. That's the tradeoff.
 }
 

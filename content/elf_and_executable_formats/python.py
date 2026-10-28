@@ -146,7 +146,7 @@ def build_program_header(p_type, p_flags, p_offset, p_vaddr, p_filesz, p_memsz, 
 #   56      8     sh_entsize
 
 ELF64_SHDR_SIZE = 64
-ELF64_SHDR_FORMAT = '<IIQQQQIIqq'
+ELF64_SHDR_FORMAT = '<IIQQQQIIQQ'  # sh_addralign/sh_entsize are unsigned Xword
 
 def build_section_header(sh_name, sh_type, sh_flags, sh_addr, sh_offset,
                          sh_size, sh_link=0, sh_info=0, sh_addralign=1,
@@ -297,11 +297,14 @@ def verify_section_vs_segment():
     Segments are the loader's view — they describe memory mappings.
     Multiple sections can map to a single segment.
     """
-    # A typical executable has these sections mapped to two segments:
+    # A typical executable has these sections mapped to three segments.
+    # Since binutils 2.31, ld defaults to -z separate-code on x86-64 Linux:
+    # .rodata gets its own read-only PT_LOAD instead of riding in the
+    # executable one, so constant data is no longer executable (ROP surface).
     section_to_segment = {
         # Section           Segment (by permissions)
         ".text":     "PT_LOAD R+X",     # code — executable
-        ".rodata":   "PT_LOAD R+X",     # read-only data — same segment as code
+        ".rodata":   "PT_LOAD R",       # read-only data — NOT executable
         ".data":     "PT_LOAD R+W",     # initialized data — writable
         ".bss":      "PT_LOAD R+W",     # uninitialized — writable, no file space
         ".symtab":   "not loaded",      # symbol table — tools only
@@ -309,8 +312,8 @@ def verify_section_vs_segment():
         ".debug_info": "not loaded",    # DWARF debug — tools only
     }
 
-    # Verify: .text and .rodata share the R+X segment
-    assert section_to_segment[".text"] == section_to_segment[".rodata"]
+    # Verify: .rodata is NOT in the executable segment
+    assert section_to_segment[".text"] != section_to_segment[".rodata"]
 
     # Verify: .data and .bss share the R+W segment
     assert section_to_segment[".data"] == section_to_segment[".bss"]
@@ -397,8 +400,9 @@ def verify_dwarf_sections():
     # All DWARF sections have SHT_PROGBITS type but no SHF_ALLOC flag
     # (SHF_ALLOC = 2 means "occupies memory during execution")
     for section_name in dwarf_sections:
-        # DWARF sections: flags = 0 (no ALLOC, no WRITE, no EXECINSTR)
-        dwarf_flags = 0
+        # No ALLOC, WRITE or EXECINSTR. Not always flags == 0: .debug_str
+        # carries SHF_MERGE|SHF_STRINGS (0x30, readelf shows "MS").
+        dwarf_flags = 0x30 if section_name == ".debug_str" else 0
         assert (dwarf_flags & SHF_ALLOC) == 0, \
             f"{section_name} must NOT have SHF_ALLOC — it's not loaded"
 
@@ -441,7 +445,8 @@ def main():
     # ── Section vs segment duality ─────────────────────────────────────
     print("\n4. Section vs segment duality:")
     verify_section_vs_segment()
-    print("   .text + .rodata  -> PT_LOAD R+X (code segment)")
+    print("   .text            -> PT_LOAD R+X (code segment)")
+    print("   .rodata          -> PT_LOAD R   (separate-code: not executable)")
     print("   .data + .bss     -> PT_LOAD R+W (data segment)")
     print("   .symtab, .debug* -> not loaded (tools read from file)")
     print("   Stripping removes non-loaded sections; execution unchanged.")

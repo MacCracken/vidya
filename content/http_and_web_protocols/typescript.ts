@@ -1,6 +1,13 @@
 // Vidya — HTTP and Web Protocols in TypeScript
 //
 // HTTP/1.1 request parser, sequential.
+//
+// The body is framed by Content-Length (RFC 9112 §6.3), never "whatever
+// follows the headers": on a keep-alive connection the rest of the buffer
+// is the next pipelined request, and treating it as body is the root of
+// request smuggling. Chunked Transfer-Encoding is out of scope.
+
+const BODY_CAP = 1 << 20; // 413 Content Too Large above this
 
 interface Request {
   method: string;
@@ -35,7 +42,16 @@ function parseRequest(buf: Buffer): Request | null {
     if (pos + 1 >= buf.length) return null;
     if (buf[pos] === 0x0D && buf[pos + 1] === 0x0A) {
       pos += 2;
-      req.body = buf.subarray(pos);
+      // No Content-Length means no body.
+      const cl = headerLookup(req, "content-length");
+      let bodyLen = 0;
+      if (cl !== null) {
+        if (!/^[0-9]+$/.test(cl)) return null;      // 400 Bad Request
+        bodyLen = Number(cl);
+        if (bodyLen > BODY_CAP) return null;        // 413
+      }
+      if (bodyLen > buf.length - pos) return null;  // body not fully received
+      req.body = buf.subarray(pos, pos + bodyLen);
       return req;
     }
     const lineEnd = findCRLF(buf, pos);
@@ -92,8 +108,19 @@ function main(): void {
   if (parseRequest(req6) !== null) throw new Error("malformed accepted");
 
   if (headerLookup(r1, "authorization") !== null) throw new Error("absent");
+  if (r1.body.length !== 0) throw new Error("no Content-Length, no body");
 
-  console.log("http_and_web_protocols: 24/24 ok");
+  // Content-Length frames the body: trailing bytes are the next request
+  const r7 = parseRequest(Buffer.from("POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET / HTTP/1.1\r\n\r\n"));
+  if (!r7 || r7.body.toString("utf8") !== "hello") throw new Error("body stops at Content-Length");
+  if (parseRequest(Buffer.from("POST /x HTTP/1.1\r\nContent-Length: 20\r\n\r\nshort")) !== null) {
+    throw new Error("short body is incomplete, not accepted");
+  }
+  if (parseRequest(Buffer.from("POST /x HTTP/1.1\r\nContent-Length: 5x\r\n\r\nhello")) !== null) {
+    throw new Error("non-numeric Content-Length rejected");
+  }
+
+  console.log("http_and_web_protocols: 20/20 ok");
 }
 
 main();

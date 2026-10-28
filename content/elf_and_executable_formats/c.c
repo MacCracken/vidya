@@ -1,14 +1,16 @@
 // Vidya — ELF and Executable Formats in C
 //
 // Defines ELF64 structures and builds/verifies a minimal ELF binary:
-//   1. ELF64 header struct (64 bytes, packed)
+//   1. ELF64 header struct (64 bytes, no padding by construction)
 //   2. Program header struct (56 bytes) — segment/runtime view
 //   3. Section header struct (64 bytes) — section/link-time view
 //   4. Minimal ELF construction — just ehdr + phdr + machine code
 //   5. Section-to-segment mapping — multiple sections in one segment
 //
 // The kernel reads program headers. The linker reads section headers.
-// A stripped binary has no section headers — it still runs.
+// A binary with no section headers (e_shnum = 0) still runs. Note that
+// `strip` does NOT remove them — it drops .symtab/.strtab/.debug_* but
+// keeps the section header table; tools like sstrip remove it.
 
 #include <assert.h>
 #include <stddef.h>
@@ -47,7 +49,7 @@
 
 // ── ELF64 Header (64 bytes) ────────────────────────────────────────
 
-typedef struct __attribute__((packed)) {
+typedef struct {
     uint8_t  e_ident[EI_NIDENT];
     uint16_t e_type;
     uint16_t e_machine;
@@ -66,7 +68,7 @@ typedef struct __attribute__((packed)) {
 
 // ── ELF64 Program Header (56 bytes) ────────────────────────────────
 
-typedef struct __attribute__((packed)) {
+typedef struct {
     uint32_t p_type;
     uint32_t p_flags;
     uint64_t p_offset;
@@ -79,7 +81,7 @@ typedef struct __attribute__((packed)) {
 
 // ── ELF64 Section Header (64 bytes) ────────────────────────────────
 
-typedef struct __attribute__((packed)) {
+typedef struct {
     uint32_t sh_name;       // offset into .shstrtab
     uint32_t sh_type;
     uint64_t sh_flags;
@@ -94,7 +96,7 @@ typedef struct __attribute__((packed)) {
 
 // ── ELF64 Symbol Table Entry (24 bytes) ─────────────────────────────
 
-typedef struct __attribute__((packed)) {
+typedef struct {
     uint32_t st_name;
     uint8_t  st_info;
     uint8_t  st_other;
@@ -105,7 +107,16 @@ typedef struct __attribute__((packed)) {
 
 // ── Verify struct sizes ─────────────────────────────────────────────
 // The ELF spec defines exact sizes. If the compiler adds padding,
-// the binary format is wrong.
+// the binary format is wrong. No __attribute__((packed)) is needed:
+// every ELF64 field sits at a multiple of its own size, so the natural
+// layout already matches (glibc's <elf.h> is unpacked too). Packing
+// would only drop the structs' alignment to 1. static_assert (a C23
+// keyword) makes a layout mismatch a compile error, not a runtime one.
+
+static_assert(sizeof(Elf64_Ehdr) == 64);
+static_assert(sizeof(Elf64_Phdr) == 56);
+static_assert(sizeof(Elf64_Shdr) == 64);
+static_assert(sizeof(Elf64_Sym)  == 24);
 
 static void test_struct_sizes(void) {
     assert(sizeof(Elf64_Ehdr) == 64);
@@ -355,13 +366,17 @@ static void test_build_minimal_elf(void) {
     assert(binary[2] == 'L');
     assert(binary[3] == 'F');
 
-    // Verify entry point
-    uint64_t *entry_ptr = (uint64_t *)(binary + 24);
-    assert(*entry_ptr == entry);
+    // Verify entry point. Read multi-byte fields out of a byte buffer with
+    // memcpy, never `*(uint64_t *)(binary + 24)`: that lvalue violates the
+    // effective-type (strict aliasing) rule and may be misaligned — UB.
+    uint64_t e_entry_read;
+    memcpy(&e_entry_read, binary + 24, sizeof(e_entry_read));
+    assert(e_entry_read == entry);
 
     // Verify program header type at offset 64
-    uint32_t *pt_ptr = (uint32_t *)(binary + 64);
-    assert(*pt_ptr == PT_LOAD);
+    uint32_t p_type_read;
+    memcpy(&p_type_read, binary + 64, sizeof(p_type_read));
+    assert(p_type_read == PT_LOAD);
 
     // Verify code starts at offset 120
     assert(binary[120] == 0x48);  // REX.W prefix of first instruction
@@ -397,6 +412,9 @@ static void test_bss_memsz(void) {
 // ── Virtual address to file offset conversion ───────────────────────
 // file_offset = vaddr - segment.p_vaddr + segment.p_offset
 // This is what GDB does to read code from the binary file.
+// Only [p_vaddr, p_vaddr + p_filesz) is backed by file bytes; the tail
+// up to p_memsz is .bss, which has NO file offset — so the range test
+// must use p_filesz, not p_memsz.
 
 static void test_vaddr_to_offset(void) {
     Elf64_Phdr segments[2] = {
@@ -411,7 +429,7 @@ static void test_vaddr_to_offset(void) {
     int found = 0;
     for (int i = 0; i < 2; i++) {
         if (target >= segments[i].p_vaddr &&
-            target < segments[i].p_vaddr + segments[i].p_memsz) {
+            target < segments[i].p_vaddr + segments[i].p_filesz) {
             uint64_t file_off = target - segments[i].p_vaddr + segments[i].p_offset;
             assert(file_off == 0x1234);
             found = 1;
@@ -425,7 +443,7 @@ static void test_vaddr_to_offset(void) {
     found = 0;
     for (int i = 0; i < 2; i++) {
         if (target >= segments[i].p_vaddr &&
-            target < segments[i].p_vaddr + segments[i].p_memsz) {
+            target < segments[i].p_vaddr + segments[i].p_filesz) {
             uint64_t file_off = target - segments[i].p_vaddr + segments[i].p_offset;
             assert(file_off == 0x3100);
             found = 1;
@@ -433,6 +451,18 @@ static void test_vaddr_to_offset(void) {
         }
     }
     assert(found);
+
+    // 0x403300 is inside the data segment's memory image but past its
+    // file bytes (filesz 0x200): it is .bss and has no file offset.
+    target = 0x403300;
+    found = 0;
+    for (int i = 0; i < 2; i++) {
+        if (target >= segments[i].p_vaddr &&
+            target < segments[i].p_vaddr + segments[i].p_filesz) {
+            found = 1;
+        }
+    }
+    assert(!found);
 }
 
 // ── Symbol table structure ──────────────────────────────────────────
@@ -471,7 +501,7 @@ int main(void) {
     printf("ELF and Executable Formats — C struct-level deep dive:\n\n");
 
     // ── Struct sizes ──────────────────────────────────────────────────
-    printf("1. Struct sizes (packed):\n");
+    printf("1. Struct sizes (natural layout, no padding):\n");
     test_struct_sizes();
     printf("   Elf64_Ehdr: %zu bytes\n", sizeof(Elf64_Ehdr));
     printf("   Elf64_Phdr: %zu bytes\n", sizeof(Elf64_Phdr));
@@ -518,6 +548,7 @@ int main(void) {
     test_vaddr_to_offset();
     printf("   0x401234 -> offset 0x1234 (in code segment)\n");
     printf("   0x403100 -> offset 0x3100 (in data segment)\n");
+    printf("   0x403300 -> no file offset (.bss, past p_filesz)\n");
 
     // ── Symbol table ──────────────────────────────────────────────────
     printf("\n8. Symbol table encoding:\n");

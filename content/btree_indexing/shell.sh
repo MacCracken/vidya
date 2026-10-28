@@ -6,9 +6,9 @@
 # every node's fields into per-node-id arrays:
 #   N_LEAF[id]     — 1 if leaf, 0 if internal
 #   N_NK[id]       — number of keys in this node
-#   K_<id>_<i>     — key i of node id (NS_KEY i d  / NS_GET i d)
-#   V_<id>_<i>     — leaf value i of node id
-#   C_<id>_<i>     — child pointer (id of child) for internal node
+#   KEYS[<id>_<i>]     — key i of node id (associative array)
+#   VALS[<id>_<i>]     — leaf value i of node id
+#   CHILDREN[<id>_<i>] — child pointer (id of child) for internal node
 # This is heavy bookkeeping for bash — declared explicitly in the
 # header comment as a known limitation. We only support a single
 # split (matching the cyrius test set). Stateful helpers return values
@@ -38,7 +38,8 @@ bt_reset() {
 # Allocate a new leaf; returns its id via the global OUT (NOT echo —
 # the caller can't run `$(node_new_leaf)` because that subshells away
 # all the global mutations we just performed). This is the bash subshell
-# trap called out in concept.toml.
+# trap recorded in field note bash_subshell_clobbers_stateful_helpers
+# (content/cyrius/field_notes/language/shell_runtime.cyml).
 node_new_leaf() {
     local id=$NEXT_ID
     NEXT_ID=$(( NEXT_ID + 1 ))

@@ -7,11 +7,14 @@
 //
 // A semver major.minor.patch is encoded as one number
 //   enc = major*1_000_000 + minor*1_000 + patch
-// so version comparison IS numeric comparison. All components stay
-// below 1e7, so encodings are exact in f64 — no BigInt needed. A
-// constraint is a half-open range [lo, hi). A caret ^X.Y.Z allows
-// everything from X.Y.Z up to (but not including) the next major:
-// [X.Y.Z, (X+1).0.0).
+// so version comparison IS numeric comparison. Minor and patch must
+// stay below 1000 (1.0.1000 would collide with 1.1.0); the encoded
+// values stay far below 2^53, so they are exact in f64 — no BigInt
+// needed. A constraint is a half-open range [lo, hi). A caret ^X.Y.Z
+// allows everything from X.Y.Z up to (but not including) the next
+// major: [X.Y.Z, (X+1).0.0). Below 1.0 the first non-zero component is
+// the breaking one (npm and cargo): ^0.2.3 = [0.2.3, 0.3.0) and
+// ^0.0.3 = [0.0.3, 0.0.4).
 
 const VMAJ = 1_000_000;
 const VMIN = 1_000;
@@ -24,12 +27,16 @@ function svMajor(v: number): number {
     return Math.floor(v / VMAJ);
 }
 
-// --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0) ---
+// --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0) for X > 0 ---
 function caretLo(v: number): number {
     return v;
 }
 function caretHi(v: number): number {
-    return (svMajor(v) + 1) * VMAJ;
+    const maj = svMajor(v);
+    const min = Math.floor((v % VMAJ) / VMIN);
+    if (maj > 0) return sv(maj + 1, 0, 0);
+    if (min > 0) return sv(0, min + 1, 0); // ^0.Y.Z: minor is the breaking axis
+    return v + 1;                          // ^0.0.Z: only that exact patch
 }
 
 // --- Constraint satisfaction over a half-open range ---
@@ -147,6 +154,9 @@ assert(caretHi(sv(1, 2, 0)) === sv(2, 0, 0), "caret upper = next major");
 assert(satisfies(sv(1, 4, 0), caretLo(sv(1, 2, 0)), caretHi(sv(1, 2, 0))), "1.4.0 in ^1.2.0");
 assert(!satisfies(sv(2, 0, 0), caretLo(sv(1, 2, 0)), caretHi(sv(1, 2, 0))), "2.0.0 not in ^1.2.0");
 assert(!satisfies(sv(1, 1, 0), caretLo(sv(1, 2, 0)), caretHi(sv(1, 2, 0))), "1.1.0 below ^1.2.0");
+assert(caretHi(sv(0, 2, 3)) === sv(0, 3, 0), "^0.2.3 upper = 0.3.0, not 1.0.0");
+assert(!satisfies(sv(0, 9, 0), caretLo(sv(0, 2, 3)), caretHi(sv(0, 2, 3))), "0.9.0 not in ^0.2.3");
+assert(caretHi(sv(0, 0, 3)) === sv(0, 0, 4), "^0.0.3 upper = 0.0.4");
 
 // intersect
 assert(rangeLoMax(sv(1, 0, 0), sv(1, 3, 0)) === sv(1, 3, 0), "intersect lo = max");

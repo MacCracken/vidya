@@ -116,33 +116,33 @@ fn constantFold(prog: *IRProgram) void {
 // ── Dead Code Elimination ────────────────────────────────────────────
 // An instruction is dead if its destination temp is never read by
 // any subsequent instruction. We scan backward, tracking which temps
-// are live (needed by later instructions).
+// are live (needed by later instructions). Going backward is what makes
+// it transitive: once a dead instruction is removed, its operands are
+// never marked live, so whatever only fed it dies too. (A forward
+// "is this temp read anywhere?" pass misses that: the read comes from
+// the dead instruction itself.)
 fn eliminateDeadCode(prog: *IRProgram) void {
     var live: [256]bool = @splat(false);
 
-    // First pass: mark all temps that are used as sources
-    for (prog.insts[0..prog.len]) |inst| {
+    var i = prog.len;
+    while (i > 0) {
+        i -= 1;
+        const inst = prog.insts[i];
+        if (inst.dst()) |d| {
+            if (!live[d]) {
+                prog.insts[i] = .nop; // result unused below: dead
+                continue; // ... so its operands are NOT made live
+            }
+            live[d] = false; // this definition satisfies the uses below it
+        }
         switch (inst) {
             .binary => |op| {
                 live[op.left] = true;
                 live[op.right] = true;
             },
-            .copy => |op| {
-                live[op.src] = true;
-            },
-            .ret => |op| {
-                live[op.src] = true;
-            },
+            .copy => |op| live[op.src] = true,
+            .ret => |op| live[op.src] = true,
             .load_const, .nop => {},
-        }
-    }
-
-    // Second pass: kill instructions whose dst is never used
-    for (0..prog.len) |i| {
-        if (prog.insts[i].dst()) |d| {
-            if (!live[d]) {
-                prog.insts[i] = .nop;
-            }
         }
     }
 }
@@ -190,7 +190,7 @@ fn strengthReduce(prog: *IRProgram) void {
                             known[op.dst] = rval;
                             continue;
                         }
-                        // x * 2 → x << 1 (strength reduction)
+                        // x * 2 → x + x (strength reduction; x << 1 also works)
                         if (rval != null and rval.? == 2) {
                             prog.insts[i] = .{ .binary = .{
                                 .op = .add,
@@ -336,6 +336,19 @@ fn testDeadCodeElimination() !void {
         .load_const => |op| try expect(op.val == 10),
         else => return error.DCEFailed,
     }
+
+    // Transitively dead: t1 = t0 + t0 is unused, so t0 (used only by t1)
+    // must go too
+    var chain = IRProgram.init();
+    chain.add(.{ .load_const = .{ .dst = 0, .val = 1 } }); // feeds only t1
+    chain.add(.{ .binary = .{ .op = .add, .dst = 1, .left = 0, .right = 0 } }); // dead
+    chain.add(.{ .load_const = .{ .dst = 2, .val = 5 } });
+    chain.add(.{ .ret = .{ .src = 2 } });
+    eliminateDeadCode(&chain);
+    try expect(chain.insts[0] == .nop);
+    try expect(chain.insts[1] == .nop);
+    try expect(chain.insts[2] == .load_const);
+    try expect(try interpret(&chain) == 5);
 }
 
 fn testStrengthReduction() !void {

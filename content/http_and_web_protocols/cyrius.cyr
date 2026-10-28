@@ -3,8 +3,10 @@
 # HTTP/1.1 request parser. Sequential parsing per concept.toml's first
 # best practice: request line → headers → optional body. Header names
 # are normalized to lowercase for case-insensitive lookup. Body framing
-# uses Content-Length when present; chunked encoding is out of scope
-# for this minimal reference.
+# uses Content-Length: exactly that many bytes are the body, and a request
+# without one has no body (RFC 9112 §6.3). Bytes after the body belong to
+# the NEXT request on the connection (req_consumed marks the boundary).
+# Chunked encoding is out of scope for this minimal reference.
 #
 # Tests:
 #   1. Parse a simple GET request — method/path/version extracted.
@@ -14,6 +16,8 @@
 #   5. Body bytes containing CRLF aren't truncated.
 #   6. Malformed request (no \r\n\r\n) is rejected.
 #   7. Lookup of absent header returns null sentinel.
+#   8. Pipelined bytes after the body are not swallowed into it; a
+#      Content-Length larger than what arrived (or over the cap) is rejected.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -37,6 +41,7 @@ var req_headers_value_len[128]; # 16 × 8
 var req_header_count = 0;
 var req_body[1024];
 var req_body_len = 0;
+var req_consumed = 0;           # bytes of `buf` this request used (start of the next one)
 
 fn req_reset() {
     memset(&req_method, 0, 16);
@@ -52,7 +57,24 @@ fn req_reset() {
     req_version_len = 0;
     req_header_count = 0;
     req_body_len = 0;
+    req_consumed = 0;
     return 0;
+}
+
+# Parse a Content-Length value: decimal digits only. Returns -1 on an empty
+# or non-numeric value; a huge value saturates (it is rejected by the cap).
+fn parse_content_length(p, n) {
+    if (n == 0) { return 0 - 1; }
+    var v = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(p + i);
+        if (c < 48) { return 0 - 1; }
+        if (c > 57) { return 0 - 1; }
+        if (v < 100000000) { v = v * 10 + (c - 48); }
+        i = i + 1;
+    }
+    return v;
 }
 
 fn to_lower(b) {
@@ -133,15 +155,22 @@ fn parse_request(buf, len) {
         if (load8(buf + pos) == 13) {
             if (load8(buf + pos + 1) == 10) {
                 pos = pos + 2;
-                # Headers done; rest is body (Content-Length bytes)
-                # For simplicity here, take whatever remains as body
-                # (caller is responsible for honoring Content-Length).
-                var body_len = len - pos;
-                if (body_len > 1024) { body_len = 1024; }
+                # Headers done. The body is exactly Content-Length bytes
+                # (0 without the header) — never "whatever remains", which
+                # would swallow a pipelined next request.
+                var body_len = 0;
+                var cl = header_lookup("content-length", 14);
+                if (cl != 0) {
+                    body_len = parse_content_length(cl, hdr_lookup_out_len);
+                    if (body_len < 0) { return 0; }          # malformed value
+                }
+                if (body_len > 1024) { return 0; }           # over the cap: reject, don't truncate
+                if (body_len > len - pos) { return 0; }      # body not fully received
                 if (body_len > 0) {
                     copy_bytes(&req_body, buf + pos, body_len);
                     req_body_len = body_len;
                 }
+                req_consumed = pos + body_len;
                 return 1;
             }
         }
@@ -276,6 +305,20 @@ fn main() {
     parse_request(req1, 47);
     var absent = header_lookup("authorization", 13);
     assert_eq(absent, 0, "absent header returns 0");
+
+    # --- 8. Content-Length framing ---
+    var req8 = "POST /p HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET / HTTP/1.1\r\n\r\n";
+    var len8 = strlen(req8);
+    assert_eq(parse_request(req8, len8), 1, "pipelined request parses");
+    assert_eq(req_body_len, 5, "body is exactly Content-Length bytes");
+    assert(buf_eq(&req_body, "hello", 5), "body bytes = hello");
+    assert(buf_eq(req8 + req_consumed, "GET / ", 6), "next request starts right after the body");
+    var req9 = "POST /p HTTP/1.1\r\nContent-Length: 50\r\n\r\nshort";
+    assert_eq(parse_request(req9, strlen(req9)), 0, "Content-Length beyond received bytes rejected");
+    var req10 = "POST /p HTTP/1.1\r\nContent-Length: 2000\r\n\r\nx";
+    assert_eq(parse_request(req10, strlen(req10)), 0, "Content-Length over the body cap rejected");
+    var req11 = "POST /p HTTP/1.1\r\nContent-Length: 1x\r\n\r\nab";
+    assert_eq(parse_request(req11, strlen(req11)), 0, "non-numeric Content-Length rejected");
 
     return assert_summary();
 }

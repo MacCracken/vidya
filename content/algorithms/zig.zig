@@ -204,7 +204,10 @@ fn testMergeSort() !void {
 }
 
 // ── Two-sum with hash map ─────────────────────────────────────────────
-fn twoSum(nums: []const i32, target: i32) ?struct { usize, usize } {
+// Error union AND optional: OutOfMemory is an error, "no pair" is null.
+// `seen.put(...) catch return null` would report an allocation failure
+// as "no two numbers sum to target" — a wrong answer, not an error.
+fn twoSum(nums: []const i32, target: i32) !?struct { usize, usize } {
     var seen = std.AutoHashMap(i32, usize).init(std.heap.page_allocator);
     defer seen.deinit();
     for (nums, 0..) |num, i| {
@@ -212,22 +215,22 @@ fn twoSum(nums: []const i32, target: i32) ?struct { usize, usize } {
         if (seen.get(complement)) |j| {
             return .{ j, i };
         }
-        seen.put(num, i) catch return null;
+        try seen.put(num, i);
     }
     return null;
 }
 
 fn testTwoSum() !void {
     const nums1 = [_]i32{ 2, 7, 11, 15 };
-    const r1 = twoSum(&nums1, 9).?;
+    const r1 = (try twoSum(&nums1, 9)).?;
     try expect(r1[0] == 0 and r1[1] == 1);
 
     const nums2 = [_]i32{ 3, 2, 4 };
-    const r2 = twoSum(&nums2, 6).?;
+    const r2 = (try twoSum(&nums2, 6)).?;
     try expect(r2[0] == 1 and r2[1] == 2);
 
     const nums3 = [_]i32{ 1, 2, 3 };
-    try expect(twoSum(&nums3, 7) == null);
+    try expect(try twoSum(&nums3, 7) == null);
 }
 
 // ── Graph BFS (fixed-size, no allocator) ──────────────────────────────
@@ -245,7 +248,11 @@ const Graph = struct {
         self.degree[v] += 1;
     }
 
-    fn bfs(self: *const Graph, start: usize, end: usize) ?[MAX_NODES]u8 {
+    const Path = struct { nodes: [MAX_NODES]u8, len: usize };
+
+    // Returns the path WITH its length: a bare [MAX_NODES]u8 leaves the
+    // caller unable to tell where the path ends (the tail is undefined).
+    fn bfs(self: *const Graph, start: usize, end: usize) ?Path {
         var visited: [MAX_NODES]bool = @splat(false);
         var parent: [MAX_NODES]i8 = @splat(-1);
         var queue: [MAX_NODES]u8 = undefined;
@@ -280,7 +287,7 @@ const Graph = struct {
                     i += 1;
                     j -= 1;
                 }
-                return path;
+                return .{ .nodes = path, .len = len };
             }
             for (0..self.degree[node]) |k| {
                 const nb: usize = self.adj[node][k];
@@ -305,5 +312,6 @@ fn testGraphBFS() !void {
     g.addEdge(0, 4);
 
     const path = g.bfs(0, 3).?;
-    try expect(path[0] == 0 and path[1] == 4 and path[2] == 3);
+    try expect(path.len == 3); // 0 -> 4 -> 3, not the 4-hop 0-1-2-3
+    try expect(path.nodes[0] == 0 and path.nodes[1] == 4 and path.nodes[2] == 3);
 }

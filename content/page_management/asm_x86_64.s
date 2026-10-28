@@ -8,7 +8,7 @@
 # H_PGCOUNT/H_FREEHEAD in the cyrius layout.
 #
 # 64-bit constants use `mov rN, 0xLITERAL`; results returned in rax.
-# Single-byte fail message encodes which assertion failed (0–5).
+# Any failed assertion prints FAIL and exits 1 (it does not say which).
 
 .intel_syntax noprefix
 .global _start
@@ -20,6 +20,7 @@
 .align 8
 PAGES:        .skip 8 * POOL_CAP        # PAGES[i] = value stored at page i
 FREE_NEXT:    .skip 8 * POOL_CAP        # FREE_NEXT[i] = next freed page id
+FREED:        .skip POOL_CAP            # FREED[i] = 1 while page i is on the free list
 
 .section .data
 HDR_MAGIC:    .quad 0
@@ -42,7 +43,8 @@ hdr_init:
     mov     qword ptr [rip + HDR_FREEHEAD], 0
     ret
 
-# page_alloc -> rax = newly-allocated page id
+# page_alloc -> rax = newly-allocated page id, or 0 when the pool is full
+# (page 0 is the header, so 0 never names a data page).
 # Free-list path first (FREEHEAD nonzero), else extend pagecount.
 page_alloc:
     mov     rax, [rip + HDR_FREEHEAD]
@@ -52,36 +54,66 @@ page_alloc:
     lea     rcx, [rip + FREE_NEXT]
     mov     rdx, [rcx + rax * 8]
     mov     [rip + HDR_FREEHEAD], rdx
+    lea     rcx, [rip + FREED]
+    mov     byte ptr [rcx + rax], 0
     ret
 .pa_extend:
     mov     rax, [rip + HDR_PAGECOUNT]
+    cmp     rax, POOL_CAP
+    jae     .pa_full                # no slot past PAGES[POOL_CAP-1]
     inc     qword ptr [rip + HDR_PAGECOUNT]
     # Zero the slot
     lea     rcx, [rip + PAGES]
     mov     qword ptr [rcx + rax * 8], 0
     ret
+.pa_full:
+    xor     eax, eax
+    ret
 
-# page_free(rdi=num) — push num onto the free list.
+# page_free(rdi=num) -> rax = 1 freed / 0 refused — push num onto the
+# free list. A page freed twice would sit on the list twice and be handed
+# to two owners, so a second free (and page 0 / an unallocated id) is refused.
 page_free:
+    test    rdi, rdi
+    jz      .pf_refuse
+    cmp     rdi, [rip + HDR_PAGECOUNT]
+    jae     .pf_refuse              # unsigned: also rejects negatives
+    lea     rcx, [rip + FREED]
+    cmp     byte ptr [rcx + rdi], 0
+    jne     .pf_refuse              # already free: double free
+    mov     byte ptr [rcx + rdi], 1
     lea     rcx, [rip + FREE_NEXT]
     mov     rax, [rip + HDR_FREEHEAD]
     mov     [rcx + rdi * 8], rax
     mov     [rip + HDR_FREEHEAD], rdi
+    mov     eax, 1
+    ret
+.pf_refuse:
+    xor     eax, eax
     ret
 
-# page_write(rdi=num, rsi=val)
+# page_write(rdi=num, rsi=val) -> rax = 1 / 0 if num is not an allocated id
 page_write:
+    xor     eax, eax
+    cmp     rdi, [rip + HDR_PAGECOUNT]
+    jae     .pw_done
     lea     rcx, [rip + PAGES]
     mov     [rcx + rdi * 8], rsi
+    mov     eax, 1
+.pw_done:
     ret
 
-# page_read(rdi=num) -> rax
+# page_read(rdi=num) -> rax (-1 if num is not an allocated id)
 page_read:
+    mov     rax, -1
+    cmp     rdi, [rip + HDR_PAGECOUNT]
+    jae     .pr_done
     lea     rcx, [rip + PAGES]
     mov     rax, [rcx + rdi * 8]
+.pr_done:
     ret
 
-# fail_exit(rdi=test number 0-5) — write FAIL\n + exit(1)
+# fail_exit — write FAIL\n + exit(1); reached by jne, no argument
 fail_exit:
     mov     rax, 1
     mov     rdi, 1
@@ -133,6 +165,36 @@ _start:
     call    page_alloc
     cmp     rax, 2
     jne     fail_exit
+
+    # 7. double free is refused: page 2 must not be handed out twice
+    mov     rdi, 2
+    call    page_free
+    mov     rdi, 2
+    call    page_free               # second free of the same page
+    test    rax, rax
+    jnz     fail_exit
+    call    page_alloc
+    mov     r12, rax
+    call    page_alloc
+    cmp     rax, r12
+    je      fail_exit
+
+    # 8. the pool stops at POOL_CAP pages instead of writing past PAGES
+    mov     rbx, 100
+.pm_fill:
+    call    page_alloc
+    dec     rbx
+    jnz     .pm_fill
+    test    rax, rax
+    jnz     fail_exit               # full → 0
+    mov     rax, [rip + HDR_PAGECOUNT]
+    cmp     rax, POOL_CAP
+    jne     fail_exit
+    mov     rdi, POOL_CAP           # one past the last page
+    mov     rsi, 7
+    call    page_write
+    test    rax, rax
+    jnz     fail_exit
 
     # success
     mov     rax, 1

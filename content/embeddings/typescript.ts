@@ -18,6 +18,11 @@ const CORPUS: number[][] = [
 ];
 
 function dot(a: number[], b: number[]): number {
+    // A length mismatch would otherwise be silent: a short vector drops the
+    // missing dimensions, a long one reads undefined, and NaN >> 15 is 0.
+    if (a.length !== DIM || b.length !== DIM) {
+        throw new RangeError(`dimension mismatch: ${a.length} vs ${b.length}, want ${DIM}`);
+    }
     let acc = 0;
     for (let i = 0; i < a.length; i++) acc += qMul(a[i], b[i]);
     return acc;
@@ -95,9 +100,13 @@ check(nearest([-29490, 0, 0, 0]) === 3, "negative-x → v3");
 check(arrEq(topKNeighbors([32767, 0, 0, 0], 3), [0, 2, 1]), "top-3 ranked");
 check(topKNeighbors([32767, 0, 0, 0], 10).length === 4, "top_k caps");
 
+// Ties keep the lowest index (strict > in the scan): an all-zero query
+// scores 0 against every vector and must return v0, not whichever came last.
+check(nearest([0, 0, 0, 0]) === 0, "tie → lowest index");
 {
-    const q = [29490, 0, 0, 0];
-    check(nearest(q) === nearest(q), "deterministic");
+    let threw = false;
+    try { dot([32767, 0, 0, 0, 32767], CORPUS[0]); } catch (e) { threw = e instanceof RangeError; }
+    check(threw, "dimension mismatch rejected");
 }
 
 console.log("=== embeddings ===");

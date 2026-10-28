@@ -41,13 +41,25 @@ func (t *Timelines) WaitAll(c, tr uint64) bool {
 }
 
 func mustTrue(b bool, label string) {
+	checks++
 	if !b {
 		panic(label)
 	}
 }
 
 func mustFalse(b bool, label string) {
+	checks++
 	if b {
+		panic(label)
+	}
+}
+
+// checks counts the assertions this file runs, for the final tally.
+var checks int
+
+func check(cond bool, label string) {
+	checks++
+	if !cond {
 		panic(label)
 	}
 }
@@ -55,30 +67,22 @@ func mustFalse(b bool, label string) {
 func main() {
 	var t Timelines
 
-	if t.compute != 0 || t.transfer != 0 {
-		panic("init")
-	}
+	check(t.compute == 0 && t.transfer == 0, "init")
 	mustTrue(t.WaitFor(0, 0), "wait(0,0)")
 
 	mustTrue(t.Signal(0, 5), "signal 5")
-	if t.compute != 5 {
-		panic("compute=5")
-	}
+	check(t.compute == 5, "compute=5")
 
 	mustTrue(t.WaitFor(0, 3), "past")
 	mustTrue(t.WaitFor(0, 5), "current")
 	mustFalse(t.WaitFor(0, 10), "future")
 
 	mustFalse(t.Signal(0, 3), "regress 3")
-	if t.compute != 5 {
-		panic("after regress")
-	}
+	check(t.compute == 5, "after regress")
 	mustFalse(t.Signal(0, 5), "regress 5")
 
 	t.Signal(1, 3)
-	if t.transfer != 3 {
-		panic("transfer=3")
-	}
+	check(t.transfer == 3, "transfer=3")
 	mustTrue(t.WaitAll(5, 3), "wait_all 5,3")
 	mustFalse(t.WaitAll(5, 4), "wait_all 5,4")
 	mustFalse(t.WaitAll(6, 3), "wait_all 6,3")
@@ -88,11 +92,11 @@ func main() {
 	for i := uint64(1); i <= 10; i++ {
 		t2.Signal(0, i)
 	}
-	if t2.compute != 10 {
-		panic("monotonic 10")
-	}
+	check(t2.compute == 10, "monotonic 10")
 	mustTrue(t2.WaitFor(0, 10), "final")
 	mustFalse(t2.WaitFor(0, 11), "beyond")
 
-	fmt.Println("explicit_gpu_synchronization: 19/19 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("explicit_gpu_synchronization: %d/%d ok\n", checks, checks)
 }

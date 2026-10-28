@@ -2,6 +2,13 @@
 #
 # HTTP/1.1 request parser, sequential parse pattern + case-insensitive
 # header lookup.
+#
+# The body is framed by Content-Length (RFC 9112 §6.3), never "whatever
+# follows the headers": on a keep-alive connection the rest of the buffer
+# is the next pipelined request, and treating it as body is the root of
+# request smuggling. Chunked Transfer-Encoding is out of scope.
+
+BODY_CAP = 1 << 20  # 413 Content Too Large above this
 
 
 class Request:
@@ -36,7 +43,19 @@ def parse_request(buf):
             return None
         if buf[pos:pos + 2] == b"\r\n":
             pos += 2
-            req.body = bytes(buf[pos:])
+            # No Content-Length means no body.
+            cl = header_lookup(req, b"content-length")
+            body_len = 0
+            if cl is not None:
+                # Digits only: int() would also take " 5", "+5" and "5_0".
+                if not cl.isdigit():
+                    return None  # 400 Bad Request
+                body_len = int(cl)
+                if body_len > BODY_CAP:
+                    return None  # 413
+            if body_len > len(buf) - pos:
+                return None  # body not fully received
+            req.body = bytes(buf[pos:pos + body_len])
             return req
         line_end = find_crlf(buf, pos)
         if line_end < 0:
@@ -94,8 +113,19 @@ def main():
     assert parse_request(req6) is None
 
     assert header_lookup(r1, b"authorization") is None
+    assert r1.body == b""  # no Content-Length, no body
 
-    print("http_and_web_protocols: 24/24 ok")
+    # Content-Length frames the body: trailing bytes are the next request
+    r7 = parse_request(
+        b"POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET / HTTP/1.1\r\n\r\n")
+    assert r7 is not None and r7.body == b"hello"
+    # A short body is incomplete, not accepted
+    assert parse_request(b"POST /x HTTP/1.1\r\nContent-Length: 20\r\n\r\nshort") is None
+    # Non-numeric Content-Length is rejected (int() would accept "5_0")
+    assert parse_request(b"POST /x HTTP/1.1\r\nContent-Length: 5x\r\n\r\nhello") is None
+    assert parse_request(b"POST /x HTTP/1.1\r\nContent-Length: 0_5\r\n\r\nhello") is None
+
+    print("http_and_web_protocols: 21/21 ok")
 
 
 main()

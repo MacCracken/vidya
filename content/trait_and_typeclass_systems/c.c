@@ -2,8 +2,10 @@
 //
 // C has no traits, interfaces, or virtual methods. Polymorphism is
 // achieved through manual vtable dispatch: a struct of function
-// pointers paired with a data pointer. This is exactly what the
-// compiler generates for Rust's dyn Trait — in C you build it by hand.
+// pointers paired with a data pointer. This is the shape rustc generates
+// for Rust's dyn Trait — in C you build it by hand. (rustc's vtable also
+// starts with drop_in_place, size and align; this one has no destructor
+// slot, so cleanup below must know the data needs only free().)
 //
 // Concepts demonstrated:
 //   1. Manual vtable: struct of function pointers
@@ -135,7 +137,7 @@ static double sum_circle_areas(const Circle *circles, size_t n) {
     double total = 0.0;
     for (size_t i = 0; i < n; i++) {
         // Direct call — no vtable, inlinable, like Rust's static dispatch
-        total += M_PI * circles[i].radius * circles[i].radius;
+        total += circle_area(&circles[i]);
     }
     return total;
 }

@@ -268,9 +268,57 @@ def eval_expr(node):
     elif kind == "mul":
         return eval_expr(node[1]) * eval_expr(node[2])
     elif kind == "div":
-        return eval_expr(node[1]) // eval_expr(node[2])
+        # idiv truncates toward zero; Python's // floors. They disagree on
+        # negative operands (-7 // 2 == -4, idiv gives -3), so the reference
+        # must truncate too or it checks the wrong answer.
+        a, b = eval_expr(node[1]), eval_expr(node[2])
+        q = abs(a) // abs(b)
+        return q if (a < 0) == (b < 0) else -q
     else:
         raise ValueError(f"unknown node: {kind}")
+
+
+def run_asm(lines):
+    """Execute the emitted subset (mov/push/pop/add/sub/imul/cqo/idiv) so
+    the tests check what the code COMPUTES, not just that text came out."""
+    regs = {"rax": 0, "rcx": 0, "rdx": 0}
+    stack = []
+
+    def val(op):
+        return regs[op] if op in regs else int(op)
+
+    for line in lines:
+        ins = line.split(";")[0].strip()
+        if not ins:
+            continue
+        op, _, rest = ins.partition(" ")
+        args = [a.strip() for a in rest.split(",")] if rest else []
+        if op == "mov":
+            regs[args[0]] = val(args[1])
+        elif op == "push":
+            stack.append(regs[args[0]])
+        elif op == "pop":
+            regs[args[0]] = stack.pop()
+        elif op == "add":
+            regs[args[0]] += val(args[1])
+        elif op == "sub":
+            regs[args[0]] -= val(args[1])
+        elif op == "imul":
+            regs[args[0]] *= val(args[1])
+        elif op == "cqo":
+            regs["rdx"] = -1 if regs["rax"] < 0 else 0
+        elif op == "idiv":
+            # Dividend is the 128-bit rdx:rax — a zeroed rdx makes a
+            # negative rax a huge positive number, which is the xor bug.
+            n = regs["rdx"] * 2**64 + (regs["rax"] % 2**64)
+            d = regs[args[0]]
+            q = abs(n) // abs(d)
+            q = q if (n < 0) == (d < 0) else -q
+            regs["rax"], regs["rdx"] = q, n - q * d
+        else:
+            raise ValueError(f"unsupported instruction: {ins}")
+    assert not stack, "unbalanced push/pop"
+    return regs["rax"]
 
 
 def main():
@@ -281,6 +329,7 @@ def main():
         ("(2+3)*4",      mul(add(lit(2), lit(3)), lit(4))),
         ("10-3-2",       sub(sub(lit(10), lit(3)), lit(2))),
         ("100/10",       div(lit(100), lit(10))),
+        ("(3-10)/2",     div(sub(lit(3), lit(10)), lit(2))),  # truncates to -3
     ]
 
     print("Code Generation — stack-based x86_64 emission:")
@@ -293,8 +342,9 @@ def main():
         cg.gen_expr(expr)
         asm = "\n".join(cg.lines)
         print(f"{label:<20} {expected:>8}")
-        # Verify the codegen produced instructions
-        assert len(cg.lines) > 0, f"no output for {label}"
+        # Execute the emitted code and check it computes the right value
+        got = run_asm(cg.lines)
+        assert got == expected, f"{label}: emitted code gives {got}, want {expected}"
 
     # Verify specific instruction patterns
     cg = StackCodegen()
@@ -364,8 +414,14 @@ def main():
             print(f"  {iv.name}: [{iv.start},{iv.end}] -> {iv.register}")
 
     assert assigned > 0, "should assign some registers"
-    assert assigned + spilled == 5, "all intervals accounted for"
-    # With 3 regs and overlapping intervals, at least one must spill
+    # a, b, c, d are all live at t=6..8 — four values, three registers
+    assert spilled >= 1, "4 simultaneously-live intervals on 3 regs must spill"
+    # The property allocation must keep: overlapping intervals never share
+    regd = [iv for iv in result if not iv.spilled]
+    for i, x in enumerate(regd):
+        for y in regd[i + 1:]:
+            if x.start <= y.end and y.start <= x.end:
+                assert x.register != y.register, f"{x.name}/{y.name} share {x.register}"
     print(f"  {assigned} assigned, {spilled} spilled (3 physical regs)")
 
     # ── Test stack frame layout ─────────────────────────────────────

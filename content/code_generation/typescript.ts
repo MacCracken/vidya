@@ -10,7 +10,7 @@
 //   - Function prologue/epilogue: frame pointer setup and teardown
 //   - Register usage: rax as accumulator, rcx as scratch
 //
-// TypeScript idioms: discriminated unions for AST, generic emitter,
+// TypeScript idioms: discriminated unions for AST, exhaustive switch,
 // class-based code generator with structured output.
 
 // ── AST (discriminated union) ────────────────────────────────────────
@@ -35,6 +35,10 @@ class CodeGenerator {
     // Map variable names to stack offsets (rbp-relative)
     private locals: Map<string, number> = new Map();
     private stackOffset: number = 0;
+    // 8-byte pushes not yet popped. System V requires rsp % 16 === 0 at every
+    // `call`; the frame is 16-aligned, so an odd count means a pending push
+    // has misaligned the stack and the call must pad it.
+    private pushDepth: number = 0;
 
     private emit(line: string): void {
         this.lines.push(line);
@@ -74,8 +78,10 @@ class CodeGenerator {
                 // Evaluate right first, push, then left into rax
                 this.genExpr(expr.right);
                 this.emit("    push rax");
+                this.pushDepth++;
                 this.genExpr(expr.left);
                 this.emit("    pop rcx");
+                this.pushDepth--;
 
                 switch (expr.op) {
                     case "+":
@@ -107,13 +113,20 @@ class CodeGenerator {
                 for (let i = expr.args.length - 1; i >= 0; i--) {
                     this.genExpr(expr.args[i]);
                     this.emit("    push rax");
+                    this.pushDepth++;
                 }
                 // Pop into argument registers left-to-right
                 for (let i = 0; i < expr.args.length; i++) {
                     this.emit(`    pop ${argRegs[i]}`);
+                    this.pushDepth--;
                 }
 
+                // A call nested inside a binop or another call's arguments
+                // runs with pushes still pending: pad rsp back to 16.
+                const pad = this.pushDepth % 2 !== 0;
+                if (pad) this.emit("    sub rsp, 8");
                 this.emit(`    call ${expr.name}`);
+                if (pad) this.emit("    add rsp, 8");
                 // Result is in rax per calling convention
                 break;
             }
@@ -121,9 +134,14 @@ class CodeGenerator {
             case "let": {
                 // Evaluate initializer, store on stack, evaluate body
                 this.genExpr(expr.init);
+                const outer = this.locals.get(expr.name);
                 const offset = this.allocLocal(expr.name);
                 this.emit(`    mov [rbp${offset}], rax`);
                 this.genExpr(expr.body);
+                // `x` is only in scope inside `body`: restore any shadowed
+                // outer binding, or `x + (let x = 2 in x)` reads the inner slot.
+                if (outer === undefined) this.locals.delete(expr.name);
+                else this.locals.set(expr.name, outer);
                 break;
             }
         }
@@ -329,6 +347,51 @@ function testCallExpression(): void {
     assert(asm.some(l => l.includes("pop rsi")), "second arg in rsi");
 }
 
+function testLetShadowing(): void {
+    const gen = new CodeGenerator();
+    // let x = 1 in x + (let x = 2 in x)  — evaluates to 3, not 4
+    const expr: Expr = {
+        kind: "let", name: "x",
+        init: { kind: "number", value: 1 },
+        body: {
+            kind: "binop", op: "+",
+            left: { kind: "var", name: "x" },
+            right: {
+                kind: "let", name: "x",
+                init: { kind: "number", value: 2 },
+                body: { kind: "var", name: "x" },
+            },
+        },
+    };
+    const asm = gen.generate([
+        { kind: "func_def", name: "shadow", params: [], body: [{ kind: "return", expr }] },
+    ]);
+    // The right operand is generated first, so the outer `x` is the LAST load.
+    const loads = asm.filter(l => l.startsWith("    mov rax, [rbp"));
+    assert(loads.at(-1) === "    mov rax, [rbp-8]", "outer x reads its own slot after the inner let ends");
+}
+
+function testCallAlignment(): void {
+    const gen = new CodeGenerator();
+    // return f() + 1 — the pushed `1` is still on the stack when f is called
+    const asm = gen.generate([
+        {
+            kind: "func_def", name: "g", params: [],
+            body: [{
+                kind: "return",
+                expr: {
+                    kind: "binop", op: "+",
+                    left: { kind: "call", name: "f", args: [] },
+                    right: { kind: "number", value: 1 },
+                },
+            }],
+        },
+    ]);
+    const call = asm.indexOf("    call f");
+    assert(asm[call - 1] === "    sub rsp, 8", "pad rsp to 16 before a call with a pending push");
+    assert(asm[call + 1] === "    add rsp, 8", "undo the pad after the call");
+}
+
 function testFrameAlignment(): void {
     const gen = new CodeGenerator();
     // 3 locals: should round up to 16-byte aligned frame
@@ -380,6 +443,8 @@ function main(): void {
     testLetBinding();
     testFunctionParams();
     testCallExpression();
+    testLetShadowing();
+    testCallAlignment();
     testFrameAlignment();
     testDivision();
 

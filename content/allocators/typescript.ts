@@ -17,7 +17,7 @@
 //      in kernels and block allocation in filesystems.
 //
 // TypeScript idioms: ArrayBuffer for raw memory, DataView for typed
-// access, classes with generics, explicit alignment handling.
+// access, Uint32Array/Uint8Array for state, explicit alignment handling.
 
 // ── Bump Allocator ───────────────────────────────────────────────────
 // Allocation = increment a pointer. Free = reset everything.
@@ -79,6 +79,10 @@ class SlabAllocator {
     private readonly slotCount: number;
     private freeHead: number; // index of first free slot (-1 = full)
     private allocatedCount: number = 0;
+    // One byte per slot: 1 = handed out. The intrusive list alone cannot tell
+    // a free slot from a used one, so without this a double free links the
+    // slot in twice and the next two alloc() calls return the SAME slot.
+    private readonly inUse: Uint8Array;
 
     constructor(slotSize: number, slotCount: number) {
         // Slot must be at least 4 bytes (to store the free list pointer)
@@ -86,6 +90,7 @@ class SlabAllocator {
         this.slotCount = slotCount;
         this.buffer = new ArrayBuffer(this.slotSize * slotCount);
         this.view = new DataView(this.buffer);
+        this.inUse = new Uint8Array(slotCount);
 
         // Initialize free list: each slot points to the next
         for (let i = 0; i < slotCount - 1; i++) {
@@ -103,6 +108,7 @@ class SlabAllocator {
         const slot = this.freeHead;
         // Follow the free list to the next free slot
         this.freeHead = this.view.getInt32(slot * this.slotSize, true);
+        this.inUse[slot] = 1;
         this.allocatedCount++;
         return slot;
     }
@@ -112,6 +118,10 @@ class SlabAllocator {
         if (slot < 0 || slot >= this.slotCount) {
             throw new Error(`invalid slot index: ${slot}`);
         }
+        if (this.inUse[slot] === 0) {
+            throw new Error(`double free: slot ${slot}`);
+        }
+        this.inUse[slot] = 0;
         // Point this slot to current head, make it the new head
         this.view.setInt32(slot * this.slotSize, this.freeHead, true);
         this.freeHead = slot;
@@ -331,6 +341,21 @@ function testSlabFreeReuse(): void {
     assert(slab.allocated() === 2, "two allocated after free + realloc");
 }
 
+function testSlabDoubleFree(): void {
+    const slab = new SlabAllocator(16, 4);
+    const s = slab.alloc()!;
+    slab.free(s);
+
+    let caught = false;
+    try {
+        slab.free(s); // would link slot 0 in twice: two owners, one slot
+    } catch (e) {
+        caught = (e as Error).message.includes("double free");
+    }
+    assert(caught, "slab double free should throw");
+    assert(slab.alloc() !== slab.alloc(), "free list intact: distinct slots");
+}
+
 function testSlabReadWrite(): void {
     const slab = new SlabAllocator(16, 4);
     const slot = slab.alloc()!;
@@ -427,6 +452,7 @@ function main(): void {
     testBumpReset();
     testSlabBasic();
     testSlabFreeReuse();
+    testSlabDoubleFree();
     testSlabReadWrite();
     testBitmapBasic();
     testBitmapFree();

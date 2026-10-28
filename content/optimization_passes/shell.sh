@@ -39,6 +39,7 @@ interpret() {
             SUB)   regs[$dst]=$(( regs[$src1] - regs[$src2] )) ;;
             MUL)   regs[$dst]=$(( regs[$src1] * regs[$src2] )) ;;
             SHL)   regs[$dst]=$(( regs[$src1] << src2 )) ;;
+            COPY)  regs[$dst]=${regs[$src1]} ;;
             STORE) regs[$dst]=${regs[$src1]} ;;
         esac
     done <<< "$1"
@@ -202,7 +203,7 @@ strength_reduce() {
             if [[ -n "$const_val" ]]; then
                 case "$const_val" in
                     0) output+="LOAD $dst 0"$'\n'; continue ;;
-                    1) output+="LOAD $dst $var_src"$'\n'; continue ;;  # simplified copy
+                    1) output+="COPY $dst $var_src"$'\n'; continue ;;  # register copy
                     2) output+="SHL $dst $var_src 1"$'\n'; continue ;;
                     4) output+="SHL $dst $var_src 2"$'\n'; continue ;;
                     8) output+="SHL $dst $var_src 3"$'\n'; continue ;;
@@ -244,9 +245,11 @@ MUL t2 t0 t1
 STORE result t2"
 
 sr_result2=$(strength_reduce "$sr_ir2")
-# MUL t0 * 1 becomes LOAD t2 t0, which interpret treats as literal "t0"
-# In a real compiler this would be a COPY instruction
-assert_eq "$(echo "$sr_result2" | sed -n '3p')" "LOAD t2 t0" "strength reduction: MUL by 1 → identity"
+# MUL t0 * 1 becomes COPY t2 t0 — a register copy. (Emitting `LOAD t2 t0`
+# would load the LITERAL "t0": the program would store the string "t0"
+# instead of 42, i.e. the pass would not preserve semantics.)
+assert_eq "$(echo "$sr_result2" | sed -n '3p')" "COPY t2 t0" "strength reduction: MUL by 1 → identity"
+assert_eq "$(interpret "$sr_result2")" "42" "MUL by 1 → COPY preserves the value"
 
 # ── Common Subexpression Elimination (CSE) ───────────────────────────
 # If the same expression appears twice, reuse the first result.
@@ -266,8 +269,9 @@ cse() {
         else
             local key="$op $src1 $src2"
             if [[ -n "${expressions[$key]+x}" ]]; then
-                # Already computed — just copy
-                output+="LOAD $dst ${expressions[$key]}"$'\n'
+                # Already computed — just copy (COPY, not LOAD: LOAD takes
+                # a literal, so "LOAD t3 t2" would load the string "t2")
+                output+="COPY $dst ${expressions[$key]}"$'\n'
             else
                 expressions[$key]=$dst
                 output+="$op $dst $src1 $src2"$'\n'
@@ -289,10 +293,11 @@ cse_result=$(cse "$cse_ir")
 expected_cse="LOAD t0 5
 LOAD t1 3
 ADD t2 t0 t1
-LOAD t3 t2
+COPY t3 t2
 MUL t4 t2 t3
 STORE result t4"
-assert_eq "$cse_result" "$expected_cse" "CSE: second ADD t0,t1 becomes LOAD from t2"
+assert_eq "$cse_result" "$expected_cse" "CSE: second ADD t0,t1 becomes COPY from t2"
+assert_eq "$(interpret "$cse_result")" "$(interpret "$cse_ir")" "CSE preserves result value (64)"
 
 # ── Pass pipeline: fold then DCE ─────────────────────────────────────
 # Real compilers chain passes. Constant folding can create dead code,

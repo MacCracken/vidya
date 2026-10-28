@@ -95,8 +95,13 @@ CLEANUP_LOG=""
 test_trap_cleanup() {
     local tmpdir
     tmpdir=$(mktemp -d)
-    # trap ensures cleanup even on error
-    trap "rm -rf '$tmpdir'; CLEANUP_LOG+='cleaned '" RETURN
+    # A RETURN trap runs when this function returns normally (locals are
+    # still in scope, so single quotes work). Two limits: it is NOT run when
+    # the shell exits instead — `exit`, or a set -e abort inside here, leaks
+    # tmpdir (cleanup that must survive errors needs an EXIT trap, e.g. in a
+    # `fn() ( ... )` subshell body); and it is global, so it must clear
+    # itself or it fires again on the next `source`/`.` return.
+    trap 'rm -rf "$tmpdir"; CLEANUP_LOG+="cleaned "; trap - RETURN' RETURN
 
     echo "data" > "$tmpdir/test.txt"
     [[ -f "$tmpdir/test.txt" ]]

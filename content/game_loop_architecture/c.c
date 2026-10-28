@@ -3,7 +3,9 @@
 // Fixed-timestep accumulator loop with spiral-of-death cap. The driver
 // `loop_step` takes an elapsed-microsecond delta and returns the number
 // of fixed-step updates fired this frame. C's `int64_t` from <stdint.h>
-// is the right choice for monotonic-time math (~292 years before wrap).
+// is the right choice for monotonic-time math: in microseconds it lasts
+// ~292,000 years before overflow (~292 years if you count nanoseconds),
+// and signed overflow is undefined behaviour, not a wrap.
 // A real game would feed deltas from clock_gettime(CLOCK_MONOTONIC),
 // but tests use deterministic deltas so they behave identically on
 // every machine.

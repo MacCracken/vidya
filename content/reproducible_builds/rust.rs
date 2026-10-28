@@ -4,9 +4,12 @@
 // produce a byte-identical artifact, on any machine, at any time. Three
 // classic sources of non-determinism, and their fixes:
 //
-//   1. Embedded wall-clock timestamps  → clamp every timestamp to
-//      SOURCE_DATE_EPOCH (a fixed build time from the sources) so "now"
-//      never leaks in.
+//   1. Embedded wall-clock timestamps  → the build stamps
+//      SOURCE_DATE_EPOCH (a fixed build time from the sources) instead of
+//      "now", so the clock never reaches the output, fast or slow.
+//      Clamping (min(t, SDE)) is for FILE mtimes: a fresh checkout's newer
+//      mtimes are pinned down to SDE. Clamping the clock itself would still
+//      leak any clock that runs behind SDE.
 //   2. Filesystem iteration order      → readdir() order varies; SORT
 //      filenames before processing so output ignores directory layout.
 //   3. Non-deterministic artifact names → name artifacts by the HASH of
@@ -24,9 +27,11 @@ fn fold(h: i64, v: i64) -> i64 {
     (h * HB + v) % HM
 }
 
-// --- 1. Deterministic timestamps: clamp "now" to SOURCE_DATE_EPOCH ---
-fn normalize_ts(now: i64, sde: i64) -> i64 {
-    if now > sde { sde } else { now }
+// --- 1. Deterministic timestamps: the mtime clamp (tar --clamp-mtime).
+//     A file mtime newer than SOURCE_DATE_EPOCH is pinned down to it; an
+//     older one is kept. The build time itself is SDE, not this. ---
+fn normalize_ts(mtime: i64, sde: i64) -> i64 {
+    if mtime > sde { sde } else { mtime }
 }
 
 // --- 3. Content-addressed artifact path: a pure function of content ---
@@ -72,7 +77,7 @@ impl FileSet {
         if do_sort {
             self.sort();
         }
-        let ts = if do_norm { normalize_ts(now, sde) } else { now };
+        let ts = if do_norm { sde } else { now }; // build time comes from the sources
         let mut h = fold(HSEED, ts);
         for i in 0..self.name.len() {
             h = fold(h, self.name[i]);
@@ -87,7 +92,7 @@ fn main() {
     let order_a: [(i64, i64); 3] = [(30, 111), (10, 222), (20, 333)];
     let order_b: [(i64, i64); 3] = [(20, 333), (30, 111), (10, 222)];
 
-    // normalize_ts: clamp future "now" to SDE; keep already-past timestamps.
+    // normalize_ts: clamp a newer mtime to SDE; keep an older one.
     assert_eq!(normalize_ts(9999, 5000), 5000);
     assert_eq!(normalize_ts(3000, 5000), 3000);
 
@@ -99,8 +104,9 @@ fn main() {
         assert_eq!(fs.content[0], 222); // content followed name 10
     }
 
-    // Content-addressed paths: same content → same path, different → different.
-    assert_eq!(cas_path(111), cas_path(111));
+    // Content-addressed paths: cas_path takes nothing but the content, so
+    // same content → same path by construction (asserting
+    // cas_path(x) == cas_path(x) could never fail); different → different.
     assert_ne!(cas_path(111), cas_path(222));
 
     // REPRODUCIBLE: sort + normalize make both input order and the wall
@@ -118,11 +124,18 @@ fn main() {
         assert_ne!(d1, d2);
     }
 
-    // Normalization alone kills clock drift: both clamp to 5000.
+    // Normalization alone kills clock drift: both stamp 5000 (sorting
+    // off, same input order, so only the timestamp fix is in play).
     {
-        let d1 = FileSet::new(&order_a).build_digest(true, true, 9999, 5000);
-        let d2 = FileSet::new(&order_a).build_digest(true, true, 7777, 5000);
+        let d1 = FileSet::new(&order_a).build_digest(false, true, 9999, 5000);
+        let d2 = FileSet::new(&order_a).build_digest(false, true, 7777, 5000);
         assert_eq!(d1, d2);
+        let d3 = FileSet::new(&order_a).build_digest(false, false, 7777, 5000);
+        assert_ne!(d1, d3); // ...and without it the clock leaks in
+        // ...including a clock that runs BEHIND the epoch: min(now, sde)
+        // would stamp 3000 here and 5000 above, and the digests would differ.
+        let slow = FileSet::new(&order_a).build_digest(false, true, 3000, 5000);
+        assert_eq!(slow, d1);
     }
 
     println!("All reproducible_builds examples passed.");

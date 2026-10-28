@@ -1,11 +1,16 @@
 // Vidya — JSON Lines (JSONL) in AArch64 Assembly
 //
 // Asm port focuses on JSON string escape/unescape with bounds check
-// — the algorithmically meaningful piece. 4 assertions:
+// — the algorithmically meaningful piece. Like the C port it escapes
+// " \ \n \t \r only, and REFUSES (-1) any other control byte
+// (U+0000..U+001F): RFC 8259 §7 requires those to become \u00XX, which
+// this minimal encoder has no form for, and emitting them raw would be
+// invalid JSON. 5 assertions:
 //   1. escape produces 18 bytes from 12-byte input
 //   2. bounds check returns -1
 //   3. unescape recovers 12 bytes
 //   4. round-trip bytes match
+//   5. a control byte without a short escape is refused (-1)
 //
 // AArch64 ABI notes (see field-note aarch64_callee_saved_and_imm_limits):
 // loop state cached in callee-saved x19+ across `bl`.
@@ -15,6 +20,8 @@
 .section .data
 src:          .byte 's', 'a', 'y', ' ', '"', 'h', 'i', '"', 9, 10, 13, 92
 .equ src_len, . - src
+ctl_src:      .byte 'a', 1          // U+0001 has no short escape
+.equ ctl_len, . - ctl_src
 
 .bss
 .align 8
@@ -22,7 +29,7 @@ esc_buf:      .skip 256
 unesc_buf:    .skip 256
 
 .section .rodata
-msg_pass:     .ascii "jsonl_format: 4/4 ok\n"
+msg_pass:     .ascii "jsonl_format: 5/5 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail:     .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
@@ -50,6 +57,8 @@ json_escape:
     b.eq    .je_tab
     cmp     w6, #13
     b.eq    .je_cr
+    cmp     w6, #0x20             // any other control byte: refuse
+    b.lo    .je_bomb
     strb    w6, [x0, x4]
     add     x4, x4, #1
     b       .je_next
@@ -245,6 +254,17 @@ _start:
     mov     x2, #src_len
     bl      memeq
     cmp     x0, #1
+    b.ne    fail_exit
+
+    // 5. control byte without a short escape is refused, not emitted raw
+    adrp    x0, esc_buf
+    add     x0, x0, :lo12:esc_buf
+    mov     x1, #256
+    adrp    x2, ctl_src
+    add     x2, x2, :lo12:ctl_src
+    mov     x3, #ctl_len
+    bl      json_escape
+    cmn     x0, #1
     b.ne    fail_exit
 
     mov     x0, #1

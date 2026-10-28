@@ -28,7 +28,8 @@ enum TokKind {
 }
 
 # ── Lexer state (globals) ─────────────────────────────────────────────
-# Cyrius uses flat globals for struct-like state.
+# Flat globals keep this sketch short (one lexer at a time); a reentrant
+# lexer would bundle them in a struct.
 
 var lex_src = 0;       # pointer to source string
 var lex_pos = 0;       # current position
@@ -36,6 +37,7 @@ var lex_len = 0;       # source length
 
 var tok_kind = 0;      # current token kind
 var tok_value = 0;     # numeric value (when TOK_NUMBER)
+var parse_err = 0;     # set on any lex/parse error; the result is then invalid
 
 fn lex_init(src) {
     lex_src = src;
@@ -117,7 +119,9 @@ fn lex_next() {
         return 0;
     }
 
-    # Unknown character — return EOF
+    # Unknown character — an ERROR, not end of input: treating it as EOF
+    # would silently parse "1 + 2 $ 3" as "1 + 2".
+    parse_err = 1;
     tok_kind = TOK_EOF;
     tok_value = 0;
     return 0;
@@ -209,15 +213,24 @@ fn parse_expr(min_bp) {
     elif (tok_kind == TOK_LPAREN) {
         lex_next();   # consume '('
         lhs = parse_expr(0);
-        # expect ')'
+        # expect ')' — anything else is an unclosed group
+        if (tok_kind != TOK_RPAREN) { parse_err = 1; return 0; }
         lex_next();
     }
     elif (prefix_bp(tok_kind) >= 0) {
         var pbp = prefix_bp(tok_kind);
         lex_next();   # consume '-'
         var operand = parse_expr(pbp);
+        if (operand == 0) { return 0; }
         lhs = make_unary_neg(operand);
     }
+    else {
+        # No atom where one is required ("()", "", "2 +"): report it rather
+        # than hand a null node to the evaluator.
+        parse_err = 1;
+        return 0;
+    }
+    if (lhs == 0) { return 0; }
 
     # ── Infix loop ────────────────────────────────────────────────
     while (1) {
@@ -233,6 +246,7 @@ fn parse_expr(min_bp) {
         lex_next();   # consume operator
         var rbp = infix_rbp(op_kind);
         var rhs = parse_expr(rbp);
+        if (rhs == 0) { return 0; }
         lhs = make_binop(op, lhs, rhs);
     }
 
@@ -267,10 +281,27 @@ fn eval_ast(node) {
 
 # ── Helper: parse and evaluate a string ────────────────────────────────
 
-fn parse_and_eval(src) {
+# parse_ok(src) — 1 if src is one complete, well-formed expression.
+fn parse_ok(src) {
+    parse_err = 0;
     lex_init(src);
     lex_next();
     var ast = parse_expr(0);
+    if (ast == 0) { return 0; }
+    if (tok_kind != TOK_EOF) { return 0; }   # e.g. a stray ')'
+    if (parse_err == 1) { return 0; }
+    return 1;
+}
+
+# Callers check parse_ok first; on malformed input this returns 0 rather
+# than walking a null node.
+fn parse_and_eval(src) {
+    parse_err = 0;
+    lex_init(src);
+    lex_next();
+    var ast = parse_expr(0);
+    if (ast == 0) { return 0; }
+    if (parse_err == 1) { return 0; }
     return eval_ast(ast);
 }
 
@@ -323,6 +354,18 @@ fn test_target() {
     return 0;
 }
 
+fn test_malformed_rejected() {
+    assert_eq(parse_ok("3 + 4 * (2 - 1)"), 1, "well-formed accepted");
+    assert_eq(parse_ok("()"), 0, "empty group rejected");
+    assert_eq(parse_ok(""), 0, "empty input rejected");
+    assert_eq(parse_ok("(2 + 3"), 0, "unclosed paren rejected");
+    assert_eq(parse_ok("1 + 2 $ 3"), 0, "unknown char rejected, not truncated");
+    assert_eq(parse_ok("2 +"), 0, "missing operand rejected");
+    assert_eq(parse_ok("2 + 3)"), 0, "stray ')' rejected");
+    assert_eq(parse_and_eval("()"), 0, "eval of malformed input does not deref null");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_number();
@@ -333,6 +376,7 @@ fn main() {
     test_left_assoc();
     test_multi_mul();
     test_target();
+    test_malformed_rejected();
     return assert_summary();
 }
 var exit_code = main();

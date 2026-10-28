@@ -39,7 +39,21 @@ fn parse_request(buf: &[u8]) -> Option<Request> {
         if pos + 1 >= buf.len() { return None; }
         if buf[pos] == b'\r' && buf[pos + 1] == b'\n' {
             pos += 2;
-            req.body = buf[pos..].to_vec();
+            // The body is exactly Content-Length bytes (RFC 9112 §6.3);
+            // bytes after it belong to the next pipelined request. A request
+            // with no Content-Length (and no chunked coding, which this parser
+            // does not handle) has no body at all.
+            let n = match header_lookup(&req, b"content-length") {
+                Some(cl) => {
+                    // 1*DIGIT only: str::parse would also accept "+5"
+                    if cl.is_empty() || !cl.iter().all(u8::is_ascii_digit) { return None; }
+                    let n: usize = std::str::from_utf8(cl).ok()?.parse().ok()?;
+                    if buf.len() - pos < n { return None; } // body not fully received
+                    n
+                }
+                None => 0,
+            };
+            req.body = buf[pos..pos + n].to_vec();
             return Some(req);
         }
         let line_end = find_crlf(buf, pos)?;
@@ -89,6 +103,11 @@ fn main() {
     let r5 = parse_request(req5).expect("parse req5");
     assert_eq!(r5.body.len(), 13);
     assert_eq!(r5.body, b"line1\r\nline2!");
+
+    // Content-Length frames the body: trailing bytes are not body.
+    let req7 = b"POST /a HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET / HTTP/1.1\r\n";
+    let r7 = parse_request(req7).expect("parse req7");
+    assert_eq!(r7.body, b"hello", "body must stop at Content-Length");
 
     // 6. Malformed (no \r\n\r\n)
     let req6 = b"GET / HTTP/1.1\r\nHost: x\r\n";

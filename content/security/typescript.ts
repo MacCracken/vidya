@@ -76,9 +76,17 @@ function testConstantTimeComparison(): void {
     assert(crypto.timingSafeEqual(secret, correct), "matching tokens");
     assert(!crypto.timingSafeEqual(secret, wrong), "different tokens");
 
-    // timingSafeEqual requires same length — check first
+    // timingSafeEqual THROWS (RangeError) on a length mismatch rather than
+    // returning false, so a caller must check lengths first (which reveals
+    // only the length) or compare fixed-size digests of both sides.
     const short = Buffer.from("short");
-    assert(secret.length !== short.length, "length differs");
+    let threw = false;
+    try {
+        crypto.timingSafeEqual(secret, short);
+    } catch (e) {
+        threw = e instanceof RangeError;
+    }
+    assert(threw, "length mismatch throws RangeError");
 }
 
 // ── Secure random generation ──────────────────────────────────────────
@@ -104,11 +112,17 @@ function testSecureRandomGeneration(): void {
 function realpathOrSelf(p: string): string {
     // realpathSync throws on a path that does not exist yet; walk up to the
     // nearest existing ancestor and re-append the rest, so a not-yet-created
-    // file still gets its PARENT chain resolved. The parents are where the
-    // symlinks live.
+    // file still gets its PARENT chain resolved.
     try {
         return fs.realpathSync(p);
     } catch {
+        // realpathSync also throws on a DANGLING symlink, but that name
+        // exists: writing to it creates the link's target, wherever it
+        // points. Treating it as a new file let base/evil -> /tmp/x/new
+        // pass and the write land outside base. Fail closed.
+        if (fs.lstatSync(p, { throwIfNoEntry: false }) !== undefined) {
+            throw new Error(`unresolvable symlink: ${p}`);
+        }
         const parent = path.dirname(p);
         if (parent === p) return p;
         return path.join(realpathOrSelf(parent), path.basename(p));
@@ -137,8 +151,16 @@ function testPathTraversalPrevention(): void {
         // Safe paths
         assert(safeResolve(base, "photo.jpg").endsWith("photo.jpg"), "safe file");
 
+        // Symlink escape: a link INSIDE base pointing outside it. Lexically
+        // base/escape/passwd is inside base; only the realpath check catches it.
+        fs.symlinkSync(os.tmpdir(), path.join(base, "escape"));
+        // A dangling link: realpath cannot resolve it, but a write follows it.
+        fs.symlinkSync(path.join(os.tmpdir(), "vidya-sec-no-such-dir", "f"), path.join(base, "dangling"));
+
         // Traversal attacks
-        for (const attack of ["../../etc/passwd", "../secret", "normal/../../escape"]) {
+        for (const attack of ["../../etc/passwd", "../secret", "normal/../../escape",
+                              "escape/passwd", "escape/not-yet-created", "dangling",
+                              "/etc/passwd"]) {
             try {
                 safeResolve(base, attack);
                 assert(false, `should reject: ${attack}`);

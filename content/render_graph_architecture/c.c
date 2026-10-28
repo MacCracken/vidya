@@ -17,6 +17,7 @@ typedef struct {
     int count;
     int topo_order[PASS_CAP];
     int topo_len;
+    uint8_t culled[PASS_CAP];   /* culled passes are never scheduled */
 } Graph;
 
 static void graph_init(Graph *g) { memset(g, 0, sizeof *g); }
@@ -36,12 +37,16 @@ static int has_edge(const Graph *g, int p, int c) {
 
 static int topo_sort(Graph *g) {
     int in_degree[PASS_CAP] = {0};
-    for (int i = 0; i < g->count; i++)
+    int live = 0;
+    for (int i = 0; i < g->count; i++) {
+        if (g->culled[i]) { in_degree[i] = -1; continue; }
+        live++;
         for (int j = 0; j < g->count; j++)
-            if (i != j && has_edge(g, j, i)) in_degree[i]++;
+            if (i != j && !g->culled[j] && has_edge(g, j, i)) in_degree[i]++;
+    }
     g->topo_len = 0;
     int emitted = 0;
-    while (emitted < g->count) {
+    while (emitted < live) {
         int picked = -1;
         for (int k = 0; k < g->count; k++) {
             if (in_degree[k] == 0) { picked = k; break; }
@@ -67,19 +72,30 @@ static int barrier_count(const Graph *g) {
     return count;
 }
 
+/* Repeat to a fixed point: culling a pass can leave its producers with no
+ * reader, and they are dead too. A pass with no writes is a sink (e.g. the
+ * present pass) and is kept. */
 static int cull_dead(Graph *g) {
-    int culled = 0;
-    for (int i = 0; i < g->count; i++) {
-        uint64_t w = g->writes[i];
-        if (w == 0) continue;
-        int any_reader = 0;
-        for (int j = 0; j < g->count; j++) {
-            if (i != j && (w & g->reads[j]) != 0) { any_reader = 1; break; }
-        }
-        if (!any_reader) {
-            g->writes[i] = 0;
-            g->reads[i] = 0;
-            culled++;
+    int culled = 0, changed = 1;
+    while (changed) {
+        changed = 0;
+        for (int i = 0; i < g->count; i++) {
+            uint64_t w = g->writes[i];
+            if (g->culled[i] || w == 0) continue;
+            int any_reader = 0;
+            for (int j = 0; j < g->count; j++) {
+                if (i != j && !g->culled[j] && (w & g->reads[j]) != 0) {
+                    any_reader = 1;
+                    break;
+                }
+            }
+            if (!any_reader) {
+                g->culled[i] = 1;
+                g->writes[i] = 0;
+                g->reads[i] = 0;
+                culled++;
+                changed = 1;
+            }
         }
     }
     return culled;
@@ -94,7 +110,11 @@ int main(void) {
     int c = add_pass(&g, 102, 2, 0);
     assert(a == 0 && b == 1 && c == 2);
 
-    assert(topo_sort(&g) == 3);
+    /* topo_sort and cull_dead rewrite the graph, so they run outside
+     * assert(): under -DNDEBUG assert's expression is not evaluated and
+     * the graph would never be sorted or culled. */
+    int n = topo_sort(&g);
+    assert(n == 3);
     assert(g.topo_order[0] == 0);
     assert(g.topo_order[1] == 1);
     assert(g.topo_order[2] == 2);
@@ -103,16 +123,30 @@ int main(void) {
 
     int d = add_pass(&g, 103, 0, 4);
     assert(d == 3);
-    assert(cull_dead(&g) == 1);
+    n = cull_dead(&g);
+    assert(n == 1);
     assert(g.writes[3] == 0);
-    assert(topo_sort(&g) == 4);
+    n = topo_sort(&g);
+    assert(n == 3);               /* the culled pass is not scheduled */
     assert(barrier_count(&g) == 2);
+
+    /* Transitive cull: B's output is unread, and A's only reader is B. */
+    Graph g3;
+    graph_init(&g3);
+    add_pass(&g3, 300, 0, 1);    /* A */
+    add_pass(&g3, 301, 1, 4);    /* B */
+    add_pass(&g3, 302, 0, 0);    /* sink */
+    n = cull_dead(&g3);
+    assert(n == 2);
+    n = topo_sort(&g3);
+    assert(n == 1);
 
     Graph g2;
     graph_init(&g2);
     add_pass(&g2, 200, 1, 2);
     add_pass(&g2, 201, 2, 1);
-    assert(topo_sort(&g2) == 0);
+    n = topo_sort(&g2);
+    assert(n == 0);
 
     printf("render_graph_architecture: 14/14 ok\n");
     return 0;

@@ -126,18 +126,20 @@ fn safe_resolve(base: &Path, user_input: &str) -> Result<PathBuf, &'static str> 
         return Err("path traversal detected");
     }
 
-    let candidate = base.join(user_input);
-    // In a real system, canonicalize both paths and verify the prefix:
-    //   let resolved = candidate.canonicalize()?;
-    //   let base_resolved = base.canonicalize()?;
-    //   if !resolved.starts_with(&base_resolved) { return Err(...) }
-    //
-    // Here we check the joined path doesn't escape via components
-    for component in candidate.components() {
-        if matches!(component, std::path::Component::ParentDir) {
+    // Check the USER part, and allow only plain names: an absolute input
+    // ("/etc/passwd") makes base.join() DISCARD the base entirely, and a
+    // ParentDir check on the joined path would not notice.
+    for component in Path::new(user_input).components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
             return Err("path traversal detected");
         }
     }
+    let candidate = base.join(user_input);
+    // In a real system, also canonicalize both paths and verify the prefix
+    // (this catches symlinks pointing outside the base):
+    //   let resolved = candidate.canonicalize()?;
+    //   let base_resolved = base.canonicalize()?;
+    //   if !resolved.starts_with(&base_resolved) { return Err(...) }
     Ok(candidate)
 }
 
@@ -149,6 +151,7 @@ fn test_path_traversal_prevention() {
     assert!(safe_resolve(base, "../../etc/passwd").is_err());
     assert!(safe_resolve(base, "../secret").is_err());
     assert!(safe_resolve(base, "normal/../../escape").is_err());
+    assert!(safe_resolve(base, "/etc/passwd").is_err()); // join() would drop the base
 }
 
 // ── Parameterized query pattern ───────────────────────────────────────

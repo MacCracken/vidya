@@ -281,14 +281,10 @@ _start:
     mov     rcx, 262144         # 4.0
     call    dist_sq
     # Result is pre-shifted by 4 on each axis, so:
-    # dx=3.0>>4, dy=4.0>>4, result = (3.0/16)^2 + (4.0/16)^2 in raw units
-    # Just verify it's positive and consistent
-    test    rax, rax
-    mov     rdi, 1
-    jg      .t7_ok
-    xor     rdi, rdi
-.t7_ok:
-    mov     rsi, 1
+    # dx=3.0>>4, dy=4.0>>4, result = (3.0>>4)^2 + (4.0>>4)^2 in raw units
+    # = 12288^2 + 16384^2 = 20480^2 = (5.0>>4)^2 — the 3-4-5 hypotenuse
+    mov     rdi, rax
+    mov     rsi, (327680 >> 4) * (327680 >> 4)
     lea     rdx, [rip + msg_t7]
     mov     rcx, msg_t7_len
     call    assert_eq

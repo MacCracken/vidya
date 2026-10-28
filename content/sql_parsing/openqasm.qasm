@@ -13,8 +13,8 @@
 // the four lexical slots. The compound `select_stmt` gate threads
 // the dependencies: SELECT enables cols, cols enables FROM, etc.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── "Grammar productions" as compound gates ───────────────────────────
 // Production: cols -> STAR | IDENT (one column slot)
@@ -39,8 +39,8 @@ gate select_stmt sel, c, f, t {
 
 // ── Token slots and parsed register ───────────────────────────────────
 // q[0] = SELECT seen, q[1] = cols slot, q[2] = FROM seen, q[3] = table slot
-qreg toks[4];
-creg parsed[4];
+qubit[4] toks;
+bit[4] parsed;
 
 // Tokenizer "produces" the SELECT token first — flip q[0] to |1>
 x toks[0];
@@ -53,7 +53,8 @@ select_stmt toks[0], toks[1], toks[2], toks[3];
 //   └── table_after_from   (cx f -> t)
 // After this: |q[0..3]> = |1111> — every slot validated.
 
-measure toks -> parsed;
+parsed = measure toks;
 // parsed = "1111" with probability 1 — the full SELECT * FROM t parse
 // tree was accepted. Any production that fails to fire would leave
 // a slot at |0>, which a downstream classical check could reject.
+// @expect parsed == 15

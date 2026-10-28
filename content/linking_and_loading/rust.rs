@@ -237,18 +237,27 @@ impl Linker {
                             .copy_from_slice(&bytes);
                     }
                     RelocType::Abs32 => {
-                        // 32-bit absolute (sign-extended) — for disp32 fields
-                        let value = (sym_addr as i64 + reloc.addend) as i32;
+                        // 32-bit absolute (sign-extended) — for disp32 fields.
+                        // S + A must fit a SIGNED 32-bit field; `as i32` would
+                        // silently truncate, where ld reports an error.
+                        let value = i32::try_from(sym_addr as i64 + reloc.addend).map_err(|_| {
+                            format!("relocation truncated to fit: R_X86_64_32S against '{}'", reloc.symbol)
+                        })?;
                         let bytes = value.to_le_bytes();
                         output[patch_file_offset..patch_file_offset + 4]
                             .copy_from_slice(&bytes);
                     }
                     RelocType::Pc32 => {
-                        // PC-relative: target - (patch_address + 4)
+                        // PC-relative, psABI formula S + A - P, where P is the
+                        // address of the 4-byte field itself. The CPU measures
+                        // rel32 from the END of the field (P + 4); the assembler
+                        // folds that into the addend, A = -4 (readelf -r shows
+                        // `add_numbers - 4`). Computing S - (P + 4) with A = 0
+                        // instead lands 4 bytes off when fed real .rela entries.
                         let patch_addr = sec_base + reloc.offset;
-                        let value =
-                            sym_addr as i64 + reloc.addend - (patch_addr as i64 + 4);
-                        let bytes = (value as i32).to_le_bytes();
+                        let value = i32::try_from(sym_addr as i64 + reloc.addend - patch_addr as i64)
+                            .map_err(|_| format!("relocation truncated to fit: R_X86_64_PC32 against '{}'", reloc.symbol))?;
+                        let bytes = value.to_le_bytes();
                         output[patch_file_offset..patch_file_offset + 4]
                             .copy_from_slice(&bytes);
                     }
@@ -341,7 +350,7 @@ fn make_demo_objects() -> Vec<ObjectFile> {
                 offset: 15, // offset of the rel32 in the CALL instruction
                 symbol: "add_numbers".to_string(),
                 reloc_type: RelocType::Pc32,
-                addend: 0,
+                addend: -4, // as emitted by `as` (calls use PLT32 since binutils 2.31; same math here)
             },
             Relocation {
                 section: ".text".to_string(),
@@ -432,6 +441,11 @@ fn main() {
                 patched_rel32,
                 target
             );
+            // add_numbers is the first byte after main.o's 28-byte .text
+            assert_eq!(target, base_addr + 28, "CALL must land on add_numbers");
+            // GLOBAL_BASE: .data follows both .text sections (28 + 5 bytes)
+            let disp32 = i32::from_le_bytes(output[23..27].try_into().unwrap());
+            assert_eq!(disp32 as u64, base_addr + 28 + 5, "disp32 must hold &GLOBAL_BASE");
         }
         Err(e) => {
             println!("  Link error: {}", e);
@@ -459,7 +473,22 @@ fn main() {
     let mut bad_linker = Linker::new(0x400000);
     bad_linker.add_object(bad_obj);
     match bad_linker.link() {
-        Ok(_) => println!("  (unexpectedly succeeded)"),
+        Ok(_) => panic!("linking an undefined reference must fail"),
         Err(e) => println!("  {}", e),
+    }
+
+    // R_X86_64_32S needs S + A to fit a sign-extended 32-bit field: link the
+    // same objects at 4 GiB and the disp32 cannot hold &GLOBAL_BASE.
+    println!("\n  --- Demonstrating relocation overflow ---");
+    let mut high = Linker::new(0x1_0000_0000);
+    for obj in make_demo_objects() {
+        high.add_object(obj);
+    }
+    match high.link() {
+        Ok(_) => panic!("a 32S relocation above 2 GiB must not link"),
+        Err(e) => {
+            assert!(e.contains("truncated to fit"));
+            println!("  {}", e);
+        }
     }
 }

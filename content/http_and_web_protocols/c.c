@@ -33,6 +33,8 @@ static int find_crlf(const uint8_t *buf, int len, int start) {
     return -1;
 }
 
+static const uint8_t *header_lookup(const Request *req, const char *name, int *out_len);
+
 static int parse_request(const uint8_t *buf, int len, Request *req) {
     memset(req, 0, sizeof *req);
     int rl_end = find_crlf(buf, len, 0);
@@ -56,9 +58,11 @@ static int parse_request(const uint8_t *buf, int len, Request *req) {
     if (method_len > (int)sizeof req->method) return 0;   /* 501 */
     if (path_len > (int)sizeof req->path) return 0;       /* 414 URI Too Long */
     if (version_len > (int)sizeof req->version) return 0; /* 505 */
-    /* Validate first, THEN commit — a rejected request leaves `req` as
-     * memset left it, so a caller that ignores our return value still sees a
-     * zeroed struct rather than a length that outruns its own buffer. */
+    /* Validate first, THEN commit — a request rejected here, at the request
+     * line, leaves `req` as memset left it rather than holding a length that
+     * outruns its own buffer. Later rejections (a bad header, no blank line)
+     * leave the fields parsed so far in place, so the return value is the
+     * only thing a caller may trust. */
     req->method_len = method_len;
     memcpy(req->method, buf, method_len);
     req->path_len = path_len;
@@ -71,8 +75,21 @@ static int parse_request(const uint8_t *buf, int len, Request *req) {
         if (pos + 1 >= len) return 0;
         if (buf[pos] == '\r' && buf[pos + 1] == '\n') {
             pos += 2;
-            int bl = len - pos;
-            if (bl > BODY_CAP) bl = BODY_CAP;
+            /* The body is exactly Content-Length bytes (RFC 9112 §6.3), not
+             * "whatever follows the headers": the rest of the buffer may be
+             * the next pipelined request. No Content-Length means no body. */
+            int cl_len;
+            const uint8_t *cl = header_lookup(req, "content-length", &cl_len);
+            int bl = 0;
+            if (cl != NULL) {
+                if (cl_len == 0) return 0;                   /* 400 */
+                for (int i = 0; i < cl_len; i++) {
+                    if (cl[i] < '0' || cl[i] > '9') return 0; /* 400 */
+                    bl = bl * 10 + (cl[i] - '0');
+                    if (bl > BODY_CAP) return 0;             /* 413 Content Too Large */
+                }
+            }
+            if (bl > len - pos) return 0;                    /* body not fully received */
             req->body_len = bl;
             if (bl > 0) memcpy(req->body, buf + pos, bl);
             return 1;
@@ -121,7 +138,10 @@ int main(void) {
     int hl;
 
     const char *req1 = "GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
-    assert(parse_request((const uint8_t *)req1, 47, &r));
+    // parse_request fills r, so it runs outside assert(): under -DNDEBUG
+    // assert's expression is not evaluated and r would stay unparsed.
+    int ok = parse_request((const uint8_t *)req1, 47, &r);
+    assert(ok);
     assert(r.method_len == 3 && memcmp(r.method, "GET", 3) == 0);
     assert(r.path_len == 11 && memcmp(r.path, "/index.html", 11) == 0);
     assert(r.version_len == 8 && memcmp(r.version, "HTTP/1.1", 8) == 0);
@@ -136,26 +156,44 @@ int main(void) {
     assert(v != NULL);
 
     const char *req3 = "GET / HTTP/1.1\r\nHost: x\r\nUser-Agent: test/1.0\r\nAccept: */*\r\n\r\n";
-    assert(parse_request((const uint8_t *)req3, 62, &r));
+    ok = parse_request((const uint8_t *)req3, 62, &r);
+    assert(ok);
     assert(r.header_count == 3);
     v = header_lookup(&r, "user-agent", &hl);
     assert(v && hl == 8 && memcmp(v, "test/1.0", 8) == 0);
 
     const char *req4 = "POST /api HTTP/1.1\r\nContent-Length: 11\r\n\r\nhello world";
-    assert(parse_request((const uint8_t *)req4, 53, &r));
+    ok = parse_request((const uint8_t *)req4, 53, &r);
+    assert(ok);
     assert(r.method_len == 4 && memcmp(r.method, "POST", 4) == 0);
     assert(r.body_len == 11 && memcmp(r.body, "hello world", 11) == 0);
 
     const char *req5 = "POST /a HTTP/1.1\r\nContent-Length: 13\r\n\r\nline1\r\nline2!";
-    assert(parse_request((const uint8_t *)req5, 53, &r));
+    ok = parse_request((const uint8_t *)req5, 53, &r);
+    assert(ok);
     assert(r.body_len == 13 && memcmp(r.body, "line1\r\nline2!", 13) == 0);
 
     const char *req6 = "GET / HTTP/1.1\r\nHost: x\r\n";
-    assert(!parse_request((const uint8_t *)req6, 25, &r));
+    ok = parse_request((const uint8_t *)req6, 25, &r);
+    assert(!ok);
 
     parse_request((const uint8_t *)req1, 47, &r);
-    assert(header_lookup(&r, "authorization", &hl) == NULL);
+    v = header_lookup(&r, "authorization", &hl);
+    assert(v == NULL);
+    assert(r.body_len == 0);  /* no Content-Length, no body */
 
-    printf("http_and_web_protocols: 24/24 ok\n");
+    /* Content-Length frames the body: trailing bytes are the next request */
+    const char *req7 = "POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET / HTTP/1.1\r\n\r\n";
+    ok = parse_request((const uint8_t *)req7, (int)strlen(req7), &r);
+    assert(ok);
+    assert(r.body_len == 5 && memcmp(r.body, "hello", 5) == 0);
+    const char *req8 = "POST /x HTTP/1.1\r\nContent-Length: 20\r\n\r\nshort";
+    ok = parse_request((const uint8_t *)req8, (int)strlen(req8), &r);
+    assert(!ok);
+    const char *req9 = "POST /x HTTP/1.1\r\nContent-Length: 99999\r\n\r\n";
+    ok = parse_request((const uint8_t *)req9, (int)strlen(req9), &r);
+    assert(!ok);
+
+    printf("http_and_web_protocols: 23/23 ok\n");
     return 0;
 }

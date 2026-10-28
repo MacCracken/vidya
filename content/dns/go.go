@@ -4,7 +4,10 @@
 
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 const (
 	RR_A     = 1
@@ -17,7 +20,29 @@ const (
 	NEGATIVE_TTL    = 300
 )
 
-const NXDOMAIN int64 = -1
+// Negative answers are not all the same (RFC 2308, RFC 8020):
+//
+//	NXDOMAIN — the name does not exist at all, for ANY type
+//	NODATA   — the name exists but has no record of the asked type
+//	SERVFAIL — resolution failed (CNAME loop, chain too deep)
+//
+// Answering NXDOMAIN for an existing name tells an RFC 8020 resolver the
+// whole name is gone, which also denies the records it does have.
+const (
+	NXDOMAIN int64 = -1
+	NODATA   int64 = -2
+	SERVFAIL int64 = -3
+)
+
+// nameExists reports whether the zone has any record at all for name.
+func (r *Resolver) nameExists(name uint64) bool {
+	for _, rec := range r.Zone {
+		if rec.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
 type Record struct {
 	Name  uint64
@@ -62,13 +87,19 @@ func (r *Resolver) ZoneLookup(name uint64, rtype int32) int64 {
 				}
 			}
 			if cn == 0 {
-				return NXDOMAIN
+				break
 			}
 			cur = cn
 			depth++
 		} else {
-			return NXDOMAIN
+			break
 		}
+	}
+	if depth > CNAME_MAX_DEPTH {
+		return SERVFAIL // loop or over-long chain (RFC 1034 §3.6.2: an error)
+	}
+	if r.nameExists(cur) {
+		return NODATA
 	}
 	return NXDOMAIN
 }
@@ -109,19 +140,53 @@ func (r *Resolver) Resolve(name uint64, rtype int32) int64 {
 		return cached
 	}
 	v := r.ZoneLookup(name, rtype)
-	if v == NXDOMAIN {
-		r.CacheInsert(name, rtype, NXDOMAIN, NEGATIVE_TTL)
-		return NXDOMAIN
+	if v < 0 { // NXDOMAIN, NODATA, SERVFAIL: all negatively cached
+		r.CacheInsert(name, rtype, v, NEGATIVE_TTL)
+		return v
 	}
-	var ttl int64 = NEGATIVE_TTL
-	for _, rec := range r.Zone {
-		if rec.Name == name && rec.Type == rtype {
-			ttl = rec.TTL
+	r.CacheInsert(name, rtype, v, r.answerTTL(name, rtype))
+	return v
+}
+
+// answerTTL is how long a positive answer may be cached: the minimum TTL
+// over every record the lookup used (each CNAME link and the final
+// record), because the answer is only valid while all of them are.
+// Looking up only the queried name's own record misses a CNAME-resolved
+// answer and would cache it past the target record's TTL.
+func (r *Resolver) answerTTL(name uint64, rtype int32) int64 {
+	ttl := int64(math.MaxInt64)
+	cur := name
+	for depth := 0; depth <= CNAME_MAX_DEPTH; depth++ {
+		var cname *Record
+		for i := range r.Zone {
+			rec := &r.Zone[i]
+			if rec.Name != cur {
+				continue
+			}
+			if rec.Type == rtype {
+				return min(ttl, rec.TTL)
+			}
+			if rec.Type == RR_CNAME && cname == nil {
+				cname = rec
+			}
+		}
+		if cname == nil || rtype != RR_A {
 			break
 		}
+		ttl = min(ttl, cname.TTL)
+		cur = uint64(cname.Value)
 	}
-	r.CacheInsert(name, rtype, v, ttl)
-	return v
+	return NEGATIVE_TTL // not reached for a name ZoneLookup resolved
+}
+
+// checks counts the assertions this file runs, for the final tally.
+var checks int
+
+func check(cond bool, label string) {
+	checks++
+	if !cond {
+		panic(label)
+	}
 }
 
 func main() {
@@ -140,62 +205,41 @@ func main() {
 	}
 	r.ZoneAdd(37, RR_A, 60, 0x12345678)
 
-	if r.ZoneLookup(1, RR_A) != 0x7F000001 {
-		panic("a1")
-	}
-	if r.ZoneLookup(2, RR_A) != 0x7F000001 {
-		panic("cname")
-	}
-	if r.ZoneLookup(3, RR_A) != 0x08080808 {
-		panic("cname2")
-	}
-	if r.ZoneLookup(10, RR_A) != NXDOMAIN {
-		panic("loop")
-	}
-	if r.ZoneLookup(20, RR_A) != NXDOMAIN {
-		panic("deep")
-	}
+	check(r.ZoneLookup(1, RR_A) == 0x7F000001, "a1")
+	check(r.ZoneLookup(2, RR_A) == 0x7F000001, "cname")
+	check(r.ZoneLookup(3, RR_A) == 0x08080808, "cname2")
+	check(r.ZoneLookup(10, RR_A) == SERVFAIL, "loop")
+	check(r.ZoneLookup(20, RR_A) == SERVFAIL, "deep")
 
 	r.CacheInit()
 	first := r.Resolve(1, RR_A)
-	if r.LastStatus != 0 {
-		panic("first miss")
-	}
+	check(r.LastStatus == 0, "first miss")
 	second := r.Resolve(1, RR_A)
-	if r.LastStatus != 1 {
-		panic("second hit")
-	}
-	if second != first {
-		panic("same")
-	}
+	check(r.LastStatus == 1, "second hit")
+	check(second == first, "same")
 
 	r.AdvanceTime(301)
 	third := r.Resolve(1, RR_A)
-	if r.LastStatus != 0 {
-		panic("expired")
-	}
-	if third != 0x7F000001 {
-		panic("requery")
-	}
+	check(r.LastStatus == 0, "expired")
+	check(third == 0x7F000001, "requery")
+
+	// A CNAME-resolved answer expires with the shortest TTL on the chain:
+	// 3 -CNAME(600)-> 4 -A(60)-> so the cached answer is gone after 61s.
+	r.CacheInit()
+	r.Resolve(3, RR_A)
+	r.AdvanceTime(61)
+	check(r.Resolve(3, RR_A) == 0x08080808 && r.LastStatus == 0, "cname chain cached past the A record's TTL")
 
 	r.CacheInit()
-	if r.Resolve(99, RR_A) != NXDOMAIN {
-		panic("nxdomain")
-	}
+	check(r.Resolve(99, RR_A) == NXDOMAIN, "nxdomain")
 	r.Resolve(99, RR_A)
-	if r.LastStatus != 1 {
-		panic("neg cache")
-	}
+	check(r.LastStatus == 1, "neg cache")
 
-	if r.ZoneLookup(1, RR_MX) != 10 {
-		panic("mx")
-	}
-	if r.ZoneLookup(1, RR_TXT) != 99 {
-		panic("txt")
-	}
-	if r.ZoneLookup(1, RR_AAAA) != NXDOMAIN {
-		panic("aaaa")
-	}
+	check(r.ZoneLookup(1, RR_MX) == 10, "mx")
+	check(r.ZoneLookup(1, RR_TXT) == 99, "txt")
+	check(r.ZoneLookup(1, RR_AAAA) == NODATA, "aaaa: name 1 exists, so a missing type is NODATA, not NXDOMAIN")
 
-	fmt.Println("dns: 15/15 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("dns: %d/%d ok\n", checks, checks)
 }

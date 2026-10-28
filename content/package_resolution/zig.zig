@@ -7,9 +7,12 @@
 //
 // A semver major.minor.patch is encoded as one i64
 //   enc = major*1_000_000 + minor*1_000 + patch
-// so version comparison IS integer comparison. A constraint is a
-// half-open range [lo, hi). A caret ^X.Y.Z allows everything from
-// X.Y.Z up to (but not including) the next major: [X.Y.Z, (X+1).0.0).
+// so version comparison IS integer comparison (while minor and patch
+// stay below 1000). A constraint is a half-open range [lo, hi). A caret
+// ^X.Y.Z (X >= 1) allows everything from X.Y.Z up to (but not including)
+// the next major: [X.Y.Z, (X+1).0.0). Below 1.0 the leftmost non-zero
+// field is the breaking one, as in npm and cargo: ^0.2.3 = [0.2.3, 0.3.0)
+// and ^0.0.3 = [0.0.3, 0.0.4).
 // Resolving a shared ("diamond") dependency means intersecting the
 // ranges every requirer imposes and picking the highest version that
 // survives — and backtracking on an earlier choice when the highest
@@ -32,12 +35,18 @@ fn svMajor(v: i64) i64 {
     return @divTrunc(v, VMAJ);
 }
 
-// --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0) ---
+// --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0) for X >= 1 ---
 fn caretLo(v: i64) i64 {
     return v;
 }
 fn caretHi(v: i64) i64 {
-    return (svMajor(v) + 1) * VMAJ;
+    const maj = svMajor(v);
+    const min = @divTrunc(@mod(v, VMAJ), VMIN);
+    // The plain "next major" rule on 0.x would let ^0.2.3 upgrade to
+    // 0.9.0 across breaking changes: bump the leftmost non-zero field.
+    if (maj > 0) return (maj + 1) * VMAJ;
+    if (min > 0) return (min + 1) * VMIN;
+    return v + 1; // ^0.0.z pins the exact patch
 }
 
 // --- Constraint satisfaction over a half-open range ---
@@ -166,6 +175,10 @@ pub fn main() !void {
     assert(satisfies(sv(1, 4, 0), caretLo(sv(1, 2, 0)), caretHi(sv(1, 2, 0))));
     assert(!satisfies(sv(2, 0, 0), caretLo(sv(1, 2, 0)), caretHi(sv(1, 2, 0))));
     assert(!satisfies(sv(1, 1, 0), caretLo(sv(1, 2, 0)), caretHi(sv(1, 2, 0))));
+    // 0.x: the minor is the breaking axis
+    assert(caretHi(sv(0, 2, 3)) == sv(0, 3, 0));
+    assert(!satisfies(sv(0, 9, 0), caretLo(sv(0, 2, 3)), caretHi(sv(0, 2, 3))));
+    assert(caretHi(sv(0, 0, 3)) == sv(0, 0, 4));
 
     // --- intersect ---
     assert(rangeLoMax(sv(1, 0, 0), sv(1, 3, 0)) == sv(1, 3, 0));

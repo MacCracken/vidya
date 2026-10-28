@@ -194,8 +194,8 @@ fn main() {
     // Different categories produce different packed values
     assert_ne!(pack_error(CAT_IO, 1), pack_error(CAT_PARSE, 1));
 
-    // Same category + same code = same packed value (deterministic)
-    assert_eq!(pack_error(CAT_IO, 99), pack_error(CAT_IO, 99));
+    // Packing is lossless both ways: the code never bleeds into the category
+    assert_eq!(pack_error(CAT_IO, 99), (1u64 << 32) | 99);
 
     // Max code fits in 32 bits
     let max_err = pack_error(0xFFFF_FFFF, 0xFFFF_FFFF);

@@ -48,8 +48,11 @@ function topkFilter(logits: number[], k: number): number {
         marks[bestIdx] = true;
         picked++;
     }
+    // Mask with -Infinity, not 0: logits are unnormalized log-probabilities,
+    // so 0 can outrank a kept negative logit and still gets exp(0) = 1 of
+    // softmax mass. exp(-Infinity) = 0 removes the token entirely.
     for (let m = 0; m < logits.length; m++) {
-        if (!marks[m]) logits[m] = 0;
+        if (!marks[m]) logits[m] = -Infinity;
     }
     return picked;
 }
@@ -91,8 +94,13 @@ check(argmaxLogits([-100, -50, -200]) === 1, "argmax over negatives");
     check(topkFilter(l, 3) === 3, "topk picked 3");
     check(l[6] === 60 && l[1] === 50 && l[4] === 40, "top 3 kept");
     for (const i of [0, 2, 3, 5, 7]) {
-        check(l[i] === 0, `idx ${i} zeroed`);
+        check(l[i] === -Infinity, `idx ${i} masked`);
     }
+}
+{
+    const l = [-100, -50, -200];
+    topkFilter(l, 1);
+    check(argmaxLogits(l) === 1, "masked tokens cannot outrank a kept negative logit");
 }
 {
     const l = [1, 2, 3];

@@ -52,7 +52,8 @@ def encode(src):
 
 
 def decode(tok, out_cap):
-    """Returns bytes on success, None on bomb-guard trigger."""
+    """Returns bytes on success, None on bomb-guard trigger or a corrupt
+    back-reference (offset past the start of the output)."""
     out = bytearray()
     i = 0
     while i + 1 < len(tok):
@@ -67,6 +68,11 @@ def decode(tok, out_cap):
             offset = b0
             length = b1
             if len(out) + length > out_cap:
+                return None
+            # Untrusted input: an offset reaching before out[0] must be
+            # rejected. Python would otherwise index from the END
+            # (out[-2]) and silently emit garbage; C would read out of bounds.
+            if offset > len(out):
                 return None
             for k in range(length):
                 out.append(out[len(out) - offset])
@@ -86,7 +92,7 @@ def main():
     t2 = encode(s2)
     d2 = decode(t2, 512)
     assert d2 == s2, "AAAAAAAA roundtrip"
-    assert len(t2) < len(s2) + 4, "AAAAAAAA actually compresses"
+    assert len(t2) < len(s2), "AAAAAAAA actually compresses"
 
     # 3. Mostly literals
     s3 = b"Hello, World!"
@@ -97,6 +103,9 @@ def main():
     # 4. Bomb guard
     bomb = bytes([1, 200])
     assert decode(bomb, 10) is None, "bomb guard rejects oversize"
+    # Corrupt back-reference: offset 5 with only 3 bytes of output so far
+    assert decode(bytes([0, 65, 0, 66, 0, 67, 5, 2]), 512) is None, \
+        "offset before start of output is rejected"
 
     # 5. Empty input
     t5 = encode(b"")
@@ -104,7 +113,7 @@ def main():
     d5 = decode(b"", 512)
     assert d5 == b"", "empty tokens → zero output"
 
-    print("compression: 11/11 ok")
+    print("compression: 9/9 ok")
 
 
 main()

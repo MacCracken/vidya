@@ -112,28 +112,30 @@ _start:
     adr     x0, vtable_rect
     str     x0, [sp, #24]
 
-    // Sum areas: iterate over trait objects
-    mov     w4, #0                  // total = 0
-    mov     w5, #0                  // i = 0
+    // Sum areas: iterate over trait objects. The loop state lives in
+    // callee-saved w19/w20: the caller cannot know which implementation
+    // blr reaches, so it may assume only what AAPCS64 guarantees.
+    mov     w19, #0                 // total = 0
+    mov     w20, #0                 // i = 0
 .Lpoly_loop:
-    cmp     w5, #2
+    cmp     w20, #2
     b.ge    .Lpoly_done
 
     // Load trait object[i]
-    lsl     w6, w5, #4             // i * 16 (size of pair)
+    lsl     w6, w20, #4            // i * 16 (size of pair)
     add     x7, sp, x6
     ldr     x0, [x7, #0]          // data_ptr
     ldr     x1, [x7, #8]          // vtable_ptr
     ldr     x2, [x1, #0]          // slot 0 = area
     blr     x2                      // call area()
-    add     w4, w4, w0             // total += area
+    add     w19, w19, w0           // total += area
 
-    add     w5, w5, #1
+    add     w20, w20, #1
     b       .Lpoly_loop
 
 .Lpoly_done:
     add     sp, sp, #32
-    cmp     w4, #49                 // 25 + 24 = 49
+    cmp     w19, #49                // 25 + 24 = 49
     b.ne    fail
 
     // ── Test 8: vtable slot validation ──────────────────────────────
@@ -156,13 +158,13 @@ _start:
     adr     x1, vtable_square
     mov     w2, #1                  // slot 1 = perimeter
     bl      trait_call
-    mov     w4, w0                  // save square perimeter
+    mov     w19, w0                 // save square perimeter (callee-saved)
 
     adr     x0, rect_data
     adr     x1, vtable_rect
     mov     w2, #1
     bl      trait_call
-    cmp     w0, w4                  // both are 20
+    cmp     w0, w19                 // both are 20
     b.ne    fail
 
     // ── Print success ────────────────────────────────────────────────

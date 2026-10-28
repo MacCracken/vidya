@@ -9,7 +9,9 @@
 //   enc = major*1_000_000 + minor*1_000 + patch
 // so version comparison IS integer comparison. A constraint is a
 // half-open range [lo, hi). A caret ^X.Y.Z allows everything from
-// X.Y.Z up to (but not including) the next major: [X.Y.Z, (X+1).0.0).
+// X.Y.Z up to (but not including) a bump of its leftmost NON-ZERO
+// component (Cargo and npm rules): ^1.2.3 = [1.2.3, 2.0.0), but
+// ^0.2.3 = [0.2.3, 0.3.0) and ^0.0.3 = [0.0.3, 0.0.4).
 
 const VMAJ: i64 = 1_000_000;
 const VMIN: i64 = 1_000;
@@ -18,9 +20,14 @@ const VMIN: i64 = 1_000;
 fn sv(maj: i64, min: i64, pat: i64) -> i64 { maj * VMAJ + min * VMIN + pat }
 fn sv_major(v: i64) -> i64 { v / VMAJ }
 
-// --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0) ---
+// --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, bump of leftmost non-zero) ---
 fn caret_lo(v: i64) -> i64 { v }
-fn caret_hi(v: i64) -> i64 { (sv_major(v) + 1) * VMAJ }
+fn caret_hi(v: i64) -> i64 {
+    let (maj, min, pat) = (sv_major(v), (v / VMIN) % 1_000, v % 1_000);
+    if maj > 0 { sv(maj + 1, 0, 0) }      // ^1.2.3 → <2.0.0
+    else if min > 0 { sv(0, min + 1, 0) } // ^0.2.3 → <0.3.0 (0.x minors may break)
+    else { sv(0, 0, pat + 1) }            // ^0.0.3 → <0.0.4
+}
 
 // --- Constraint satisfaction over a half-open range ---
 fn satisfies(v: i64, lo: i64, hi: i64) -> bool { lo <= v && v < hi }
@@ -123,6 +130,9 @@ fn main() {
     // --- caret ---
     assert_eq!(caret_lo(sv(1, 2, 0)), sv(1, 2, 0), "caret lower = base");
     assert_eq!(caret_hi(sv(1, 2, 0)), sv(2, 0, 0), "caret upper = next major");
+    assert_eq!(caret_hi(sv(0, 2, 3)), sv(0, 3, 0), "^0.2.3 upper = 0.3.0, not 1.0.0");
+    assert_eq!(caret_hi(sv(0, 0, 3)), sv(0, 0, 4), "^0.0.3 upper = 0.0.4");
+    assert!(!satisfies(sv(0, 9, 0), caret_lo(sv(0, 2, 3)), caret_hi(sv(0, 2, 3))), "0.9.0 not in ^0.2.3");
     assert!(satisfies(sv(1, 4, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))), "1.4.0 in ^1.2.0");
     assert!(!satisfies(sv(2, 0, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))), "2.0.0 not in ^1.2.0");
     assert!(!satisfies(sv(1, 1, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))), "1.1.0 below ^1.2.0");

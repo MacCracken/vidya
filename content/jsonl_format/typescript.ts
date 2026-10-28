@@ -31,6 +31,12 @@ function buildIndex(buf: number[]): LineIndex {
 }
 
 // Returns escaped bytes, or null on bounds-check failure.
+// RFC 8259 §7: quote, backslash AND every control byte U+0000-U+001F
+// MUST be escaped. This minimal encoder has short forms for \n \t \r
+// only and no \uXXXX form, so it refuses the other control bytes rather
+// than emit invalid JSON. (In real TypeScript, JSON.stringify(str) is the
+// complete escaper.) Each accepted byte expands to at most 2, so the
+// 2x bound below is exact.
 function jsonEscape(src: number[], dstCap: number): number[] | null {
   if (src.length * 2 > dstCap) return null;
   const out: number[] = [];
@@ -40,6 +46,7 @@ function jsonEscape(src: number[], dstCap: number): number[] | null {
     else if (c === 0x0A) { out.push(0x5C, 0x6E); }
     else if (c === 0x09) { out.push(0x5C, 0x74); }
     else if (c === 0x0D) { out.push(0x5C, 0x72); }
+    else if (c < 0x20) { return null; }      // would need \u00XX
     else { out.push(c); }
   }
   return out;
@@ -97,6 +104,12 @@ function main(): void {
               0x09, 0x0A, 0x0D, 0x5C];
   const esc = jsonEscape(s3, 256);
   if (esc === null || esc.length !== 18) throw new Error("escape produces 18");
+  // Same bytes as the platform's complete encoder for this input
+  const viaJson = strBytes(JSON.stringify(Buffer.from(s3).toString("latin1")).slice(1, -1));
+  eqBytes(esc, viaJson, "matches JSON.stringify");
+
+  // Test 3b: other control bytes (here \b, 0x01) are refused, never copied raw
+  if (jsonEscape([0x61, 0x08, 0x01, 0x62], 256) !== null) throw new Error("raw control byte refused");
 
   // Test 4: bounds check
   const s4 = [0x22, 0x22, 0x22, 0x22];
@@ -107,7 +120,7 @@ function main(): void {
   if (un.length !== 12) throw new Error("unescape recovers 12");
   eqBytes(un, s3, "round-trip bytes");
 
-  console.log("jsonl_format: 8/8 ok");
+  console.log("jsonl_format: 10/10 ok");
 }
 
 main();

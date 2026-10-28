@@ -22,7 +22,7 @@ import struct
 #   Bits 32-39:  Base (mid 8 bits)
 #   Bits 40-47:  Access byte
 #   Bits 48-51:  Limit (high 4 bits)
-#   Bits 52-55:  Flags (G, DB, L, reserved)
+#   Bits 52-55:  Flags (bit 55 G, 54 DB, 53 L, 52 AVL — free for OS use)
 #   Bits 56-63:  Base (high 8 bits)
 #
 # In long mode, base and limit are ignored (flat model), but the
@@ -35,7 +35,7 @@ class GdtEntry:
         self.base = base        # 32-bit base address
         self.limit = limit      # 20-bit segment limit
         self.access = access    # 8-bit access byte
-        self.flags = flags      # 4-bit flags (G, DB, L, reserved)
+        self.flags = flags      # 4-bit flags (G, DB, L, AVL)
 
     def pack(self):
         """Pack into 8 bytes matching hardware layout."""

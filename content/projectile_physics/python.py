@@ -108,8 +108,13 @@ def test_semi_implicit_stability() -> None:
         if b.y < min_y:
             min_y = b.y
 
+    # This bound holds for explicit Euler too (checked): with restitution
+    # 0.7 every bounce removes energy, so no integrator blows up here. The
+    # explicit-vs-semi-implicit difference shows in oscillators (springs,
+    # orbits); what pins the semi-implicit ORDER here is test_gravity
+    # (explicit Euler would leave y == 0 after the first step).
     max_rise = 1000 * 65536
-    assert min_y > start_y - max_rise, "semi-implicit euler does not explode"
+    assert min_y > start_y - max_rise, "bouncing with restitution stays bounded"
 
 
 def main() -> None:

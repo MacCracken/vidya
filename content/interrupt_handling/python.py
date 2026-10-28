@@ -33,7 +33,7 @@ class IdtEntry:
       - IST index (which stack to switch to, 0 = no switch)
       - Gate type (interrupt gate vs trap gate)
       - DPL (who can trigger via INT instruction: 0=kernel, 3=user)
-      - Present bit (must be set or #GP on dispatch)
+      - Present bit (must be set, or vectoring through it raises #NP)
     """
     handler_addr: int = 0
     selector: int = 0
@@ -90,7 +90,8 @@ class Idt:
 class InterruptFrame:
     """What the CPU pushes onto the stack when an interrupt fires.
 
-    The CPU pushes these in order (top of stack = RIP):
+    The CPU pushes these in order (top of stack = error code if the
+    exception has one, otherwise RIP):
       SS, RSP, RFLAGS, CS, RIP [, error_code]
     """
     rip: int
@@ -122,7 +123,8 @@ class ExceptionInfo:
     exc_type: ExceptionType
 
 
-# All 18 architected x86_64 exceptions (vector 0-19, skipping reserved 9 and 15)
+# The 18 classic x86_64 exceptions (vectors 0-19; 9 and 15 reserved). Newer
+# CPUs also define #VE (20, virtualization) and #CP (21, CET control protection).
 EXCEPTIONS: list[ExceptionInfo] = [
     ExceptionInfo(0,  "Divide Error (#DE)",          False, ExceptionType.FAULT),
     ExceptionInfo(1,  "Debug (#DB)",                 False, ExceptionType.FAULT_TRAP),
@@ -248,9 +250,15 @@ def simulate_interrupt(idt: Idt, vector: int, frame: InterruptFrame,
         print(f"    Handler: 0x{entry.handler_addr:016X} sel=0x{entry.selector:04X} ist={entry.ist}")
         if entry.ist > 0:
             print(f"    Stack switch: IST[{entry.ist}]")
-        print(f"    Action: save registers -> call handler -> send EOI -> IRETQ")
+        if vector >= 32:
+            print(f"    Action: save registers -> call handler -> send EOI -> IRETQ")
+        else:
+            # CPU exceptions are not PIC/APIC interrupts: there is no EOI
+            print(f"    Action: save registers -> call handler -> IRETQ")
     else:
-        print(f"    ERROR: no handler registered! Would cause #DF (double fault)")
+        # A not-present gate raises #NP; only if delivering THAT fails too
+        # does the CPU escalate to #DF (and then a triple fault / reset).
+        print(f"    ERROR: no handler registered! CPU raises #NP (gate not present)")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
@@ -326,9 +334,12 @@ def main() -> None:
     # ── 4. Simulate interrupts ────────────────────────────────────────
     print(f"\n4. Simulating interrupt dispatch:")
 
+    # Linux x86-64 user selectors: CS = 0x33 (GDT entry 6, RPL 3), SS = 0x2B
+    # (entry 5). SYSRET loads SS from STAR+8 and CS from STAR+16, so user
+    # data must sit just BELOW user code; a live process reads CS=0x33 SS=0x2B.
     user_frame = InterruptFrame(
-        rip=0x0000_0000_0040_1234, cs=0x2B, rflags=0x202,
-        rsp=0x0000_7FFF_FFFF_F000, ss=0x33,
+        rip=0x0000_0000_0040_1234, cs=0x33, rflags=0x202,
+        rsp=0x0000_7FFF_FFFF_F000, ss=0x2B,
     )
 
     # Page fault: user-mode write to unmapped page
@@ -350,17 +361,20 @@ def main() -> None:
     # ── 5. Page fault error code examples ─────────────────────────────
     print(f"\n5. Page fault error code decoding:")
     pf_codes = [
-        (0x0, "kernel read, page not present"),
-        (0x2, "kernel write, page not present"),
-        (0x4, "user read, page not present"),
-        (0x5, "user read, protection violation"),
-        (0x6, "user write, page not present"),
-        (0x7, "user write, protection violation"),
-        (0x14, "user instruction fetch (NX)"),
+        (0x0, "page not present, read access, kernel mode"),
+        (0x2, "page not present, write access, kernel mode"),
+        (0x4, "page not present, read access, user mode"),
+        (0x5, "protection violation, read access, user mode"),
+        (0x6, "page not present, write access, user mode"),
+        (0x7, "protection violation, write access, user mode"),
+        # NX violation: the page IS present (bit 0) and the access was an
+        # instruction fetch (bit 4). 0x14 would be a fetch from a missing page.
+        (0x15, "protection violation, read access, user mode, instruction fetch"),
     ]
     for code, expected_desc in pf_codes:
         decoded = decode_page_fault_error(code)
         print(f"   0x{code:02X} -> {decoded}")
+        assert decoded == expected_desc, f"0x{code:X}: {decoded!r}"
 
     # Verify decoding
     assert "page not present" in decode_page_fault_error(0x0)

@@ -18,10 +18,11 @@ def main():
     # ── Reference counting: Python's primary memory strategy ───────
     # Every object has a reference count. When it drops to zero, the
     # object is immediately deallocated. sys.getrefcount() shows it
-    # (adds 1 for the function argument itself).
+    # (before 3.14 it added 1 for its own argument; since 3.14 the
+    # argument is usually a borrowed reference, so this reads 1 here).
 
     a = [1, 2, 3]
-    base = sys.getrefcount(a)  # typically 2: 'a' + getrefcount arg
+    base = sys.getrefcount(a)  # 1 on 3.14+ ('a' only); 2 on older Pythons
     b = a                       # alias — refcount increases
     assert sys.getrefcount(a) == base + 1
     del b                       # refcount decreases
@@ -121,12 +122,16 @@ def main():
     except RuntimeError as e:
         assert "use after move" in str(e)
 
-    # ── Borrowing simulation: read-only views ──────────────────────
-    # memoryview provides a read-only view (shared borrow) without copy.
-    # The underlying buffer must stay alive while the view exists.
+    # ── Borrowing simulation: zero-copy views ──────────────────────
+    # memoryview is a view without a copy. It is NOT read-only: over a
+    # bytearray it is writable (view.readonly is False). What it does
+    # enforce, at runtime, is the core borrow rule: while a view exists the
+    # buffer cannot be RESIZED, because that could move the bytes out
+    # from under the view.
 
     data = bytearray(b"hello world")
-    view = memoryview(data)  # shared borrow — no copy
+    view = memoryview(data)  # borrow — no copy
+    assert not view.readonly
 
     assert bytes(view[0:5]) == b"hello"
 
@@ -134,7 +139,14 @@ def main():
     data[0:5] = b"HELLO"
     assert bytes(view[0:5]) == b"HELLO"
 
+    try:
+        data.append(33)      # resize while borrowed
+        assert False, "should have raised"
+    except BufferError:
+        pass                 # "Existing exports of data: object cannot be re-sized"
+
     view.release()  # explicit "end borrow"
+    data.append(33)          # now resizing is allowed again
 
     # ── Resource cleanup: RAII equivalent ──────────────────────────
     # Python has no destructors that run at scope exit (like Rust's Drop).
@@ -227,9 +239,10 @@ def main():
     assert seen_good == [1, 2, 3, 4, 5]
     assert items == [2, 4]
 
-    # Dicts are stricter than lists: CPython stamps a version on the
-    # dict and the iterator checks it, raising instead of silently
-    # skipping. The trap: the check runs on the NEXT step, so a `break`
+    # Dicts are stricter than lists: the iterator remembers the dict's
+    # SIZE and checks it, raising instead of silently skipping. (Only the
+    # size: deleting one key and adding another mid-loop goes unnoticed.)
+    # The trap: the check runs on the NEXT step, so a `break`
     # immediately after the mutation exits before it ever fires and the
     # except handler becomes dead code that proves nothing.
     d = {"a": 1, "b": 2}

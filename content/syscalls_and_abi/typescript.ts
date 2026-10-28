@@ -39,7 +39,7 @@ const LINUX_X86_64_SYSCALLS: SyscallDef[] = [
     { number: 11,  name: "munmap",   args: ["addr", "len"],                   returnType: "int" },
     { number: 12,  name: "brk",      args: ["addr"],                          returnType: "void*" },
     { number: 39,  name: "getpid",   args: [],                                returnType: "pid_t" },
-    { number: 56,  name: "clone",    args: ["flags", "stack", "ptid", "ctid", "regs"], returnType: "pid_t" },
+    { number: 56,  name: "clone",    args: ["flags", "stack", "ptid", "ctid", "tls"], returnType: "pid_t" },
     { number: 57,  name: "fork",     args: [],                                returnType: "pid_t" },
     { number: 59,  name: "execve",   args: ["filename", "argv", "envp"],      returnType: "int" },
     { number: 60,  name: "exit",     args: ["status"],                        returnType: "void" },
@@ -287,37 +287,43 @@ function testNodeProcessBindings(): void {
 // Understanding this is essential for writing compilers and debuggers.
 
 interface CallFrame {
-    returnAddr: bigint;     // pushed by CALL instruction
-    savedRbp: bigint;       // pushed by function prologue
-    locals: bigint[];       // local variables on the stack
+    stack: Map<bigint, bigint>; // simulated memory: address -> 8-byte value
+    returnAddrSlot: bigint;     // where CALL stored the return address
+    savedRbpSlot: bigint;       // where the prologue stored the caller's RBP
+    rbp: bigint;                // callee's frame pointer after `mov rbp, rsp`
+    rsp: bigint;                // after `sub rsp, 8 * nLocals`
 }
 
-function simulateCall(caller: string, callee: string): CallFrame {
-    // Simulates what happens at a function call:
-    // 1. Caller pushes arguments beyond 6 onto the stack (right to left)
-    // 2. CALL instruction pushes return address
-    // 3. Callee pushes RBP (frame pointer)
-    // 4. Callee sets RBP = RSP
-    // 5. Callee allocates locals by subtracting from RSP
-    return {
-        returnAddr: 0x40_1234n,  // where to return in caller
-        savedRbp: 0x7FFF_F000n,  // caller's frame pointer
-        locals: [0n, 0n, 0n],    // 3 local variables
+function simulateCall(callerRsp: bigint, callerRbp: bigint,
+                      returnAddr: bigint, nLocals: number): CallFrame {
+    // Simulates what happens at a function call (no stack arguments here;
+    // a caller with more than 6 would push them, right to left, first):
+    const stack = new Map<bigint, bigint>();
+    let rsp = callerRsp;
+    const push = (value: bigint): bigint => {
+        rsp -= 8n;              // the stack grows DOWN: decrement, then store
+        stack.set(rsp, value);
+        return rsp;
     };
+    const returnAddrSlot = push(returnAddr); // 1. CALL pushes the return address
+    const savedRbpSlot = push(callerRbp);    // 2. callee: push rbp
+    const rbp = rsp;                         // 3. callee: mov rbp, rsp
+    rsp -= 8n * BigInt(nLocals);             // 4. callee: sub rsp, N for locals
+    return { stack, returnAddrSlot, savedRbpSlot, rbp, rsp };
 }
 
 function testCallingConvention(): void {
-    const frame = simulateCall("main", "compute");
+    const callerRbp = 0x7FFF_F100n;
+    const frame = simulateCall(0x7FFF_F000n, callerRbp, 0x40_1234n, 3);
 
-    // Return address is set by CALL instruction
-    assert(frame.returnAddr > 0n, "return address set");
+    // [rbp] holds the caller's RBP — the chain a debugger walks for backtraces
+    assert(frame.stack.get(frame.rbp) === callerRbp, "[rbp] = caller's rbp");
+    // [rbp + 8] holds the return address
+    assert(frame.stack.get(frame.rbp + 8n) === 0x40_1234n, "[rbp+8] = return address");
 
-    // Saved RBP links to caller's frame (forms a chain for backtraces)
-    assert(frame.savedRbp > 0n, "saved rbp links to caller");
-
-    // Stack grows downward on x86_64
-    // Higher addresses are "earlier" in the call chain
-    assert(frame.savedRbp > frame.returnAddr, "stack grows down");
+    // Stack grows downward: the later push sits at the LOWER address
+    assert(frame.returnAddrSlot > frame.savedRbpSlot, "stack grows down");
+    assert(frame.rbp - frame.rsp === 24n, "3 locals = 24 bytes below rbp");
 }
 
 // ── Stack Frame Layout ──────────────────────────────────────────────

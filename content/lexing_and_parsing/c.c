@@ -12,6 +12,7 @@
 
 #include <assert.h>
 #include <ctype.h>
+#include <stdckdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,7 +89,13 @@ static Token lexer_next(Lexer *lex) {
     if (isdigit((unsigned char)c)) {
         long val = c - '0';
         while (isdigit((unsigned char)lexer_peek(lex))) {
-            val = val * 10 + (lexer_advance(lex) - '0');
+            // C23 checked arithmetic: an over-long literal is an error, not
+            // signed overflow (undefined behavior) that silently wraps.
+            if (ckd_mul(&val, val, 10) ||
+                ckd_add(&val, val, lexer_advance(lex) - '0')) {
+                fprintf(stderr, "number too large at position %d\n", tok.pos);
+                exit(1);
+            }
         }
         tok.kind = TOK_NUMBER;
         tok.number_value = val;
@@ -276,7 +283,9 @@ static long eval(const Expr *e) {
                 case '+': return l + r;
                 case '-': return l - r;
                 case '*': return l * r;
-                case '/': return l / r;
+                case '/':
+                    if (r == 0) { fprintf(stderr, "division by zero\n"); exit(1); }
+                    return l / r;
                 default:  return 0;
             }
         }
@@ -309,6 +318,9 @@ int main(void) {
         Parser p;
         parser_init(&p, tests[i].input);
         Expr *ast = parse_expr(&p, 0);
+        // The whole input must be consumed: without this, "2 3" parses as 2
+        // and "1 + 2)" as 3, silently dropping the trailing tokens.
+        parser_expect(&p, TOK_EOF);
         long result = eval(ast);
 
         printf("%-25s => %4ld  (expected %4ld) %s\n",

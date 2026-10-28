@@ -37,9 +37,15 @@ function readPort(configText: string): number {
     for (const line of configText.split("\n")) {
         if (line.startsWith("port=")) {
             const value = line.slice(5).trim();
-            const port = parseInt(value, 10);
-            if (isNaN(port)) {
+            // NOT parseInt + isNaN: parseInt stops at the first non-digit, so
+            // "3000abc" -> 3000, "8.5" -> 8, "0x50" -> 0 all pass. Check the
+            // whole string, then the range.
+            if (!/^\d+$/.test(value)) {
                 throw new ParseError("port", value, "not a number");
+            }
+            const port = Number(value);
+            if (port > 65535) {
+                throw new ParseError("port", value, "out of range 0-65535");
             }
             return port;
         }
@@ -114,6 +120,13 @@ function main(): void {
         assert((e as ParseError).value === "abc", "error value");
     }
 
+    // Trailing garbage is a parse error, not a silent truncation
+    for (const text of ["port=3000abc\n", "port=8.5\n", "port=99999\n"]) {
+        let rejected = false;
+        try { readPort(text); } catch (e) { rejected = e instanceof ParseError; }
+        assert(rejected, `rejects ${JSON.stringify(text)}`);
+    }
+
     // ── finally: always runs ───────────────────────────────────────
     let cleanupRan = false;
     try {
@@ -169,13 +182,16 @@ function main(): void {
         return e instanceof AppError;
     }
 
+    let guarded = false;
     try {
         readPort("bad");
     } catch (e) {
         if (isAppError(e)) {
             assert(e.name === "MissingKeyError", "type guard");
+            guarded = true; // e narrowed to AppError: .name needs no cast
         }
     }
+    assert(guarded, "type guard narrowed the thrown error");
 
     console.log("All error handling examples passed.");
 }

@@ -7,11 +7,15 @@
 // return value, and assume all input is hostile.
 
 #include <assert.h>
+#include <errno.h>
 #include <limits.h>
+#include <stdckdint.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // ── Constant-time comparison ──────────────────────────────────────────
 // Prevents timing side-channel attacks on secret comparison.
@@ -39,12 +43,12 @@ static void test_constant_time_comparison(void) {
 
 // ── Secure memory zeroing ─────────────────────────────────────────────
 // Plain memset can be optimized away if the buffer is never read again.
-// explicit_bzero (POSIX) or volatile writes survive optimization.
+// C23 standardizes the fix: memset_explicit (<string.h>, C23 7.26.6.2)
+// is never elided. Before C23 the options were non-standard —
+// explicit_bzero (BSD/glibc extension, not POSIX), memset_s (optional
+// Annex K, absent from glibc) or a volatile-pointer loop.
 static void secure_zero(void *buf, size_t len) {
-    volatile unsigned char *p = (volatile unsigned char *)buf;
-    for (size_t i = 0; i < len; i++) {
-        p[i] = 0;
-    }
+    memset_explicit(buf, 0, len);
 }
 
 static void test_secure_zeroing(void) {
@@ -71,18 +75,24 @@ static int safe_copy(char *dst, size_t dst_size, const char *src) {
 static void test_buffer_overflow_prevention(void) {
     char buf[8];
 
+    // The copy runs outside assert(): under -DNDEBUG assert's expression
+    // is not evaluated, so assert(safe_copy(...) == 0) would never copy.
     // Safe: fits within buffer
-    assert(safe_copy(buf, sizeof(buf), "hello") == 0);
+    int rc = safe_copy(buf, sizeof(buf), "hello");
+    assert(rc == 0);
     assert(strcmp(buf, "hello") == 0);
 
     // Rejected: would overflow
-    assert(safe_copy(buf, sizeof(buf), "this is way too long") == -1);
+    rc = safe_copy(buf, sizeof(buf), "this is way too long");
+    assert(rc == -1);
 
     // Edge case: exactly fills buffer
-    assert(safe_copy(buf, sizeof(buf), "1234567") == 0);  // 7 chars + \0 = 8
+    rc = safe_copy(buf, sizeof(buf), "1234567");   // 7 chars + \0 = 8
+    assert(rc == 0);
 
     // Edge case: one too many
-    assert(safe_copy(buf, sizeof(buf), "12345678") == -1); // 8 chars + \0 = 9 > 8
+    rc = safe_copy(buf, sizeof(buf), "12345678");  // 8 chars + \0 = 9 > 8
+    assert(rc == -1);
 }
 
 // ── Format string safety ─────────────────────────────────────────────
@@ -101,6 +111,10 @@ static void test_format_string_safety(void) {
 }
 
 // ── Integer overflow checks ───────────────────────────────────────────
+// The hand-written pre-checks below are portable to any C version. C23's
+// <stdckdint.h> gives the same check as a language facility:
+// ckd_add/ckd_sub/ckd_mul(&result, a, b) return true on overflow and work
+// for any integer type, so there is no per-type helper to get wrong.
 static int safe_add_u32(uint32_t a, uint32_t b, uint32_t *result) {
     if (a > UINT32_MAX - b) {
         return -1;  // would overflow
@@ -120,16 +134,35 @@ static int safe_mul_u32(uint32_t a, uint32_t b, uint32_t *result) {
 static void test_integer_overflow(void) {
     uint32_t result;
 
-    assert(safe_add_u32(100, 200, &result) == 0);
+    // Each checked operation writes *result, so it runs outside assert():
+    // under -DNDEBUG assert's expression is not evaluated and result is
+    // never set.
+    int rc = safe_add_u32(100, 200, &result);
+    assert(rc == 0);
     assert(result == 300);
-    assert(safe_add_u32(UINT32_MAX, 1, &result) == -1);
+    rc = safe_add_u32(UINT32_MAX, 1, &result);
+    assert(rc == -1);
 
-    assert(safe_mul_u32(1000, 1000, &result) == 0);
+    rc = safe_mul_u32(1000, 1000, &result);
+    assert(rc == 0);
     assert(result == 1000000);
-    assert(safe_mul_u32(65536, 65536, &result) == -1);  // overflow
+    rc = safe_mul_u32(65536, 65536, &result);  // overflow
+    assert(rc == -1);
 
-    // Buffer allocation: width * height * bytes_per_pixel
-    assert(safe_mul_u32(65536, 65536, &result) == -1);
+    // Buffer allocation: width * height * bytes_per_pixel — check EVERY
+    // multiply. 40000 * 40000 fits in u32; * 4 bytes per pixel does not.
+    uint32_t pixels;
+    rc = safe_mul_u32(40000, 40000, &pixels);
+    assert(rc == 0);
+    rc = safe_mul_u32(pixels, 4, &result);
+    assert(rc == -1);
+
+    // Same check with C23 checked arithmetic
+    uint32_t bytes;
+    bool overflowed = ckd_mul(&pixels, (uint32_t)40000, (uint32_t)40000);
+    assert(!overflowed);
+    overflowed = ckd_mul(&bytes, pixels, (uint32_t)4);
+    assert(overflowed);  // true = overflowed
 }
 
 // ── Input validation ──────────────────────────────────────────────────
@@ -171,24 +204,77 @@ static void test_input_validation(void) {
 }
 
 // ── Path traversal prevention ─────────────────────────────────────────
-static int path_is_safe(const char *user_input) {
-    // Reject any path containing ".." components
-    if (strstr(user_input, "..") != NULL) {
-        return 0;  // unsafe
+// A string test on the user's path is not containment. A "reject any '..'
+// substring and a leading '/'" check passes "escape/passwd" when
+// base/escape is a symlink to /etc (the open then reads /etc/passwd), and
+// it rejects the harmless name "photo..jpg". Resolve instead: realpath(3)
+// follows every symlink and collapses "." and "..", so check that the
+// RESOLVED path is still under the resolved base.
+//
+// This is check-then-use: anyone who can write inside base can swap a
+// component for a symlink between this check and the open. On Linux 5.6+,
+// openat2(2) with RESOLVE_BENEATH has the kernel enforce containment
+// during the open itself (an escape fails with EXDEV).
+static int path_is_safe(const char *base, const char *user_input) {
+    char rbase[PATH_MAX], joined[PATH_MAX], resolved[PATH_MAX];
+    if (user_input[0] == '\0' || user_input[0] == '/') return 0;  // empty / absolute
+    if (realpath(base, rbase) == NULL) return 0;
+    int n = snprintf(joined, sizeof joined, "%s/%s", rbase, user_input);
+    if (n < 0 || (size_t)n >= sizeof joined) return 0;            // would truncate
+    if (realpath(joined, resolved) == NULL) {
+        // A file about to be created does not exist yet: resolve its parent
+        // and append the last name. A DANGLING symlink also fails realpath,
+        // but that name exists and a write to it creates the link's target,
+        // wherever it points, so a name that exists must resolve.
+        struct stat st;
+        if (errno != ENOENT || lstat(joined, &st) == 0) return 0;
+        char *slash = strrchr(joined, '/');
+        const char *name = slash + 1;
+        if (name[0] == '\0' || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return 0;
+        *slash = '\0';
+        if (realpath(joined, resolved) == NULL) return 0;            // parent missing too
+        size_t rl = strlen(resolved);
+        if (rl + 1 + strlen(name) >= sizeof resolved) return 0;
+        resolved[rl] = '/';
+        strcpy(resolved + rl + 1, name);
     }
-    // Reject absolute paths
-    if (user_input[0] == '/') {
-        return 0;  // unsafe
-    }
-    return 1;  // safe
+    // Compare on the separator: /srv/data-evil must not pass for /srv/data.
+    size_t bl = strlen(rbase);
+    return strncmp(resolved, rbase, bl) == 0 &&
+           (resolved[bl] == '\0' || resolved[bl] == '/');
 }
 
 static void test_path_traversal(void) {
-    assert(path_is_safe("photo.jpg") == 1);
-    assert(path_is_safe("subdir/file.txt") == 1);
-    assert(path_is_safe("../../etc/passwd") == 0);
-    assert(path_is_safe("../secret") == 0);
-    assert(path_is_safe("/etc/passwd") == 0);
+    const char *tmp = getenv("TMPDIR");
+    char base[PATH_MAX];
+    int n = snprintf(base, sizeof base, "%s/vidya-sec-XXXXXX", tmp && *tmp ? tmp : "/tmp");
+    assert(n > 0 && (size_t)n < sizeof base);
+    char *made = mkdtemp(base);
+    assert(made != NULL);
+    char sub[PATH_MAX + 16], link[PATH_MAX + 16], dangling[PATH_MAX + 16];
+    snprintf(sub, sizeof sub, "%s/subdir", base);
+    snprintf(link, sizeof link, "%s/escape", base);
+    snprintf(dangling, sizeof dangling, "%s/dangling", base);
+    int rc = mkdir(sub, 0700);
+    assert(rc == 0);
+    rc = symlink("/etc", link);                    // inside base, pointing out
+    assert(rc == 0);
+    rc = symlink("/nonexistent-vidya-dir/f", dangling);
+    assert(rc == 0);
+
+    assert(path_is_safe(base, "photo.jpg") == 1);        // not created yet
+    assert(path_is_safe(base, "subdir/file.txt") == 1);
+    assert(path_is_safe(base, "photo..jpg") == 1);       // ".." inside a name is fine
+    assert(path_is_safe(base, "../../etc/passwd") == 0);
+    assert(path_is_safe(base, "../secret") == 0);
+    assert(path_is_safe(base, "/etc/passwd") == 0);
+    assert(path_is_safe(base, "escape/passwd") == 0);    // no "..", still escapes
+    assert(path_is_safe(base, "dangling") == 0);         // a write would follow it
+
+    unlink(dangling);
+    unlink(link);
+    rmdir(sub);
+    rmdir(base);
 }
 
 int main(void) {

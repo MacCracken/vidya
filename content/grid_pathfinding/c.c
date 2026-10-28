@@ -2,7 +2,8 @@
 //
 // BFS + A* on an 8x8 4-connected grid (0=walkable, 1=blocked).
 // C uses flat fixed-size arrays for everything: grid + visited as
-// uint8_t[64], a circular FIFO array as the BFS queue, and a
+// uint8_t[64], a linear FIFO array as the BFS queue (each cell is
+// enqueued at most once, so GN slots never wrap), and a
 // linear-scan over an open-set array for A*'s min-f selection.
 // For 64 cells the linear scan is O(N) but N is tiny — exactly the
 // scaling decision the Cyrius reference makes. Manhattan is the

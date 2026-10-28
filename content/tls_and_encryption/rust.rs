@@ -57,14 +57,16 @@ fn xor_stream(out: &mut [u8], src: &[u8], key: u8) {
 //
 // Concretely, "transfer 10 usd" and "transfer u0 1sd" differ only by a swap of
 // bytes 9 and 12 ('1' <-> 'u'), so they carry the identical tag under every key
-// and nonce (1407 with the key=42, nonce=7 used below), and `demo_open` happily
-// ACCEPTS the forged second message as authentic. A real AEAD (AES-GCM,
+// and nonce (973 over the ciphertext with the key=42, nonce=7 used below), and
+// `demo_open` happily ACCEPTS the forged second message as authentic. A real AEAD (AES-GCM,
 // ChaCha20-Poly1305 — the ciphers negotiated above) rejects it, because its tag
 // depends on byte order and on a key the attacker does not hold.
 //
 // What this IS for: the *shape* of the AEAD contract — seal produces ciphertext
-// plus a tag, open recomputes the tag over what it received and refuses to
-// return plaintext unless the tags match. Study the control flow; never the
+// plus a tag computed over the CIPHERTEXT, open recomputes the tag over what it
+// received and verifies it BEFORE decrypting, so a forged message never puts a
+// byte of plaintext in the caller's buffer (RFC 5116 §2.2: on failure, return
+// FAIL and no part of the plaintext). Study the control flow; never the
 // checksum.
 // ---------------------------------------------------------------------------
 
@@ -75,13 +77,14 @@ fn weak_checksum(buf: &[u8], key: u64, nonce: u64) -> u64 {
 
 fn demo_seal(pt: &[u8], key: u8, nonce: u64, ct_out: &mut [u8]) -> u64 {
     xor_stream(ct_out, pt, key);
-    weak_checksum(pt, key as u64, nonce)
+    weak_checksum(&ct_out[..pt.len()], key as u64, nonce) // tag the ciphertext
 }
 
 fn demo_open(ct: &[u8], key: u8, nonce: u64, claimed_tag: u64, pt_out: &mut [u8]) -> i32 {
-    xor_stream(pt_out, ct, key);
-    let actual = weak_checksum(&pt_out[..ct.len()], key as u64, nonce);
+    // Verify first, decrypt second: pt_out is untouched unless the tag matches.
+    let actual = weak_checksum(ct, key as u64, nonce);
     if actual != claimed_tag { return -1; }
+    xor_stream(pt_out, ct, key);
     ct.len() as i32
 }
 
@@ -142,7 +145,9 @@ fn main() {
     // *swap* would not be — see the disclaimer above `weak_checksum`.
     let mut tampered_ct = ct.clone();
     tampered_ct[5] ^= 1;
-    assert_eq!(demo_open(&tampered_ct, 42, 7, tag, &mut dec), -1);
+    let mut untouched = vec![0u8; pt.len()];
+    assert_eq!(demo_open(&tampered_ct, 42, 7, tag, &mut untouched), -1);
+    assert!(untouched.iter().all(|&b| b == 0), "no plaintext released on failure");
     assert_eq!(demo_open(&ct, 42, 7, tag ^ 1, &mut dec), -1);
 
     // Handshake happy path

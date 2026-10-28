@@ -2,8 +2,8 @@
 //
 // Go's standard library provides crypto/subtle for constant-time
 // comparison, crypto/rand for secure randomness, html/template for
-// auto-escaping, and path/filepath for safe path resolution. Input
-// validation is manual — there's no framework magic.
+// auto-escaping, and filepath.IsLocal + os.Root (Go 1.24) for safe path
+// resolution. Input validation is manual — there's no framework magic.
 
 package main
 
@@ -92,25 +92,36 @@ func testConstantTimeComparison() {
 
 // ── Secure random generation ──────────────────────────────────────────
 func testSecureRandomGeneration() {
-	// BAD: math/rand is deterministic (seeded PRNG, not crypto)
+	// BAD: math/rand (and math/rand/v2) are not for secrets. Since Go 1.20
+	// the global source is randomly seeded, so the problem isn't a fixed
+	// seed: go doc math/rand — "outputs might be easily predictable
+	// regardless of how it's seeded".
 	//   import "math/rand"; token := rand.Int63()
 
-	// GOOD: crypto/rand reads from OS entropy (/dev/urandom)
+	// GOOD: crypto/rand reads the OS CSPRNG (getrandom(2) on Linux). Since
+	// Go 1.24 rand.Read never returns an error — it crashes the program
+	// instead — so there is no error to check; rand.Text (Go 1.24) gives a
+	// ready-made 26-char base32 token with 128 bits of entropy.
 	token := make([]byte, 32) // 256 bits
-	_, err := rand.Read(token)
-	assertNoErr(err)
+	rand.Read(token)
 
 	hexToken := hex.EncodeToString(token)
 	assert(len(hexToken) == 64, "hex token length")
 
 	// Two tokens should never be equal
 	token2 := make([]byte, 32)
-	_, err = rand.Read(token2)
-	assertNoErr(err)
+	rand.Read(token2)
 	assert(subtle.ConstantTimeCompare(token, token2) == 0, "tokens differ")
+	assert(len(rand.Text()) == 26, "rand.Text token")
 }
 
 // ── Path traversal prevention ─────────────────────────────────────────
+// safeResolve is a LEXICAL check: it catches "../" escapes in the string
+// but not a symlink inside baseDir that points outside it (base/link ->
+// /etc makes "link/passwd" pass). To actually open user-named files,
+// use os.Root (Go 1.24), which resolves every component relative to the
+// root and refuses escapes, symlinks included. filepath.IsLocal (Go 1.20)
+// is the stdlib form of the lexical check.
 func safeResolve(baseDir, userInput string) (string, error) {
 	// Clean and join
 	candidate := filepath.Clean(filepath.Join(baseDir, userInput))
@@ -139,7 +150,18 @@ func testPathTraversalPrevention() {
 	for _, attack := range attacks {
 		_, err := safeResolve(base, attack)
 		assert(err != nil, "should reject: "+attack)
+		assert(!filepath.IsLocal(attack), "IsLocal rejects: "+attack)
 	}
+
+	// The symlink escape that a lexical check lets through
+	assertNoErr(os.Symlink("/etc", filepath.Join(base, "link")))
+	_, err = safeResolve(base, "link/passwd")
+	assert(err == nil, "lexical check is fooled by base/link -> /etc")
+	root, err := os.OpenRoot(base)
+	assertNoErr(err)
+	defer root.Close()
+	_, err = root.Open("link/passwd")
+	assert(err != nil, "os.Root refuses to follow the symlink out of base")
 }
 
 // ── Parameterized query pattern ───────────────────────────────────────
@@ -171,7 +193,7 @@ func testIntegerOverflowChecks() {
 	assertNoErr(err)
 	assert(result == 1_000_000, "safe multiply")
 
-	// Overflow: 65536 * 65536 * 4 exceeds uint32
+	// Overflow: 65536 * 65536 = 2^32 exceeds uint32's max (2^32 - 1)
 	_, err = safeMultiply(65536, 65536)
 	assert(err != nil, "overflow detected")
 }

@@ -1,9 +1,11 @@
 // Vidya — ELF and Executable Formats in Zig
 //
 // The ELF format has a duality: sections (for linkers) and segments
-// (for loaders). Zig packed structs map exactly to the on-disk
-// structures — Ehdr (64 bytes), Phdr (56 bytes), Shdr (64 bytes).
-// comptime validates all sizes at compile time.
+// (for loaders). Zig `extern struct`s (C ABI layout) match the spec's
+// C structs — Ehdr (64 bytes), Phdr (56 bytes), Shdr (64 bytes). extern
+// layout can insert padding; these happen to need none, and comptime
+// checks prove every size at compile time. (A `packed struct` cannot be
+// used here: it cannot hold the [16]u8 e_ident array.)
 
 const std = @import("std");
 const expect = std.testing.expect;
@@ -254,7 +256,10 @@ fn testSectionSegmentDuality() !void {
     const mappings = [_]SectionMapping{
         // .text → LOAD segment (R+X)
         .{ .section_name = ".text", .section_type = SHT.PROGBITS, .segment_type = PT.LOAD, .segment_flags = PF.R | PF.X },
-        // .rodata → same LOAD segment as .text (R only, but often combined)
+        // .rodata → its own R-only LOAD segment. GNU ld has defaulted to
+        // -z separate-code on x86-64 Linux since 2.31, so .rodata is kept
+        // out of the executable segment (`readelf -l` on any gcc binary
+        // shows ".text" in the R E segment, ".rodata" in a separate R one)
         .{ .section_name = ".rodata", .section_type = SHT.PROGBITS, .segment_type = PT.LOAD, .segment_flags = PF.R },
         // .data → LOAD segment (R+W)
         .{ .section_name = ".data", .section_type = SHT.PROGBITS, .segment_type = PT.LOAD, .segment_flags = PF.R | PF.W },
@@ -264,15 +269,19 @@ fn testSectionSegmentDuality() !void {
         .{ .section_name = ".dynamic", .section_type = SHT.DYNAMIC, .segment_type = PT.DYNAMIC, .segment_flags = PF.R | PF.W },
     };
 
-    // .text and .rodata can share a segment (both readable, .text also executable)
+    // .text and .rodata are both PT_LOAD, but with different flags, so they
+    // cannot be the same segment (a segment has one p_flags). Merging them
+    // (-z noseparate-code, pre-2.31 ld) made all constant data executable.
     try expect(mappings[0].segment_type == mappings[1].segment_type);
     try expect(mappings[0].segment_type == PT.LOAD);
+    try expect(mappings[0].segment_flags != mappings[1].segment_flags);
+    try expect(mappings[1].segment_flags & PF.X == 0);
 
     // .data and .bss share a segment (both R+W)
     try expect(mappings[2].segment_flags == mappings[3].segment_flags);
 
-    // .bss has NOBITS — it takes file space via the section, but the
-    // loader allocates memory from p_memsz - p_filesz
+    // .bss has NOBITS — it takes NO file space (its sh_size is memory
+    // only); the loader zero-fills the p_memsz - p_filesz tail instead
     try expect(mappings[3].section_type == SHT.NOBITS);
 
     // Stripped binaries lose sections but keep segments — still runnable
@@ -300,7 +309,9 @@ fn testElfTypes() !void {
     try expect(types[3].t == ET.DYN);
 
     // Modern Linux: almost all executables are ET_DYN (PIE)
-    // ET_EXEC is legacy — no ASLR possible with fixed addresses
+    // ET_EXEC is legacy — its image loads at fixed addresses, so the
+    // executable itself cannot be randomized (stack, heap, mmap and shared
+    // libraries still are)
     try expect(ET.DYN == 3);
 }
 

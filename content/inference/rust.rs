@@ -54,9 +54,12 @@ fn topk_filter(logits: &mut [i64], k: usize) -> usize {
         marks[best_idx as usize] = true;
         picked += 1;
     }
+    // Mask with the integer stand-in for -inf, not 0: logits can be negative,
+    // so a 0 would rank a filtered token ABOVE the survivors (and softmax
+    // would still give it weight e^0 = 1).
     for m in 0..logits.len() {
         if !marks[m] {
-            logits[m] = 0;
+            logits[m] = i64::MIN;
         }
     }
     picked
@@ -98,8 +101,14 @@ fn main() {
         assert_eq!(l[1], 50);
         assert_eq!(l[4], 40);
         for &i in &[0, 2, 3, 5, 7] {
-            assert_eq!(l[i], 0, "idx {} zeroed", i);
+            assert_eq!(l[i], i64::MIN, "idx {} masked", i);
         }
+    }
+    {
+        // Negative logits: the survivor must still win after filtering.
+        let mut l: Vec<i64> = vec![-5, -1, -3];
+        topk_filter(&mut l, 1);
+        assert_eq!(argmax_logits(&l), 1);
     }
     {
         let mut l: Vec<i64> = vec![1, 2, 3];
@@ -112,11 +121,11 @@ fn main() {
     assert_eq!(decode_sequence(&bigram, 2, 10), vec![3, 6, 7, 1]);
     assert_eq!(decode_sequence(&bigram, 5, 10), vec![1]);
     assert_eq!(decode_sequence(&bigram, 2, 2), vec![3, 6]);
-    {
-        let o1 = decode_sequence(&bigram, 2, 10);
-        let o2 = decode_sequence(&bigram, 2, 10);
-        assert_eq!(o1, o2);
-    }
+    // Greedy decoding is deterministic because argmax has a fixed tie-break
+    // (first index wins), not because two calls of a pure function agree.
+    // Token 0's row is all zeros, so every step ties and picks 0 again:
+    // greedy decoding stuck repeating until the length cap.
+    assert_eq!(decode_sequence(&bigram, 0, 3), vec![0, 0, 0]);
 
     println!("inference: 10 tests, 17 assertions ok");
 }

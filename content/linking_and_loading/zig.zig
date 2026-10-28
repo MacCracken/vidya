@@ -155,19 +155,18 @@ fn applyRelocations(obj: *ObjectFile, global_syms: *const SymbolTable) !void {
                     obj.code[patch_offset + b] = @truncate(val >> @intCast(b * 8));
                 }
             },
-            .rel32 => {
-                // PC-relative: target - (patch_site + 4) + addend
-                const site: i64 = @intCast(obj.base_address + patch_offset + 4);
-                const disp: i32 = @intCast(target_addr - site + rel.addend);
-                const d: u32 = @bitCast(disp);
-                inline for (0..4) |b| {
-                    obj.code[patch_offset + b] = @truncate(d >> @intCast(b * 8));
-                }
-            },
-            .got32, .plt32 => {
-                // Simplified: treat like rel32 for demonstration
-                const site: i64 = @intCast(obj.base_address + patch_offset + 4);
-                const disp: i32 = @intCast(target_addr - site + rel.addend);
+            .rel32, .got32, .plt32 => {
+                // PC-relative, as ELF's R_X86_64_PC32 / PLT32: S + A - P,
+                // where P is the address of the 4-byte field itself. The
+                // "-4" (the CPU measures from the END of the field) lives
+                // in the ADDEND, which the assembler emits: `call foo`
+                // assembles to R_X86_64_PLT32 foo - 4. (got32/plt32 are
+                // simplified to the same formula for demonstration.)
+                const place: i64 = @intCast(obj.base_address + patch_offset);
+                // A displacement that does not fit 32 bits is a link
+                // error ("relocation truncated to fit"), never a wrap.
+                const disp = std.math.cast(i32, target_addr + rel.addend - place) orelse
+                    return error.RelocationOverflow;
                 const d: u32 = @bitCast(disp);
                 inline for (0..4) |b| {
                     obj.code[patch_offset + b] = @truncate(d >> @intCast(b * 8));
@@ -292,14 +291,14 @@ fn testRelocationPatching() !void {
         .offset = 1,
         .symbol = "target_fn",
         .rtype = .rel32,
-        .addend = 0,
+        .addend = -4, // what the assembler emits for a call's rel32
     });
 
     var empty = SymbolTable.init(std.heap.page_allocator);
     defer empty.deinit();
     try applyRelocations(&obj, &empty);
 
-    // Expected displacement: 0x2000 - (0x1000 + 1 + 4) = 0xFFB = 4091
+    // Expected displacement: S + A - P = 0x2000 + (-4) - (0x1000 + 1) = 0xFFB = 4091
     // Little-endian: FB 0F 00 00
     try expect(obj.code[1] == 0xFB);
     try expect(obj.code[2] == 0x0F);
@@ -328,16 +327,24 @@ fn testMultiObjectLinking() !void {
         .offset = 1,
         .symbol = "helper",
         .rtype = .rel32,
-        .addend = 0,
+        .addend = -4, // what the assembler emits for a call's rel32
     });
 
     // Link: resolve main.o's relocations using util.o's symbols
     try applyRelocations(&main_obj, &util_obj.symbols);
 
     // Verify the call target resolves correctly
-    // displacement = 0x2000 - (0x1000 + 5) = 0x0FFB
+    // displacement = S + A - P = 0x2000 + (-4) - 0x1001 = 0x0FFB
     try expect(main_obj.code[1] == 0xFB);
     try expect(main_obj.code[2] == 0x0F);
+
+    // A target more than 2 GiB away cannot be reached by rel32: error
+    var far_obj = ObjectFile.init("far.o", std.heap.page_allocator);
+    defer far_obj.deinit();
+    far_obj.base_address = 0x1000;
+    try far_obj.symbols.define("far_fn", 0x1_0000_0000, 16, ".text", .global);
+    far_obj.addReloc(.{ .offset = 1, .symbol = "far_fn", .rtype = .rel32, .addend = -4 });
+    try expect(applyRelocations(&far_obj, &util_obj.symbols) == error.RelocationOverflow);
 }
 
 fn testGotPlt() !void {

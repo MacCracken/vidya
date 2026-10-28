@@ -169,13 +169,24 @@ class Linker:
 
                 elif reloc.reloc_type == RelocType.ABS32:
                     value = sym_addr + reloc.addend
+                    # 32S: the CPU sign-extends the field, so the value must
+                    # fit in a signed 32-bit int. ld refuses rather than
+                    # masking ("relocation truncated to fit: R_X86_64_32S").
+                    if not -2**31 <= value < 2**31:
+                        raise LinkError(
+                            f"relocation truncated to fit: R_X86_64_32S "
+                            f"against '{reloc.symbol}' (0x{value:X})"
+                        )
                     output[file_offset:file_offset + 4] = \
-                        (value & 0xFFFFFFFF).to_bytes(4, "little")
+                        value.to_bytes(4, "little", signed=True)
 
                 elif reloc.reloc_type == RelocType.PC32:
-                    # PC-relative: target - (patch_address + 4)
+                    # ABI formula S + A - P, P = address of the 4-byte field.
+                    # The "-4" (field ends 4 bytes before the next
+                    # instruction, which is what rel32 is relative to) is
+                    # NOT hard-coded here: the assembler puts it in the addend.
                     patch_addr = sec_base + reloc.offset
-                    value = sym_addr + reloc.addend - (patch_addr + 4)
+                    value = sym_addr + reloc.addend - patch_addr
                     output[file_offset:file_offset + 4] = \
                         value.to_bytes(4, "little", signed=True)
 
@@ -264,7 +275,11 @@ def main():
             Symbol("GLOBAL_BASE"),        # undefined reference
         ],
         relocations=[
-            Relocation(".text", 15, "add_numbers", RelocType.PC32),
+            # What `as` emits for these two instructions (readelf -r):
+            #   0x0f R_X86_64_PLT32 add_numbers - 4   (PLT32 for calls since
+            #        binutils 2.31; resolves like PC32 to a local definition)
+            #   0x17 R_X86_64_32S   GLOBAL_BASE + 0
+            Relocation(".text", 15, "add_numbers", RelocType.PC32, addend=-4),
             Relocation(".text", 23, "GLOBAL_BASE", RelocType.ABS32),
         ],
     )
@@ -312,6 +327,17 @@ def main():
     assert patched_abs32 == expected_data_addr, \
         f"ABS32 should be 0x{expected_data_addr:X}, got 0x{patched_abs32:X}"
     print(f"   GLOBAL_BASE = 0x{patched_abs32:X}")
+
+    # Same objects linked above 4 GiB: GLOBAL_BASE no longer fits a 32S field
+    high_linker = Linker(0x1_0000_0000)
+    high_linker.add_object(main_obj)
+    high_linker.add_object(math_obj)
+    try:
+        high_linker.link()
+        assert False, "should have raised LinkError for 32S overflow"
+    except LinkError as e:
+        assert "truncated to fit" in str(e)
+        print(f"   Linked at 4 GiB: {e}")
 
     # ── Test 2: Symbol resolution errors ───────────────────────────
     print("\n2. Link errors: duplicate and undefined symbols")
@@ -431,20 +457,20 @@ def main():
     print("\n6. Relocation type formulas:")
 
     # R_X86_64_64:   S + A (absolute 64-bit)
-    # R_X86_64_32S:  S + A (truncated to 32-bit, sign-extended check)
-    # R_X86_64_PC32: S + A - P (PC-relative, P = patch address)
+    # R_X86_64_32S:  S + A (must fit in signed 32 bits, else link error)
+    # R_X86_64_PC32: S + A - P (PC-relative, P = address of the field)
 
     sym_addr = 0x401000
-    addend = 0
     patch_addr = 0x400100
 
-    abs64 = sym_addr + addend
+    abs64 = sym_addr + 0
     assert abs64 == 0x401000, "ABS64 = S + A"
 
-    pc32 = sym_addr + addend - (patch_addr + 4)  # P includes +4 for instruction size
-    assert pc32 == 0xEFC, "PC32 = S + A - (P + 4)"
-    print(f"   ABS64: S(0x{sym_addr:X}) + A({addend}) = 0x{abs64:X}")
-    print(f"   PC32:  S(0x{sym_addr:X}) + A({addend}) - P(0x{patch_addr + 4:X}) = 0x{pc32:X}")
+    addend = -4  # emitted by the assembler for a rel32 at the end of an insn
+    pc32 = sym_addr + addend - patch_addr
+    assert pc32 == 0xEFC, "PC32 = S + A - P, with A = -4"
+    print(f"   ABS64: S(0x{sym_addr:X}) + A(0) = 0x{abs64:X}")
+    print(f"   PC32:  S(0x{sym_addr:X}) + A({addend}) - P(0x{patch_addr:X}) = 0x{pc32:X}")
 
     print("\nAll linking and loading examples passed.")
 

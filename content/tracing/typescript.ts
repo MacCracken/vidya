@@ -36,7 +36,7 @@ function levelName(level: LogLevel): string {
 // This makes logs machine-parseable (JSON) while remaining human-readable.
 
 interface LogEntry {
-    timestamp: number;    // monotonic nanoseconds (not wall clock)
+    timestamp: number;    // monotonic milliseconds, sub-ms fraction (not wall clock)
     level: LogLevel;
     message: string;
     fields: Record<string, unknown>;
@@ -46,6 +46,9 @@ interface LogEntry {
 // ── Logger with level filtering ───────────────────────────────────
 // BEST PRACTICE: Filter BEFORE formatting. A filtered-out log call
 // should cost one comparison, not a full format+write cycle.
+// JS evaluates arguments before the call, so emit()'s level check alone
+// cannot skip building a template literal or a fields object the caller
+// passed in — expensive messages need an enabled() guard at the call site.
 
 class Logger {
     private entries: LogEntry[] = [];
@@ -53,8 +56,12 @@ class Logger {
 
     constructor(private minLevel: LogLevel = LogLevel.INFO) {}
 
-    private shouldLog(level: LogLevel): boolean {
+    enabled(level: LogLevel): boolean {
         return level >= this.minLevel;
+    }
+
+    private shouldLog(level: LogLevel): boolean {
+        return this.enabled(level);
     }
 
     private emit(level: LogLevel, message: string, fields: Record<string, unknown> = {}): void {
@@ -107,10 +114,14 @@ class Logger {
 
         try {
             const result = fn();
-            const elapsed = this.monotonicNow() - startTime;
-            this.emit(LogLevel.DEBUG, `span ${name} completed`, {
-                elapsed_ms: elapsed,
-            });
+            // Guard: the template literal and fields object below would
+            // otherwise be built even when DEBUG is filtered out.
+            if (this.shouldLog(LogLevel.DEBUG)) {
+                const elapsed = this.monotonicNow() - startTime;
+                this.emit(LogLevel.DEBUG, `span ${name} completed`, {
+                    elapsed_ms: elapsed,
+                });
+            }
             return result;
         } catch (err) {
             this.emit(LogLevel.ERROR, `span ${name} failed`, {
@@ -162,7 +173,7 @@ class Logger {
 // The built-in console has levels, but no filtering.
 // console.log   → INFO
 // console.debug → DEBUG (filtered in some browsers)
-// console.warn  → WARN (yellow in browser/terminal)
+// console.warn  → WARN (yellow in browser devtools; in Node an alias of console.error)
 // console.error → ERROR (red, goes to stderr in Node.js)
 // console.trace → prints stack trace (NOT a log level!)
 
@@ -433,7 +444,17 @@ function main(): void {
     // ── GOTCHA: formatting before filtering ───────────────────────
     // BAD:  const msg = `value=${expensive()}`; if (level <= max) log(msg);
     // GOOD: if (level > max) return; const msg = `value=${expensive()}`;
-    // Our logger does this correctly — emit() checks shouldLog() first.
+    // emit() checks the level first, but logger.debug(`v=${expensive()}`)
+    // has already called expensive() before debug() runs. Guard it.
+    logger.clear();
+    logger.setLevel(LogLevel.INFO);
+    let formatted = 0;
+    const expensive = (): string => { formatted++; return "x".repeat(64); };
+    logger.debug(`value=${expensive()}`);              // BAD: formats anyway
+    assert(formatted === 1 && logger.getEntries().length === 0,
+        "unguarded: filtered out, but the message was still built");
+    if (logger.enabled(LogLevel.DEBUG)) logger.debug(`value=${expensive()}`); // GOOD
+    assert(formatted === 1, "guarded: filtered call builds nothing");
 
     // ── GOTCHA: wall clock vs monotonic ───────────────────────────
     // BAD:  Date.now() — can jump backwards (NTP correction)

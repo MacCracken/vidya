@@ -105,7 +105,9 @@ _start:
     jnz     fail
 
     # ── sys_write to stderr (fd 2) ──────────────────────────────────
-    # stderr is always unbuffered
+    # No syscall here is buffered — every write(2) goes straight to the
+    # kernel. Buffering is a libc stdio layer (where stderr defaults to
+    # unbuffered and stdout to line/full buffering); raw syscalls have none.
     mov     rax, 1
     mov     rdi, 2              # fd = stderr
     lea     rsi, [hello]

@@ -3,8 +3,10 @@
 // Recursive backtracker (iterative DFS) on an 8x8 grid. Each cell stores
 // a bitmask of present walls (N=1, S=2, E=4, W=8). Generation carves
 // passages by clearing the corresponding bit on the current and
-// neighbour cell. Rust's `wrapping_mul` / `wrapping_add` give us the
-// modular-2^64 arithmetic the PCG state needs — overflow is defined,
+// neighbour cell. The PRNG is a 64-bit LCG with PCG's multiplier and
+// increment but a plain top-bits output (real PCG32 adds an output
+// permutation). Rust's `wrapping_mul` / `wrapping_add` give us the
+// modular-2^64 arithmetic the LCG state needs — overflow is defined,
 // we just have to ask for it. The PRNG step matches cyrius byte-for-
 // byte: same constants, same mask, same shift.
 
@@ -37,7 +39,7 @@ impl Rng {
     }
 
     fn next(&mut self) -> i64 {
-        // PCG step: u64 wraparound is the natural mod-2^64 arithmetic.
+        // LCG step (PCG's constants): u64 wraparound is the natural mod-2^64 arithmetic.
         self.state = self.state.wrapping_mul(PCG_MULT).wrapping_add(PCG_INC);
         // Top bits give better distribution. Mask to 31 bits so the
         // result is non-negative and the modulo below is well-defined.
@@ -218,14 +220,15 @@ fn test_different_seeds_differ() {
     let mut rng = Rng::new(1);
     let mut a = Maze::new();
     a.generate(&mut rng, 0, 0);
-    let sum1: u64 = a.cells.iter().map(|&v| v as u64).sum();
 
     rng.seed(2);
     let mut b = Maze::new();
     b.generate(&mut rng, 0, 0);
-    let sum2: u64 = b.cells.iter().map(|&v| v as u64).sum();
 
-    assert!(sum1 != sum2, "different seeds produce different mazes");
+    // Compare the cells themselves: a sum of wall bytes only counts
+    // vertical vs horizontal passages (960 - 3*V - 12*H), so two
+    // different mazes often have equal sums.
+    assert!(a.cells != b.cells, "different seeds produce different mazes");
 }
 
 fn test_starting_cell_visited() {

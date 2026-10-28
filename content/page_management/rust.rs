@@ -57,18 +57,30 @@ fn page_write(f: &mut File, num: u64, buf: &[u8]) -> std::io::Result<()> {
     f.write_all(buf)
 }
 
+// The on-disk header is the allocator's source of truth: persist it after
+// every change, and only AFTER the page write it describes. Skip this and
+// a reopen reloads page_count=1 / freehead=0, hands out live pages again
+// and loses the free list (concept.toml: "Header must be written after
+// page_count changes").
+fn hdr_flush(f: &mut File, hdr: &Header) -> std::io::Result<()> {
+    f.seek(SeekFrom::Start(0))?;
+    f.write_all(&hdr.to_bytes())
+}
+
 fn page_alloc(f: &mut File, hdr: &mut Header) -> std::io::Result<u64> {
     if hdr.freehead != 0 {
         let fh = hdr.freehead;
         let mut buf = vec![0u8; PAGE_SZ as usize];
         page_read(f, fh, &mut buf)?;
         hdr.freehead = u64::from_le_bytes(buf[FP_NEXT..FP_NEXT + 8].try_into().unwrap());
+        hdr_flush(f, hdr)?;
         return Ok(fh);
     }
     let num = hdr.page_count;
     hdr.page_count += 1;
     let zero = vec![0u8; PAGE_SZ as usize];
     page_write(f, num, &zero)?;
+    hdr_flush(f, hdr)?;
     Ok(num)
 }
 
@@ -77,7 +89,7 @@ fn page_free(f: &mut File, hdr: &mut Header, num: u64) -> std::io::Result<()> {
     buf[FP_NEXT..FP_NEXT + 8].copy_from_slice(&hdr.freehead.to_le_bytes());
     page_write(f, num, &buf)?;
     hdr.freehead = num;
-    Ok(())
+    hdr_flush(f, hdr)
 }
 
 fn main() -> std::io::Result<()> {
@@ -117,8 +129,15 @@ fn main() -> std::io::Result<()> {
     let p3 = page_alloc(&mut f, &mut hdr)?;
     assert_eq!(p3, 2, "reused freed page");
 
+    // the header on disk tracks the allocator, so a reopen resumes it
+    f.seek(SeekFrom::Start(0))?;
+    f.read_exact(&mut hbuf)?;
+    let on_disk = Header::load(&hbuf);
+    assert!(on_disk.page_count == hdr.page_count && on_disk.freehead == hdr.freehead,
+            "header persisted");
+
     drop(f);
     let _ = std::fs::remove_file(path);
-    println!("page_management: 6/6 ok");
+    println!("page_management: 7/7 ok");
     Ok(())
 }

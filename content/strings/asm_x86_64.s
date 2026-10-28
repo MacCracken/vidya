@@ -13,6 +13,8 @@ hello:      .asciz "hello"
 hello_len = . - hello - 1           # length without null: 5
 world:      .ascii "world"
 world_len = . - world
+hi_byte:    .byte 0xFF
+lo_byte:    .byte 0x01
 msg_pass:   .ascii "All string examples passed.\n"
 msg_len = . - msg_pass
 
@@ -35,6 +37,25 @@ _start:
     call    memcmp
     test    eax, eax
     jnz     fail
+
+    # Different strings must compare unequal — and with the right sign:
+    # 'h' (0x68) < 'w' (0x77). Without this, a memcmp that always says
+    # "equal" would also pass the copy checks below.
+    lea     rsi, [hello]
+    lea     rdi, [world]
+    mov     rcx, 5
+    call    memcmp
+    test    eax, eax
+    jns     fail
+
+    # Bytes compare as UNSIGNED (as C's memcmp does): 0xFF > 0x01. A
+    # signed byte difference (0xFF - 0x01 = 0xFE = -2) gets this backwards.
+    lea     rsi, [hi_byte]
+    lea     rdi, [lo_byte]
+    mov     rcx, 1
+    call    memcmp
+    test    eax, eax
+    jle     fail
 
     # ── String copy with rep movsb ──────────────────────────────────
     lea     rsi, [hello]
@@ -118,7 +139,7 @@ strlen:
     ret
 
 # ── memcmp: compare rcx bytes at rsi and rdi ───────────────────────
-# returns eax = 0 if equal
+# returns eax = 0 if equal, <0 / >0 by the first differing byte (unsigned)
 memcmp:
     push    rsi
     push    rdi
@@ -134,8 +155,9 @@ memcmp:
     dec     rcx
     jmp     .memcmp_loop
 .memcmp_diff:
-    sub     al, byte ptr [rdi]
-    movsx   eax, al
+    movzx   eax, al                 # zero-extend both bytes, subtract in
+    movzx   edx, byte ptr [rdi]     # 32 bits: an unsigned comparison
+    sub     eax, edx
     pop     rcx
     pop     rdi
     pop     rsi

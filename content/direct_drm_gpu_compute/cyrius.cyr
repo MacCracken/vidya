@@ -15,7 +15,7 @@
 #   - "Bo handle 0 is invalid" — sentinel matching the kernel UAPI.
 #
 # Tests:
-#   1. open_render_node returns a non-zero fd.
+#   1. open_render_node returns a valid fd (>= 0; -1 is the error).
 #   2. gem_create returns sequential BO handles starting at 1.
 #   3. gem_va_map binds a BO to a virtual address.
 #   4. va_lookup returns the BO handle, or 0 for unmapped VAs.
@@ -35,7 +35,7 @@ var VA_CAP = 32;
 # BO table: bo_size[i] = 0 means slot empty, otherwise the size in bytes.
 var bo_size[256];                 # 32 * 8
 var next_bo = 1;
-var device_fd = 0;
+var device_fd = 0 - 1;            # -1 = not open (0 is a valid fd)
 
 # VA map: parallel arrays of (va, bo_handle).
 var va_addr[256];
@@ -53,17 +53,19 @@ fn device_init() {
     memset(&va_addr, 0, VA_CAP * 8);
     memset(&va_bo, 0, VA_CAP * 8);
     next_bo = 1;
-    device_fd = 0;
+    device_fd = 0 - 1;
     va_count = 0;
     next_seq = 1;
     completed_seq = 0;
     return 0;
 }
 
-# open_render_node — returns a "fake fd" (any non-zero number).
-# In real code this is `open("/dev/dri/renderD128", O_RDWR)`.
+# open_render_node — returns a "fake fd" (any number >= 0).
+# In real code this is `open("/dev/dri/renderD128", O_RDWR)`, which
+# returns -1 on failure; 0 is a valid fd (POSIX hands out the lowest
+# unused one), so the success test is `fd >= 0`, never `fd != 0`.
 fn open_render_node() {
-    device_fd = 42;               # any non-zero placeholder
+    device_fd = 42;               # placeholder fd
     return device_fd;
 }
 
@@ -79,7 +81,7 @@ fn gem_create(size) {
 
 # gem_destroy(handle) — frees the BO and removes any VA mapping.
 fn gem_destroy(handle) {
-    if (handle == 0) { return 0; }
+    if (handle <= 0) { return 0; }    # 0 = null handle; a negative one would index before bo_size
     if (handle >= BO_CAP) { return 0; }
     if (load64(&bo_size + handle * 8) == 0) { return 0; }
     store64(&bo_size + handle * 8, 0);
@@ -97,7 +99,7 @@ fn gem_destroy(handle) {
 # gem_va_map(handle, va) — bind handle to virtual address `va`.
 # Returns 1 on success, 0 if handle invalid.
 fn gem_va_map(handle, va) {
-    if (handle == 0) { return 0; }
+    if (handle <= 0) { return 0; }    # 0 = null handle; a negative one would index before bo_size
     if (handle >= BO_CAP) { return 0; }
     if (load64(&bo_size + handle * 8) == 0) { return 0; }
     if (va_count >= VA_CAP) { return 0; }
@@ -124,7 +126,7 @@ fn va_lookup(va) {
 # Returns the syncobj seq for the submission, or 0 if BO is invalid.
 # Real code would carry a PM4 stream; we just record the seq.
 fn submit(handle) {
-    if (handle == 0) { return 0; }
+    if (handle <= 0) { return 0; }    # 0 = null handle; a negative one would index before bo_size
     if (handle >= BO_CAP) { return 0; }
     if (load64(&bo_size + handle * 8) == 0) { return 0; }
     var seq = next_seq;
@@ -145,9 +147,9 @@ fn main() {
 
     test_group("direct_drm_gpu_compute");
 
-    # --- 1. open returns a non-zero fd ---
+    # --- 1. open returns a valid fd ---
     var fd = open_render_node();
-    assert(fd != 0, "open_render_node returns non-zero fd");
+    assert(fd >= 0, "open_render_node returns a valid fd (>= 0; -1 is the error)");
 
     # --- 2. gem_create returns sequential handles starting at 1 ---
     var b1 = gem_create(4096);

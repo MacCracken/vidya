@@ -6,11 +6,13 @@ are stored as a bitmask (N=1, S=2, E=4, W=8). Generation carves
 passages by clearing the wall bit on both the current and neighbour
 cell.
 
-Python's `int` is arbitrary precision, which means the PCG step would
-not wrap on its own. We mask explicitly to 64 bits, then convert to
-signed if needed so the `>>` and modulo behave like cyrius's signed-i64
-arithmetic. Top-bit masking after the shift keeps the result
-non-negative regardless of platform shift semantics.
+Python's `int` is arbitrary precision, which means the LCG step (PCG's
+multiplier and increment, without PCG's output permutation) would not
+wrap on its own, so we mask explicitly to 64 bits. No signed conversion
+is needed to match cyrius's signed-i64 arithmetic: `(state >> 33) &
+0x7FFFFFFF` keeps bits 33-63, which are identical whether the shift is
+arithmetic (signed) or logical (unsigned), and the result is never
+negative, so the modulo matches too.
 """
 
 GW = 8
@@ -33,7 +35,7 @@ class Rng:
         self.state = s & U64_MASK
 
     def next(self) -> int:
-        # PCG step: explicit mask provides the wrap that other languages
+        # LCG step: explicit mask provides the wrap that other languages
         # get from native i64 overflow.
         self.state = (self.state * PCG_MULT + PCG_INC) & U64_MASK
         # Top bits, then mask to 31 — non-negative, so range modulo is

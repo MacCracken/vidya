@@ -23,8 +23,11 @@ def build_index(buf):
 
 
 def json_escape(src, dst_cap):
-    """Returns escaped bytes, or None if 2x expansion exceeds dst_cap."""
-    if len(src) * 2 > dst_cap:
+    """Returns escaped bytes, or None if the worst-case expansion exceeds
+    dst_cap. Worst case is 6x: RFC 8259 §7 requires EVERY control byte
+    U+0000..U+001F to be escaped, and those without a short form become
+    \\u00XX. Leaving them raw (only escaping \\n \\t \\r) emits invalid JSON."""
+    if len(src) * 6 > dst_cap:
         return None
     out = bytearray()
     for c in src:
@@ -38,6 +41,8 @@ def json_escape(src, dst_cap):
             out.append(0x5C); out.append(0x74)
         elif c == 0x0D:  # \r
             out.append(0x5C); out.append(0x72)
+        elif c < 0x20:   # other control bytes: \u00XX
+            out.extend(b"\\u%04x" % c)
         else:
             out.append(c)
     return bytes(out)
@@ -54,6 +59,8 @@ def json_unescape(src):
             elif n == 0x6E: out.append(0x0A); i += 2
             elif n == 0x74: out.append(0x09); i += 2
             elif n == 0x72: out.append(0x0D); i += 2
+            elif n == 0x75 and i + 5 < len(src):  # \u00XX (control bytes)
+                out.append(int(src[i + 2:i + 6], 16)); i += 6
             else: out.append(src[i]); i += 1
         else:
             out.append(src[i])
@@ -95,7 +102,13 @@ def main():
     assert len(un) == 12, f"unescape recovers 12, got {len(un)}"
     assert un == s3, "round-trip bytes match"
 
-    print("jsonl_format: 8/8 ok")
+    # Test 6: control bytes without a short escape (NUL, backspace, 0x1F)
+    s6 = bytes([0x61, 0x00, 0x08, 0x1F])
+    esc6 = json_escape(s6, 64)
+    assert esc6 == b"a\\u0000\\u0008\\u001f", f"\\u00XX escapes, got {esc6!r}"
+    assert json_unescape(esc6) == s6, "\\u00XX round-trip"
+
+    print("jsonl_format: 10/10 ok")
 
 
 main()

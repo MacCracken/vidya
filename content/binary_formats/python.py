@@ -184,11 +184,20 @@ def verify_pe_structure():
     pe_sig_offset_field = 0x3C
     assert pe_sig_offset_field == 60
 
-    # COFF header (after PE signature): 20 bytes
-    coff_header_size = 20
+    # COFF header (after PE signature): 20 bytes — Machine, NumberOfSections,
+    # TimeDateStamp, PointerToSymbolTable, NumberOfSymbols,
+    # SizeOfOptionalHeader, Characteristics. Derived from the layout, not typed.
+    coff_header_size = struct.calcsize('<HHIIIHH')
+    assert coff_header_size == 20
 
-    # Optional header for PE32+: 112 bytes (PE32 = 96 bytes)
-    pe32plus_optional_size = 112
+    # Optional header for PE32+: 112 bytes before the data directories
+    # (PE32 = 96 bytes): 24 bytes of standard fields + 88 Windows-specific.
+    pe32plus_optional_size = struct.calcsize('<HBBIIIII' + 'QIIHHHHHHIIIIHHQQQQII')
+    assert pe32plus_optional_size == 112
+
+    # Section header: Name[8], 6 u32 fields, 2 u16 counts, Characteristics.
+    section_header_size = struct.calcsize('<8sIIIIIIHHI')
+    assert section_header_size == 40
 
     # Machine types
     IMAGE_FILE_MACHINE_AMD64 = 0x8664
@@ -200,7 +209,7 @@ def verify_pe_structure():
 
     # Typical PE minimum: DOS stub (128) + PE sig (4) + COFF (20)
     # + optional (112) + 1 section header (40) = 304 bytes minimum
-    min_pe_headers = 128 + 4 + coff_header_size + pe32plus_optional_size + 40
+    min_pe_headers = 128 + 4 + coff_header_size + pe32plus_optional_size + section_header_size
     assert min_pe_headers == 304
 
     return coff_header_size, pe32plus_optional_size
@@ -222,13 +231,13 @@ def verify_macho_structure():
     macho64_header_size = 32
     # Fields: magic(4) + cputype(4) + cpusubtype(4) + filetype(4)
     #       + ncmds(4) + sizeofcmds(4) + flags(4) + reserved(4)
-    field_sum = 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4
+    field_sum = struct.calcsize('<IiiIIIII')
     assert field_sum == macho64_header_size
 
     # Load command types
     LC_SEGMENT_64 = 0x19     # map file content into address space
     LC_MAIN = 0x80000028     # entry point (replaces LC_UNIXTHREAD)
-    LC_DYLD_INFO = 0x80000022  # dynamic linker info
+    LC_DYLD_INFO_ONLY = 0x80000022  # dynamic linker info (LC_DYLD_INFO | LC_REQ_DYLD)
     LC_SYMTAB = 0x02         # symbol table
 
     assert LC_SEGMENT_64 == 25

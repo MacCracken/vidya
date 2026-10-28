@@ -113,6 +113,8 @@ _start:
     call    test_cleanup
     cmp     eax, 0              # should be back to 0
     jne     fail
+    cmp     edx, 0x321          # released 3, then 2, then 1 (LIFO)
+    jne     fail
 
     # ── Test 11: full state cycle ─────────────────────────────────────
     # locked → unlock → open → close → lock → locked
@@ -193,20 +195,27 @@ state_transition:
     mov     eax, -1
     ret
 
-# ── test_cleanup() → eax (resource counter, should be 0) ─────────────
-# Demonstrates structured acquire/release: nested resource management
-# using call/ret discipline ensures proper cleanup ordering.
+# ── test_cleanup() → eax (resource counter, should be 0),
+#                    edx (release order, one nibble per release) ────────
+# Demonstrates structured acquire/release: each acquire pushes the
+# resource's id, so the stack IS the cleanup list and popping it releases
+# in reverse order. The counter alone cannot tell order apart (three incs
+# and three decs net 0 in any order), so the release order is logged too.
 test_cleanup:
     xor     eax, eax            # counter = 0
+    xor     edx, edx            # release log
     inc     eax                 # acquire resource 1 (counter = 1)
-    push    rax
+    push    1
     inc     eax                 # acquire resource 2 (counter = 2)
-    push    rax
+    push    2
     inc     eax                 # acquire resource 3 (counter = 3)
+    push    3
     # Now release in reverse order (LIFO — like stack unwinding)
-    dec     eax                 # release resource 3 (counter = 2)
-    pop     rcx                 # restore after resource 2 acquire
-    dec     eax                 # release resource 2 (counter = 1)
-    pop     rcx                 # restore after resource 1 acquire
-    dec     eax                 # release resource 1 (counter = 0)
+.tc_release:
+    pop     rcx                 # most recently acquired resource
+    dec     eax                 # release it
+    shl     edx, 4
+    or      edx, ecx            # log its id
+    test    eax, eax
+    jnz     .tc_release
     ret

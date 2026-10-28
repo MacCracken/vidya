@@ -32,19 +32,24 @@ var MAX_MSG_SIZE = 1024;
 # === Varint ===
 
 # encode_varint(value, out_buf) → bytes written (1..10).
+# `value` is an UNSIGNED 64-bit pattern: a test like `value >= 128` or a
+# `/ 128` is signed, so every u64 >= 2^63 (negative as an i64) would skip
+# the loop and emit one byte. Cyrius `>>` is the logical (unsigned) shift.
 fn encode_varint(value, out_buf) {
     var n = 0;
-    while (value >= 128) {
+    while ((value >> 7) != 0) {
         store8(out_buf + n, (value & 0x7F) | 0x80);
-        value = value / 128;
+        value = value >> 7;
         n = n + 1;
     }
     store8(out_buf + n, value & 0x7F);
     return n + 1;
 }
 
-# decode_varint(in_buf, in_len) → packed (value << 8 | bytes_consumed),
-# or -1 on overflow / truncation.
+# decode_varint(in_buf, in_len) → value, with the bytes consumed in
+# DECODE_BYTES. On overflow / truncation it returns -1 AND sets
+# DECODE_BYTES = 0 — test DECODE_BYTES, not the value: -1 is also the
+# valid decoding of u64-max.
 var DECODE_VAL = 0;
 var DECODE_BYTES = 0;
 
@@ -57,7 +62,12 @@ fn decode_varint(in_buf, in_len) {
         if (i >= in_len) { return 0 - 1; }
         var b = load8(in_buf + i);
         var low7 = b & 0x7F;
-        DECODE_VAL = DECODE_VAL + low7 * (1 << shift);
+        # The 10th byte (shift 63) has room for ONE bit of a u64; anything
+        # more, or a continuation bit, would wrap — reject it.
+        if (i == 9) {
+            if (b > 1) { DECODE_VAL = 0; return 0 - 1; }
+        }
+        DECODE_VAL = DECODE_VAL | (low7 << shift);
         if ((b & 0x80) == 0) {
             DECODE_BYTES = i + 1;
             return DECODE_VAL;
@@ -86,7 +96,8 @@ fn encode_frame(payload, payload_len, out_buf) {
 # or -1 on truncation / oversize / decode error.
 fn decode_frame(in_buf, in_len, payload_out, max_msg) {
     var len = decode_varint(in_buf, in_len);
-    if (len < 0) { return 0 - 1; }
+    if (DECODE_BYTES == 0) { return 0 - 1; }
+    if (len < 0) { return 0 - 1; }       # a u64 >= 2^63 is oversize too
     if (len > max_msg) { return 0 - 1; }
     var hdr = DECODE_BYTES;
     if (hdr + len > in_len) { return 0 - 1; }
@@ -145,6 +156,16 @@ fn main() {
     assert_eq(dec, sample, "round-trip 1234567890");
     assert_eq(DECODE_BYTES, rn, "round-trip bytes consumed match");
 
+    # u64-max (all 64 bits set; -1 as an i64) is 10 bytes, not 1.
+    var nmax = encode_varint(0 - 1, &enc_buf);
+    assert_eq(nmax, 10, "encode(u64 max) = 10 bytes");
+    assert_eq(load8(&enc_buf + 9), 0x01, "encode(u64 max) byte9 = 0x01");
+    var dmax = decode_varint(&enc_buf, nmax);
+    assert_eq(DECODE_BYTES, 10, "decode(u64 max) consumed 10 bytes");
+    assert_eq(dmax, 0 - 1, "decode(u64 max) round-trips");
+    # 2^63 is 10 bytes too (signed `>= 128` would have emitted one 0x00).
+    assert_eq(encode_varint(1 << 63, &enc_buf), 10, "encode(2^63) = 10 bytes");
+
     # === Varint overflow guard ===
     # 11 bytes all with continuation set → must return -1 (overflow,
     # past MAX_VARINT_BYTES = 10).
@@ -156,6 +177,15 @@ fn main() {
     }
     var bomb = decode_varint(&bomb_buf, 11);
     assert_eq(bomb, 0 - 1, "varint overflow guard");
+    assert_eq(DECODE_BYTES, 0, "overflow reports 0 bytes consumed");
+
+    # 9 continuation bytes then a 10th byte carrying more than 1 bit: the
+    # value would wrap past 64 bits → rejected, not silently truncated.
+    i = 0;
+    while (i < 9) { store8(&bomb_buf + i, 0x80); i = i + 1; }
+    store8(&bomb_buf + 9, 0x7F);
+    decode_varint(&bomb_buf, 10);
+    assert_eq(DECODE_BYTES, 0, "10th byte > 1 rejected (would overflow u64)");
 
     # === Length-prefix frame round-trip ===
     var payload = "hello, world";
@@ -178,8 +208,7 @@ fn main() {
     while (pos < s_off) {
         var c = decode_frame(&stream_buf + pos, s_off - pos, &pl_buf, MAX_MSG_SIZE);
         if (c < 0) {
-            msg_count = msg_count;
-            pos = s_off;     # break
+            break;
         } else {
             msg_count = msg_count + 1;
             pos = pos + c;

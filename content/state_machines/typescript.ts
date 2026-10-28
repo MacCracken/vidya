@@ -62,6 +62,25 @@ function didTransition(p: Player): boolean {
     return p.state !== p.prevState;
 }
 
+// Transition validation for the game flow: a table of legal edges.
+// An illegal request returns the CURRENT state unchanged — never a
+// default/zero state (concept gotcha "Missing the 'stay in current state'
+// transition").
+const GAME_TRANSITIONS: ReadonlyMap<GameState, readonly GameState[]> = new Map([
+    [GameState.MENU,     [GameState.SELECT, GameState.ATTRACT]],
+    [GameState.ATTRACT,  [GameState.MENU]],
+    [GameState.SELECT,   [GameState.TIPOFF, GameState.MENU]],
+    [GameState.TIPOFF,   [GameState.PLAYING]],
+    [GameState.PLAYING,  [GameState.HALFTIME, GameState.OVERTIME, GameState.GAMEOVER]],
+    [GameState.HALFTIME, [GameState.PLAYING]],
+    [GameState.OVERTIME, [GameState.GAMEOVER]],
+    [GameState.GAMEOVER, [GameState.MENU]],
+]);
+
+function gameTransition(from: GameState, to: GameState): GameState {
+    return GAME_TRANSITIONS.get(from)?.includes(to) ? to : from;
+}
+
 function mustEq<T>(got: T, want: T, msg: string): void {
     if (got !== want) throw new Error(`FAIL: ${msg}: got ${got}, want ${want}`);
 }
@@ -102,12 +121,15 @@ function main(): void {
     mustEq(didTransition(p), false, "run->run no transition");
 
     let g: GameState = GameState.MENU;
-    g = GameState.SELECT;   mustEq(g, GameState.SELECT, "menu->select");
-    g = GameState.TIPOFF;   mustEq(g, GameState.TIPOFF, "select->tipoff");
-    g = GameState.PLAYING;  mustEq(g, GameState.PLAYING, "tipoff->playing");
-    g = GameState.HALFTIME; mustEq(g, GameState.HALFTIME, "playing->halftime");
-    g = GameState.PLAYING;  mustEq(g, GameState.PLAYING, "halftime->playing");
-    g = GameState.GAMEOVER; mustEq(g, GameState.GAMEOVER, "playing->gameover");
+    g = gameTransition(g, GameState.SELECT);   mustEq(g, GameState.SELECT, "menu->select");
+    g = gameTransition(g, GameState.TIPOFF);   mustEq(g, GameState.TIPOFF, "select->tipoff");
+    g = gameTransition(g, GameState.PLAYING);  mustEq(g, GameState.PLAYING, "tipoff->playing");
+    g = gameTransition(g, GameState.HALFTIME); mustEq(g, GameState.HALFTIME, "playing->halftime");
+    g = gameTransition(g, GameState.PLAYING);  mustEq(g, GameState.PLAYING, "halftime->playing");
+    g = gameTransition(g, GameState.GAMEOVER); mustEq(g, GameState.GAMEOVER, "playing->gameover");
+    // Illegal edges are rejected and leave the state where it was
+    g = gameTransition(g, GameState.PLAYING);  mustEq(g, GameState.GAMEOVER, "gameover->playing rejected");
+    mustEq(gameTransition(GameState.MENU, GameState.PLAYING), GameState.MENU, "menu->playing rejected");
 
     p = newPlayer();
     transition(p, Input.SHOOT);

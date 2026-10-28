@@ -1,12 +1,14 @@
 // Vidya — Game AI Decision Making in AArch64 Assembly
 //
-// Stat-driven AI scoring with PCG PRNG. AArch64 has no single 64x64→128
+// Stat-driven AI scoring with an LCG PRNG (PCG's constants, plain
+// top-bits output rather than PCG's permutation step). AArch64 has no
+// single 64x64→128
 // instruction in one form: we use the MUL/UMULH pair to get the low and
 // high halves of an unsigned multiply. For PCG, we only need the low 64
 // bits of state*MULT, so a plain MUL suffices and the wraparound is the
 // natural modulo-2^64 behavior of MUL on x-registers. Constants larger
-// than a 16-bit immediate (PCG_MULT, PCG_INC) must be loaded via the
-// assembler's literal-pool form: `ldr xN, =literal`.
+// than a 16-bit immediate (PCG_MULT, PCG_INC) need either a movz + three
+// movk sequence or, as here, the literal-pool form `ldr xN, =literal`.
 
 .global _start
 

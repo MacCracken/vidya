@@ -3,8 +3,9 @@
 # File operations via Linux syscalls: open, write, read, close, unlink.
 # Creates a temporary file, writes data, reads it back, verifies the
 # content matches, then removes the file. This is the raw syscall
-# interface that libc wraps — no abstraction, just registers and int 0x80
-# (or syscall on x86_64).
+# interface that libc wraps — no abstraction, just registers and the
+# `syscall` instruction. (int 0x80 is the legacy 32-bit ABI: different
+# syscall numbers — open is 5 there, not 2 — and only 32-bit pointers.)
 #
 # Build: as --64 asm_x86_64.s -o out.o && ld out.o -o out && ./out
 
@@ -34,12 +35,13 @@
 .equ SEEK_SET,   0
 
 # ── Data constants ───────────────────────────────────────────────────
-.equ WRITE_LEN,  14             # length of write_data
+.equ WRITE_LEN,  write_data_end - write_data   # 14: length of write_data
                                 # TRAP: count the escape, not the source text.
                                 # "Hello, vidya!\n" is 13 printable chars + one
-                                # 0x0A = 14 bytes. A 13 here writes a short file
-                                # (newline dropped) and every later check still
-                                # passes, because they all use the same constant.
+                                # 0x0A = 14 bytes. A hand-typed 13 here writes a
+                                # short file (newline dropped) and every later
+                                # check still passes, because they all use the
+                                # same constant — so let the assembler count.
 
 _start:
     # ── Step 1: Create and open file for writing ─────────────────────
@@ -173,6 +175,7 @@ filepath:
 
 write_data:
     .ascii  "Hello, vidya!\n"       # 14 bytes (no null needed for write)
+write_data_end:
 
 read_buf:
     .skip   64                     # buffer for reading back

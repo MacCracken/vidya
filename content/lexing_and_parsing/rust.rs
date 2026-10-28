@@ -195,6 +195,15 @@ impl Parser {
         self.advance();
     }
 
+    /// Parse a complete input: one expression, then end of input. Without
+    /// the Eof check, "2 3" would parse as 2 and "1 + 2) * 100" as 3 —
+    /// parse_expr stops at the first token it cannot continue with.
+    fn parse_all(&mut self) -> Expr {
+        let expr = self.parse_expr(0);
+        self.expect(TokenKind::Eof);
+        expr
+    }
+
     /// Pratt parser entry point. `min_bp` is the minimum binding power.
     fn parse_expr(&mut self, min_bp: u8) -> Expr {
         // Parse prefix (atoms and unary operators)
@@ -297,7 +306,7 @@ fn main() {
 
     for (input, expected) in &tests {
         let mut parser = Parser::new(input);
-        let ast = parser.parse_expr(0);
+        let ast = parser.parse_all();
         let result = eval(&ast);
         let status = if result == *expected { "✓" } else { "✗ FAIL" };
         println!(

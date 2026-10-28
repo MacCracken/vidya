@@ -127,6 +127,11 @@ def main():
     tampered = bytearray(ct); tampered[5] ^= 1
     assert demo_open(bytes(tampered), 42, 7, tag) is None
     assert demo_open(ct, 42, 7, tag ^ 1) is None
+    # The forgery the WARNING describes, executed: a byte-swapped message
+    # under the original tag is ACCEPTED. A real MAC would reject it.
+    _, tag_msg = demo_seal(b"transfer 10 usd", 42, 7)
+    forged = b"transfer u0 1sd"
+    assert demo_open(xor_stream(forged, 42), 42, 7, tag_msg) == forged
 
     hs = Handshake()
     assert hs.state == ST_INIT

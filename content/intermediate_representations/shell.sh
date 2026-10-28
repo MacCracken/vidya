@@ -177,18 +177,23 @@ assert_eq "$ssa_output" "$expected_ssa" "SSA conversion"
 #   - No labels except possibly the first instruction
 # Blocks are the unit of local optimization.
 
+# Count LEADERS (first instruction of a block): the first instruction, any
+# branch target (LABEL), and any instruction right after a branch. A LABEL
+# that directly follows a branch is ONE leader, not two — counting
+# "branches + labels" separately invents empty blocks.
 count_basic_blocks() {
     local ir="$1"
-    local blocks=1  # start with one block
+    local blocks=0 leader=1  # the first instruction is a leader
 
     while IFS=' ' read -r op dst src1 src2; do
+        [[ "$op" == "LABEL" ]] && leader=1
+        if (( leader )); then
+            blocks=$(( blocks + 1 ))
+            leader=0
+        fi
         case "$op" in
             JMP|BR|BEQ|BNE)
-                (( blocks++ ))
-                ;;
-            LABEL)
-                # A label starts a new block (unless it's the first instruction)
-                (( blocks++ ))
+                leader=1  # the next instruction starts a new block
                 ;;
         esac
     done <<< "$1"
@@ -206,15 +211,19 @@ LABEL done
 STORE result t2"
 
 blocks=$(count_basic_blocks "$block_ir")
-assert_eq "$blocks" "5" "5 basic blocks (entry + 2 branches + 2 labels)"
+# [LOAD ADD BEQ] [LABEL loop MUL SUB BNE] [LABEL done STORE]
+assert_eq "$blocks" "3" "3 basic blocks (a label right after a branch is one leader)"
 
 # ── IR instruction counting by type ─────────────────────────────────
+# Counters use x=$(( x + 1 )), not (( x++ )): the post-increment evaluates
+# to the OLD value, so from 0 it returns status 1 and set -e aborts the
+# script. It only "works" inside $(...), where errexit is not inherited.
 count_by_opcode() {
     local ir="$1"
     local opcode="$2"
     local count=0
     while IFS=' ' read -r op rest; do
-        [[ "$op" == "$opcode" ]] && (( count++ ))
+        [[ "$op" == "$opcode" ]] && count=$(( count + 1 ))
     done <<< "$ir"
     echo "$count"
 }
@@ -232,7 +241,7 @@ find_def() {
             echo "$line_num"
             return
         fi
-        (( line_num++ ))
+        line_num=$(( line_num + 1 ))
     done <<< "$ir"
     echo "-1"
 }
@@ -241,8 +250,8 @@ count_uses() {
     local ir="$1" var="$2"
     local count=0
     while IFS=' ' read -r op dst src1 src2; do
-        [[ "$src1" == "$var" ]] && (( count++ ))
-        [[ "$src2" == "$var" ]] && (( count++ ))
+        [[ "$src1" == "$var" ]] && count=$(( count + 1 ))
+        [[ "$src2" == "$var" ]] && count=$(( count + 1 ))
     done <<< "$ir"
     echo "$count"
 }

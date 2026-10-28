@@ -94,12 +94,14 @@ _start:
     jne     fail
 
     # ── Call to local function (file-private symbol) ────────────────
-    # The assembler resolves this to a relative offset.
-    # In the object file, this is a R_X86_64_PLT32 relocation
-    # (or R_X86_64_PC32 for direct calls in static linking).
+    # The assembler resolves this to a relative offset itself: the target
+    # is a local label in this same section, so the rel32 is known at
+    # assembly time and the object file carries NO relocation for it
+    # (`readelf -r` lists none). A call to a global or external function
+    # is what gets an R_X86_64_PLT32 for the linker to resolve.
     mov     rdi, 10
     mov     rsi, 20
-    call    local_helper            # linker resolves to relative offset
+    call    local_helper            # rel32 filled in by the assembler
     cmp     rax, 30
     jne     fail
 
@@ -150,9 +152,11 @@ _start:
     # We demonstrate with a weak symbol:
 .weak optional_plugin
     lea     rax, [rip + optional_plugin]
-    # If not defined elsewhere, this resolves to 0
-    # (Linker may or may not zero it — behavior is defined for .weak)
-    # In static linking with no other object, it's typically 0
+    # Nothing defines it, and an undefined weak symbol has value 0 (ELF
+    # gABI), so its address is 0 — the null check is how code detects an
+    # optional hook that was not linked in.
+    test    rax, rax
+    jnz     fail
 
     # ── Print success ───────────────────────────────────────────────
     mov     rax, 1

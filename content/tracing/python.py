@@ -26,7 +26,13 @@ def main():
                 "level": record.levelname,
                 "target": record.name,
                 "message": record.getMessage(),
-                "timestamp_ns": time.perf_counter_ns(),
+                # Wall-clock time the event was LOGGED (epoch seconds, set
+                # by LogRecord). Not time.perf_counter_ns(): that clock's
+                # zero point is undefined (here it read ~12576 s, roughly
+                # uptime), so it only measures durations and cannot be
+                # correlated across processes or hosts; and calling it here
+                # stamps format time, not event time.
+                "timestamp": record.created,
             }
             # Attach extra structured fields if present
             if hasattr(record, "extra_fields"):
@@ -57,7 +63,7 @@ def main():
     assert entry0["level"] == "ERROR"
     assert entry0["target"] == "vidya.tracing"
     assert entry0["message"] == "connection refused"
-    assert "timestamp_ns" in entry0
+    assert abs(entry0["timestamp"] - time.time()) < 60  # a real wall-clock time
 
     entry3 = json.loads(lines[3])
     assert entry3["level"] == "DEBUG"

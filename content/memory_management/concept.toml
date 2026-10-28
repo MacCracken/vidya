@@ -31,22 +31,22 @@ language = "Rust"
 [[gotchas]]
 title = "Leaking memory with reference cycles"
 explanation = "Rc<T> with interior RefCell can create cycles that never get freed. Use Weak<T> to break cycles."
-bad_example = "let a = Rc::new(RefCell::new(None)); let b = Rc::clone(&a); *a.borrow_mut() = Some(b); // cycle!"
-good_example = "Use Weak<T> for back-references: Rc::downgrade(&parent)"
+bad_example = "struct Node { next: RefCell<Option<Rc<Node>>> } let a = Rc::new(Node { next: RefCell::new(None) }); *a.next.borrow_mut() = Some(Rc::clone(&a)); // a -> a: strong count never hits 0, never freed"
+good_example = "struct Node { next: RefCell<Option<Weak<Node>>> } ... *a.next.borrow_mut() = Some(Rc::downgrade(&a)); // Weak back-reference: freed normally"
 language = "Rust"
 
 [[gotchas]]
 title = "Double free in C"
-explanation = "Freeing the same pointer twice is undefined behavior. Set pointers to NULL after free, or use ownership conventions."
+explanation = "Freeing the same pointer twice is undefined behavior. Set pointers to NULL after free (free(NULL) is a no-op, but this only protects that one variable; other copies of the pointer still dangle), or use ownership conventions."
 bad_example = "free(ptr); /* ... later ... */ free(ptr);"
 good_example = "free(ptr); ptr = NULL;"
 language = "C"
 
 [[gotchas]]
 title = "Hidden allocations from innocent-looking operations"
-explanation = "String concatenation, format!(), vec![], to_string() — all allocate. In hot loops, these add up fast."
-bad_example = "for item in items { result.push(format!(\"{item}\")); }"
-good_example = "let mut buf = String::new(); for item in items { write!(buf, \"{item}\").unwrap(); results.push(buf.clone()); buf.clear(); }"
+explanation = "String concatenation, format!(), vec![], to_string() — all allocate. In hot loops, these add up fast. Reusing one buffer pays off only when each value is consumed before the next is built; pushing buf.clone() into a Vec<String> allocates once per element, exactly like format!."
+bad_example = "for item in items { out.write_all(format!(\"{item}\").as_bytes())?; } // format! allocates a new String per item"
+good_example = "let mut buf = String::new(); for item in items { buf.clear(); write!(buf, \"{item}\").unwrap(); out.write_all(buf.as_bytes())?; } // clear() keeps the capacity: one allocation in total"
 language = "Rust"
 
 [[performance_notes]]
@@ -68,5 +68,5 @@ evidence = "Arena dealloc is O(1) regardless of object count vs O(n) for individ
 [[performance_notes]]
 title = "Small string optimization"
 explanation = "Many string types store short strings inline (on the stack) to avoid heap allocation. Rust's String doesn't do this by default — use SmallString crates if needed."
-evidence = "Strings under ~22 bytes can be stack-allocated with compact_str or smol_str"
+evidence = "compact_str stores strings up to 24 bytes inline, smol_str up to 23 (64-bit targets; docs.rs)"
 language = "Rust"

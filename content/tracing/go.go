@@ -341,18 +341,25 @@ func testFilterByLevel() {
 	})
 	logger := slog.New(handler)
 
-	// slog checks level before evaluating LogAttrs arguments
-	// but regular key-value args are always evaluated.
-	// Use LogAttrs for performance-critical paths:
+	// No Go function can skip evaluating its arguments: slog checks the
+	// level inside the call, after every argument — LogAttrs' included —
+	// has been computed. (LogAttrs' advantage is avoiding the any-boxing
+	// of key/value pairs, not laziness.)
 	logger.LogAttrs(context.Background(), slog.LevelDebug, "debug msg",
 		slog.String("expensive", func() string {
 			formatCalled = true
 			return "computed"
 		}()),
 	)
+	assert(formatCalled, "argument computed even though Debug is filtered")
 
-	// Note: the string was still computed because Go evaluates function
-	// arguments before the call. For truly lazy evaluation, use Enabled():
+	// Lazy option 1: a slog.LogValuer is only resolved when the record is
+	// actually handled, so a filtered-out record never calls LogValue.
+	formatCalled = false
+	logger.Debug("lazy value", "expensive", lazyValue{&formatCalled})
+	assert(!formatCalled, "LogValuer not resolved for a filtered record")
+
+	// Lazy option 2: guard a whole block with Enabled():
 	formatCalled = false
 	if logger.Enabled(context.Background(), slog.LevelDebug) {
 		// This block is skipped entirely when debug is disabled
@@ -365,21 +372,44 @@ func testFilterByLevel() {
 	//   debug!("value: {}", expensive_fn());  // macro short-circuits
 }
 
+// lazyValue defers its work to LogValue, which slog calls only for
+// records that pass the level check.
+type lazyValue struct{ called *bool }
+
+func (v lazyValue) LogValue() slog.Value {
+	*v.called = true
+	return slog.StringValue("computed")
+}
+
 // ── Custom slog Handler ─────────────────────────────────────────────
 // slog's Handler interface lets you write custom log backends.
 // This is like Rust's tracing Subscriber.
 
+// levelCounts is shared by a handler and every handler derived from it
+// with WithAttrs/WithGroup. The mutex must be shared WITH the map: giving
+// each derived handler its own (zero) mutex over the same map lets
+// logger.With(...) loggers race — "fatal error: concurrent map writes".
+type levelCounts struct {
+	mu sync.Mutex
+	m  map[slog.Level]int
+}
+
 type CountingHandler struct {
 	inner  slog.Handler
-	counts map[slog.Level]int
-	mu     sync.Mutex
+	counts *levelCounts
 }
 
 func NewCountingHandler(inner slog.Handler) *CountingHandler {
 	return &CountingHandler{
 		inner:  inner,
-		counts: make(map[slog.Level]int),
+		counts: &levelCounts{m: make(map[slog.Level]int)},
 	}
+}
+
+func (h *CountingHandler) count(level slog.Level) int {
+	h.counts.mu.Lock()
+	defer h.counts.mu.Unlock()
+	return h.counts.m[level]
 }
 
 func (h *CountingHandler) Enabled(ctx context.Context, level slog.Level) bool {
@@ -387,9 +417,9 @@ func (h *CountingHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h *CountingHandler) Handle(ctx context.Context, r slog.Record) error {
-	h.mu.Lock()
-	h.counts[r.Level]++
-	h.mu.Unlock()
+	h.counts.mu.Lock()
+	h.counts.m[r.Level]++
+	h.counts.mu.Unlock()
 	return h.inner.Handle(ctx, r)
 }
 
@@ -412,9 +442,24 @@ func testCustomHandler() {
 	logger.Warn("warning")
 	logger.Error("error")
 
-	assert(counting.counts[slog.LevelInfo] == 2, "two info logs")
-	assert(counting.counts[slog.LevelWarn] == 1, "one warn log")
-	assert(counting.counts[slog.LevelError] == 1, "one error log")
+	assert(counting.count(slog.LevelInfo) == 2, "two info logs")
+	assert(counting.count(slog.LevelWarn) == 1, "one warn log")
+	assert(counting.count(slog.LevelError) == 1, "one error log")
+
+	// A derived logger (With) and the base logger, used concurrently,
+	// count into the same table under the same lock.
+	derived := logger.With("component", "worker")
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for range 50 {
+				logger.Debug("base")
+				derived.Debug("derived")
+			}
+		})
+	}
+	wg.Wait()
+	assert(counting.count(slog.LevelDebug) == 400, "concurrent base+derived logs all counted")
 }
 
 // ── OpenTelemetry Pattern ───────────────────────────────────────────

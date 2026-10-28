@@ -8,7 +8,9 @@
 #   - {OFFSET, LENGTH} match: copy LENGTH bytes from dst[pos - OFFSET]
 #                                (OFFSET in 1..255, LENGTH in 1..255)
 # Encoder: greedy O(n²) match-finder over a 255-byte window. Decoder:
-# validates against an output size cap (decompression bomb guard).
+# validates against an output size cap (decompression bomb guard) and
+# rejects a match whose OFFSET reaches before the start of the output
+# (an out-of-bounds read from a malformed or hostile stream).
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -85,7 +87,8 @@ fn encode(src, src_len) {
 
 # --- Decoder ---
 # decode(tok, tok_len, out_cap) — fills output_buf, returns output length.
-# Returns 0 - 1 (-1 sentinel) if output would exceed out_cap (bomb guard).
+# Returns 0 - 1 (-1 sentinel) if output would exceed out_cap (bomb guard)
+# or a match offset exceeds the bytes decoded so far.
 
 fn decode(tok, tok_len, out_cap) {
     var pos = 0;
@@ -102,6 +105,7 @@ fn decode(tok, tok_len, out_cap) {
         } else {
             # match: byte-by-byte copy (handles overlap, e.g. offset=1)
             if (pos + b1 > out_cap) { return 0 - 1; }
+            if (b0 > pos) { return 0 - 1; }   # source would start before output_buf
             var k = 0;
             while (k < b1) {
                 store8(&output_buf + pos + k, load8(&output_buf + pos - b0 + k));
@@ -155,7 +159,7 @@ fn main() {
     assert_eq(dn2, n2, "AAAAAAAA decoded length");
     assert(buf_eq(&output_buf, &input_buf, n2), "AAAAAAAA roundtrip");
     # Sanity: should compress (token bytes < input bytes for n2 = 8)
-    assert(tn2 < n2 + 4, "AAAAAAAA actually compresses");
+    assert(tn2 < n2, "AAAAAAAA actually compresses");
 
     # 3. Round-trip: mostly literals
     var s3 = "Hello, World!";
@@ -169,10 +173,18 @@ fn main() {
     #    decoded with out_cap=10 must return -1.
     store8(&token_buf + 0, 1);    # offset = 1
     store8(&token_buf + 1, 200);  # length = 200
-    # Seed output_buf[0] to something so the decoder has source bytes to copy.
-    # Even with valid source, the cap check fires first.
+    # The cap check fires before any byte is copied. (This token would be
+    # rejected anyway: offset 1 at pos 0 points before the buffer.)
     var bomb = decode(&token_buf, 2, 10);
     assert_eq(bomb, 0 - 1, "bomb guard rejects oversize");
+
+    # 4b. Offset guard: literal 'A', then a match reaching back 2 bytes
+    #     when only 1 has been decoded — must be rejected, not read OOB.
+    store8(&token_buf + 0, 0);
+    store8(&token_buf + 1, 65);
+    store8(&token_buf + 2, 2);    # offset 2 > pos 1
+    store8(&token_buf + 3, 1);
+    assert_eq(decode(&token_buf, 4, OUT_CAP), 0 - 1, "match offset beyond output rejected");
 
     # 5. Empty input: zero tokens, zero output.
     var tn5 = encode(&input_buf, 0);

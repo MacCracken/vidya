@@ -22,6 +22,7 @@ typedef struct {
     int rcount[N_TX];
     int rkeys[N_TX][TX_CAP];
     long long rsnaps[N_TX][TX_CAP];
+    int rfull[N_TX];   /* a read could not be tracked: commit must fail */
 } Store;
 
 static void store_init(Store *s) { memset(s, 0, sizeof(*s)); }
@@ -45,6 +46,7 @@ static int tx_begin(Store *s) {
             s->status[t] = TX_ACTIVE;
             s->wcount[t] = 0;
             s->rcount[t] = 0;
+            s->rfull[t] = 0;
             return t;
         }
     }
@@ -69,10 +71,18 @@ static long long tx_read(Store *s, int tx, int k) {
     assert(s->status[tx] == TX_ACTIVE);
     int widx = tx_find_write(s, tx, k);
     if (widx >= 0) return s->wvals[tx][widx];
-    if (!tx_has_read(s, tx, k) && s->rcount[tx] < TX_CAP) {
-        s->rkeys[tx][s->rcount[tx]] = k;
-        s->rsnaps[tx][s->rcount[tx]] = s->version[k];
-        s->rcount[tx] += 1;
+    if (!tx_has_read(s, tx, k)) {
+        if (s->rcount[tx] < TX_CAP) {
+            s->rkeys[tx][s->rcount[tx]] = k;
+            s->rsnaps[tx][s->rcount[tx]] = s->version[k];
+            s->rcount[tx] += 1;
+        } else {
+            /* Read-set full. Silently not recording the snapshot would let
+             * a concurrent write to k go undetected at validation (a stale
+             * read commits). An untracked read is unvalidatable: doom the
+             * commit instead. */
+            s->rfull[tx] = 1;
+        }
     }
     return s->accounts[k];
 }
@@ -92,6 +102,7 @@ static int tx_write(Store *s, int tx, int k, long long v) {
 }
 
 static int tx_validate(Store *s, int tx) {
+    if (s->rfull[tx]) return 0;
     for (int i = 0; i < s->rcount[tx]; i++) {
         int k = s->rkeys[tx][i];
         if (s->version[k] != s->rsnaps[tx][i]) return 0;
@@ -125,6 +136,7 @@ static void crash_recovery(Store *s) {
         s->status[t] = TX_FREE;
         s->wcount[t] = 0;
         s->rcount[t] = 0;
+        s->rfull[t] = 0;
     }
 }
 
@@ -214,11 +226,33 @@ int main(void) {
     }
     seed(&s);
     {
+        /* Durability itself (fsync / WAL replay) is not simulated: the
+         * accounts array stands in for stable storage and crash_recovery
+         * only discards volatile tx state. What CAN be checked is that an
+         * in-flight tx's buffered writes never reach the store and its
+         * slot is reclaimed. */
         int tx = tx_begin(&s);
         tx_write(&s, tx, 0, 12345);
         tx_commit(&s, tx);
+        int inflight = tx_begin(&s);
+        tx_write(&s, inflight, 0, 666);
         crash_recovery(&s);
-        check(account_get_raw(&s, 0) == 12345, "committed survives crash");
+        check(account_get_raw(&s, 0) == 12345, "committed kept, in-flight discarded");
+        check(s.status[inflight] == TX_FREE && tx_begin(&s) == 0,
+              "crash recovery frees tx slots");
+    }
+    seed(&s);
+    {
+        /* Read-set overflow: tx1 reads TX_CAP + 1 keys, tx2 then changes
+         * the last one. tx1's untracked read must not commit. */
+        int tx1 = tx_begin(&s);
+        int tx2 = tx_begin(&s);
+        long long sum = 0;
+        for (int k = 0; k <= TX_CAP; k++) sum += tx_read(&s, tx1, k);
+        tx_write(&s, tx2, TX_CAP, 777);
+        tx_commit(&s, tx2);
+        tx_write(&s, tx1, 5, sum);
+        check(tx_commit(&s, tx1) == 0, "untracked read aborts commit");
     }
     seed(&s);
     {

@@ -14,23 +14,24 @@
 //      cell grid this finds the goal in O(√N) queries instead of O(N).
 //
 // We illustrate three primitives on a tiny 2x2 = 4-cell grid encoded
-// in 2 qubits (cell index = b1 b0). qelib1.inc only — no `swap`.
+// in 2 qubits (cell index = b1 b0). Gates used: h, x, cx, cz.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Primitive 1: superposition over all cells (quantum walk seed) ─────
 // Hadamard each position qubit ⇒ uniform amplitude over all 4 cells.
 // This is the quantum analog of "BFS frontier = all cells at once."
-qreg pos[2];
-creg pos_c[2];
+qubit[2] pos;
+bit[2] pos_c;
 
 h pos[0];
 h pos[1];
 // pos is now (|00⟩ + |01⟩ + |10⟩ + |11⟩)/2 — every cell amplitude 1/2.
 
-measure pos -> pos_c;
+pos_c = measure pos;
 // pos_c is uniformly random across {00, 01, 10, 11} = 4 grid cells.
+// @expect pos_c in {0, 1, 2, 3}
 
 // ── Primitive 2: phase oracle marking the goal cell |11⟩ ──────────────
 // Classical BFS checks `if (curr == goal)` once per dequeue. The
@@ -38,8 +39,8 @@ measure pos -> pos_c;
 // For a 2-qubit register, marking |11⟩ is exactly a controlled-Z (cz):
 // it flips the phase of |11⟩ and leaves |00⟩, |01⟩, |10⟩ unchanged.
 
-qreg gv[2];               // grid position register (init |00⟩)
-creg gv_c[2];
+qubit[2] gv;               // grid position register (init |00⟩)
+bit[2] gv_c;
 
 // Put gv in uniform superposition (all cells), then apply oracle.
 h gv[0];
@@ -56,7 +57,7 @@ cz gv[0], gv[1];          // mark goal = |11⟩ with a relative -1 phase
 // Diffusion D = H⊗H · (2|00⟩⟨00| - I) · H⊗H. Equivalent gate sequence:
 //   H ⊗ H  ;  X ⊗ X  ;  CZ  ;  X ⊗ X  ;  H ⊗ H
 // (The outer H's mix into the |+,+⟩ basis; the X/CZ/X stack reflects
-// about the all-ones state, which is the diffusion mirror operator.)
+// about the all-zeros state, which is the diffusion mirror operator.)
 
 h gv[0];
 h gv[1];
@@ -68,8 +69,9 @@ x gv[1];
 h gv[0];
 h gv[1];
 
-measure gv -> gv_c;
+gv_c = measure gv;
 // gv_c = "11" with probability 1 — the goal cell, found in one query.
+// @expect gv_c == 3
 
 // ── Primitive 4: 1-step coined quantum walk (illustration) ────────────
 // A discrete-time quantum walk uses a "coin" qubit to direct the next
@@ -80,16 +82,20 @@ measure gv -> gv_c;
 // One step spreads amplitude across both cells — the same shape as a
 // classical BFS frontier expansion, but in superposition.
 
-qreg coin[1];
-qreg cell[1];
-creg coin_c[1];
-creg cell_c[1];
+qubit[1] coin;
+qubit[1] cell;
+bit[1] coin_c;
+bit[1] cell_c;
 
 h coin[0];                 // |+⟩ — superposed step direction
 cx coin[0], cell[0];       // conditional advance — quantum-walk step
 
-measure coin -> coin_c;
-measure cell -> cell_c;
+coin_c = measure coin;
+cell_c = measure cell;
+// Each is 0 or 1 with equal probability, and they always agree: the
+// walker advanced exactly when the coin said so.
+// @expect coin_c in {0, 1}
+// @expect cell_c in {0, 1}
 
 // ── Notes — the pathfinding/quantum bridge ────────────────────────────
 //

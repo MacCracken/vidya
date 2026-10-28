@@ -9,7 +9,8 @@
 //   Rust &T        → TS Readonly<T> (shallow, compile-time only)
 //   Rust &mut T    → TS normal reference (everything is mutable by default)
 //   Rust move      → TS has no moves; references are always shared
-//   Rust Drop      → TS FinalizationRegistry (non-deterministic)
+//   Rust Drop      → TS `using` + [Symbol.dispose] (deterministic, scope exit)
+//                    FinalizationRegistry is GC-driven, NOT a Drop substitute
 //   Rust Weak<T>   → TS WeakRef<T>
 //   Rust Clone     → TS structuredClone / spread operator
 //
@@ -87,7 +88,9 @@ function defensiveCopyDemo(): void {
 
     // Object.freeze: runtime immutability (shallow)
     const frozen = Object.freeze({ x: 1, y: 2 });
-    // frozen.x = 99; // ← TypeError at runtime in strict mode
+    // frozen.x = 99; // ← TypeError in strict mode; silently ignored in sloppy
+    //                   mode (tsx runs this file as sloppy CommonJS)
+    assert(!Reflect.set(frozen, "x", 99), "freeze rejects the write");
     assert(frozen.x === 1, "freeze prevents mutation");
 
     // as const: compile-time deep readonly + literal types
@@ -143,12 +146,13 @@ function finalizationDemo(): void {
     // Key difference from Rust:
     // Rust Drop: runs immediately and predictably at scope exit
     // TS FinalizationRegistry: runs "eventually, maybe" after GC
-    // For deterministic cleanup, use try/finally or explicit close() methods
+    // For deterministic cleanup, use `using` / try/finally (next section)
 }
 
 // ── Deterministic cleanup: try/finally (the TS way) ───────────────
 // Since FinalizationRegistry is unreliable, TypeScript uses try/finally
-// and the Disposable pattern (TC39 proposal, supported in TS 5.2+).
+// and `using` declarations (explicit resource management: TS 5.2+, native
+// in V8 — plain `node` runs it on Node 26).
 
 interface Resource {
     readonly name: string;
@@ -184,6 +188,20 @@ function deterministicCleanupDemo(): void {
     let closedError = false;
     try { r.use(); } catch { closedError = true; }
     assert(closedError, "resource closed");
+
+    // `using`: the compiler-inserted try/finally — [Symbol.dispose]() runs at
+    // scope exit, in reverse declaration order, even on throw. This is the
+    // closest TypeScript gets to Rust's Drop.
+    const log: string[] = [];
+    const guard = (name: string): Disposable => ({
+        [Symbol.dispose]() { log.push(`drop ${name}`); },
+    });
+    {
+        using _a = guard("a");
+        using _b = guard("b");
+        log.push("body");
+    }
+    assert(log.join(",") === "body,drop b,drop a", "using disposes at scope exit, LIFO");
 }
 
 // ── Ownership transfer pattern ────────────────────────────────────

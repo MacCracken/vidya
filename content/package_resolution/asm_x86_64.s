@@ -8,7 +8,10 @@
 # A semver major.minor.patch is encoded as one integer
 #   enc = major*1_000_000 + minor*1_000 + patch
 # so version comparison IS integer comparison. A constraint is a half-open
-# range [lo, hi). A caret ^X.Y.Z = [X.Y.Z, (X+1).0.0). Resolving a shared
+# range [lo, hi). A caret bumps the leftmost NON-ZERO field:
+# ^X.Y.Z = [X.Y.Z, (X+1).0.0) for X > 0, ^0.Y.Z = [0.Y.Z, 0.(Y+1).0) for
+# Y > 0, and ^0.0.Z = [0.0.Z, 0.0.(Z+1)) — below 1.0 the minor (or patch)
+# is the breaking axis, as in npm and cargo. Resolving a shared
 # ("diamond") dependency means intersecting the ranges every requirer imposes
 # and picking the highest version that survives — and backtracking on an
 # earlier choice when the highest pick paints a later dependency into a
@@ -62,11 +65,28 @@ sv_major:
     idiv    rcx                         # rax = v / VMAJ
     ret
 
-# caret_hi(rdi=v) -> rax = (sv_major(v) + 1) * VMAJ
+# caret_hi(rdi=v) -> rax = exclusive upper bound of ^v:
+#   major > 0: (major+1).0.0 ; major == 0, minor > 0: 0.(minor+1).0 ;
+#   else 0.0.(patch+1). Clobbers rcx, rdx (sv_major's idiv); keeps rdi.
 caret_hi:
     call    sv_major
+    test    rax, rax
+    jz      .ch_major0
     inc     rax
-    imul    rax, VMAJ
+    imul    rax, VMAJ                   # ^1.2.3 -> 2.0.0
+    ret
+.ch_major0:
+    mov     rax, rdi
+    cqo
+    mov     rcx, VMIN
+    idiv    rcx                         # rax = minor (major is 0)
+    test    rax, rax
+    jz      .ch_minor0
+    inc     rax
+    imul    rax, VMIN                   # ^0.2.3 -> 0.3.0
+    ret
+.ch_minor0:
+    lea     rax, [rdi + 1]              # ^0.0.3 -> 0.0.4
     ret
 
 # satisfies(rdi=v, rsi=lo, rdx=hi) -> rax = 1 if lo<=v<hi else 0
@@ -189,7 +209,8 @@ resolve_backtrack:
     push    r14
     push    r15
     push    rbp
-    sub     rsp, 8                      # 16-byte align
+    sub     rsp, 24                     # [rsp]=i, [rsp+8]=aver; 6 pushes + 24
+                                        # keeps rsp 16-byte aligned at each call
     mov     rbx, rdi                    # &a_vers
     mov     r12, rsi                    # &a_creq
     mov     r13, rdx                    # an
@@ -206,26 +227,24 @@ resolve_backtrack:
     mov     rax, [rbx + rcx * 8]        # aver
     mov     rdx, [r12 + rcx * 8]        # creq
     # intersect(creq, b_base)
-    push    rax                         # save aver
+    mov     [rsp + 8], rax              # save aver (a push here would undo
+                                        # the alignment for both calls)
     mov     rdi, rdx
     mov     rsi, r14
     call    intersect                   # rax = lo, rdx = hi
     cmp     rax, rdx
-    jge     .rb_next_pop                # empty ⇒ skip
+    jge     .rb_next                    # empty ⇒ skip
     mov     rdi, rax
     mov     rsi, rdx
     call    best_match                  # rax = c, or -1
     cmp     rax, -1
-    je      .rb_next_pop                # no C satisfies ⇒ skip
+    je      .rb_next                    # no C satisfies ⇒ skip
     mov     rdx, rax                    # c
-    pop     rax                         # aver
+    mov     rax, [rsp + 8]              # aver
     cmp     rax, r15
     jle     .rb_next                    # aver <= bestA ⇒ skip
     mov     r15, rax                    # bestA = aver
     mov     rbp, rdx                    # bestC = c
-    jmp     .rb_next
-.rb_next_pop:
-    pop     rax                         # discard saved aver
 .rb_next:
     mov     rcx, [rsp]
     inc     rcx
@@ -235,7 +254,7 @@ resolve_backtrack:
     lea     rax, [rip + g_chosen_c]
     mov     [rax], rbp                  # g_chosen_c = bestC
     mov     rax, r15                    # bestA
-    add     rsp, 8
+    add     rsp, 24
     pop     rbp
     pop     r15
     pop     r14
@@ -365,7 +384,7 @@ pkg_has_cycle:
 # Backtrack candidate tables live in .data so we can pass their addresses.
 .section .data
 .align 8
-a_vers:     .quad 1100000, 1000000      # A 1.1.0, A 1.0.0
+a_vers:     .quad 1001000, 1000000      # A 1.1.0, A 1.0.0
 a_creq:     .quad 2000000, 1000000      # A 1.1.0 -> C^2.0.0, A 1.0.0 -> C^1.0.0
 
 .section .text
@@ -407,14 +426,14 @@ _start:
     jne     fail
 
     # ---- Caret: caret_hi(1.2.0) == 2000000 ----
-    mov     rdi, 1200000
+    mov     rdi, 1002000
     call    caret_hi
     cmp     rax, 2000000
     jne     fail
 
-    # satisfies(1.4.0, ^1.2.0) == 1   [lo=1200000, hi=2000000]
-    mov     rdi, 1400000
-    mov     rsi, 1200000
+    # satisfies(1.4.0, ^1.2.0) == 1   [lo=1002000, hi=2000000]
+    mov     rdi, 1004000
+    mov     rsi, 1002000
     mov     rdx, 2000000
     call    satisfies
     cmp     rax, 1
@@ -422,19 +441,40 @@ _start:
 
     # satisfies(2.0.0, ^1.2.0) == 0
     mov     rdi, 2000000
-    mov     rsi, 1200000
+    mov     rsi, 1002000
     mov     rdx, 2000000
     call    satisfies
     test    rax, rax
     jnz     fail
 
     # satisfies(1.1.0, ^1.2.0) == 0
-    mov     rdi, 1100000
-    mov     rsi, 1200000
+    mov     rdi, 1001000
+    mov     rsi, 1002000
     mov     rdx, 2000000
     call    satisfies
     test    rax, rax
     jnz     fail
+
+    # ---- Caret below 1.0: the minor (then the patch) is the breaking axis ----
+    # caret_hi(0.2.3) == 0.3.0 = 3000, not 1.0.0
+    mov     rdi, 2003
+    call    caret_hi
+    cmp     rax, 3000
+    jne     fail
+
+    # satisfies(0.9.0, ^0.2.3) == 0 — the "next major" rule would admit it
+    mov     rdi, 9000
+    mov     rsi, 2003
+    mov     rdx, 3000
+    call    satisfies
+    test    rax, rax
+    jnz     fail
+
+    # caret_hi(0.0.3) == 0.0.4 = 4
+    mov     rdi, 3
+    call    caret_hi
+    cmp     rax, 4
+    jne     fail
 
     # ---- Intersect: lo of (1.0.0, 1.3.0) == 1.3.0 ----
     mov     rdi, 1000000

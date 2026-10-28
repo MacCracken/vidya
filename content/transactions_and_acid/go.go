@@ -28,6 +28,10 @@ type Store struct {
 	status   [NTx]int
 	writes   [NTx]map[int]int64
 	reads    [NTx]map[int]int64
+	// readOverflow marks a tx that read more keys than the read set can
+	// track. Those reads have no version snapshot, so Validate cannot
+	// prove them current; the only safe answer is to abort at commit.
+	readOverflow [NTx]bool
 }
 
 func NewStore() *Store {
@@ -60,6 +64,7 @@ func (s *Store) Begin() int {
 			s.status[t] = StatusActive
 			s.writes[t] = make(map[int]int64)
 			s.reads[t] = make(map[int]int64)
+			s.readOverflow[t] = false
 			return t
 		}
 	}
@@ -73,8 +78,12 @@ func (s *Store) Read(tx, k int) int64 {
 	if v, ok := s.writes[tx][k]; ok {
 		return v
 	}
-	if _, seen := s.reads[tx][k]; !seen && len(s.reads[tx]) < TxCap {
-		s.reads[tx][k] = s.version[k]
+	if _, seen := s.reads[tx][k]; !seen {
+		if len(s.reads[tx]) < TxCap {
+			s.reads[tx][k] = s.version[k]
+		} else {
+			s.readOverflow[tx] = true // untracked read: commit must fail
+		}
 	}
 	return s.accounts[k]
 }
@@ -95,6 +104,9 @@ func (s *Store) Write(tx, k int, v int64) int {
 }
 
 func (s *Store) Validate(tx int) bool {
+	if s.readOverflow[tx] {
+		return false
+	}
 	for k, snap := range s.reads[tx] {
 		if s.version[k] != snap {
 			return false
@@ -132,6 +144,7 @@ func (s *Store) CrashRecovery() {
 		s.status[t] = StatusFree
 		s.writes[t] = make(map[int]int64)
 		s.reads[t] = make(map[int]int64)
+		s.readOverflow[t] = false
 	}
 }
 
@@ -247,6 +260,22 @@ func main() {
 		s.Write(tx, 3, 4)
 		fifth := s.Write(tx, 4, 5)
 		check(fifth == 0, "5th write rejected (cap=4)")
+	}
+
+	{
+		// A read past the read-set cap has no snapshot to validate, so
+		// letting it commit would allow a lost update.
+		s := seed()
+		tx1 := s.Begin()
+		var stale int64
+		for k := 0; k <= TxCap; k++ { // TxCap+1 distinct keys
+			stale = s.Read(tx1, k)
+		}
+		tx2 := s.Begin()
+		s.Write(tx2, TxCap, 777)
+		check(s.Commit(tx2) == 1, "tx2 updates the untracked key")
+		s.Write(tx1, 5, stale+1)
+		check(s.Commit(tx1) == 0, "tx1 with an untracked (now stale) read aborts")
 	}
 
 	fmt.Println("=== transactions_and_acid ===")

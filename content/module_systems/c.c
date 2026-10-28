@@ -39,7 +39,12 @@
 
 // Include guard pattern:
 //   #ifndef prevents processing the same header twice.
-//   Without it, typedef/struct definitions would conflict.
+//   Without it, a second inclusion redefines everything in the header.
+//   C23 (N3037) accepts an identical redefinition of a *tagged* struct,
+//   union or enum (and the same typedef), but an anonymous-struct typedef
+//   like `typedef struct { ... } Config;` below is a new type each time
+//   and conflicts, as do object and function definitions. Before C23 any
+//   struct redefinition was an error. Guards also skip re-parsing.
 //   #pragma once is a non-standard but widely-supported alternative.
 
 typedef struct {
@@ -64,7 +69,8 @@ void config_set_debug(Config *cfg, int debug);
 
 // static functions are PRIVATE to this translation unit.
 // They cannot be called from other .c files.
-// This is C's only visibility control — like Rust's default private.
+// This is C's only linkage-level visibility control — like Rust's default
+// private. (Opaque types, below, hide a struct's fields instead.)
 
 static int validate_port(int port) {
     return port > 0 && port <= 65535;
@@ -185,8 +191,9 @@ int logger_count(const Logger *log) {
 // int y;               — program-scoped (external linkage)
 // extern int z;        — declaration only (defined elsewhere)
 //
-// static limits visibility to the current translation unit.
-// This is the ONLY tool C provides for encapsulation.
+// static limits visibility to the current translation unit. Together with
+// opaque types (incomplete struct declarations) it is all the encapsulation
+// standard C provides.
 
 // File-scoped global: only visible in this translation unit
 static int module_initialized = 0;
@@ -209,8 +216,9 @@ static void ensure_initialized(void) {
 //   logger_new, logger_log      — logger module
 //   str_dup, str_concat         — string module
 //
-// This is why C library functions have short, cryptic names:
-//   strncmp, memcpy, fprintf — manually namespaced
+// The C library itself is prefixed: str*, mem*, f* (strncmp, memcpy,
+// fprintf). Their shortness is a separate legacy: C89 only guaranteed
+// 6 significant characters, single-case, for external names (C99: 31).
 
 static char *str_dup(const char *s) {
     size_t len = strlen(s) + 1;
@@ -268,6 +276,7 @@ int main(void) {
 
     // ── Namespace prefix convention ───────────────────────────────
     char *s = str_dup("hello module");
+    assert(s != NULL);  // str_dup returns NULL when malloc fails
     assert(strcmp(s, "hello module") == 0);
     assert(str_starts_with(s, "hello"));
     assert(!str_starts_with(s, "world"));

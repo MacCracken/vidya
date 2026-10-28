@@ -1,8 +1,9 @@
 # Vidya — Sprite Rendering in x86_64 Assembly
 #
-# Software sprite blitting to a framebuffer. Demonstrates: atlas lookup,
-# scaled blit with fixed-point stepping, color key transparency, screen
-# clipping, and depth-sorted draw order.
+# Software sprite blitting to a framebuffer. Demonstrates: 1:1 blit,
+# scaled blit with 16.16 fixed-point stepping, color key transparency,
+# screen clipping, and painter's draw order (later draws win — a real
+# renderer sorts sprites by depth first; no sort is done here).
 
 .intel_syntax noprefix
 .global _start
@@ -52,7 +53,7 @@ msg_t4:     .ascii "clipping: sprite partially off-screen"
 msg_t4_len = . - msg_t4
 msg_t5:     .ascii "scaled blit: 2x magnification"
 msg_t5_len = . - msg_t5
-msg_t6:     .ascii "depth sort: later draw overwrites earlier"
+msg_t6:     .ascii "painter's order: later draw overwrites earlier"
 msg_t6_len = . - msg_t6
 
 .section .text
@@ -81,7 +82,7 @@ fb_get_pixel:
     ret
 
 # fb_set_pixel: write pixel at (rdi=x, rsi=y, rdx=color)
-# No bounds checking (caller must clip)
+# Bounds-checked: off-screen writes are dropped. Clobbers rax, rcx.
 fb_set_pixel:
     cmp     rdi, SCREEN_W
     jge     .sp_skip
@@ -214,6 +215,84 @@ blit_sprite:
     pop     rbx
     ret
 
+# --- Scaled blit (nearest neighbour, 16.16 stepping) ---
+
+# blit_scaled: draw sprite magnified by a 16.16 scale factor
+# rdi=sprite_data, rsi=sprite_w, rdx=sprite_h, rcx=dst_x, r8=dst_y,
+# r9=scale (16.16, e.g. 131072 = 2.0)
+# The destination is (w*scale) x (h*scale). Each destination pixel samples
+# source (d * step) >> 16 with step = 1/scale in 16.16, so the inner loop
+# only adds — no per-pixel divide.
+blit_scaled:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    push    rbp
+    sub     rsp, 40                 # [rsp]=dst_w [rsp+8]=dst_h [rsp+16]=step
+                                    # [rsp+24]=dx  [rsp+32]=src_x (16.16)
+    mov     r12, rdi                # sprite data
+    mov     r13, rsi                # sprite width
+    mov     r14, rcx                # dst_x
+    mov     r15, r8                 # dst_y
+    mov     rax, rsi
+    imul    rax, r9
+    sar     rax, FX_SHIFT
+    mov     [rsp], rax              # dst_w = w * scale
+    mov     rax, rdx
+    imul    rax, r9
+    sar     rax, FX_SHIFT
+    mov     [rsp + 8], rax          # dst_h = h * scale
+    mov     rax, 1
+    shl     rax, 32
+    xor     edx, edx
+    div     r9
+    mov     [rsp + 16], rax         # step = 1.0 / scale (16.16)
+    xor     ebp, ebp                # dy
+    xor     ebx, ebx                # src_y (16.16)
+.bs_row:
+    cmp     rbp, [rsp + 8]
+    jge     .bs_done
+    mov     qword ptr [rsp + 24], 0
+    mov     qword ptr [rsp + 32], 0
+.bs_col:
+    mov     rax, [rsp + 24]
+    cmp     rax, [rsp]
+    jge     .bs_next_row
+    # source pixel = sprite[(src_y >> 16) * w + (src_x >> 16)]
+    mov     rax, rbx
+    shr     rax, FX_SHIFT
+    imul    rax, r13
+    mov     rcx, [rsp + 32]
+    shr     rcx, FX_SHIFT
+    add     rax, rcx
+    movzx   edx, byte ptr [r12 + rax]
+    test    edx, edx
+    jz      .bs_skip                # color key: transparent
+    mov     rdi, r14
+    add     rdi, [rsp + 24]
+    lea     rsi, [r15 + rbp]
+    call    fb_set_pixel            # clipped write
+.bs_skip:
+    inc     qword ptr [rsp + 24]
+    mov     rax, [rsp + 16]
+    add     [rsp + 32], rax         # src_x += step
+    jmp     .bs_col
+.bs_next_row:
+    inc     rbp
+    add     rbx, [rsp + 16]         # src_y += step
+    jmp     .bs_row
+.bs_done:
+    add     rsp, 40
+    pop     rbp
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
 # --- Test helpers ---
 
 assert_eq:
@@ -326,32 +405,95 @@ _start:
     lea     rdx, [rip + msg_t4]
     mov     rcx, msg_t4_len
     call    assert_eq
+    # The clipped columns must not wrap onto the next row: without the
+    # end_x clamp, sprite (2,0) would land at x=320 = (0,1)
+    mov     rdi, 0
+    mov     rsi, 1
+    call    fb_get_pixel
+    mov     rdi, rax
+    mov     rsi, 0
+    lea     rdx, [rip + msg_t4]
+    mov     rcx, msg_t4_len
+    call    assert_eq
 
-    # --- Test 5: Scaled blit (2x) ---
-    # Simple test: draw sprite, then draw again at different position
-    # Verifying the concept of "later draws overwrite earlier" (depth sort)
+    # Top-left clip: at (-2,-2) only sprite (2..3, 2..3) is visible
     mov     rdi, 0
     call    fb_clear
-
-    # Draw sprite at (20,20)
     lea     rdi, [rip + test_sprite]
     mov     rsi, 4
     mov     rdx, 4
-    mov     rcx, 20
-    mov     r8,  20
+    mov     rcx, -2
+    mov     r8,  -2
     call    blit_sprite
+    mov     rdi, 0
+    mov     rsi, 0
+    call    fb_get_pixel            # sprite (2,2) = 2
+    mov     rdi, rax
+    mov     rsi, 2
+    lea     rdx, [rip + msg_t4]
+    mov     rcx, msg_t4_len
+    call    assert_eq
+    mov     rdi, 1
+    mov     rsi, 0
+    call    fb_get_pixel            # sprite (3,2) = 1
+    mov     rdi, rax
+    mov     rsi, 1
+    lea     rdx, [rip + msg_t4]
+    mov     rcx, msg_t4_len
+    call    assert_eq
 
-    # Verify center pixel
-    mov     rdi, 21
-    mov     rsi, 21
+    # --- Test 5: Scaled blit (2x) ---
+    # 4x4 sprite at scale 2.0 covers (100..107, 100..107); each source
+    # pixel becomes a 2x2 block.
+    mov     rdi, 99
+    call    fb_clear
+
+    lea     rdi, [rip + test_sprite]
+    mov     rsi, 4
+    mov     rdx, 4
+    mov     rcx, 100
+    mov     r8,  100
+    mov     r9,  131072             # 2.0 in 16.16
+    call    blit_scaled
+
+    # (103,103) samples source (1,1) = 2
+    mov     rdi, 103
+    mov     rsi, 103
     call    fb_get_pixel
     mov     rdi, rax
     mov     rsi, 2
     lea     rdx, [rip + msg_t5]
     mov     rcx, msg_t5_len
     call    assert_eq
+    # (107,103) is the last destination column: source (3,1) = 1
+    mov     rdi, 107
+    mov     rsi, 103
+    call    fb_get_pixel
+    mov     rdi, rax
+    mov     rsi, 1
+    lea     rdx, [rip + msg_t5]
+    mov     rcx, msg_t5_len
+    call    assert_eq
+    # (108,103) is one past the 8-pixel width: untouched
+    mov     rdi, 108
+    mov     rsi, 103
+    call    fb_get_pixel
+    mov     rdi, rax
+    mov     rsi, 99
+    lea     rdx, [rip + msg_t5]
+    mov     rcx, msg_t5_len
+    call    assert_eq
+    # (101,101) samples transparent source (0,0): background shows through
+    mov     rdi, 101
+    mov     rsi, 101
+    call    fb_get_pixel
+    mov     rdi, rax
+    mov     rsi, 99
+    lea     rdx, [rip + msg_t5]
+    mov     rcx, msg_t5_len
+    call    assert_eq
 
-    # --- Test 6: Depth sort (painter's algorithm) ---
+    # --- Test 6: Painter's order (draw order decides overlap) ---
     mov     rdi, 0
     call    fb_clear
 

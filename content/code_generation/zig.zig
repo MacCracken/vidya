@@ -162,14 +162,12 @@ const FrameLayout = struct {
     frame_size: u32,
 
     fn addLocal(self: *FrameLayout, name: []const u8, size: u32) void {
-        // Locals grow downward from rbp
-        var offset: i32 = 0;
-        if (self.slot_count > 0) {
-            const prev = self.slots[self.slot_count - 1];
-            offset = prev.offset - @as(i32, @intCast(prev.size));
-        } else {
-            offset = -@as(i32, @intCast(size));
-        }
+        // Locals grow downward from rbp: each new slot sits `size` bytes
+        // below the lowest byte used so far (the previous slot's offset).
+        // Subtracting the PREVIOUS slot's size instead is a classic bug:
+        // a 16-byte local after an 8-byte one would land on top of it.
+        const top: i32 = if (self.slot_count > 0) self.slots[self.slot_count - 1].offset else 0;
+        const offset = top - @as(i32, @intCast(size));
         self.slots[self.slot_count] = .{ .name = name, .offset = offset, .size = size };
         self.slot_count += 1;
         self.frame_size += size;
@@ -255,11 +253,20 @@ fn testStackFrameLayout() !void {
 
     frame.addLocal("x", 8); // -8(%rbp)
     frame.addLocal("y", 8); // -16(%rbp)
-    frame.addLocal("flag", 4); // -24(%rbp) (4-byte, but next offset from -16-8)
+    frame.addLocal("flag", 4); // -20(%rbp): 4 bytes directly below y
 
     try expect(frame.slot_count == 3);
     try expect(frame.slots[0].offset == -8);
     try expect(frame.slots[1].offset == -16);
-    try expect(frame.slots[2].offset == -24);
+    try expect(frame.slots[2].offset == -20);
+    // frame_size reaches exactly the lowest used byte: no gap, no overlap
     try expect(frame.frame_size == 20);
+    try expect(-frame.slots[2].offset == @as(i32, @intCast(frame.frame_size)));
+
+    // A larger local after a smaller one must not overlap it
+    var f2 = FrameLayout{ .slots = undefined, .slot_count = 0, .frame_size = 0 };
+    f2.addLocal("x", 8); // [-8, 0)
+    f2.addLocal("buf", 16); // [-24, -8)
+    try expect(f2.slots[1].offset == -24);
+    try expect(f2.slots[1].offset + 16 <= f2.slots[0].offset);
 }

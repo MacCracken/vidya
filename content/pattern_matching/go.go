@@ -97,9 +97,9 @@ func main() {
 	// ── Type assertion with comma-ok ───────────────────────────────
 	var s Shape = Circle{5.0}
 
-	if c, ok := s.(Circle); ok {
-		assert(c.Radius == 5.0, "type assertion circle")
-	}
+	c, ok := s.(Circle)
+	assert(ok, "s holds a Circle") // inside `if ok {}` a failed match would skip the check
+	assert(c.Radius == 5.0, "type assertion circle")
 
 	if _, ok := s.(Rectangle); ok {
 		panic("should not be rectangle")
@@ -110,12 +110,14 @@ func main() {
 	assert(quot == 3 && rem == 2, "divmod")
 
 	// ── If with initialization (Go's if-let equivalent) ────────────
+	// strings.Cut (Go 1.18) is the destructuring form of the old
+	// Index-then-slice dance: (before, after, found) in one call.
 	text := "port=3000"
-	if idx := strings.Index(text, "="); idx >= 0 {
-		key := text[:idx]
-		value := text[idx+1:]
+	if key, value, found := strings.Cut(text, "="); found {
 		assert(key == "port", "if-init key")
 		assert(value == "3000", "if-init value")
+	} else {
+		panic("separator not found")
 	}
 
 	// ── Fallthrough (explicit, unlike C) ───────────────────────────

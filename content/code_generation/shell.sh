@@ -95,7 +95,9 @@ declare -A INST_SIZE=(
 calc_code_size() {
     local total=0
     for inst in "$@"; do
-        local size=${INST_SIZE[$inst]}
+        # ${arr[k]-} (default to empty): under set -u a bare ${INST_SIZE[$inst]}
+        # on a missing key aborts with "unbound variable" before the check runs.
+        local size=${INST_SIZE[$inst]-}
         if [[ -z "$size" ]]; then
             echo "Unknown instruction: $inst" >&2
             return 1

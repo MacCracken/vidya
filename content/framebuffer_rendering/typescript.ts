@@ -5,7 +5,11 @@
 const FB_W = 16;
 const FB_H = 16;
 const FB_BPP = 4;
-const FB_BYTES = FB_W * FB_H * FB_BPP;
+// Bytes per row. A real framebuffer's pitch (DRM) may exceed FB_W * FB_BPP
+// for alignment, so rows are padded here (80 > 64): address pixels with
+// y * FB_STRIDE + x * FB_BPP, never (y * FB_W + x) * FB_BPP.
+const FB_STRIDE = 80;
+const FB_BYTES = FB_H * FB_STRIDE;
 
 class FrameBuffer {
   buf = new Uint8Array(FB_BYTES);
@@ -14,7 +18,7 @@ class FrameBuffer {
 
   set(x: number, y: number, color: number): boolean {
     if (x < 0 || x >= FB_W || y < 0 || y >= FB_H) return false;
-    const off = (y * FB_W + x) * FB_BPP;
+    const off = y * FB_STRIDE + x * FB_BPP;
     this.buf[off]     = color & 0xFF;
     this.buf[off + 1] = (color >>> 8) & 0xFF;
     this.buf[off + 2] = (color >>> 16) & 0xFF;
@@ -24,7 +28,7 @@ class FrameBuffer {
 
   get(x: number, y: number): number {
     if (x < 0 || x >= FB_W || y < 0 || y >= FB_H) return 0;
-    const off = (y * FB_W + x) * FB_BPP;
+    const off = y * FB_STRIDE + x * FB_BPP;
     return (this.buf[off + 2] << 16) | (this.buf[off + 1] << 8) | this.buf[off];
   }
 
@@ -60,7 +64,7 @@ function main(): void {
   eq(fb.countLit(), 0, "clear");
 
   fb.set(5, 7, 0xFF0000);
-  const off = (7 * FB_W + 5) * FB_BPP;
+  const off = 7 * FB_STRIDE + 5 * FB_BPP;
   eq(fb.buf[off], 0, "B");
   eq(fb.buf[off + 1], 0, "G");
   eq(fb.buf[off + 2], 255, "R");

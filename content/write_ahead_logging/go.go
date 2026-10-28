@@ -123,13 +123,22 @@ func (w *Wal) storeGet(key int64) int64 {
 	return w.dataVals[key]
 }
 
+// replay rebuilds the store from the durable prefix. Recovery is exactly
+// when a torn or corrupt record shows up, so every field read back from
+// the log is validated before use: an out-of-range key would otherwise
+// index past dataVals and crash recovery itself. Replay stops at the first
+// invalid record — everything after a bad record is untrustworthy. (Real
+// WALs also checksum each record to detect torn writes.)
 func (w *Wal) replay() int64 {
 	w.storeClear()
 	var pos, applied int64
-	for pos < w.logCommitted {
+	for pos+recSZ <= w.logCommitted {
 		op := w.load64(pos + 0)
 		key := w.load64(pos + 8)
 		val := w.load64(pos + 16)
+		if key < 0 || key >= storeKeys || (op != opSet && op != opDel) {
+			break // corrupt record: stop, don't trust the rest
+		}
 		if op == opSet {
 			w.dataVals[key] = val
 			w.dataPresent[key] = 1
@@ -241,7 +250,21 @@ func testLogCapacityLimit() {
 			failures++
 		}
 	}
-	check(failures > 0, "log capacity is bounded")
+	check(failures == 300-logCapBytes/recSZ, "exactly the records past the 256-record cap are refused")
+}
+
+func testCorruptRecordStopsReplay() {
+	w := newWal()
+	w.resetAll()
+	w.storeSet(1, 10)
+	w.storeSet(2, 20)
+	w.storeSet(3, 30)
+	w.logCommit()
+	w.store64(recSZ+8, 99) // corrupt record 2's key on "disk"
+	n := w.replay()
+	check(n == 1, "replay stops at the corrupt record instead of crashing")
+	check(w.storeGet(1) == 10, "records before the corruption survive")
+	check(w.storeGet(3) == -1, "records after the corruption are not trusted")
 }
 
 func main() {
@@ -253,5 +276,6 @@ func main() {
 	testOverwriteUsesLastRecord()
 	testSequentialOffsetsMonotonic()
 	testLogCapacityLimit()
+	testCorruptRecordStopsReplay()
 	fmt.Println("All write_ahead_logging examples passed.")
 }

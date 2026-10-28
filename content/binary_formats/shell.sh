@@ -44,10 +44,12 @@ assert_eq "$(printf '%02x' 0x46)" "46" "ELF byte 3 (F)"
 assert_eq "$(( 0x4d ))" "77" "M decimal"
 assert_eq "$(( 0x5a ))" "90" "Z decimal"
 
-# ── Read ELF magic from /proc/self/exe ────────────────────────────────
-# /proc/self/exe is a symlink to the currently running executable.
-# For bash, this points to the bash binary itself — always an ELF file
-# on Linux.
+# ── Read ELF magic from /proc/$$/exe ────────────────────────────────
+# /proc/PID/exe is a symlink to that process's executable. Do NOT use
+# /proc/self/exe here: "self" resolves in whichever process opens it,
+# and that is od (a child), not bash — `readlink /proc/self/exe` prints
+# readlink's own path. $$ is this shell's PID (even inside $(...)), so
+# /proc/$$/exe is the bash binary itself — always an ELF file on Linux.
 
 read_magic_bytes() {
     local file="$1" count="${2:-4}"
@@ -56,8 +58,8 @@ read_magic_bytes() {
 }
 
 # The bash interpreter is an ELF binary
-bash_magic=$(read_magic_bytes /proc/self/exe 4)
-assert_eq "$bash_magic" "$ELF_MAGIC" "/proc/self/exe is ELF"
+bash_magic=$(read_magic_bytes /proc/$$/exe 4)
+assert_eq "$bash_magic" "$ELF_MAGIC" "/proc/$$/exe is ELF"
 
 # ── ELF header field extraction ──────────────────────────────────────
 # ELF header layout (first 16 bytes = e_ident):
@@ -67,10 +69,10 @@ assert_eq "$bash_magic" "$ELF_MAGIC" "/proc/self/exe is ELF"
 #   Offset 0x06: version (1 byte) — 1=current
 #   Offset 0x07: OS/ABI (1 byte) — 0=SYSV, 3=Linux
 
-elf_class_byte=$(od -A n -t x1 -j 4 -N 1 /proc/self/exe | tr -d ' \n')
-elf_data_byte=$(od -A n -t x1 -j 5 -N 1 /proc/self/exe | tr -d ' \n')
-elf_version_byte=$(od -A n -t x1 -j 6 -N 1 /proc/self/exe | tr -d ' \n')
-elf_osabi_byte=$(od -A n -t x1 -j 7 -N 1 /proc/self/exe | tr -d ' \n')
+elf_class_byte=$(od -A n -t x1 -j 4 -N 1 /proc/$$/exe | tr -d ' \n')
+elf_data_byte=$(od -A n -t x1 -j 5 -N 1 /proc/$$/exe | tr -d ' \n')
+elf_version_byte=$(od -A n -t x1 -j 6 -N 1 /proc/$$/exe | tr -d ' \n')
+elf_osabi_byte=$(od -A n -t x1 -j 7 -N 1 /proc/$$/exe | tr -d ' \n')
 
 # On a 64-bit Linux system, bash is a 64-bit little-endian ELF
 assert_eq "$elf_class_byte" "02" "ELF class: 64-bit"
@@ -103,8 +105,8 @@ detect_format() {
     esac
 }
 
-# Detect /proc/self/exe — must be ELF
-detected=$(detect_format /proc/self/exe)
+# Detect /proc/$$/exe — must be ELF
+detected=$(detect_format /proc/$$/exe)
 assert_eq "$detected" "ELF" "detect bash as ELF"
 
 # Create test files with known magic bytes
@@ -129,7 +131,7 @@ format_hex_dump() {
     od -A x -t x1z -N "$count" "$file" | head -n 1
 }
 
-dump=$(format_hex_dump /proc/self/exe 4)
+dump=$(format_hex_dump /proc/$$/exe 4)
 # The dump should contain our ELF magic bytes
 if [[ "$dump" != *"7f"*"45"*"4c"*"46"* ]]; then
     echo "FAIL: hex dump should contain ELF magic" >&2
@@ -156,7 +158,7 @@ read_le32() {
 
 # e_type is at offset 16 in the ELF header (2 bytes, LE)
 # 2 = ET_EXEC (executable), 3 = ET_DYN (shared object / PIE)
-elf_type=$(read_le16 /proc/self/exe 16)
+elf_type=$(read_le16 /proc/$$/exe 16)
 if (( elf_type != 2 && elf_type != 3 )); then
     echo "FAIL: e_type should be ET_EXEC(2) or ET_DYN(3), got $elf_type" >&2
     exit 1
@@ -164,7 +166,7 @@ fi
 
 # e_machine is at offset 18 (2 bytes, LE)
 # 0x3e = 62 = EM_X86_64, 0xb7 = 183 = EM_AARCH64
-elf_machine=$(read_le16 /proc/self/exe 18)
+elf_machine=$(read_le16 /proc/$$/exe 18)
 declare -A MACHINE_NAMES=( [3]="EM_386" [62]="EM_X86_64" [183]="EM_AARCH64" [40]="EM_ARM" )
 machine_name="${MACHINE_NAMES[$elf_machine]:-UNKNOWN}"
 
@@ -188,7 +190,7 @@ assert_eq "$PHDR64_SIZE" "56" "phdr64 = 56 bytes"
 assert_eq "$SHDR64_SIZE" "64" "shdr64 = 64 bytes"
 
 # e_ehsize at offset 52 should confirm our header size
-elf_ehsize=$(read_le16 /proc/self/exe 52)
+elf_ehsize=$(read_le16 /proc/$$/exe 52)
 assert_eq "$elf_ehsize" "$ELF64_HEADER_SIZE" "e_ehsize matches"
 
 echo "All binary formats examples passed."

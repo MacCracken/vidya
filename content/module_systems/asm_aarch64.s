@@ -14,11 +14,14 @@
 // In a multi-file project, other .s files can call these.
 .global public_add
 .global public_mul
+.global shared_counter          // exported data, not just functions
 
 // ── Local symbols: file-private ─────────────────────────────────────
-// Symbols without .global are local — invisible to the linker.
-// Convention: prefix with . or _local_ to signal intent.
-// Labels starting with .L are guaranteed local by the assembler.
+// Symbols without .global are LOCAL: they still appear in the object's
+// symbol table (STB_LOCAL — `nm` and debuggers see them), but the linker
+// never resolves another file's reference against them.
+// Labels starting with .L go further: the assembler does not emit them
+// into the symbol table at all. (A bare "." prefix is NOT special on ELF.)
 
 .section .rodata
 msg_pass:   .ascii "All module systems examples passed.\n"

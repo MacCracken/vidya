@@ -3,7 +3,10 @@
 // C has no built-in logging framework. This implements level-filtered
 // logging with fprintf, nanosecond timestamps via clock_gettime,
 // span enter/exit with elapsed timing, packed error codes using
-// bitwise operations, and a lock-free ring buffer for binary trace events.
+// bitwise operations, and a fixed-size ring buffer for binary trace events.
+// The ring buffer is single-threaded: plain int head/count with no atomics
+// or locks, so sharing it between threads is a data race. A lock-free
+// version needs _Atomic indices and release/acquire ordering.
 
 #define _POSIX_C_SOURCE 199309L
 

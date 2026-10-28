@@ -15,7 +15,8 @@ line two`;
 
     // ── Immutability ───────────────────────────────────────────────
     const s: string = "hello";
-    // s[0] = "H";  // ← no effect (strings are immutable)
+    // s[0] = "H";  // ← TS2542 compile error; strict-mode JS throws a
+    //                    TypeError, sloppy-mode JS silently ignores it
     const modified: string = "H" + s.slice(1);
     assert(modified === "Hello", "immutable concat");
 
@@ -65,12 +66,24 @@ line two`;
     assert(emoji.length === 8, "emoji length (UTF-16 units, not chars!)");
     // 🌍 is a surrogate pair — counts as 2 UTF-16 units
 
-    // Use Array.from or spread for correct character counting
-    assert([...emoji].length === 7, "spread character count");
+    // Spread (or Array.from) iterates code points, which fixes surrogate pairs
+    assert([...emoji].length === 7, "spread code point count");
 
     const cafe: string = "café";
     assert(cafe.length === 4, "café length");
     assert([...cafe].length === 4, "café char count");
+
+    // But one visible character can be several code points: a combining
+    // accent, a skin tone, a ZWJ family, a flag. Intl.Segmenter (ES2022)
+    // counts grapheme clusters — what a reader calls characters.
+    const graphemes = (str: string): number =>
+        [...new Intl.Segmenter("en", { granularity: "grapheme" }).segment(str)].length;
+    const cafeDecomposed: string = "cafe\u0301"; // e + COMBINING ACUTE ACCENT
+    assert([...cafeDecomposed].length === 5, "decomposed café: 5 code points");
+    assert(graphemes(cafeDecomposed) === 4, "decomposed café: 4 graphemes");
+    assert(cafeDecomposed.normalize("NFC") === cafe, "NFC composes it back to café");
+    const family: string = "👨\u200D👩\u200D👧";
+    assert([...family].length === 5 && graphemes(family) === 1, "ZWJ family: 5 code points, 1 grapheme");
 
     // ── Regex matching ─────────────────────────────────────────────
     const match = "hello123".match(/^[a-z]+(\d+)$/);

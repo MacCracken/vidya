@@ -6,15 +6,19 @@
 # and 201) on the same file simulate two opens — flock is per-OPEN,
 # so they have independent lock state.
 #
-# Bash gotcha (see field-note bash_subshell_clobbers_stateful_helpers):
-# `flock -n -x 200 || rc=1` would put rc in a subshell. We invoke
-# flock directly and check $? in the parent shell.
+# Exit statuses: we invoke flock directly and check $? on the next line,
+# in the parent shell. (`flock -n -x 200 || rc=1` would also work — an
+# `||` list runs in the CURRENT shell; it is `$(...)` and pipelines that
+# run in a subshell and lose assignments, see field-note
+# bash_subshell_clobbers_stateful_helpers.) There is no `set -e`: Test 3
+# expects a flock call to fail.
 
 set -uo pipefail
 
-PATH_TMP="/tmp/vidya_cfa_shell.bin"
-rm -f "$PATH_TMP"
-touch "$PATH_TMP"
+# mktemp, not a fixed /tmp name: a predictable path in a world-writable
+# directory collides with concurrent runs and invites symlink tricks.
+PATH_TMP=$(mktemp "${TMPDIR:-/tmp}/vidya_cfa_shell.XXXXXX") || exit 1
+trap 'rm -f "$PATH_TMP"' EXIT
 
 PASS=0
 check() { [[ $1 -eq $2 ]] && PASS=$((PASS+1)) || { echo "FAIL: $3 (got $1 want $2)" >&2; exit 1; }; }
@@ -26,9 +30,12 @@ printf 'DEADBEEF' >&200; check $? 0 "wrote 8 bytes"
 flock -u 200; check $? 0 "fd1 LOCK_UN"
 
 # Test 2: shared read with roundtrip
-flock -s 200; check $? 0 "fd1 LOCK_SH"
+# Reopen FIRST (the write left the offset at EOF), THEN lock. A flock is
+# owned by the open file description, so closing fd 200 drops it: taking
+# LOCK_SH and then reopening would leave the read below unlocked.
 exec 200<&-
 exec 200<>"$PATH_TMP"
+flock -s 200; check $? 0 "fd1 LOCK_SH"
 read -r -n 8 GOT <&200
 check ${#GOT} 8 "read 8 bytes"
 [[ "$GOT" == "DEADBEEF" ]] && PASS=$((PASS+1)) || { echo "FAIL roundtrip: got '$GOT'" >&2; exit 1; }

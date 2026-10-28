@@ -2,7 +2,7 @@
 //
 // Demonstrates the language-level mechanics of Rust's trait system:
 // monomorphization (static dispatch) vs vtable (dynamic dispatch),
-// object safety constraints, associated types, blanket impls, and
+// dyn-compatibility constraints, associated types, blanket impls, and
 // the performance difference between dispatch strategies.
 //
 // This is a compiler-implementer's perspective: what happens at the
@@ -75,8 +75,13 @@ fn main() {
     assert!((sum_mixed - (100.0 + 108.0 + 50.0)).abs() < 0.01);
 
     // ── Performance comparison ─────────────────────────────────────
-    // Monomorphized dispatch allows the compiler to inline amount()
-    // and potentially vectorize the loop. Vtable dispatch cannot.
+    // Monomorphized dispatch allows the compiler to inline amount();
+    // vtable dispatch cannot. (The f64 sum is NOT vectorized either way:
+    // without fast-math, IEEE addition must stay in order.) Two caveats:
+    // Vec<Box<dyn Value>> also pays a pointer chase per element, so the
+    // ratio is dispatch + layout, not dispatch alone; and in an unoptimized
+    // build nothing is inlined, so the ratio is meaningless — this file's
+    // gate builds without -O and typically prints ~1x (with -O: ~4x).
 
     let boxed_dollars: Vec<Box<dyn Value>> =
         (0..10_000).map(|i| Box::new(Dollars(i as f64)) as Box<dyn Value>).collect();
@@ -111,19 +116,22 @@ fn main() {
         dynamic_time, ITERS
     );
     println!(
-        "Ratio: {:.1}x",
-        dynamic_time.as_nanos() as f64 / static_time.as_nanos().max(1) as f64
+        "Ratio: {:.1}x{}",
+        dynamic_time.as_nanos() as f64 / static_time.as_nanos().max(1) as f64,
+        if cfg!(debug_assertions) { " (debug build: no inlining, rebuild with -O to compare)" } else { "" }
     );
 
-    // ── Object safety ──────────────────────────────────────────────
-    // A trait is object-safe only if all methods can go through a vtable.
+    // ── Dyn compatibility (called "object safety" before Rust 1.83) ─
+    // A trait is dyn compatible only if all methods can go through a vtable
+    // (rustc: "error[E0038]: the trait `X` is not dyn compatible").
     //
-    // NOT object-safe (cannot be used as dyn):
+    // NOT dyn compatible (cannot be used as dyn), unless the offending
+    // method opts out with `where Self: Sized`:
     //   - Methods returning Self (vtable doesn't know concrete size)
     //   - Generic methods (infinite vtable entries)
     //   - Trait requires Sized
     //
-    // Object-safe:
+    // Dyn compatible:
     //   - Methods taking &self, &mut self, or Box<Self>
     //   - No generic parameters on methods
     //   - Self only behind a pointer (Box<Self>, &Self)
@@ -133,7 +141,7 @@ fn main() {
         fn boxed_clone(&self) -> Box<dyn ObjectSafe>; // Self behind pointer: OK
     }
 
-    // NOT object-safe — commented out to show the pattern:
+    // NOT dyn compatible — commented out to show the pattern:
     // trait NotObjectSafe {
     //     fn clone_self(&self) -> Self;       // returns Self by value
     //     fn convert<U>(&self) -> U;          // generic method
@@ -165,7 +173,8 @@ fn main() {
     // Associated type: one implementation per type (the implementor chooses)
     // Type parameter: multiple implementations possible (the caller chooses)
 
-    // Associated type — Vec<i32> implements Iterator exactly once
+    // Associated type — e.g. std::vec::IntoIter<i32> implements Iterator
+    // exactly once, with Item = i32 (Vec itself is IntoIterator, not Iterator)
     trait Source {
         type Item;
         fn next_item(&mut self) -> Option<Self::Item>;

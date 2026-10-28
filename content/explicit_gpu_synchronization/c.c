@@ -31,16 +31,21 @@ int main(void) {
     assert(t.compute == 0 && t.transfer == 0);
     assert(wait_for(&t, 0, 0));
 
-    assert(sig(&t, 0, 5));
+    // sig() advances a timeline, so it runs outside assert(): under
+    // -DNDEBUG assert's expression is not evaluated and the signal vanishes.
+    int ok = sig(&t, 0, 5);
+    assert(ok);
     assert(t.compute == 5);
 
     assert(wait_for(&t, 0, 3));
     assert(wait_for(&t, 0, 5));
     assert(!wait_for(&t, 0, 10));
 
-    assert(!sig(&t, 0, 3));
+    ok = sig(&t, 0, 3);
+    assert(!ok);
     assert(t.compute == 5);
-    assert(!sig(&t, 0, 5));
+    ok = sig(&t, 0, 5);
+    assert(!ok);
 
     sig(&t, 1, 3);
     assert(t.transfer == 3);
@@ -55,6 +60,6 @@ int main(void) {
     assert(wait_for(&t2, 0, 10));
     assert(!wait_for(&t2, 0, 11));
 
-    printf("explicit_gpu_synchronization: 19/19 ok\n");
+    printf("explicit_gpu_synchronization: 18/18 ok\n");
     return 0;
 }

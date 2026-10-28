@@ -29,13 +29,17 @@ Buffer buffer_new(size_t cap) {
 void buffer_append(Buffer *b, const char *s) {
     size_t slen = strlen(s);
     while (b->len + slen + 1 > b->cap) {
-        b->cap *= 2;
         // Trap: `b->data = realloc(b->data, ...)` leaks the old block when
         // realloc fails — NULL overwrites the only pointer to it. Land the
         // result in a temporary first; on failure the original is still ours.
-        char *grown = realloc(b->data, b->cap);
+        // Same for the size: commit cap only after realloc succeeds, or a
+        // failed grow leaves cap claiming bytes the block does not have.
+        // (A cap of 0 must not double to 0 — that loops forever.)
+        size_t new_cap = b->cap ? b->cap * 2 : 16;
+        char *grown = realloc(b->data, new_cap);
         assert(grown != NULL);
         b->data = grown;
+        b->cap = new_cap;
     }
     memcpy(b->data + b->len, s, slen);
     b->len += slen;
@@ -126,7 +130,8 @@ int main(void) {
 
     // GOTCHA: sizeof on a pointer gives pointer size, not array size
     int *ptr = arr;
-    assert(sizeof(ptr) == sizeof(int *)); // 4 or 8, not 20!
+    assert(sizeof(ptr) != sizeof(arr));   // 4 or 8, not 20!
+    assert(sizeof(ptr) == sizeof(void *));
 
     // ── Struct layout and padding ──────────────────────────────────
     struct Compact {
@@ -134,8 +139,11 @@ int main(void) {
         int y;   // 4 bytes
         char c;  // 1 byte + padding
     };
-    // Size includes alignment padding
-    assert(sizeof(struct Compact) >= 9);
+    // Size includes alignment padding: 9 bytes of fields, rounded up to a
+    // multiple of alignof(int) so arrays of Compact keep x aligned
+    // (12 on x86_64 and AArch64). `>= 9` would pass with no padding at all.
+    assert(sizeof(struct Compact) > 9);
+    assert(sizeof(struct Compact) % alignof(int) == 0);
 
     // ── void* : generic pointer ────────────────────────────────────
     void *generic = malloc(sizeof(int));

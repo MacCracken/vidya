@@ -22,16 +22,17 @@
 // length=1) match tokens. Both expand structured input into a
 // compact representation that recovers the full state on decode.
 //
-// Quantum compilers (Qiskit's transpiler, t|ket>) actually use this
-// idea to compress circuits: identical sub-circuits become a single
-// stored "template" with reference instructions, much like LZ77's
-// dictionary entries.
+// OpenQASM's own `gate` definitions are the closest circuit analog: a
+// sub-circuit stored once and invoked by name, like an LZ77 dictionary
+// entry. (Transpilers do not factor circuits this way: Qiskit's output
+// is flat basis gates, and its TemplateOptimization pass rewrites any
+// sub-circuit that matches a template identity into a cheaper one.)
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // "Source byte" prepared into superposition |+>
 h q[0];
@@ -42,4 +43,5 @@ cx q[0], q[2];
 cx q[0], q[3];
 
 // Decode: measure all four — they will all agree (either 0000 or 1111)
-measure q -> c;
+c = measure q;
+// @expect c in {0, 15}

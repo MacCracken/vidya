@@ -60,7 +60,8 @@ fn encode(src: &[u8]) -> Vec<u8> {
     tok
 }
 
-// Returns Some(output) on success, None on bomb-guard trigger.
+// Returns Some(output) on success, None on bomb-guard trigger or a
+// malformed back-reference (offset reaching before the start of output).
 fn decode(tok: &[u8], out_cap: usize) -> Option<Vec<u8>> {
     let mut out: Vec<u8> = Vec::new();
     let mut i = 0;
@@ -75,6 +76,9 @@ fn decode(tok: &[u8], out_cap: usize) -> Option<Vec<u8>> {
             let offset = b0 as usize;
             let length = b1 as usize;
             if out.len() + length > out_cap { return None; }
+            // Untrusted input: an offset past what we've produced would
+            // underflow `start - offset` — reject instead of panicking.
+            if offset > out.len() { return None; }
             // Capture start so the source index doesn't drift as we push.
             // For offset=1, this still produces RLE replication because
             // start - 1 + k advances into bytes we just pushed.
@@ -101,7 +105,7 @@ fn main() {
     let t2 = encode(s2);
     let d2 = decode(&t2, 512).expect("decode succeeds");
     assert_eq!(d2, s2, "AAAAAAAA roundtrip");
-    assert!(t2.len() < s2.len() + 4, "AAAAAAAA actually compresses");
+    assert!(t2.len() < s2.len(), "AAAAAAAA actually compresses");
 
     // 3. Round-trip mostly literals
     let s3 = b"Hello, World!";
@@ -112,6 +116,8 @@ fn main() {
     // 4. Decompression bomb guard: token claims length 200, cap is 10
     let bomb = vec![1u8, 200u8];
     assert!(decode(&bomb, 10).is_none(), "bomb guard rejects oversize");
+    // ...and a back-reference before the start of output is rejected, not a panic
+    assert!(decode(&[5u8, 3u8], 512).is_none(), "malformed offset rejected");
 
     // 5. Empty input
     let t5 = encode(&[]);
@@ -119,5 +125,5 @@ fn main() {
     let d5 = decode(&[], 512).expect("empty decode");
     assert_eq!(d5.len(), 0, "empty tokens → zero output");
 
-    println!("compression: 11/11 ok");
+    println!("compression: 12/12 ok");
 }

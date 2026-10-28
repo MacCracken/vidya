@@ -94,76 +94,52 @@ func (i *Ipc) ChanRecv(endpoint int) int64 {
 	return int64(msg)
 }
 
+// checks counts the assertions this file runs, for the final tally.
+var checks int
+
+func check(cond bool, label string) {
+	checks++
+	if !cond {
+		panic(label)
+	}
+}
+
 func main() {
 	var ipc Ipc
 
-	if !ipc.ShmWrite(1, 5, 0xA1) {
-		panic("shm_write")
-	}
-	if ipc.ShmRead(1, 5) != 0xA1 {
-		panic("shm_read")
-	}
-	if ipc.ShmRead(2, 5) != 0 {
-		panic("other region")
-	}
-	if ipc.ShmWrite(1, 99, 0xFF) {
-		panic("oob write")
-	}
-	if ipc.ShmRead(1, 99) != -1 {
-		panic("oob read")
-	}
+	check(ipc.ShmWrite(1, 5, 0xA1), "shm_write")
+	check(ipc.ShmRead(1, 5) == 0xA1, "shm_read")
+	check(ipc.ShmRead(2, 5) == 0, "other region")
+	check(!ipc.ShmWrite(1, 99, 0xFF), "oob write")
+	check(ipc.ShmRead(1, 99) == -1, "oob read")
 
 	ipc.PipeWrite(65)
 	ipc.PipeWrite(66)
 	ipc.PipeWrite(67)
-	if ipc.PipeRead() != 65 {
-		panic("pipe1")
-	}
-	if ipc.PipeRead() != 66 {
-		panic("pipe2")
-	}
-	if ipc.PipeRead() != 67 {
-		panic("pipe3")
-	}
-	if ipc.PipeRead() != -1 {
-		panic("pipe empty")
-	}
+	check(ipc.PipeRead() == 65, "pipe1")
+	check(ipc.PipeRead() == 66, "pipe2")
+	check(ipc.PipeRead() == 67, "pipe3")
+	check(ipc.PipeRead() == -1, "pipe empty")
 
 	var ipc2 Ipc
 	for k := 0; k < PipeCap; k++ {
 		ipc2.PipeWrite(byte(k + 100))
 	}
-	if ipc2.PipeWrite(99) {
-		panic("pipe full not rejected")
-	}
+	check(!ipc2.PipeWrite(99), "pipe full not rejected")
 	ipc2.PipeRead()
-	if !ipc2.PipeWrite(99) {
-		panic("post-drain failed")
-	}
+	check(ipc2.PipeWrite(99), "post-drain failed")
 
 	var ipc3 Ipc
-	if ipc3.ChanSend(1, 0xDEADBEEF) {
-		panic("send to closed accepted")
-	}
+	check(!ipc3.ChanSend(1, 0xDEADBEEF), "send to closed accepted")
 	ipc3.ChanListen(1)
-	if !ipc3.ChanSend(1, 0xCAFE) {
-		panic("send 1")
-	}
-	if !ipc3.ChanSend(1, 0xBABE) {
-		panic("send 2")
-	}
-	if ipc3.ChanRecv(1) != 0xCAFE {
-		panic("recv 1")
-	}
-	if ipc3.ChanRecv(1) != 0xBABE {
-		panic("recv 2")
-	}
-	if ipc3.ChanRecv(1) != -1 {
-		panic("recv empty")
-	}
-	if ipc3.ChanRecv(2) != -1 {
-		panic("recv unopened")
-	}
+	check(ipc3.ChanSend(1, 0xCAFE), "send 1")
+	check(ipc3.ChanSend(1, 0xBABE), "send 2")
+	check(ipc3.ChanRecv(1) == 0xCAFE, "recv 1")
+	check(ipc3.ChanRecv(1) == 0xBABE, "recv 2")
+	check(ipc3.ChanRecv(1) == -1, "recv empty")
+	check(ipc3.ChanRecv(2) == -1, "recv unopened")
 
-	fmt.Println("ipc: 18/18 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("ipc: %d/%d ok\n", checks, checks)
 }

@@ -98,9 +98,12 @@ _start:
     # But fences are still needed for some patterns.
 
     # MFENCE: full barrier (all loads and stores complete)
+    # TSO lets a later load pass an earlier store to a DIFFERENT address
+    # (store→load reordering). The fence forbids that: the store to counter
+    # is globally visible before flag is read — the Dekker/Peterson case.
     mov     qword ptr [counter], 1
     mfence
-    mov     rax, [flag]         # guaranteed to see counter=1
+    mov     rax, [flag]         # cannot be performed ahead of the store above
 
     # SFENCE: store fence (all prior stores complete)
     mov     qword ptr [counter], 2

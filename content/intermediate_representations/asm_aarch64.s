@@ -126,13 +126,14 @@ _start:
     mov     w0, #3                  // arg1 = 3
     mov     w1, #4                  // arg2 = 4
     bl      ir_add                  // t1 = call add(3, 4)
-    mov     w4, w0                  // save t1
+    mov     w19, w0                 // save t1 in a callee-saved reg: x0-x18
+                                    // may be clobbered by the next call
 
     mov     w0, #10                 // arg1 = 10
     mov     w1, #20                 // arg2 = 20
     bl      ir_add                  // t2 = call add(10, 20)
 
-    add     w0, w4, w0             // t3 = t1 + t2 = 7 + 30 = 37
+    add     w0, w19, w0            // t3 = t1 + t2 = 7 + 30 = 37
     cmp     w0, #37
     b.ne    fail
 

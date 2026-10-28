@@ -229,12 +229,13 @@ bs_sig:
 
 // bs_build() -> x0 = number of targets rebuilt.
 // ordered = bs_topo(); walk order; if sig != t_built[t] rebuild.
-// Callee-saved: x19=ordered, x20=i, x21=rebuilt.
+// Callee-saved: x19=ordered, x20=i, x21=rebuilt, x22=t. All four are
+// saved here because AAPCS64 obliges bs_build to hand them back intact.
 bs_build:
     stp     x29, x30, [sp, #-48]!
     mov     x29, sp
     stp     x19, x20, [sp, #16]
-    str     x21, [sp, #32]
+    stp     x21, x22, [sp, #32]
 
     bl      bs_topo
     mov     x19, x0                  // ordered
@@ -247,10 +248,8 @@ bs_build:
     adrp    x9, t_order
     add     x9, x9, :lo12:t_order
     ldr     x0, [x9, x20, lsl #3]
-    mov     x22, x0                  // keep t (x22 is scratch here, save it)
-    str     x22, [sp, #-16]!         // protect t across bs_sig
-    bl      bs_sig                   // x0 = sig
-    ldr     x22, [sp], #16           // restore t
+    mov     x22, x0                  // keep t: callee-saved, so bs_sig
+    bl      bs_sig                   // must preserve it. x0 = sig
     // if sig != t_built[t]
     adrp    x9, t_built
     add     x9, x9, :lo12:t_built
@@ -268,7 +267,7 @@ bs_build:
     b       .Lbld_loop
 .Lbld_done:
     mov     x0, x21
-    ldr     x21, [sp, #32]
+    ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #48
     ret

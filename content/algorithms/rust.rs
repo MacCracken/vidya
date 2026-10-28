@@ -20,7 +20,7 @@ fn main() {
     println!("All algorithms examples passed.");
 }
 
-// ── Binary search ───────────────────────────────────���─────────────────
+// ── Binary search ─────────────────────────────────────────────────────
 // O(log n) — requires sorted input. Returns index of target.
 fn binary_search(arr: &[i32], target: i32) -> Option<usize> {
     let mut lo: usize = 0;
@@ -49,7 +49,7 @@ fn test_binary_search() {
     assert_eq!(arr.binary_search(&7), Ok(3));
 }
 
-// ── Sorting ──────────────────────────────────────────��────────────────
+// ── Sorting ───────────────────────────────────────────────────────────
 // Insertion sort: O(n^2) but fast for small/nearly-sorted data
 fn insertion_sort(arr: &mut [i32]) {
     for i in 1..arr.len() {
@@ -80,7 +80,7 @@ fn test_sorting() {
     insertion_sort(&mut sorted);
     assert_eq!(sorted, [1, 2, 3, 4, 5]);
 
-    // Stdlib sort (pdqsort — pattern-defeating quicksort)
+    // Stdlib unstable sort (ipnsort since Rust 1.81; pdqsort before that)
     let mut v = vec![5, 2, 8, 1, 9, 3];
     v.sort_unstable();
     assert_eq!(v, [1, 2, 3, 5, 8, 9]);
@@ -236,7 +236,7 @@ fn test_two_sum_hashmap() {
     assert_eq!(two_sum(&[1, 2, 3], 7), None);
 }
 
-// ── GCD (Euclidean algorithm): O(log(min(a,b))) ──��───────────────────
+// ── GCD (Euclidean algorithm): O(log(min(a,b))) ──────────────────────
 fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         let t = b;

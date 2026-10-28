@@ -36,6 +36,20 @@ seed_program:
     .word 0xD4000001        // svc #0
 seed_program_len = (. - seed_program) / 4
 
+// Opcode bits for Test 8's stage sets.
+OP_MOV = 1 << 0
+OP_ADD = 1 << 1
+OP_SUB = 1 << 2
+OP_B   = 1 << 3
+OP_SVC = 1 << 4
+OP_MUL = 1 << 5
+OP_LDR = 1 << 6
+OP_STR = 1 << 7
+OP_CMP = 1 << 8
+OP_BL  = 1 << 9
+STAGE0_OPS = OP_MOV | OP_ADD | OP_SUB | OP_B | OP_SVC
+STAGE1_NEW = OP_MUL | OP_LDR | OP_STR | OP_CMP | OP_BL
+
 .section .text
 
 _start:
@@ -43,14 +57,39 @@ _start:
     mov     x29, sp
 
     // ── Test 1: fixed-width instruction verification ────────────────
-    // All AArch64 instructions are 4 bytes. Verify our seed program
-    // contains exactly 3 instructions = 12 bytes.
+    // All AArch64 instructions are 4 bytes. seed_program_len alone proves
+    // nothing (three .word directives are 12 bytes by definition), so let
+    // the real assembler emit the same three instructions (skipped, never
+    // run) and check they take exactly 3 * 4 bytes and match the seed's
+    // hand-encoded words.
     mov     w0, seed_program_len
     cmp     w0, #3
     b.ne    fail
+    adr     x0, .Lref_start
+    adr     x1, .Lref_end
+    sub     x2, x1, x0             // bytes the assembler emitted
+    cmp     x2, #(seed_program_len * 4)
+    b.ne    fail
+    adr     x1, seed_program
+    mov     x3, #0
+.Lref_cmp:
+    ldr     w4, [x0, x3]           // assembler's encoding
+    ldr     w5, [x1, x3]           // seed's hand encoding
+    cmp     w4, w5
+    b.ne    fail
+    add     x3, x3, #4
+    cmp     x3, x2
+    b.lo    .Lref_cmp
+    b       .Lref_after
+.Lref_start:
+    mov     x0, #42
+    mov     x8, #93
+    svc     #0
+.Lref_end:
+.Lref_after:
 
     // ── Test 2: instruction decoding — verify MOV encoding ──────────
-    // MOV X0, #42 encodes as: 1101_0010_100 00000000000101010 00000
+    // MOV X0, #42 encodes as: 1101_0010_100 0000000000101010 00000
     // opcode=D2800000 | (42 << 5) = D2800540
     adr     x0, seed_program
     ldr     w1, [x0]               // load first instruction
@@ -138,9 +177,21 @@ _start:
     //   stage0: MOV, ADD, SUB, B, SVC (5 opcodes)
     //   stage1: + MUL, LDR, STR, CMP, BL (10 opcodes)
     //   stage2: self-hosting (all opcodes)
-    mov     w0, #5                  // stage 0 opcodes
-    add     w0, w0, #5             // stage 1 adds 5
-    cmp     w0, #10
+    // Opcode sets are bitmasks (one bit per opcode). Stage 1's set is the
+    // UNION with stage 0's, so it has 10 opcodes only if the five it adds
+    // are really new — "5 + 5" would count an opcode listed twice.
+    mov     w0, #STAGE0_OPS
+    mov     w1, #STAGE1_NEW
+    orr     w0, w0, w1             // stage-1 opcode set
+    mov     w2, #0                 // popcount
+.Lpop:
+    cbz     w0, .Lpop_done
+    sub     w1, w0, #1
+    and     w0, w0, w1             // clear lowest set bit
+    add     w2, w2, #1
+    b       .Lpop
+.Lpop_done:
+    cmp     w2, #10
     b.ne    fail
 
     // ── Print success ────────────────────────────────────────────────

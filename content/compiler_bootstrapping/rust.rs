@@ -88,6 +88,13 @@ fn main() {
     let labels = collect_labels(&program);
     let code = emit_code(&program, &labels);
 
+    // The two passes must agree on every size, or each jump is off by the
+    // difference: JMP sits at 10+10+3 = 23, its rel32 is measured from the
+    // end of the 5-byte instruction (28) back to `start` (0).
+    assert_eq!(code.len(), 10 + 10 + 3 + 5 + 1);
+    assert_eq!(code[23], 0xE9);
+    assert_eq!(i32::from_le_bytes(code[24..28].try_into().unwrap()), -28);
+
     println!("Labels: {:?}", labels);
     println!("Code ({} bytes): {:02X?}", code.len(), code);
     println!("Bootstrap chain: source → labels → machine code");

@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-# ── Helper functions ───────────────────────────────────���────────────
+# ── Helper functions ────────────────────────────────────────────────
 assert_eq() {
     local got="$1" expected="$2" msg="$3"
     if [[ "$got" != "$expected" ]]; then
@@ -105,8 +105,10 @@ assert_eq "$line_count" "10" "batch write"
 # for i in $(seq 1 10); do echo "line $i" >> "$tmpfile"; done
 
 # ── Use [[ over [ ───────────────────────────────────────────────────
-# [[ is a bash builtin keyword (faster, more features)
-# [ is an external command on some systems
+# [[ is a shell KEYWORD: it is parsed specially, so unquoted variables in
+# it are not word-split or globbed, and it adds ==/=~ pattern matching.
+# [ is a builtin in bash too (/usr/bin/[ exists, but bash never runs it),
+# so the speed difference is small — the win is correctness.
 if [[ "hello" == h* ]]; then
     result="matched"
 fi

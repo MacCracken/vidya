@@ -62,20 +62,29 @@ def push_apart_x(x1, y1, x2, y2, overlap) -> int:
     return -half if dx > 0 else half
 
 
+def _fx_time(dist: int, v: int) -> int:
+    """dist / v in 16.16, truncating toward zero (signs preserved)."""
+    q = (abs(dist) << FX_SHIFT) // abs(v)
+    return q if (dist < 0) == (v < 0) else -q
+
+
 def swept_aabb_x(al, ar, vx, bl, br) -> int:
-    """1D swept AABB — returns time-of-impact in [0, FX_ONE]."""
+    """1D swept AABB — returns time-of-impact in [0, FX_ONE); FX_ONE = no
+    hit this frame. Entry/exit times keep their SIGN: a negative entry time
+    means the boxes already overlap at t=0 (impact 0), and a negative exit
+    time means B is behind A. Taking abs() of the distances, as this used to,
+    turns an existing overlap into a later hit or a miss."""
     if vx == 0:
-        return FX_ONE
+        return 0 if (al < br and bl < ar) else FX_ONE
     if vx > 0:
         enter_dist, exit_dist = bl - ar, br - al
     else:
         enter_dist, exit_dist = br - al, bl - ar
-    abs_v = abs(vx)
-    enter = (abs(enter_dist) << FX_SHIFT) // abs_v
-    exit_ = (abs(exit_dist)  << FX_SHIFT) // abs_v
-    if enter > exit_ or enter > FX_ONE:
+    enter = _fx_time(enter_dist, vx)
+    exit_ = _fx_time(exit_dist, vx)
+    if enter > exit_ or enter >= FX_ONE or exit_ < 0:
         return FX_ONE
-    return enter
+    return max(enter, 0)
 
 
 # ── Tests ─────────────────────────────────────────────────────────────
@@ -114,7 +123,8 @@ def main() -> None:
     assert not point_in_circle(fx(100), fx(100), fx(0), fx(0), fx(5)), \
         "point outside circle"
 
-    assert dist_sq(fx(0), fx(0), fx(3), fx(4)) > 0, "3-4-5 triangle dist²"
+    assert dist_sq(fx(0), fx(0), fx(3), fx(4)) == (fx(5) >> 4) ** 2, \
+        "3-4-5 triangle: dist² equals (pre-shifted 5)²"
 
     assert push_apart_x(fx(0), fx(0), fx(4), fx(0), fx(2)) < 0, \
         "entity 1 pushed left when entity 2 is right"
@@ -123,6 +133,10 @@ def main() -> None:
     assert 0 < toi < FX_ONE, "swept AABB returns mid-frame TOI"
     toi2 = swept_aabb_x(fx(0), fx(2), -fx(1), fx(6), fx(10))
     assert toi2 == FX_ONE, "moving away yields no in-frame impact"
+    assert swept_aabb_x(fx(0), fx(4), fx(8), fx(2), fx(6)) == 0, \
+        "already overlapping at t=0 -> impact at 0"
+    assert swept_aabb_x(fx(3), fx(5), fx(8), fx(0), fx(4)) == 0, \
+        "overlapping, moving out -> still impact at 0, not a miss"
 
     print("All collision_detection_2d examples passed.")
 

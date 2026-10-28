@@ -439,7 +439,9 @@ func main() {
 	// jmp -5  →  e9 fb ff ff ff  (jump back to self)
 	enc.Reset()
 	enc.JmpRel32(-5)
-	assert(enc.Bytes()[0] == 0xE9, "opcode E9")
+	expected = []byte{0xE9, 0xFB, 0xFF, 0xFF, 0xFF} // rel32 is two's complement, little-endian
+	assert(bytesEqual(enc.Bytes(), expected),
+		fmt.Sprintf("jmp -5: expected %s, got %s", hexBytes(expected), hexBytes(enc.Bytes())))
 	fmt.Printf("  jmp -5           → %s  (infinite loop)\n", hexBytes(enc.Bytes()))
 
 	// ret  →  c3

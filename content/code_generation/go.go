@@ -7,13 +7,17 @@
 //   - Temporaries saved via push/pop
 //   - No register allocation (optimize later)
 //
-// Go's interfaces make the AST extensible — new node types don't
-// require modifying existing code (open recursion via interface).
+// The AST is an interface, but codegen and eval dispatch with a type
+// switch, so the set of node types is effectively closed: adding a node
+// type means adding a case to every switch (the default panics). That is
+// the trade a type switch makes — new passes are cheap, new node types
+// are not (the expression problem).
 
 package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -120,7 +124,8 @@ func (cg *Codegen) GenExpr(expr Expr) {
 		cg.emit("pop rax")      // dividend in rax
 		// CRITICAL: cqo sign-extends rax into rdx:rax
 		// Using xor rdx,rdx before idiv gives wrong results
-		// for negative dividends (-10/3 = 82, not -3)
+		// for negative dividends: rdx:rax becomes the positive
+		// 2^64-10, so -10/3 = 6148914691236517202, not -3
 		cg.emit("cqo")
 		cg.emit("idiv rcx")
 
@@ -188,6 +193,51 @@ func eval(expr Expr) int64 {
 	}
 }
 
+// run executes the register/stack subset GenExpr emits for expressions
+// on a toy machine and returns rax, so each test checks the generated
+// code against eval instead of only checking that some text came out.
+func run(asm string) int64 {
+	regs := map[string]int64{}
+	var stack []int64
+	for _, line := range strings.Split(asm, "\n") {
+		op, args, _ := strings.Cut(strings.TrimSpace(line), " ")
+		dst, src, _ := strings.Cut(args, ", ")
+		val := func(s string) int64 {
+			if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+				return v
+			}
+			return regs[s]
+		}
+		switch op {
+		case "mov":
+			regs[dst] = val(src)
+		case "push":
+			stack = append(stack, regs[dst])
+		case "pop":
+			regs[dst] = stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+		case "add":
+			regs[dst] += val(src)
+		case "sub":
+			regs[dst] -= val(src)
+		case "imul":
+			regs[dst] *= val(src)
+		case "cqo":
+			regs["rdx"] = regs["rax"] >> 63
+		case "idiv":
+			// idiv divides the 128-bit rdx:rax; this toy only models the
+			// case where rdx is rax's sign extension (what cqo produces).
+			if regs["rdx"] != regs["rax"]>>63 {
+				panic("idiv: rdx:rax is not a sign-extended rax")
+			}
+			regs["rax"], regs["rdx"] = regs["rax"]/regs[dst], regs["rax"]%regs[dst]
+		default:
+			panic("run: unsupported instruction: " + line)
+		}
+	}
+	return regs["rax"]
+}
+
 // ── Stack Frame Layout ───────────────────────────────────────────────
 
 type FrameLayout struct {
@@ -243,6 +293,7 @@ func main() {
 		{"(2+3)*4", Mul{Add{Lit{2}, Lit{3}}, Lit{4}}},
 		{"10-3-2", Sub{Sub{Lit{10}, Lit{3}}, Lit{2}}},
 		{"100/10", Div{Lit{100}, Lit{10}}},
+		{"-10/3", Div{Lit{-10}, Lit{3}}},
 	}
 
 	fmt.Println("Code Generation — stack-based x86_64 emission:")
@@ -256,7 +307,7 @@ func main() {
 		output := cg.Output()
 
 		fmt.Printf("%-20s %8d\n", tc.label, expected)
-		assert(len(output) > 0, "codegen produced output for "+tc.label)
+		assert(run(output) == expected, "generated code computes "+tc.label)
 	}
 
 	// ── Verify instruction patterns ────────────────────────────────

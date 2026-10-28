@@ -4,7 +4,7 @@
 //
 // AArch64 ABI notes (see field-note aarch64_callee_saved_and_imm_limits):
 // callee-saved x19+ across `bl`. fb_set may clobber x0–x18; loop state
-// for draw_hline/draw_vline cached in x19–x22.
+// for draw_hline/draw_vline cached in x19–x23 (x23 = the loop counter).
 
 .global _start
 

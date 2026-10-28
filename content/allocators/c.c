@@ -36,13 +36,17 @@ void bump_init(BumpAllocator *b) {
 }
 
 // Returns pointer into the arena, or NULL if out of memory.
+// align must be a power of two.
 void *bump_alloc(BumpAllocator *b, size_t size, size_t align) {
-    // Round up to alignment
-    size_t aligned = (b->offset + align - 1) & ~(align - 1);
-    size_t end = aligned + size;
-    if (end > BUMP_CAPACITY) {
+    // Round up the ADDRESS, not the offset: memory[] is only as aligned as
+    // the struct (8 here), so rounding the offset alone hands out
+    // misaligned pointers for align > 8 (e.g. 16/32 for SIMD types).
+    uintptr_t base = (uintptr_t)b->memory;
+    size_t aligned = (size_t)(((base + b->offset + align - 1) & ~(uintptr_t)(align - 1)) - base);
+    if (aligned > BUMP_CAPACITY || size > BUMP_CAPACITY - aligned) {
         return NULL;
     }
+    size_t end = aligned + size;
     b->offset = end;
     b->alloc_count++;
     return &b->memory[aligned];
@@ -55,9 +59,11 @@ void bump_reset(BumpAllocator *b) {
 
 // ── Slab Allocator ────────────────────────────────────────────────────
 //
-// Pre-divides memory into fixed-size slots. Free slots store a pointer
-// to the next free slot (embedded free list). Alloc = pop head.
-// Free = push head. Both O(1). Zero external fragmentation.
+// Pre-divides memory into fixed-size slots. A free list links the free
+// slots; here the links live in a side array next[] for clarity. Real
+// slab allocators embed the link inside the free slot itself (zero
+// metadata overhead). Alloc = pop head. Free = push head. Both O(1).
+// Zero external fragmentation.
 // Used by the Linux kernel for task_struct, inode, dentry.
 
 #define SLAB_SLOT_SIZE 64
@@ -194,6 +200,10 @@ int main(void) {
     void *aligned_ptr = bump_alloc(&bump, 8, 8);
     assert(aligned_ptr != NULL);
     assert(((uintptr_t)aligned_ptr & 7) == 0);
+    // Over-aligned request: larger than the arena's own alignment
+    void *simd_ptr = bump_alloc(&bump, 32, 32);
+    assert(simd_ptr != NULL);
+    assert(((uintptr_t)simd_ptr & 31) == 0);
     printf("   After 3-byte + 8-byte: aligned = %s\n",
            ((uintptr_t)aligned_ptr & 7) == 0 ? "true" : "false");
 
@@ -230,8 +240,13 @@ int main(void) {
     // Write and read back
     uint32_t *data = (uint32_t *)slab_ptr(&slab, reused1);
     *data = 0xDEADBEEF;
-    assert(*data == 0xDEADBEEF);
-    printf("   Write/read: 0x%08X\n\n", *data);
+    printf("   Write/read: 0x%08X\n", *data);
+    // A recycled slot must come back zeroed, not holding the old object
+    slab_free(&slab, reused1);
+    int recycled = slab_alloc(&slab);
+    assert(recycled == reused1);
+    assert(*(uint32_t *)slab_ptr(&slab, recycled) == 0);
+    printf("   Recycled slot %d is zeroed\n\n", recycled);
 
     // Bitmap allocator
     printf("3. Bitmap Allocator (page frames):\n");

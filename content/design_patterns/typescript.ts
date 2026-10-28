@@ -2,8 +2,9 @@
 //
 // TypeScript patterns: builder with fluent API and type safety,
 // strategy via first-class functions, observer with callbacks,
-// state machine with discriminated unions, factory with runtime
-// dispatch, and dependency injection via interfaces.
+// state machine over string-literal unions with a key-checked transition
+// table, factory with runtime dispatch, and dependency injection via
+// interfaces.
 
 function main(): void {
     testBuilderPattern();
@@ -109,13 +110,18 @@ function testStrategyPattern(): void {
 }
 
 // ── Observer pattern ─────────────────────────────────────────────────
-// Callback-based event notification.
+// Callback-based event notification. on() returns an unsubscribe function:
+// an observer that can never be removed keeps its listener (and everything
+// the listener closes over) alive as long as the emitter lives.
 
 class EventEmitter {
     private listeners: Array<(event: string) => void> = [];
 
-    on(callback: (event: string) => void): void {
+    on(callback: (event: string) => void): () => void {
         this.listeners.push(callback);
+        return () => {
+            this.listeners = this.listeners.filter((l) => l !== callback);
+        };
     }
 
     emit(event: string): void {
@@ -130,7 +136,7 @@ function testObserverPattern(): void {
     const emitter = new EventEmitter();
 
     emitter.on((e) => log.push(`A:${e}`));
-    emitter.on((e) => log.push(`B:${e}`));
+    const offB = emitter.on((e) => log.push(`B:${e}`));
 
     emitter.emit("click");
     emitter.emit("hover");
@@ -140,15 +146,25 @@ function testObserverPattern(): void {
     assert(log[1] === "B:click", "second");
     assert(log[2] === "A:hover", "third");
     assert(log[3] === "B:hover", "fourth");
+
+    offB(); // unsubscribe: B no longer hears anything
+    emitter.emit("focus");
+    assert(log.length === 5 && log[4] === "A:focus", "unsubscribed listener not called");
 }
 
 // ── State machine ────────────────────────────────────────────────────
-// Transition table maps (state, action) pairs to next states.
+// Transition table maps (state, action) pairs to next states. Keying it by
+// the template-literal type `${DoorState}:${DoorAction}` makes a typo'd key a
+// compile error; Partial<> makes every lookup `DoorState | undefined`, so the
+// missing-transition check below is one the compiler insists on.
+// (Record<string, DoorState> would accept "closed:lokc" and type every
+// lookup as a DoorState that is never undefined.)
 
 type DoorState = "locked" | "closed" | "open";
 type DoorAction = "unlock" | "open" | "close" | "lock";
+type DoorKey = `${DoorState}:${DoorAction}`;
 
-const TRANSITIONS: Record<string, DoorState> = {
+const TRANSITIONS: Partial<Record<DoorKey, DoorState>> = {
     "locked:unlock": "closed",
     "closed:open": "open",
     "open:close": "closed",
@@ -156,7 +172,7 @@ const TRANSITIONS: Record<string, DoorState> = {
 };
 
 function doorTransition(state: DoorState, action: DoorAction): DoorState {
-    const key = `${state}:${action}`;
+    const key: DoorKey = `${state}:${action}`;
     const next = TRANSITIONS[key];
     if (next === undefined) {
         throw new Error(`cannot ${action} when ${state}`);

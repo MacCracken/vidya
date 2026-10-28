@@ -59,6 +59,11 @@ static int is_alnum(char c) {
     return is_alpha(c) || (c >= '0' && c <= '9');
 }
 
+/* Returns the token count (including T_EOF), or -1 if the input holds a
+ * character this lexer does not know or more tokens than `out` can hold.
+ * Refusing matters: silently dropping '<' would turn `id < 5` into
+ * `id 5`, and silently truncating would hand the parser a different
+ * (shorter) query than the one that was sent. */
 static int tokenize(const char *sql, Token *out, int max) {
     int pos = 0;
     int n = 0;
@@ -95,7 +100,7 @@ static int tokenize(const char *sql, Token *out, int max) {
             case '(': k = T_LPAREN; break;
             case ')': k = T_RPAREN; break;
             case ',': k = T_COMMA;  break;
-            default:  pos++;        continue;
+            default:  return -1;   /* unknown character: reject */
         }
         out[n].kind = k;
         out[n].p    = &sql[pos];
@@ -103,6 +108,9 @@ static int tokenize(const char *sql, Token *out, int max) {
         n++;
         pos++;
     }
+    while (pos < slen && (sql[pos] == ' ' || sql[pos] == '\t' ||
+                          sql[pos] == '\n' || sql[pos] == '\r')) pos++;
+    if (pos < slen) return -1;   /* out of token slots: reject, never truncate */
     out[n].kind = T_EOF;
     out[n].p    = NULL;
     out[n].len  = 0;
@@ -119,7 +127,15 @@ static int is_valid_select(const Token *toks, int n) {
     if (from_idx < 0) return 0;
     if (from_idx == 1) return 0; // nothing between SELECT and FROM
     if (from_idx + 1 >= n || toks[from_idx + 1].kind != T_IDENT) return 0;
-    return 1;
+    // ...then end of input, or exactly WHERE <ident> = <int|ident>. Without
+    // this, anything after the table name ("FROM t DROP TABLE t") passed.
+    const Token *tail = &toks[from_idx + 2];
+    int rest = n - (from_idx + 2);
+    if (rest == 1) return tail[0].kind == T_EOF;
+    return rest == 5 && tail[0].kind == T_WHERE && tail[1].kind == T_IDENT
+        && tail[2].kind == T_EQ
+        && (tail[3].kind == T_INT || tail[3].kind == T_IDENT)
+        && tail[4].kind == T_EOF;
 }
 
 static void assert_kinds(const Token *toks, int n, const Tok *exp, int en, const char *msg) {
@@ -189,10 +205,31 @@ int main(void) {
     assert(is_valid_select(toks, n) == 0);
     n = tokenize("SELECT * FROM", toks, MAX_TOKENS);
     assert(is_valid_select(toks, n) == 0);
+    // Nothing may follow the table except one WHERE <ident> = <value>
+    const char *trailing[] = {
+        "SELECT * FROM t DROP TABLE t", "SELECT * FROM t u",
+        "SELECT * FROM t WHERE DROP TABLE t",
+        "SELECT * FROM t WHERE id = 1 DROP TABLE t",
+    };
+    for (size_t k = 0; k < sizeof trailing / sizeof trailing[0]; k++) {
+        n = tokenize(trailing[k], toks, MAX_TOKENS);
+        assert(n > 0);
+        assert(is_valid_select(toks, n) == 0);
+    }
 
     // Test 7: whitespace tolerance
     n = tokenize("  SELECT\t*\nFROM\tt  ", toks, MAX_TOKENS);
     assert_kinds(toks, n, e2, 5, "whitespace");
+
+    // Test 8: unknown characters and overflow are errors, not skipped
+    // (tokenize writes toks, so like the tests above it runs outside
+    // assert(): under -DNDEBUG assert's expression is not evaluated.)
+    n = tokenize("SELECT * FROM t WHERE id < 5", toks, MAX_TOKENS);
+    assert(n == -1);
+    n = tokenize("SELECT * FROM t; DROP TABLE t", toks, MAX_TOKENS);
+    assert(n == -1);
+    n = tokenize("SELECT a, b FROM t", toks, 5);
+    assert(n == -1);
 
     printf("All sql_parsing examples passed.\n");
     return 0;

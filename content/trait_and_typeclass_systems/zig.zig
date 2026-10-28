@@ -7,7 +7,9 @@
 //   4. std.mem.Allocator — the stdlib's canonical interface pattern
 //
 // The philosophy: traits constrain what you can pass. Zig constrains
-// what you can do with what you receive. If it compiles, it works.
+// what you can do with what you receive. If it compiles, every method
+// it calls exists with a usable signature (which is not the same as the
+// semantics a trait's contract would document).
 
 const std = @import("std");
 const print = std.debug.print;
@@ -121,7 +123,10 @@ fn describeShape(shape: anytype) []const u8 {
 //
 // Zig has no dyn Trait. For runtime dispatch, build a vtable manually:
 // a struct with function pointers + an erased *anyopaque pointer.
-// This is exactly what Rust's dyn Trait compiles to under the hood.
+// Rust's dyn Trait is the same idea with one difference: its fat pointer
+// is (data ptr, ptr to ONE shared static vtable, which also holds drop,
+// size and align). This struct stores the function pointers inline, per
+// value; std.mem.Allocator does it Rust's way (ptr + *const VTable).
 
 const ShapeVTable = struct {
     areaFn: *const fn (ctx: *const anyopaque) f64,

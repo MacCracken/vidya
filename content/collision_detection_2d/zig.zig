@@ -2,9 +2,9 @@
 //
 // All coordinates in 16.16 fixed-point on i64. Zig's `>>` on signed
 // integers is arithmetic (sign-preserving), and signed overflow is
-// runtime-checked in safe modes — so we use the i128 builtin for
-// the squared-distance intermediate when full precision matters.
-// In this test set we keep coordinates small and mirror the Cyrius
+// runtime-checked in safe modes — so when full precision matters you
+// widen the squared-distance intermediate to i128. This file does not:
+// in this test set we keep coordinates small and mirror the Cyrius
 // >>4 pre-shift pattern so dx*dx + dy*dy fits in i64 without widen.
 // Squared-distance comparisons avoid sqrt — the central trick.
 
@@ -124,7 +124,9 @@ pub fn main() !void {
     assert(pointInCircle(fx(1), fx(1), fx(0), fx(0), fx(5)));
     assert(!pointInCircle(fx(100), fx(100), fx(0), fx(0), fx(5)));
 
-    assert(distSq(fx(0), fx(0), fx(3), fx(4)) > 0);
+    // 3-4-5 triangle: each delta is pre-shifted >>4 (16.16 -> 12.12), so
+    // the squared distance is 5^2 in 24.24 fixed-point
+    assert(distSq(fx(0), fx(0), fx(3), fx(4)) == @as(i64, 25) << 24);
 
     assert(pushApartX(fx(0), fx(4), fx(2)) < 0);
 

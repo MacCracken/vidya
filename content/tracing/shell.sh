@@ -6,8 +6,9 @@
 # These provide printf-style debugging, structured trace output,
 # and function-level instrumentation without external tools.
 #
-# Requires bash >= 4.1 — BASH_XTRACEFD (4.1), and bash 4's extdebug, which
-# propagates the DEBUG trap into functions. macOS's 3.2.57 has neither.
+# Requires bash >= 4.1 — for BASH_XTRACEFD (new in 4.1; macOS's 3.2.57
+# lacks it). extdebug and set -T (functrace), which let functions inherit
+# the DEBUG trap, are older: both arrived in bash 3.0.
 
 set -euo pipefail
 
@@ -24,7 +25,7 @@ assert_eq() {
 
 # ── Setup: capture output to files ────────────────────────────────
 TRACE_DIR=$(mktemp -d)
-trap "rm -rf '$TRACE_DIR'" EXIT
+trap 'rm -rf "$TRACE_DIR"' EXIT   # single-quoted: expands at EXIT, stays one word
 
 # ── set -x: basic execution tracing ──────────────────────────────
 # set -x prints each command before execution to stderr.
@@ -42,7 +43,9 @@ trace_log="$TRACE_DIR/xtrace.log"
 
 # Trace log should contain the commands that ran
 trace_content=$(cat "$trace_log")
-assert_eq "$(($(echo "$trace_content" | wc -l) > 0))" "1" "set -x produces output"
+# Test emptiness directly: `echo "$x" | wc -l` is 1 even when x is empty,
+# so a "line count > 0" check could never fail.
+assert_eq "$([[ -n "$trace_content" ]] && echo 1 || echo 0)" "1" "set -x produces output"
 
 # Verify traced commands appear (arithmetic is evaluated before trace)
 if echo "$trace_content" | grep -q "result=5"; then
@@ -96,7 +99,7 @@ exec 2>&3           # restore stderr
 exec 3>&-           # close saved fd
 
 exec_content=$(cat "$exec_log")
-assert_eq "$(($(echo "$exec_content" | wc -l) > 0))" "1" "exec redirect captures trace"
+assert_eq "$([[ "$exec_content" == *"exec_traced=captured"* ]] && echo 1 || echo 0)" "1" "exec redirect captures trace"
 
 # ── BASH_SOURCE, LINENO, FUNCNAME: location introspection ────────
 # These arrays provide call stack information at any point.
@@ -128,7 +131,7 @@ inner_func() {
 }
 
 depth=$(outer_func)
-# Stack: inner_func -> outer_func -> main -> subshell
+# FUNCNAME = (inner_func outer_func main) — a $(...) subshell adds no entry
 assert_eq "$((depth >= 3))" "1" "call stack depth"
 
 # ── Structured trace function ─────────────────────────────────────
@@ -187,7 +190,10 @@ traced_function_b() {
     traced_function_a
 }
 
-# extdebug lets the DEBUG trap see FUNCNAME inside called functions
+# Functions do not inherit the DEBUG trap by default, so it would never run
+# inside them. extdebug turns that inheritance on (as `set -T`/functrace
+# alone does), and also changes DEBUG-trap semantics: a non-zero trap
+# return skips the next command — so keep the trap body's status 0.
 shopt -s extdebug
 
 # Install a DEBUG trap that logs function transitions
@@ -242,10 +248,14 @@ assert_eq "$logger_available" "yes" "logger command available"
 # SECONDS is a built-in that counts seconds since shell start.
 # Useful for coarse-grained performance tracing.
 
+# For sub-second timing use $EPOCHREALTIME (bash 5.0+, microseconds; it is
+# wall-clock time, so it can jump if the clock is set).
 SECONDS=0
 for (( i = 0; i < 1000; i++ )); do :; done
 elapsed=$SECONDS
-assert_eq "$((elapsed >= 0))" "1" "SECONDS timer"
+# Assigning resets the counter; a 1000-iteration no-op loop is far under a
+# second. (`elapsed >= 0` could never fail.)
+assert_eq "$((elapsed <= 1))" "1" "SECONDS timer resets on assignment"
 
 # ── BASH_XTRACEFD: trace to a specific file descriptor ───────────
 # Redirect trace output to a file descriptor other than stderr.

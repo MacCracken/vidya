@@ -79,10 +79,10 @@ function demoOpen(ct: Uint8Array, key: number, nonce: number, tag: number): Uint
 }
 
 class Handshake {
-  // Explicit `: number`. Inferred from the initializers these would narrow to
-  // the literal types `0` and `0`, and every later `!== ST_HELLO_SENT` would
-  // be a TS2367 "no overlap" error — the checker would believe a state machine
-  // can never leave its initial state.
+  // Explicit `: number` documents intent. It is not what keeps `state`
+  // mutable: a mutable property initialized from `const ST_INIT = 0` widens to
+  // `number` on its own. Only `readonly state = ST_INIT` (or `as const`) keeps
+  // the literal type `0`. The TS2367 trap is call-site narrowing — see main().
   state: number = ST_INIT;
   negotiated: number = 0;
 
@@ -136,6 +136,15 @@ function main(): void {
   tampered[5] ^= 1;
   if (demoOpen(tampered, 42, 7, tag) !== null) throw new Error("tampered");
   if (demoOpen(ct, 42, 7, tag ^ 1) !== null) throw new Error("wrong tag");
+  // ...and the WARNING above, demonstrated: swap two ciphertext bytes and the
+  // byte-sum tag still matches, so demoOpen returns the forged plaintext.
+  const sealed = demoSeal(new Uint8Array(Buffer.from("transfer 10 usd")), 42, 7);
+  const forged = new Uint8Array(sealed.ct);
+  [forged[9], forged[12]] = [forged[12], forged[9]];
+  const accepted = demoOpen(forged, 42, 7, sealed.tag);
+  if (accepted === null || Buffer.from(accepted).toString() !== "transfer u0 1sd") {
+    throw new Error("forgery: a byte-sum tag is permutation-invariant");
+  }
 
   // Same TS2367 shape as content/explicit_gpu_synchronization: the guard
   // narrows `hs.state` to the literal `0`, and `hs.advance(...)` does not

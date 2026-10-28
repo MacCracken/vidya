@@ -6,7 +6,7 @@
 //
 //   Rust macro_rules!    → TS has nothing (no token transformation)
 //   Rust proc_macro      → TS has nothing (no compile-time code execution)
-//   Rust derive          → TS decorators (experimental, runtime only)
+//   Rust derive          → TS decorators (standard since TS 5.0, runtime only)
 //   Rust cfg!            → TS conditional types (type-level only)
 //   C #define            → TS const + as const (value-level constants)
 //
@@ -53,11 +53,15 @@ type IsString<T> = T extends string ? true : false;
 type IsArray<T> = T extends unknown[] ? true : false;
 
 // Distributive conditional types — applies to each union member
-type NonNullable<T> = T extends null | undefined ? never : T;
-type Cleaned = NonNullable<string | null | number | undefined>; // string | number
+// (My* names: redeclaring lib names like NonNullable would shadow them)
+type MyNonNullable<T> = T extends null | undefined ? never : T;
+type Cleaned = MyNonNullable<string | null | number | undefined>; // string | number
 
-// Infer keyword: extract types from patterns
-type ReturnType<T> = T extends (...args: unknown[]) => infer R ? R : never;
+// Infer keyword: extract types from patterns. The parameter list must be
+// `never[]`, not `unknown[]`: parameters are checked contravariantly, so
+// (x: number) => string does NOT extend (...args: unknown[]) => R and the
+// unknown[] version silently yields never for every typed function.
+type MyReturnType<T> = T extends (...args: never[]) => infer R ? R : never;
 type ArrayElement<T> = T extends (infer E)[] ? E : never;
 
 // Recursive conditional types — type-level recursion (like recursive macros)
@@ -99,6 +103,37 @@ interface User {
 
 // Getters<User> = { getName: () => string; getAge: () => number; getEmail: () => string }
 
+// ── Type-level tests: tsc checks every claim above ────────────────
+// A type alias nobody uses proves nothing — its comment could be wrong
+// and the program would still run. Expect<Equal<...>> fails to COMPILE
+// when a claim is false, and the gate runs tsc --noEmit --strict.
+type Equal<A, B> =
+    (<G>() => G extends A ? 1 : 2) extends (<G>() => G extends B ? 1 : 2) ? true : false;
+type Expect<T extends true> = T;
+export type TypeLevelTests = [
+    Expect<Equal<ClickEvent, "onClick">>,
+    Expect<Equal<HoverEvent, "onHover">>,
+    Expect<Equal<FocusEvent, "onFocus">>,
+    Expect<Equal<Extract<Route, `GET ${string}`>, "GET /users" | "GET /posts">>,
+    Expect<Equal<Params, "userId" | "postId">>,
+    Expect<Equal<IsString<"x">, true>>,
+    Expect<Equal<IsArray<number>, false>>,
+    Expect<Equal<Cleaned, string | number>>,
+    Expect<Equal<MyReturnType<(x: number) => string>, string>>,
+    Expect<Equal<ArrayElement<boolean[]>, boolean>>,
+    Expect<Equal<Deep, number>>,
+    Expect<Equal<MyPartial<User>, Partial<User>>>,
+    Expect<Equal<MyRequired<MyPartial<User>>, User>>,
+    Expect<Equal<MyReadonly<User>, Readonly<User>>>,
+    Expect<Equal<MyPick<User, "name">, Pick<User, "name">>>,
+    Expect<Equal<MyOmit<User, "email">, Omit<User, "email">>>,
+    Expect<Equal<Getters<User>, { getName: () => string; getAge: () => number; getEmail: () => string }>>,
+    // (aliases below are hoisted, so they can be checked here)
+    Expect<Equal<Direction, "north" | "south" | "east" | "west">>,
+    Expect<Equal<ErrorCode, 404 | 403 | 500>>,
+    Expect<Equal<typeof palette.red, number[]>>,
+];
+
 // ── Declaration merging: extending existing types ─────────────────
 // In Rust, you can't add methods to external types without newtypes.
 // In TS, declaration merging lets you extend interfaces across files.
@@ -128,21 +163,30 @@ interface EventEmitter {
 // Decorators modify classes/methods at runtime, not compile time.
 // Rust derive macros generate code at compile time.
 
-// Note: Decorators require experimentalDecorators or the TC39 stage 3
-// proposal. We demonstrate the pattern without depending on the flag.
+// TC39 standard decorators have needed no flag since TypeScript 5.0.
+// The older (target, propertyKey, descriptor) signature belongs to
+// --experimentalDecorators, a different, legacy proposal.
+// Node 26 cannot run @ syntax directly (V8 has not shipped decorators,
+// and type stripping does not transform them); tsc and tsx downlevel it.
 
-// Simulating a decorator pattern without the @ syntax
-function logged(
-    _target: unknown,
-    propertyKey: string,
-    descriptor: PropertyDescriptor,
-): PropertyDescriptor {
-    const original = descriptor.value;
-    descriptor.value = function (this: unknown, ...args: unknown[]) {
-        const result = original.apply(this, args);
-        return result;
+const callLog: string[] = [];
+
+function logged<This, Args extends unknown[], R>(
+    target: (this: This, ...args: Args) => R,
+    context: ClassMethodDecoratorContext<This, (this: This, ...args: Args) => R>,
+): (this: This, ...args: Args) => R {
+    const name = String(context.name);
+    return function (this: This, ...args: Args): R {
+        callLog.push(`${name}(${args.join(", ")})`);
+        return target.call(this, ...args);
     };
-    return descriptor;
+}
+
+class Calculator {
+    @logged
+    double(x: number): number {
+        return x * 2;
+    }
 }
 
 // ── Builder pattern: what Rust derive macros automate ──────────────
@@ -280,15 +324,11 @@ function main(): void {
     assert(Array.isArray(palette.red), "satisfies preserves array type");
     assert(typeof palette.green === "string", "satisfies preserves string type");
 
-    // ── Decorator pattern (without @ syntax) ──────────────────────
-    const descriptor: PropertyDescriptor = {
-        value: (x: number) => x * 2,
-        writable: true,
-        configurable: true,
-    };
-    const modified = logged(null, "double", descriptor);
-    assert(typeof modified.value === "function", "decorator wraps function");
-    assert(modified.value(5) === 10, "decorator preserves behavior");
+    // ── Decorator (TC39 standard, @ syntax) ───────────────────────
+    const calc = new Calculator();
+    assert(calc.double(5) === 10, "decorator preserves behavior");
+    assert(callLog.length === 1 && callLog[0] === "double(5)",
+        "decorator wrapped the method and saw its name and arguments");
 
     // ── What TS CANNOT do (Rust macros can) ───────────────────────
     // 1. Generate new functions at compile time (proc_macro)

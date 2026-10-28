@@ -114,8 +114,12 @@ int main(void) {
         check(n == 4, "top_k caps at corpus size");
     }
     {
+        /* Dot-product ranking scales linearly with |q|, so halving the
+         * query must not change its nearest neighbour. (Comparing
+         * nearest(q) with itself, as before, could never fail.) */
         long long q[4] = {29490, 0, 0, 0};
-        check(nearest(q) == nearest(q), "deterministic");
+        long long half[4] = {14745, 0, 0, 0};
+        check(nearest(half) == nearest(q), "ranking invariant to query scale");
     }
 
     printf("=== embeddings ===\n");

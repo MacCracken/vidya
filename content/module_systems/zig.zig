@@ -60,7 +60,7 @@ const math_module = struct {
 
 const visibility_demo = struct {
     pub const PUBLIC_CONST: i32 = 42;
-    const PRIVATE_CONST: i32 = 99; // only visible in this struct
+    const PRIVATE_CONST: i32 = 99; // visible anywhere in THIS FILE, not just this struct; invisible to importers
 
     pub fn publicFn() i32 {
         return privateFn() + 1; // private fn usable internally
@@ -109,13 +109,17 @@ const Color = struct {
     };
 };
 
-// ── 4. Opaque types — encapsulation ──────────────────────────────────
+// ── 4. Encapsulation — and why fields do not provide it ──────────────
 //
-// Zig structs with only pub methods and private fields enforce
-// encapsulation. External code cannot access internals.
+// Zig has NO private fields. `pub` applies to declarations (consts, fns,
+// nested types), never to fields: any code in any file that can name
+// Counter can read and write counter.value. Encapsulation is by
+// convention (document the invariant, expose methods), or real hiding via
+// an `opaque {}` handle whose state lives behind a pointer only this file
+// knows how to cast.
 
 const Counter = struct {
-    value: i64, // private field — not accessible outside this struct
+    value: i64, // a field: public to every importer — use the methods by convention
 
     pub fn init(start: i64) Counter {
         return .{ .value = start };
@@ -197,11 +201,15 @@ const ModuleError = inner_module.Error;
 //       const target = b.standardTargetOptions(.{});
 //       const optimize = b.standardOptimizeOption(.{});
 //
+//       // Zig 0.17: options go on a Module; ExecutableOptions has no
+//       // root_source_file / target / optimize fields any more
 //       const exe = b.addExecutable(.{
 //           .name = "myapp",
-//           .root_source_file = b.path("src/main.zig"),
-//           .target = target,
-//           .optimize = optimize,
+//           .root_module = b.createModule(.{
+//               .root_source_file = b.path("src/main.zig"),
+//               .target = target,
+//               .optimize = optimize,
+//           }),
 //       });
 //
 //       // Add a dependency declared in build.zig.zon
@@ -270,8 +278,8 @@ pub fn main() void {
     counter.increment();
     counter.decrement();
     assert(counter.get() == 2);
-    // counter.value — accessible here (same file), but would be
-    // private from another file that @imports this one.
+    // counter.value is accessible here AND from any file that imports
+    // this one: fields cannot be made private in Zig.
     print("   Counter: init(0) + 3 inc - 1 dec = {d}\n\n", .{counter.get()});
 
     // ── Platform-specific compilation ────────────────────────────
@@ -296,10 +304,11 @@ pub fn main() void {
     print("7. std library module structure:\n", .{});
     print("   std.mem      — memory operations\n", .{});
     print("   std.math     — math functions\n", .{});
-    print("   std.heap     — allocators (GPA, Arena, FixedBuffer)\n", .{});
+    print("   std.heap     — allocators (SafeAllocator, Arena, FixedBuffer)\n", .{});
     print("   std.debug    — print, assert\n", .{});
     print("   std.testing  — test framework\n", .{});
-    print("   std.fs       — filesystem\n", .{});
+    print("   std.Io       — I/O interface, files and dirs (Io.Dir, Io.File)\n", .{});
+    print("   std.fs       — path helpers (fs.path) and path-length limits\n", .{});
     print("   std.Thread   — threading\n", .{});
     print("   std.atomic   — atomic operations\n", .{});
     print("   std.Build    — build system API\n", .{});

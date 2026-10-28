@@ -129,7 +129,8 @@ class Tlb:
 
     def insert(self, vpage: int, pframe: int) -> None:
         if len(self.entries) >= self.capacity:
-            # Evict first entry (simulates random/LRU eviction)
+            # Evict the OLDEST insertion: FIFO, since lookup() does not
+            # reorder the dict. (Real TLBs use pseudo-LRU or random.)
             first_key = next(iter(self.entries))
             del self.entries[first_key]
         self.entries[vpage] = pframe

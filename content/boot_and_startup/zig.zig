@@ -155,8 +155,10 @@ fn testGdtEntry() !void {
 
 // ── GDT Descriptor (GDTR) ───────────────────────────────────────────
 // Loaded with the LGDT instruction. The hardware GDTR is 10 bytes
-// (2-byte limit + 8-byte base), unaligned. In Zig we model the fields
-// separately since neither packed nor extern struct gives exactly 10 bytes.
+// (2-byte limit + 8-byte base), unaligned. A plain `packed struct` will
+// not do: its backing integer is u80, so @sizeOf is 16. An `extern
+// struct` with `align(1)` fields IS exactly 10 bytes (GdtrRaw below).
+// Here we model the fields separately and encode the bytes explicitly.
 const GdtDescriptor = struct {
     limit: u16, // Size of GDT - 1
     base: u64, // Linear address of GDT
@@ -170,6 +172,11 @@ const GdtDescriptor = struct {
     }
 };
 
+const GdtrRaw = extern struct { limit: u16 align(1), base: u64 align(1) };
+comptime {
+    std.debug.assert(@sizeOf(GdtrRaw) == 10);
+}
+
 fn testGdtDescriptor() !void {
     // 5 entries: null + kernel code + kernel data + user code + user data
     const num_entries = 5;
@@ -181,9 +188,13 @@ fn testGdtDescriptor() !void {
     try expect(gdtr.limit == 39); // 5 * 8 - 1
     try expect(gdtr.base > 0);
 
-    // The encoded form is exactly 10 bytes as hardware expects
+    // The encoded form is the 10 bytes LGDT reads: limit, then base, both LE
     const encoded = gdtr.encode();
-    try expect(encoded.len == 10);
+    try expect(std.mem.readInt(u16, encoded[0..2], .little) == 39);
+    try expect(std.mem.readInt(u64, encoded[2..10], .little) == 0xFFFF_8000_0000_0000);
+    // ... and byte-for-byte what the 10-byte extern struct lays out
+    const raw = GdtrRaw{ .limit = gdtr.limit, .base = gdtr.base };
+    try expect(std.mem.eql(u8, &encoded, std.mem.asBytes(&raw)));
 }
 
 // ── IDT Gate Descriptor (16 bytes in 64-bit mode) ────────────────────

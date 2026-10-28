@@ -129,10 +129,10 @@ func main() {
 	check(intsEq(topKNeighbors([]int64{32767, 0, 0, 0}, 3), []int{0, 2, 1}), "top-3 ranked")
 	check(len(topKNeighbors([]int64{32767, 0, 0, 0}, 10)) == 4, "top_k caps at corpus size")
 
-	{
-		q := []int64{29490, 0, 0, 0}
-		check(nearest(q) == nearest(q), "deterministic")
-	}
+	// Determinism means a defined tie-break, not "same call, same answer"
+	// (a pure function can't fail that). v0 and v1 both score 999 here;
+	// the strict > keeps the lowest index.
+	check(nearest([]int64{1000, 1000, -5000, -5000}) == 0, "tie → lowest index (deterministic)")
 
 	fmt.Println("=== embeddings ===")
 	fmt.Printf("%d passed, %d failed (%d total)\n", passCount, failCount, passCount+failCount)

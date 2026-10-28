@@ -149,12 +149,16 @@ def main() -> None:
     assert fb.get(22, 22) == 2, "2x scaled center pixel"
     assert fb.get(23, 23) == 2, "2x scaled adjacent center"
 
-    # depth sort (painter's algorithm)
+    # depth sort (painter's algorithm): sort by depth, draw FAR to NEAR, so
+    # the nearest sprite lands last regardless of submission order.
     fb.clear(0)
-    blit(fb, sprite, 50, 50)
-    assert fb.get(51, 51) == 2, "first sprite drawn"
-    fb.set(51, 51, 7)
-    assert fb.get(51, 51) == 7, "later draw overwrites"
+    solid = Sprite(bytes([5] * 16), 4, 4)
+    draws = [(1, sprite, 50, 50), (9, solid, 51, 51)]  # (depth, sprite, x, y)
+    for _depth, spr, x, y in sorted(draws, key=lambda d: d[0], reverse=True):
+        blit(fb, spr, x, y)
+    assert fb.get(51, 51) == 2, "near sprite drawn over the far one"
+    assert fb.get(53, 53) == 5, "far sprite shows through near's transparent texel"
+    assert fb.get(54, 54) == 5, "far sprite visible outside the overlap"
 
     # scaled shrink
     fb.clear(0)

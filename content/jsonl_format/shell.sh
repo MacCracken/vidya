@@ -16,8 +16,12 @@ ESC_LEN=0
 declare -a UNESC
 UNESC_LEN=0
 
-# Append the bytes of $2 (a string) into JSONL[] + a trailing 0x0A.
+# Append the bytes of $1 (a string) into JSONL[] + a trailing 0x0A.
+# `local LC_ALL=C` makes ${#s}, ${s:i:1} and printf "'c" work in BYTES. In a
+# UTF-8 locale they work in characters: "é" would be ONE element, 233 (its
+# code point), instead of the two bytes 195 169.
 append_record() {
+    local LC_ALL=C
     local s=$1
     local i
     for (( i = 0; i < ${#s}; i++ )); do
@@ -49,7 +53,12 @@ build_index() {
     fi
 }
 
-# json_escape SRC_NAME SRC_LEN DST_CAP — sets ESC[], ESC_LEN. ESC_LEN=-1 on bounds fail.
+# json_escape SRC_NAME SRC_LEN DST_CAP — sets ESC[], ESC_LEN. ESC_LEN=-1 on
+# bounds fail, or on a control byte it cannot encode.
+# Escapes " \ \n \t \r. RFC 8259 §7 says EVERY control byte < 0x20 MUST be
+# escaped; this minimal encoder has no \u00XX form, so it refuses the other
+# control bytes rather than emit invalid JSON (raw 0x08 makes a parser fail
+# with "Invalid control character").
 json_escape() {
     local -n src=$1
     local src_len=$2
@@ -69,7 +78,9 @@ json_escape() {
             10)  ESC[ESC_LEN]=92; ESC[ESC_LEN+1]=110; ESC_LEN=$((ESC_LEN + 2));;
             9)   ESC[ESC_LEN]=92; ESC[ESC_LEN+1]=116; ESC_LEN=$((ESC_LEN + 2));;
             13)  ESC[ESC_LEN]=92; ESC[ESC_LEN+1]=114; ESC_LEN=$((ESC_LEN + 2));;
-            *)   ESC[ESC_LEN]=$c; ESC_LEN=$((ESC_LEN + 1));;
+            *)
+                if (( c < 32 )); then ESC_LEN=-1; return 0; fi
+                ESC[ESC_LEN]=$c; ESC_LEN=$((ESC_LEN + 1));;
         esac
     done
 }
@@ -101,6 +112,7 @@ json_unescape() {
 
 # Compare slice JSONL[off..off+len] to ASCII string $3.
 slice_eq() {
+    local LC_ALL=C  # compare bytes, not characters (see append_record)
     local off=$1
     local len=$2
     local s=$3

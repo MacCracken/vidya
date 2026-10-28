@@ -2,8 +2,9 @@
 #
 # At the assembly level, security means: constant-time comparison
 # (no branches on secret data), zeroing secrets from memory (can't
-# be optimized away at this level), stack canaries, and safe memory
-# operations. These are the primitives that higher-level security
+# be optimized away at this level), bounds-checked copies and input
+# validation. (Stack canaries are inserted by the compiler and are not
+# shown here.) These are the primitives that higher-level security
 # functions are built on.
 
 .intel_syntax noprefix
@@ -17,6 +18,11 @@ secret_a:       .ascii "secret_token_24"
 secret_b:       .ascii "secret_token_24"
 secret_c:       .ascii "secret_token_25"
 secret_len = 15
+
+mixed_ok:       .ascii "AZ_az09"        # every class the validator accepts
+mixed_ok_len = . - mixed_ok
+inject_bad:     .ascii "token_24;rm"    # one bad byte past the start
+inject_bad_len = . - inject_bad
 
 .section .bss
 zero_buf:       .skip 32
@@ -114,6 +120,20 @@ _start:
     call    validate_alnum
     test    al, al
     jz      fail                    # should be valid
+
+    lea     rsi, [mixed_ok]         # upper, lower, digit, underscore
+    mov     rcx, mixed_ok_len
+    call    validate_alnum
+    test    al, al
+    jz      fail                    # should be valid
+
+    # A validator that is never shown a bad input proves nothing: the ';'
+    # is at index 8, so this also fails if only a prefix is checked.
+    lea     rsi, [inject_bad]
+    mov     rcx, inject_bad_len
+    call    validate_alnum
+    test    al, al
+    jnz     fail                    # must be rejected
 
     # ── All passed ─────────────────────────────────────────────────────
     mov     rax, 1                  # sys_write

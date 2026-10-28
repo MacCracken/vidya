@@ -1,6 +1,6 @@
 // Vidya — SQL Parsing in Zig
 //
-// Idiomatic shape: a tagged enum for token kinds and a `switch` on u8
+// Idiomatic shape: an enum for token kinds and a `switch` on u8
 // for character classification. The lexer walks a const u8 slice with
 // a position cursor; tokens hold a kind plus a slice into the original
 // SQL string (zero-copy). Keywords are matched case-insensitively by
@@ -61,13 +61,17 @@ const TokBuf = struct {
     items: [MAX_TOKENS]Token,
     len: usize,
 
-    fn push(self: *TokBuf, t: Token) void {
+    fn push(self: *TokBuf, t: Token) error{TooManyTokens}!void {
+        if (self.len >= MAX_TOKENS) return error.TooManyTokens; // untrusted input
         self.items[self.len] = t;
         self.len += 1;
     }
 };
 
-fn tokenize(sql: []const u8, buf: *TokBuf) void {
+// An unknown byte is an error, never skipped: dropping it silently turns
+// `id = -1` into `id = 1`, `a < 5` into `a 5` and `'x'` into the
+// identifier x, and the validator then accepts the changed query.
+fn tokenize(sql: []const u8, buf: *TokBuf) error{ TooManyTokens, UnexpectedCharacter }!void {
     buf.len = 0;
     var pos: usize = 0;
 
@@ -85,14 +89,14 @@ fn tokenize(sql: []const u8, buf: *TokBuf) void {
             const start = pos;
             while (pos < sql.len and isAlnum(sql[pos])) : (pos += 1) {}
             const text = sql[start..pos];
-            buf.push(.{ .kind = classify(text), .text = text });
+            try buf.push(.{ .kind = classify(text), .text = text });
             continue;
         }
 
         if (c >= '0' and c <= '9') {
             const start = pos;
             while (pos < sql.len and sql[pos] >= '0' and sql[pos] <= '9') : (pos += 1) {}
-            buf.push(.{ .kind = .int, .text = sql[start..pos] });
+            try buf.push(.{ .kind = .int, .text = sql[start..pos] });
             continue;
         }
 
@@ -104,15 +108,12 @@ fn tokenize(sql: []const u8, buf: *TokBuf) void {
             ',' => .comma,
             else => null,
         };
-        if (k) |kk| {
-            buf.push(.{ .kind = kk, .text = sql[pos .. pos + 1] });
-            pos += 1;
-        } else {
-            pos += 1; // skip unknown
-        }
+        const kk = k orelse return error.UnexpectedCharacter;
+        try buf.push(.{ .kind = kk, .text = sql[pos .. pos + 1] });
+        pos += 1;
     }
 
-    buf.push(.{ .kind = .eof, .text = "" });
+    try buf.push(.{ .kind = .eof, .text = "" });
 }
 
 fn isValidSelect(buf: *const TokBuf) bool {
@@ -128,7 +129,13 @@ fn isValidSelect(buf: *const TokBuf) bool {
     if (from_idx < 0 or from_idx == 1) return false;
     const fi: usize = @intCast(from_idx);
     if (fi + 1 >= buf.len or buf.items[fi + 1].kind != .ident) return false;
-    return true;
+    // ...then end of input, or exactly WHERE <ident> = <int|ident>. Without
+    // this, anything after the table name ("FROM t DROP TABLE t") passed.
+    const tail = buf.items[fi + 2 .. buf.len];
+    if (tail.len == 1) return tail[0].kind == .eof;
+    return tail.len == 5 and tail[0].kind == .where_kw and tail[1].kind == .ident and
+        tail[2].kind == .eq and (tail[3].kind == .int or tail[3].kind == .ident) and
+        tail[4].kind == .eof;
 }
 
 fn assertKinds(buf: *const TokBuf, expected: []const Tok, msg: []const u8) !void {
@@ -153,7 +160,7 @@ pub fn main() !void {
     var buf: TokBuf = .{ .items = undefined, .len = 0 };
 
     // Test 1: canonical SELECT
-    tokenize("SELECT * FROM users WHERE id = 1", &buf);
+    try tokenize("SELECT * FROM users WHERE id = 1", &buf);
     try assertKinds(&buf, &[_]Tok{
         .select_kw, .star, .from_kw, .ident, .where_kw,
         .ident,     .eq,   .int,     .eof,
@@ -163,42 +170,54 @@ pub fn main() !void {
     if (!textEq(buf.items[7], "1")) return error.TextMismatch;
 
     // Test 2: case insensitive
-    tokenize("select * from T", &buf);
+    try tokenize("select * from T", &buf);
     try assertKinds(&buf, &[_]Tok{ .select_kw, .star, .from_kw, .ident, .eof }, "lowercase");
-    tokenize("Select * From T", &buf);
+    try tokenize("Select * From T", &buf);
     try assertKinds(&buf, &[_]Tok{ .select_kw, .star, .from_kw, .ident, .eof }, "mixed");
 
     // Test 3: 'selected' is an identifier
-    tokenize("selected", &buf);
+    try tokenize("selected", &buf);
     if (buf.items[0].kind != .ident) return error.NotIdent;
     if (!textEq(buf.items[0], "selected")) return error.TextMismatch;
 
     // Test 4: parens + commas
-    tokenize("SELECT (a, b) FROM t", &buf);
+    try tokenize("SELECT (a, b) FROM t", &buf);
     try assertKinds(&buf, &[_]Tok{
         .select_kw, .lparen, .ident,   .comma, .ident,
         .rparen,    .from_kw, .ident,   .eof,
     }, "parens");
 
     // Test 5: integer literal
-    tokenize("12345", &buf);
+    try tokenize("12345", &buf);
     if (buf.items[0].kind != .int) return error.NotInt;
     if (!textEq(buf.items[0], "12345")) return error.TextMismatch;
 
     // Test 6: validator
-    tokenize("SELECT * FROM t", &buf);
+    try tokenize("SELECT * FROM t", &buf);
     if (!isValidSelect(&buf)) return error.ShouldBeValid;
-    tokenize("SELECT a FROM t WHERE id = 1", &buf);
+    try tokenize("SELECT a FROM t WHERE id = 1", &buf);
     if (!isValidSelect(&buf)) return error.ShouldBeValid;
-    tokenize("FROM t", &buf);
+    try tokenize("FROM t", &buf);
     if (isValidSelect(&buf)) return error.ShouldBeInvalid;
-    tokenize("SELECT FROM t", &buf);
+    try tokenize("SELECT FROM t", &buf);
     if (isValidSelect(&buf)) return error.ShouldBeInvalid;
-    tokenize("SELECT * FROM", &buf);
+    try tokenize("SELECT * FROM", &buf);
     if (isValidSelect(&buf)) return error.ShouldBeInvalid;
+    // Nothing may follow the table except one WHERE <ident> = <value>
+    for ([_][]const u8{
+        "SELECT * FROM t DROP TABLE t",       "SELECT * FROM t u",
+        "SELECT * FROM t WHERE DROP TABLE t", "SELECT * FROM t WHERE id = 1 DROP TABLE t",
+    }) |q| {
+        try tokenize(q, &buf);
+        if (isValidSelect(&buf)) return error.TrailingTokensAccepted;
+    }
+
+    // Test 6b: unknown characters are rejected, not dropped
+    if (tokenize("SELECT * FROM t WHERE id = -1", &buf)) |_| return error.MinusDropped else |e| if (e != error.UnexpectedCharacter) return e;
+    if (tokenize("SELECT * FROM t WHERE name = 'x'", &buf)) |_| return error.QuoteDropped else |e| if (e != error.UnexpectedCharacter) return e;
 
     // Test 7: whitespace tolerance
-    tokenize("  SELECT\t*\nFROM\tt  ", &buf);
+    try tokenize("  SELECT\t*\nFROM\tt  ", &buf);
     try assertKinds(&buf, &[_]Tok{ .select_kw, .star, .from_kw, .ident, .eof }, "whitespace");
 
     std.debug.print("All sql_parsing examples passed.\n", .{});

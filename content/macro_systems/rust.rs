@@ -97,9 +97,11 @@ macro_rules! hygienic_compute {
     ($x:expr, $y:expr) => {
         {
             // This 'result' lives in the macro's syntax context.
-            // It is invisible to the caller's scope.
-            let result = $x * 2 + $y;
-            result
+            // It is invisible to the caller's scope — and to the caller's
+            // tokens in $x: a `result` written by the caller still means
+            // the caller's variable even though this binding comes first.
+            let result = $y;
+            $x * 2 + result
         }
     };
 }
@@ -107,9 +109,11 @@ macro_rules! hygienic_compute {
 // ── Recursive Macros with Base Cases ─────────────────────────────────────
 
 /// Counts the number of expression arguments at compile time using
-/// recursive expansion. Each recursion peels off one argument.
-/// Without the base case (the empty pattern), this would hit the
-/// recursion limit.
+/// recursive expansion. Each recursion peels off one argument and stops
+/// at the single-argument arm. The `()` arm only serves an empty
+/// invocation; without it `count_exprs!()` is a "no rules expected"
+/// error (recursion that never reaches a base case would instead hit
+/// the recursion limit).
 macro_rules! count_exprs {
     // Base case: no arguments → 0
     () => { 0usize };
@@ -121,7 +125,7 @@ macro_rules! count_exprs {
     };
 }
 
-/// Recursive macro that generates a type-safe builder pattern.
+/// Macro that generates a builder-style struct + impl (not recursive).
 /// Demonstrates how macros can generate struct definitions and impl blocks.
 macro_rules! make_builder {
     // Entry point: struct name + fields
@@ -240,6 +244,10 @@ fn main() {
     println!("   Macro's internal computation: {}", computed);
     assert_eq!(result, 999, "hygiene: caller's 'result' must be untouched");
     assert_eq!(computed, 25, "10 * 2 + 5 = 25");
+    // The test that can actually fail without hygiene: hand the caller's
+    // `result` to the macro, which binds its own `result` first. Textual
+    // (C-preprocessor) substitution would compute 5 * 2 + 5 = 15.
+    assert_eq!(hygienic_compute!(result, 5), 999 * 2 + 5, "$x keeps the caller's binding");
     println!("   Hygiene verified: no variable capture occurred");
     println!();
 

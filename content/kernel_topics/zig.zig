@@ -3,7 +3,8 @@
 // Zig is designed for systems programming: packed structs map to
 // hardware registers, comptime generates descriptor tables, volatile
 // pointers enforce MMIO semantics, and no hidden allocations. Zig
-// is used in real kernel work (e.g., Bun's I/O layer, RTOS projects).
+// is used in real systems work (the Bun runtime, TigerBeetle) and in
+// hobby and RTOS kernels.
 
 const std = @import("std");
 const expect = std.testing.expect;
@@ -190,7 +191,13 @@ fn testGdtEntry() !void {
 }
 
 // ── ABI Struct Layout ─────────────────────────────────────────────────
-// Packed structs in Zig match hardware layout exactly
+// A packed struct is ONE backing integer, first field in the LEAST
+// significant bits — right for a hardware register, a trap for a
+// byte-oriented wire header. Its memory bytes follow target endianness,
+// field ORDER included: IcmpHeader below is 08 00 34 12 ef be ad de on
+// x86_64 but de ad be ef 12 34 00 08 on big-endian s390x. An extern
+// struct keeps declaration order on every target; either way, multi-byte
+// network fields still need std.mem.nativeToBig.
 const IcmpHeader = packed struct {
     msg_type: u8,
     code: u8,

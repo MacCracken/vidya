@@ -15,7 +15,9 @@
 #   2. Topological sort produces an order where every read comes
 #      after its writer.
 #   3. Barrier count = number of write→read edges in the DAG.
-#   4. Dead-pass culling: a pass whose writes nothing reads is removed.
+#   4. Dead-pass culling: a pass whose writes nothing reads is removed
+#      from the schedule — transitively (a producer whose only reader
+#      was culled is dead too).
 #   5. Cycle detection: A reads R1 + writes R2; B reads R2 + writes R1
 #      → topo sort reports cycle (returns 0).
 
@@ -31,6 +33,7 @@ var pass_id[128];                 # 16 * 8 — opaque pass tag
 var pass_reads[128];              # u64 mask: bit i = reads resource i
 var pass_writes[128];             # u64 mask: bit i = writes resource i
 var pass_count = 0;
+var pass_culled: i64[16];         # 1 = culled by cull_dead, never scheduled
 
 # Topological order — `topo_order[i]` is the i-th pass index in
 # execution order. `topo_len` is the number of passes scheduled
@@ -43,6 +46,7 @@ fn graph_init() {
     memset(&pass_reads, 0, PASS_CAP * 8);
     memset(&pass_writes, 0, PASS_CAP * 8);
     memset(&topo_order, 0, PASS_CAP * 8);
+    memset(&pass_culled, 0, PASS_CAP * 8);
     pass_count = 0;
     topo_len = 0;
     return 0;
@@ -88,16 +92,24 @@ fn topo_sort() {
         i = i + 1;
     }
     topo_len = 0;
+    # Culled passes are not scheduled: mark them emitted up front.
+    var live = 0;
+    var q = 0;
+    while (q < pass_count) {
+        if (pass_culled[q] == 1) { store64(&in_degree + q * 8, 0 - 1); }
+        else { live = live + 1; }
+        q = q + 1;
+    }
     # Repeatedly pick a pass with in_degree 0; emit it; decrement
     # in-degrees of its consumers.
     var emitted = 0;
-    while (emitted < pass_count) {
+    while (emitted < live) {
         var picked = 0 - 1;
         var k = 0;
         while (k < pass_count) {
             if (load64(&in_degree + k * 8) == 0) {
                 picked = k;
-                k = pass_count;     # break
+                break;
             }
             k = k + 1;
         }
@@ -144,36 +156,43 @@ fn barrier_count() {
     return count;
 }
 
-# cull_dead — returns count of passes whose writes are never read by
-# any other pass and are not themselves the final consumer (i.e.
-# pure leaf writers with no readers). Removes them by zeroing the
-# writes mask so subsequent topo sorts skip them as redundant work.
+# cull_dead — culls every pass whose writes no live pass reads (a pass
+# that writes nothing is a sink — the final consumer — and is kept).
+# A culled pass's masks are zeroed and it is flagged so topo_sort never
+# schedules it. Zeroing its reads can orphan its producers, so the scan
+# repeats until a round culls nothing (transitive culling). Returns the
+# total number culled.
 fn cull_dead() {
     var culled = 0;
-    var i = 0;
-    while (i < pass_count) {
-        var w = load64(&pass_writes + i * 8);
-        if (w != 0) {
-            # Are any of these writes read by anyone else?
-            var any_reader = 0;
-            var j = 0;
-            while (j < pass_count) {
-                if (i != j) {
-                    var r = load64(&pass_reads + j * 8);
-                    if ((w & r) != 0) { any_reader = 1; }
+    var round = 1;
+    while (round > 0) {
+        round = 0;
+        var i = 0;
+        while (i < pass_count) {
+            var w = load64(&pass_writes + i * 8);
+            if (pass_culled[i] == 0 && w != 0) {
+                # Are any of these writes read by anyone else?
+                var any_reader = 0;
+                var j = 0;
+                while (j < pass_count) {
+                    if (i != j) {
+                        var r = load64(&pass_reads + j * 8);
+                        if ((w & r) != 0) { any_reader = 1; }
+                    }
+                    j = j + 1;
                 }
-                j = j + 1;
+                if (any_reader == 0) {
+                    # Nobody reads what it writes: dead. Zeroing its
+                    # reads may orphan its producers (next round).
+                    store64(&pass_writes + i * 8, 0);
+                    store64(&pass_reads + i * 8, 0);
+                    pass_culled[i] = 1;
+                    culled = culled + 1;
+                    round = round + 1;
+                }
             }
-            if (any_reader == 0) {
-                # If this pass also reads nothing (or its reads are
-                # pure scratch), it's pure dead code. We mark it dead
-                # by zeroing both masks.
-                store64(&pass_writes + i * 8, 0);
-                store64(&pass_reads + i * 8, 0);
-                culled = culled + 1;
-            }
+            i = i + 1;
         }
-        i = i + 1;
     }
     return culled;
 }
@@ -212,10 +231,21 @@ fn main() {
     assert_eq(culled, 1, "cull_dead removes D");
     assert_eq(load64(&pass_writes + 24), 0, "D's writes zeroed after cull");
 
-    # Re-topo: D is now a no-op; the 3 real passes still ordered.
+    # Re-topo: D is culled, so only the 3 live passes are scheduled.
     n = topo_sort();
-    assert_eq(n, 4, "topo_sort still emits all 4 (D is a no-op)");
+    assert_eq(n, 3, "topo_sort schedules 3 passes (culled D is not run)");
     assert_eq(barrier_count(), 2, "barrier count unchanged after cull");
+
+    # --- Test 4b: culling is transitive ---
+    # X writes R1; Y reads R1, writes R2 (unread). Z writes R3; S reads R3.
+    # Y is dead, and once Y is gone X's only reader is gone too.
+    graph_init();
+    add_pass(300, 0, 1);                  # X
+    add_pass(301, 1, 2);                  # Y (dead)
+    add_pass(302, 0, 4);                  # Z
+    add_pass(303, 4, 0);                  # S (sink)
+    assert_eq(cull_dead(), 2, "cull_dead removes Y, then X (transitive)");
+    assert_eq(topo_sort(), 2, "only Z and S are scheduled");
 
     # --- Test 5: cycle detection ---
     graph_init();

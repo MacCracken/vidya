@@ -48,6 +48,13 @@
     mov     \reg2, \val2
 .endm
 
+// Macro: assert_pair reg1, reg2, value — a macro built FROM a macro:
+// it expands to two assert_eq expansions.
+.macro assert_pair reg1, reg2, value
+    assert_eq \reg1, \value
+    assert_eq \reg2, \value
+.endm
+
 .section .rodata
 msg_pass:   .ascii "All macro systems examples passed.\n"
 msg_len = . - msg_pass
@@ -164,8 +171,7 @@ _start:
     // ── Test nested macro usage ─────────────────────────────────────
     // Macros can invoke other macros — composition at assembly time.
     load_pair w0, #7, w1, #7
-    assert_eq w0, #7
-    assert_eq w1, #7
+    assert_pair w0, w1, #7          // expands to assert_eq twice
 
     // ── Verify .rept-generated table via loop ───────────────────────
     // Walk the squares table and verify each entry programmatically

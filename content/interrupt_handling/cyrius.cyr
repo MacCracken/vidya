@@ -43,6 +43,16 @@ include "lib/assert.cyr"
 
 fn ring_advance(idx) { return (idx + 1) & 0xFF; }
 
+# ICW2 vector bases after the remap: master 0x20 (32), slave 0x28 (40).
+fn PIC_MASTER_BASE() { return 0x20; }
+fn PIC_SLAVE_BASE() { return 0x28; }
+
+# IRQ line → IDT vector. IRQ 0-7 come from the master, 8-15 from the slave.
+fn irq_to_vector(irq) {
+    if (irq < 8) { return PIC_MASTER_BASE() + irq; }
+    return PIC_SLAVE_BASE() + (irq - 8);
+}
+
 # EOI (End of Interrupt) to PIC master: out 0x20, 0x20
 # CRITICAL: forgetting EOI means the interrupt never fires again.
 
@@ -71,10 +81,12 @@ fn test_ring_buffer() {
 }
 
 fn test_pic_remap() {
-    # IRQ0 = INT 32 (timer)
-    assert_eq(0 + 32, 32, "irq0 = int32");
-    # IRQ1 = INT 33 (keyboard)
-    assert_eq(1 + 32, 33, "irq1 = int33");
+    assert_eq(irq_to_vector(0), 32, "irq0 (timer) = int 32");
+    assert_eq(irq_to_vector(1), 33, "irq1 (keyboard) = int 33");
+    assert_eq(irq_to_vector(8), 40, "irq8 (RTC, slave) = int 40");
+    assert_eq(irq_to_vector(15), 47, "irq15 = int 47");
+    # Remapped vectors clear the 0-31 CPU exception range.
+    assert(irq_to_vector(0) >= 32, "no clash with CPU exceptions");
     return 0;
 }
 

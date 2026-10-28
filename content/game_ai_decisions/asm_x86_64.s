@@ -12,7 +12,8 @@
 test_count: .quad 0
 pass_count: .quad 0
 
-# PRNG state (PCG-style)
+# PRNG state (64-bit LCG — the state step PCG uses, without PCG's
+# output permutation)
 rng_state:  .quad 12345
 
 # Player stats (1-10 scale)
@@ -54,12 +55,12 @@ msg_t5:     .ascii "probability check: stat=10 always succeeds"
 msg_t5_len = . - msg_t5
 msg_t6:     .ascii "probability check: stat=0 always fails"
 msg_t6_len = . - msg_t6
-msg_t7:     .ascii "decision is deterministic with same seed"
+msg_t7:     .ascii "prng is deterministic with same seed"
 msg_t7_len = . - msg_t7
 
 .section .text
 
-# --- PRNG (PCG multiply-add) ---
+# --- PRNG (LCG multiply-add, Knuth MMIX constants) ---
 
 # rng_next: returns pseudo-random value in rax
 # Note: x86 `add r64, imm` sign-extends a 32-bit immediate, so the
@@ -166,6 +167,7 @@ ai_decide:
     mov     r12, rcx        # distance
     mov     r13, r8         # shot clock
     mov     r14, rdx        # pass stat
+    mov     r15, rsi        # dunk stat — rsi is reused for distance below
 
     # Evaluate shoot
     # rdi already = shooting stat, rsi = distance
@@ -185,10 +187,7 @@ ai_decide:
     imul    rbx, rax        # shoot_score *= urgency
 
     # Evaluate dunk
-    mov     rdi, rsi        # dunking stat (was in rsi before, need to restore)
-    # Actually rsi was clobbered. Use stack saved value.
-    # Re-read from globals for simplicity
-    mov     rdi, [rip + stat_dunking]
+    mov     rdi, r15        # dunking stat, saved at entry
     mov     rsi, r12
     call    evaluate_dunk
     mov     r15, rax        # r15 = dunk_score
@@ -264,6 +263,18 @@ _start:
     lea     rdx, [rip + msg_t1]
     mov     rcx, msg_t1_len
     call    assert_eq
+    # ...and ai_decide picks it: shoot 87 beats dunk 5*15 = 75, pass 5*8 = 40
+    mov     rdi, 9              # shooting
+    mov     rsi, 5              # dunking
+    mov     rdx, 5              # passing
+    mov     rcx, 196608         # distance = 3.0
+    mov     r8, 24              # full shot clock: urgency 1
+    call    ai_decide
+    mov     rdi, rax
+    mov     rsi, ACT_SHOOT
+    lea     rdx, [rip + msg_t1]
+    mov     rcx, msg_t1_len
+    call    assert_eq
 
     # --- Test 2: Close range prefers dunk ---
     mov     rdi, 8              # dunking = 8
@@ -272,6 +283,18 @@ _start:
     # Score should be 8*15 = 120 (very high)
     mov     rdi, rax
     mov     rsi, 120
+    lea     rdx, [rip + msg_t2]
+    mov     rcx, msg_t2_len
+    call    assert_eq
+    # ...and ai_decide picks it: dunk 120 beats shoot 9*10-2 = 88, pass 40
+    mov     rdi, 9              # shooting
+    mov     rsi, 8              # dunking
+    mov     rdx, 5              # passing
+    mov     rcx, 131072         # distance = 2.0
+    mov     r8, 24
+    call    ai_decide
+    mov     rdi, rax
+    mov     rsi, ACT_DUNK
     lea     rdx, [rip + msg_t2]
     mov     rcx, msg_t2_len
     call    assert_eq
@@ -291,22 +314,28 @@ _start:
     call    assert_eq
 
     # --- Test 4: Shot clock urgency increases shoot score ---
-    # Low clock (2 remaining): urgency = (24-2)/4 = 5
-    mov     rdi, 5              # shooting = 5
-    mov     rsi, 0              # distance = 0 (at rim)
-    call    evaluate_shoot
-    mov     r12, rax            # base score at 0 distance = 50
-
-    # Now with urgency multiplier
-    mov     rax, 24
-    sub     rax, 2              # 24 - 2 = 22
-    sar     rax, 2              # 22/4 = 5
-    imul    rax, r12            # 50 * 5 = 250
-    # Verify urgency > base
-    cmp     rax, r12
-    setg    al
-    movzx   rdi, al
-    mov     rsi, 1
+    # Shooting 5 at distance 10.0 scores 50 - 10 = 40; passing 8 scores 64;
+    # a dunk is out of range. Full clock (24 left): urgency 1, pass wins.
+    # Low clock (2 remaining): urgency = (24-2)/4 = 5, shoot 200 wins.
+    mov     rdi, 5              # shooting
+    mov     rsi, 6              # dunking
+    mov     rdx, 8              # passing
+    mov     rcx, 655360         # distance = 10.0
+    mov     r8, 24
+    call    ai_decide
+    mov     rdi, rax
+    mov     rsi, ACT_PASS
+    lea     rdx, [rip + msg_t4]
+    mov     rcx, msg_t4_len
+    call    assert_eq
+    mov     rdi, 5
+    mov     rsi, 6
+    mov     rdx, 8
+    mov     rcx, 655360
+    mov     r8, 2               # 2 seconds left
+    call    ai_decide
+    mov     rdi, rax
+    mov     rsi, ACT_SHOOT
     lea     rdx, [rip + msg_t4]
     mov     rcx, msg_t4_len
     call    assert_eq

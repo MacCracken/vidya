@@ -45,6 +45,7 @@ struct Expr {
 
 Expr *make_lit(int64_t val) {
     Expr *e = malloc(sizeof(Expr));
+    assert(e != NULL);
     e->kind = EXPR_LIT;
     e->lit_val = val;
     return e;
@@ -52,6 +53,7 @@ Expr *make_lit(int64_t val) {
 
 Expr *make_binop(ExprKind kind, Expr *left, Expr *right) {
     Expr *e = malloc(sizeof(Expr));
+    assert(e != NULL);
     e->kind = kind;
     e->bin.left = left;
     e->bin.right = right;
@@ -60,6 +62,7 @@ Expr *make_binop(ExprKind kind, Expr *left, Expr *right) {
 
 Expr *make_var(const char *name) {
     Expr *e = malloc(sizeof(Expr));
+    assert(e != NULL);
     e->kind = EXPR_VAR;
     e->var_name = name;
     return e;
@@ -67,6 +70,7 @@ Expr *make_var(const char *name) {
 
 Expr *make_assign(const char *name, Expr *value) {
     Expr *e = malloc(sizeof(Expr));
+    assert(e != NULL);
     e->kind = EXPR_ASSIGN;
     e->assign.name = name;
     e->assign.value = value;
@@ -101,6 +105,7 @@ typedef struct {
 void codebuf_init(CodeBuf *buf) {
     buf->cap = 4096;
     buf->data = malloc(buf->cap);
+    assert(buf->data != NULL);
     buf->data[0] = '\0';
     buf->len = 0;
 }
@@ -230,8 +235,9 @@ void gen_expr(CodeBuf *buf, LocalTable *locals, const Expr *expr) {
             codebuf_emit(buf, "mov rcx, rax");        // divisor in rcx
             codebuf_emit(buf, "pop rax");              // dividend in rax
             // CRITICAL: use cqo (sign-extend), NOT xor rdx,rdx
-            // xor rdx,rdx + idiv gives wrong results for negative dividends
-            // (-10 / 3 would give 82 instead of -3)
+            // idiv divides the 128-bit rdx:rax. With rdx zeroed, -10 becomes
+            // the positive 2^64 - 10, so -10 / 3 gives 6148914691236517202
+            // instead of -3.
             codebuf_emit(buf, "cqo");
             codebuf_emit(buf, "idiv rcx");
             break;
@@ -314,6 +320,49 @@ int64_t eval(const Expr *expr) {
     }
 }
 
+// ── Executor for Verification ────────────────────────────────────────
+// Runs the emitted text on a toy rax/rcx/rdx + stack machine, so each test
+// checks that the generated code computes what eval() computes. Covers the
+// instruction subset gen_expr emits for literal expressions.
+
+static int64_t run_asm(const char *text) {
+    int64_t rax = 0, rcx = 0, rdx = 0, stack[64];
+    int sp = 0;
+    while (*text) {
+        while (*text == ' ') text++;
+        const char *eol = strchr(text, '\n');
+        size_t n = eol ? (size_t)(eol - text) : strlen(text);
+        char ins[64];
+        assert(n < sizeof(ins));
+        memcpy(ins, text, n);
+        ins[n] = '\0';
+        text += n + (eol != NULL);
+
+        long long imm;
+        if (sscanf(ins, "mov rax, %lld", &imm) == 1) rax = imm;
+        else if (strcmp(ins, "push rax") == 0) { assert(sp < 64); stack[sp++] = rax; }
+        else if (strcmp(ins, "pop rcx") == 0)  { assert(sp > 0); rcx = stack[--sp]; }
+        else if (strcmp(ins, "pop rax") == 0)  { assert(sp > 0); rax = stack[--sp]; }
+        else if (strcmp(ins, "add rax, rcx") == 0)  rax += rcx;
+        else if (strcmp(ins, "sub rcx, rax") == 0)  rcx -= rax;
+        else if (strcmp(ins, "imul rax, rcx") == 0) rax *= rcx;
+        else if (strcmp(ins, "mov rax, rcx") == 0)  rax = rcx;
+        else if (strcmp(ins, "mov rcx, rax") == 0)  rcx = rax;
+        else if (strcmp(ins, "cqo") == 0) rdx = rax < 0 ? -1 : 0;
+        else if (strcmp(ins, "idiv rcx") == 0) {
+            // idiv divides rdx:rax; it is only a 64-bit divide when rdx
+            // holds rax's sign extension — exactly what cqo sets up.
+            assert(rdx == (rax < 0 ? -1 : 0));
+            rax /= rcx;
+        } else {
+            fprintf(stderr, "run_asm: unsupported '%s'\n", ins);
+            exit(1);
+        }
+    }
+    assert(sp == 0);  // every push was matched by a pop
+    return rax;
+}
+
 // ── Stack Frame Layout ───────────────────────────────────────────────
 // Verify the memory layout a compiler must produce.
 //
@@ -328,22 +377,23 @@ int64_t eval(const Expr *expr) {
 //   [rsp]     = bottom of frame (16-byte aligned)
 
 void test_frame_layout(void) {
-    // Parameters stored to stack: [rbp-8], [rbp-16], [rbp-24], ...
+    // Locals get consecutive slots: [rbp-8], [rbp-16], [rbp-24], ...
+    static const char *names[] = {"a", "b", "c", "d", "e", "f"};
+    LocalTable t;
+    locals_init(&t);
+    // locals_alloc mutates t, so it runs outside assert(): under -DNDEBUG
+    // assert's expression is not evaluated and no slot would be allocated.
     for (int i = 0; i < 6; i++) {
-        int offset = -(i + 1) * 8;
-        assert(offset == -8 * (i + 1));
+        int off = locals_alloc(&t, names[i]);
+        assert(off == -8 * (i + 1));
     }
+    // Re-assigning an existing name reuses its slot
+    int off_a = locals_alloc(&t, "a");
+    assert(off_a == -8);
+    assert(t.count == 6);
 
     // Stack arguments (7+): [rbp+16], [rbp+24], ...
     // +16 because: +8 for return address, +8 for saved rbp
-    assert(16 == 8 + 8);  // ret addr + saved rbp
-
-    // Frame alignment: must be multiple of 16
-    for (int num_locals = 0; num_locals <= 10; num_locals++) {
-        int raw = num_locals * 8;
-        int aligned = ((raw + 15) / 16) * 16;
-        assert(aligned % 16 == 0);
-    }
 }
 
 // ── Calling Convention Verification ──────────────────────────────────
@@ -351,23 +401,28 @@ void test_frame_layout(void) {
 void test_calling_convention(void) {
     // System V AMD64: 6 integer arg registers
     const char *sysv_args[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
-    assert(strcmp(sysv_args[0], "rdi") == 0);
-    assert(strcmp(sysv_args[3], "rcx") == 0);
 
     // Syscall ABI: same as System V except arg4 is r10 (not rcx)
     // because SYSCALL clobbers rcx (stores return address in rcx)
     const char *syscall_args[] = {"rdi", "rsi", "rdx", "r10", "r8", "r9"};
-    assert(strcmp(syscall_args[3], "r10") == 0);
+    for (int i = 0; i < 6; i++) {
+        int same = strcmp(sysv_args[i], syscall_args[i]) == 0;
+        assert(same == (i != 3));  // the two lists differ only at arg 4
+    }
 
-    // Caller-saved register count (must save before CALL)
-    // rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11 = 9
-    int caller_saved_count = 9;
-    assert(caller_saved_count == 9);
-
-    // Callee-saved (function must preserve)
-    // rbx, rbp, r12, r13, r14, r15 = 6
-    int callee_saved_count = 6;
-    assert(callee_saved_count == 6);
+    // Caller-saved (must save before CALL) and callee-saved (function must
+    // preserve) partition the 15 general registers other than rsp.
+    const char *caller_saved[] = {"rax", "rcx", "rdx", "rsi", "rdi",
+                                  "r8", "r9", "r10", "r11"};
+    const char *callee_saved[] = {"rbx", "rbp", "r12", "r13", "r14", "r15"};
+    size_t n_caller = sizeof(caller_saved) / sizeof(caller_saved[0]);
+    size_t n_callee = sizeof(callee_saved) / sizeof(callee_saved[0]);
+    assert(n_caller == 9 && n_callee == 6);
+    for (size_t i = 0; i < n_caller; i++) {
+        for (size_t j = 0; j < n_callee; j++) {
+            assert(strcmp(caller_saved[i], callee_saved[j]) != 0);
+        }
+    }
 }
 
 int main(void) {
@@ -384,12 +439,13 @@ int main(void) {
                         make_binop(EXPR_SUB, make_lit(10), make_lit(3)),
                         make_lit(2))},
         {"100/10",    make_binop(EXPR_DIV, make_lit(100), make_lit(10))},
+        {"-10/3",     make_binop(EXPR_DIV, make_lit(-10), make_lit(3))},
     };
     int num_tests = sizeof(tests) / sizeof(tests[0]);
 
     printf("Code Generation — stack-based x86_64 emission:\n");
-    printf("%-20s %8s\n", "Expression", "Expected");
-    printf("-----------------------------------\n");
+    printf("%-20s %8s %8s\n", "Expression", "Expected", "Emitted");
+    printf("--------------------------------------------\n");
 
     for (int i = 0; i < num_tests; i++) {
         int64_t expected = eval(tests[i].expr);
@@ -399,8 +455,9 @@ int main(void) {
         locals_init(&locals);
         gen_expr(&buf, &locals, tests[i].expr);
 
-        printf("%-20s %8ld\n", tests[i].label, expected);
-        assert(buf.len > 0);
+        int64_t got = run_asm(buf.data);
+        printf("%-20s %8ld %8ld\n", tests[i].label, expected, got);
+        assert(got == expected);  // generated code computes the same value
         codebuf_free(&buf);
     }
 
@@ -446,7 +503,9 @@ int main(void) {
         assert(strstr(buf.data, "push rbp") != NULL);
         assert(strstr(buf.data, "leave") != NULL);
         assert(strstr(buf.data, "ret") != NULL);
-        assert(strstr(buf.data, "sub rsp") != NULL);
+        // 3 locals * 8 = 24 bytes, rounded up to 16-byte alignment = 32
+        assert(strstr(buf.data, "sub rsp, 32") != NULL);
+        assert(strstr(buf.data, "mov [rbp-24], rax") != NULL);  // z
         printf("\nGenerated function:\n%s", buf.data);
         codebuf_free(&buf);
         for (int i = 0; i < 3; i++) free_expr(stmts[i]);

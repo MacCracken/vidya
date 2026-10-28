@@ -66,7 +66,10 @@ file_count=$(ls "$tmpdir" | wc -l | tr -d ' ')
 assert_eq "$file_count" "4" "xargs parallel"
 
 # ── Named pipes (FIFOs): inter-process communication ────────────────
-fifo=$(mktemp -u)
+# Make the FIFO inside our private mktemp -d directory. `mktemp -u` only
+# prints a name without creating it (its own --help says "unsafe"): another
+# process can take that name between mktemp and mkfifo.
+fifo="$tmpdir/msg.fifo"
 mkfifo "$fifo"
 
 # Writer in background
@@ -102,9 +105,12 @@ release_lock() {
     rm -f "$1"
 }
 
-# Acquire lock
-acquire_lock "$lockfile"
-assert_eq "$?" "0" "lock acquired"
+# Acquire lock. Capture the status with `||`: under set -e a bare failing
+# `acquire_lock` would exit the script, so a following `assert_eq "$?" 0`
+# could only ever see 0.
+got_lock=0
+acquire_lock "$lockfile" || got_lock=$?
+assert_eq "$got_lock" "0" "lock acquired"
 
 # Second acquire should fail
 set +e

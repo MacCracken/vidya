@@ -9,6 +9,7 @@
 #   "AAAAAAAA"   → [0,A, 1,7]                      (literal + RLE match)
 #   "ABCABCABC"  → [0,A, 0,B, 0,C, 3,6]            (literals + substring)
 #   bomb         → [1,200] decoded with cap=10 → -1
+#   bad offset   → [0,A, 2,1] (offset reaches before byte 0) → -1
 #
 # Token format matches cyrius.cyr exactly: 2-byte tokens; b0=0 means
 # literal (b1 = byte value), b0!=0 means match (b0 = offset, b1 = length).
@@ -46,7 +47,11 @@ exp_abcabc:   .ascii "ABCABCABC"
 tok_bomb:     .byte 1, 200
 .equ tok_bomb_len, . - tok_bomb
 
-msg_pass:     .ascii "compression: 5/5 ok\n"
+# Test 6: match offset 2 with only 1 byte decoded — would read out_buf[-1]
+tok_badoff:   .byte 0, 'A', 2, 1
+.equ tok_badoff_len, . - tok_badoff
+
+msg_pass:     .ascii "compression: 6/6 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail:     .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
@@ -88,6 +93,10 @@ decode:
     jmp     .dec_loop
 .dec_match:
     # offset = rax, length = rcx
+    # An offset past the bytes decoded so far would copy from before
+    # out_buf: an out-of-bounds read of whatever precedes it in memory.
+    cmp     rax, r15
+    ja      .dec_bomb
     mov     rdi, r15
     add     rdi, rcx
     cmp     rdi, r14
@@ -210,6 +219,14 @@ _start:
     mov     rdx, BUF_CAP
     call    decode
     cmp     rax, 0
+    jne     fail_exit
+
+    # Test 6: offset reaching before the start of the output → -1
+    lea     rdi, [rip + tok_badoff]
+    mov     rsi, tok_badoff_len
+    mov     rdx, BUF_CAP
+    call    decode
+    cmp     rax, -1
     jne     fail_exit
 
     mov     rax, 1

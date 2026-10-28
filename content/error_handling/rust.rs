@@ -69,11 +69,13 @@ fn parse_with_context(s: &str) -> Result<u16, String> {
 // Option<T> represents "might not exist" — different from "something went wrong"
 
 fn find_key<'a>(config: &'a str, key: &str) -> Option<&'a str> {
+    // split_once + exact key compare: starts_with(key) would let "host"
+    // match "hostname=…", and split('=').nth(1) would cut "a=b=c" to "b".
     config
         .lines()
-        .find(|line| line.starts_with(key))
-        .and_then(|line| line.split('=').nth(1))
-        .map(|v| v.trim())
+        .filter_map(|line| line.split_once('='))
+        .find(|(k, _)| k.trim() == key)
+        .map(|(_, v)| v.trim())
 }
 
 // ── Panic for bugs, not errors ─────────────────────────────────────
@@ -108,6 +110,8 @@ fn main() {
     // Option for absence
     assert_eq!(find_key(config, "host"), Some("localhost"));
     assert_eq!(find_key(config, "missing"), None);
+    assert_eq!(find_key("hostname=build-01\nhost=db", "host"), Some("db")); // exact key, not prefix
+    assert_eq!(find_key("token=abc=def", "token"), Some("abc=def"));         // value may contain '='
 
     // Panic for invariant violations
     assert_eq!(divide(10.0, 2.0), 5.0);

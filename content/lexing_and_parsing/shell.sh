@@ -81,7 +81,7 @@ lex_arithmetic() {
                 return 1
                 ;;
         esac
-        (( i++ ))
+        i=$(( i + 1 ))  # not (( i++ )): from 0 that is status 1 under set -e
     done
     # Flush trailing number
     if [[ -n "$num" ]]; then
@@ -121,13 +121,19 @@ assert_eq "$(count_tokens "10 * 20 + 30")" "6" "3 operands + 2 ops + EOF"
 # instead of echo, because $(...) creates a subshell that can't update
 # the parent's POS. This is the standard bash pattern for recursive
 # descent — globals for shared state, no subshells.
+# Every caller must also PROPAGATE failure (`parse_x || return`). evaluate
+# runs inside $(...), where set -e is off, so an unchecked `return 1` is
+# ignored and parsing carries on with a stale RESULT: "(3 + 4" used to
+# evaluate to 7 with exit status 0.
 
 declare -a TOKENS=()
 POS=0
 RESULT=0
 
 parser_init() {
-    IFS=' ' read -ra TOKENS <<< "$(lex_arithmetic "$1")"
+    local lexed
+    lexed=$(lex_arithmetic "$1") || return   # separate line: keep lex's status
+    IFS=' ' read -ra TOKENS <<< "$lexed"
     POS=0
     RESULT=0
 }
@@ -140,7 +146,7 @@ parse_factor() {
         RESULT=${BASH_REMATCH[1]}
     elif [[ "$tok" == "LPAREN" ]]; then
         (( POS++ )) || true
-        parse_expr
+        parse_expr || return
         # RESULT is set by parse_expr
         local inner=$RESULT
         if [[ "${TOKENS[$POS]}" != "RPAREN" ]]; then
@@ -157,17 +163,17 @@ parse_factor() {
 
 # term = factor (('*' | '/') factor)*
 parse_term() {
-    parse_factor
+    parse_factor || return
     local left=$RESULT
     while true; do
         local op="${TOKENS[$POS]}"
         if [[ "$op" == "STAR" ]]; then
             (( POS++ )) || true
-            parse_factor
+            parse_factor || return
             left=$(( left * RESULT ))
         elif [[ "$op" == "SLASH" ]]; then
             (( POS++ )) || true
-            parse_factor
+            parse_factor || return
             left=$(( left / RESULT ))
         else
             break
@@ -178,17 +184,17 @@ parse_term() {
 
 # expr = term (('+' | '-') term)*
 parse_expr() {
-    parse_term
+    parse_term || return
     local left=$RESULT
     while true; do
         local op="${TOKENS[$POS]}"
         if [[ "$op" == "PLUS" ]]; then
             (( POS++ )) || true
-            parse_term
+            parse_term || return
             left=$(( left + RESULT ))
         elif [[ "$op" == "MINUS" ]]; then
             (( POS++ )) || true
-            parse_term
+            parse_term || return
             left=$(( left - RESULT ))
         else
             break
@@ -198,8 +204,12 @@ parse_expr() {
 }
 
 evaluate() {
-    parser_init "$1"
-    parse_expr
+    parser_init "$1" || return
+    parse_expr || return
+    if [[ "${TOKENS[$POS]}" != "EOF" ]]; then
+        echo "Parse error: unexpected trailing token ${TOKENS[$POS]}" >&2
+        return 1
+    fi
     echo "$RESULT"
 }
 
@@ -209,6 +219,15 @@ assert_eq "$(evaluate "(3 + 4) * 5")" "35" "parse (3+4)*5 (parens)"
 assert_eq "$(evaluate "100 / 10 - 2")" "8" "parse 100/10-2"
 assert_eq "$(evaluate "2 * 3 + 4 * 5")" "26" "parse 2*3+4*5"
 assert_eq "$(evaluate "(2 + 3) * (4 + 5)")" "45" "parse (2+3)*(4+5)"
+
+# Malformed input must FAIL, not return a number
+for bad in "(3 + 4" "3 + * 4" "3 4"; do
+    if out=$(evaluate "$bad" 2>/dev/null); then
+        echo "FAIL: evaluate '$bad' should fail, returned '$out'" >&2
+        exit 1
+    fi
+    (( ++PASS ))
+done
 
 # ── Keyword recognition ─────────────────────────────────────────────
 # Real lexers distinguish keywords from identifiers. Pattern matching
@@ -261,7 +280,7 @@ lex_with_spans() {
                 esac
                 ;;
         esac
-        (( i++ ))
+        i=$(( i + 1 ))  # not (( i++ )): from 0 that is status 1 under set -e
     done
     if [[ -n "$num" ]]; then
         printf "NUM(%s) @ %d..%d\n" "$num" "$start" "$i"

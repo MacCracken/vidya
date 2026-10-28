@@ -12,7 +12,13 @@ enum Tok {
     T_EOF = 0; T_IDENT = 1; T_INT = 2; T_STAR = 3;
     T_EQ = 4; T_LPAREN = 5; T_RPAREN = 6; T_COMMA = 7;
     T_SELECT = 10; T_FROM = 11; T_WHERE = 12;
+    T_ERR = 99;   # a byte the lexer does not know — reported, never skipped
 }
+
+# Token buffer: SQL_TOK_CAP slots of 24 bytes (kind, ptr, len); the last slot
+# is reserved for T_EOF, so a query needing more tokens is REJECTED (-1)
+# instead of silently truncated.
+enum SqlCap { SQL_TOK_CAP = 64; }
 
 var _toks = 0;
 var _ntoks = 0;
@@ -77,6 +83,11 @@ fn tokenize(sql) {
     var n = 0;
     var slen = strlen(sql);
     while (pos < slen) {
+        if (n >= SQL_TOK_CAP - 1) {
+            _tset(n, T_EOF, 0, 0);
+            _ntoks = n;
+            return 0 - 1;
+        }
         var c = load8(sql + pos);
         if (c == 32) { pos = pos + 1; continue; }
         if (c == 9)  { pos = pos + 1; continue; }
@@ -112,6 +123,7 @@ fn tokenize(sql) {
         elif (c == 40) { _tset(n, T_LPAREN, sql + pos, 1); }
         elif (c == 41) { _tset(n, T_RPAREN, sql + pos, 1); }
         elif (c == 44) { _tset(n, T_COMMA, sql + pos, 1); }
+        else { _tset(n, T_ERR, sql + pos, 1); }   # every slot n counts is written
         n = n + 1;
         pos = pos + 1;
     }
@@ -123,7 +135,8 @@ fn tokenize(sql) {
 fn main() {
     alloc_init();
     fl_init();
-    _toks = fl_alloc(1536);
+    _toks = fl_alloc(SQL_TOK_CAP * 24);
+    if (_toks == 0) { return 1; }
 
     test_group("sql tokenizer");
 
@@ -141,6 +154,15 @@ fn main() {
     tokenize("select * from T");
     assert_eq(_tt(0), T_SELECT, "lowercase select");
     assert_eq(_tt(2), T_FROM, "lowercase from");
+
+    # Unknown byte: a T_ERR token, not whatever the previous query left in
+    # that slot (slot 1 held T_STAR from "select * from T").
+    tokenize("SELECT ; FROM");
+    assert_eq(_tt(1), T_ERR, "';' is a T_ERR token, not a stale slot");
+    assert_eq(_tt(2), T_FROM, "lexing continues after the error token");
+
+    # Capacity: 70 tokens do not fit 64 slots — rejected, not truncated.
+    assert_eq(tokenize("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * "), 0 - 1, "over-capacity query rejected");
 
     return assert_summary();
 }

@@ -1,9 +1,9 @@
 # Vidya — B+ Tree Indexing in x86_64 Assembly
 #
-# Simplified in-memory B+ tree (order 8, max 7 keys per node) — exactly
-# the layout declared by cyrius.cyr. Two static .bss arenas back the
-# tree: a `node_pool` of fixed-size 136-byte slots (BN_SZ from cyrius)
-# and a `next_id` counter; each slot has the layout
+# Simplified in-memory B+ tree (order 8, max 7 keys per node) — the
+# layout declared by cyrius.cyr, widened by one slot. Two static .bss
+# arenas back the tree: a `node_pool` of fixed-size 160-byte slots
+# (cyrius's BN_SZ is 136) and a `next_id` counter; each slot has the layout
 #     +0   BN_LEAF      (i64 — 1 = leaf)
 #     +8   BN_NK        (i64 — number of keys)
 #     +16  BN_KEYS[8]   (i64 × 8, slot 7 is the transient overflow slot)
@@ -36,9 +36,9 @@ node_pool:    .skip BN_SZ * POOL_CAP
 next_id:      .skip 8
 
 .section .data
-root_id:      .quad 0             # current root's slot id (0 is reserved
-                                   # by allocating it first, matching
-                                   # the page-0-as-null gotcha).
+root_id:      .quad 0             # current root's slot id. bt_reset hands
+                                   # slot 0 to the first root leaf, so 0 is
+                                   # a live id here, not a null sentinel.
 
 .section .rodata
 msg_pass:     .ascii "All btree_indexing examples passed.\n"
@@ -362,7 +362,10 @@ split_root_leaf:
     pop     rbx
     ret
 
-# bt_insert(rdi=key, rsi=val) — operates on root_id; splits if leaf overflows.
+# bt_insert(rdi=key, rsi=val) -> rax = 1 inserted / 0 refused.
+# Operates on root_id; splits the root leaf when it overflows. A full
+# CHILD leaf is refused (splitting below the root is not implemented, and
+# one more key would run keys[] into vals[]).
 bt_insert:
     push    rbx
     push    r12
@@ -413,12 +416,22 @@ bt_insert:
     inc     r9
     jmp     .bi_scan
 .bi_descend:
-    mov     rdi, [rbx + BN_VALS + r8 * 8]   # leaf id
+    mov     r14, [rbx + BN_VALS + r8 * 8]   # leaf id
+    mov     rdi, r14
+    call    node_addr
+    cmp     qword ptr [rax + BN_NK], BT_MAX
+    jge     .bi_refuse                      # child already holds BT_MAX keys
+    mov     rdi, r14
     mov     rsi, r12
     mov     rdx, r13
     call    leaf_insert
 
 .bi_done:
+    mov     eax, 1
+    jmp     .bi_ret
+.bi_refuse:
+    xor     eax, eax
+.bi_ret:
     pop     r14
     pop     r13
     pop     r12
@@ -556,6 +569,50 @@ _start:
     cmp     rax, -1
     jne     fail
 
+    # Insert into the split tree: the root is internal now, so bt_insert
+    # must route by separator (median 4) — 8 to the right leaf, -1 to
+    # the left. Without this the .bi_internal path never runs.
+    mov     rdi, 8
+    mov     rsi, 80
+    call    bt_insert
+    mov     rdi, -1
+    mov     rsi, 11
+    call    bt_insert
+    lea     rax, [rip + root_id]
+    mov     rdi, [rax]
+    mov     rsi, 8
+    call    bt_search
+    cmp     rax, 80
+    jne     fail
+    lea     rax, [rip + root_id]
+    mov     rdi, [rax]
+    mov     rsi, -1
+    call    bt_search
+    cmp     rax, 11
+    jne     fail
+
+    # Fill the right leaf (4..8) to BT_MAX with 9 and 10; key 11 must then
+    # be refused, not written to keys[8] (= vals[0], key 4's value).
+    mov     rdi, 9
+    mov     rsi, 90
+    call    bt_insert
+    mov     rdi, 10
+    mov     rsi, 100
+    call    bt_insert
+    cmp     rax, 1
+    jne     fail
+    mov     rdi, 11
+    mov     rsi, 110
+    call    bt_insert
+    test    rax, rax
+    jnz     fail                    # refused
+    lea     rax, [rip + root_id]
+    mov     rdi, [rax]
+    mov     rsi, 4
+    call    bt_search
+    cmp     rax, 40                 # neighbours intact
+    jne     fail
+
     # ──────── Test 4: descending inserts are sorted ────────
     call    bt_reset
     # Insert 50, 40, 30, 20, 10
@@ -592,7 +649,7 @@ _start:
     cmp     rax, 50
     jne     fail
 
-    # Search every inserted key.
+    # Search the last- and first-inserted keys.
     lea     rax, [rip + root_id]
     mov     rdi, [rax]
     mov     rsi, 50

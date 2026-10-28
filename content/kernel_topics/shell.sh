@@ -146,8 +146,9 @@ if gdt_present 0; then
     exit 1
 fi
 
-# Kernel code segment: 0x00AF9A000000FFFF
-# Need to handle this as hex since it exceeds signed 64-bit
+# Kernel code segment: 0x00AF9A000000FFFF. The top byte is 0x00, so this
+# fits comfortably in bash's signed 64-bit arithmetic (= 49427445715107839);
+# only descriptors with bit 63 set (base[31] = 1) would read as negative.
 KERNEL_CODE=0x00AF9A000000FFFF
 gdt_present $KERNEL_CODE
 assert_eq "$(gdt_dpl $KERNEL_CODE)" "0" "kernel code ring 0"

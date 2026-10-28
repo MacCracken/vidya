@@ -6,36 +6,40 @@
 
 use std::fmt::Write;
 use std::hint::black_box;
-use std::time::Instant;
 
 fn main() {
-    // ── Pre-allocation vs growing ──���───────────────────────────────
+    // ── Pre-allocation vs growing ──────────────────────────────────
     // Vec::with_capacity avoids reallocations when size is known
 
+    // Count reallocations instead of timing them: this file is built without
+    // -O, and debug-build timings measure the debug build, not the pattern.
     let n = 10_000;
 
-    let start = Instant::now();
     let mut growing = Vec::new();
+    let (mut reallocs, mut cap) = (0, growing.capacity());
     for i in 0..n {
         growing.push(i);
+        if growing.capacity() != cap {
+            reallocs += 1;
+            cap = growing.capacity();
+        }
     }
-    let grow_time = start.elapsed();
 
-    let start = Instant::now();
     let mut preallocated = Vec::with_capacity(n);
+    let cap0 = preallocated.capacity();
     for i in 0..n {
         preallocated.push(i);
     }
-    let prealloc_time = start.elapsed();
 
     assert_eq!(growing.len(), preallocated.len());
-    // Pre-allocated should be faster (fewer reallocations)
-    // We don't assert timing — just demonstrate the pattern
+    assert_eq!(preallocated.capacity(), cap0); // never reallocated
+    assert!(reallocs >= 10, "geometric growth: ~log2(n) reallocations, got {reallocs}");
 
     // ── Stack vs Heap allocation ───────────────────────────────────
     // Stack allocation is essentially free (just move the stack pointer)
 
-    let stack_data = [0u8; 4096]; // 4KB on stack — one instruction
+    let stack_data = [0u8; 4096]; // 4KB on stack — reserving it is one stack-pointer
+                                  // adjustment (zero-filling it is still a 4KB memset)
     let heap_data = vec![0u8; 4096]; // 4KB on heap — allocator call
     assert_eq!(stack_data.len(), heap_data.len());
 
@@ -44,17 +48,20 @@ fn main() {
 
     let items = ["alpha", "beta", "gamma", "delta", "epsilon"];
 
-    // GOOD: reuse a String buffer
+    // GOOD: reuse a String buffer when each formatted value is consumed
+    // before the next is built (written out, hashed, compared)
     let mut buf = String::with_capacity(64);
-    let mut results = Vec::with_capacity(items.len());
+    let mut bracketed = 0;
     for item in &items {
         buf.clear(); // reuse allocation
         write!(buf, "[{item}]").unwrap();
-        results.push(buf.clone());
+        bracketed += buf.len(); // consume it here
     }
-    assert_eq!(results[0], "[alpha]");
+    assert_eq!(bracketed, "[alpha][beta][gamma][delta][epsilon]".len());
 
-    // BAD would be: results.push(format!("[{item}]")); — allocates each time
+    // NOT a win: `buf.clone()` into a Vec<String> allocates once per item,
+    // exactly like `results.push(format!("[{item}]"))` — an owned String
+    // per element needs its own heap buffer either way.
 
     // ── Cache-friendly data layout ─────────────────────────────────
     // Sequential access (Vec) is dramatically faster than pointer-chasing

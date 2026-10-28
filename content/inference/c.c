@@ -1,10 +1,15 @@
 /* Vidya — LLM Inference (Decoding) — C port. */
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
 #define VOCAB_SIZE 8
 #define TOK_EOS 1
+/* "Removed" logit. Masking to 0 is wrong: logits are unnormalized and can
+ * be negative, so a 0 can OUTRANK every survivor, and softmax gives a
+ * 0 logit weight e^0 = 1, not 0. Mask to -infinity (here: the minimum). */
+#define LOGIT_NEG_INF LLONG_MIN
 
 static long long bigram[VOCAB_SIZE][VOCAB_SIZE];
 
@@ -50,7 +55,7 @@ static int topk_filter(long long *logits, int n, int k) {
         marks[best_idx] = 1;
         picked++;
     }
-    for (int m = 0; m < n; m++) if (!marks[m]) logits[m] = 0;
+    for (int m = 0; m < n; m++) if (!marks[m]) logits[m] = LOGIT_NEG_INF;
     return picked;
 }
 
@@ -98,11 +103,17 @@ int main(void) {
         long long l[8] = {10, 50, 30, 20, 40, 5, 60, 25};
         check(topk_filter(l, 8, 3) == 3, "topk picked 3");
         check(l[6] == 60 && l[1] == 50 && l[4] == 40, "top 3 kept");
-        check(l[0] == 0, "idx 0 zeroed");
-        check(l[2] == 0, "idx 2 zeroed");
-        check(l[3] == 0, "idx 3 zeroed");
-        check(l[5] == 0, "idx 5 zeroed");
-        check(l[7] == 0, "idx 7 zeroed");
+        check(l[0] == LOGIT_NEG_INF, "idx 0 masked");
+        check(l[2] == LOGIT_NEG_INF, "idx 2 masked");
+        check(l[3] == LOGIT_NEG_INF, "idx 3 masked");
+        check(l[5] == LOGIT_NEG_INF, "idx 5 masked");
+        check(l[7] == LOGIT_NEG_INF, "idx 7 masked");
+    }
+    {
+        /* All-negative logits: a masked token must not become the argmax */
+        long long l[4] = {-100, -50, -200, -10};
+        topk_filter(l, 4, 2);
+        check(argmax_logits(l, 4) == 3, "masked tokens never win argmax");
     }
     {
         long long l[3] = {1, 2, 3};
@@ -136,13 +147,17 @@ int main(void) {
         check(out[0] == 3 && out[1] == 6, "first 2 of decode");
     }
     {
+        /* Greedy decoding over a bigram model depends only on the previous
+         * token, so restarting from the first emitted token must reproduce
+         * the rest of the sequence. (Decoding the same start twice and
+         * comparing can never fail: nothing here is random.) */
         long long o1[16], o2[16];
         int n1 = decode_sequence(2, o1, 10);
-        int n2 = decode_sequence(2, o2, 10);
-        check(n1 == n2, "same length");
+        int n2 = decode_sequence((int)o1[0], o2, 10);
+        check(n2 == n1 - 1, "suffix length");
         int eq = 1;
-        for (int i = 0; i < n1; i++) if (o1[i] != o2[i]) eq = 0;
-        check(eq, "deterministic");
+        for (int i = 0; i < n2; i++) if (o2[i] != o1[i + 1]) eq = 0;
+        check(eq, "bigram decode depends only on prev token (suffix matches)");
     }
 
     printf("=== inference ===\n");

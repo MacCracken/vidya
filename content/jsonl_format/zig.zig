@@ -42,8 +42,13 @@ fn buildIndex() void {
 }
 
 // Returns escaped length, or -1 on bounds-check failure.
+// RFC 8259 section 7: a JSON string may not hold U+0000..U+001F raw. The
+// common ones get their short escapes, and every other control byte
+// becomes \u00XX. That makes the worst case 6 output bytes per input byte,
+// so the bounds check is src.len * 6.
 fn jsonEscape(dst: []u8, src: []const u8) i64 {
-    if (src.len * 2 > dst.len) return -1;
+    if (src.len * 6 > dst.len) return -1;
+    const hex = "0123456789abcdef";
     var w: usize = 0;
     for (src) |c| {
         switch (c) {
@@ -52,10 +57,30 @@ fn jsonEscape(dst: []u8, src: []const u8) i64 {
             '\n' => { dst[w] = '\\'; dst[w + 1] = 'n'; w += 2; },
             '\t' => { dst[w] = '\\'; dst[w + 1] = 't'; w += 2; },
             '\r' => { dst[w] = '\\'; dst[w + 1] = 'r'; w += 2; },
+            0x08 => { dst[w] = '\\'; dst[w + 1] = 'b'; w += 2; },
+            0x0C => { dst[w] = '\\'; dst[w + 1] = 'f'; w += 2; },
+            0x00...0x07, 0x0B, 0x0E...0x1F => {
+                dst[w] = '\\';
+                dst[w + 1] = 'u';
+                dst[w + 2] = '0';
+                dst[w + 3] = '0';
+                dst[w + 4] = hex[c >> 4];
+                dst[w + 5] = hex[c & 0xF];
+                w += 6;
+            },
             else => { dst[w] = c; w += 1; },
         }
     }
     return @intCast(w);
+}
+
+fn hexVal(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
 }
 
 fn jsonUnescape(dst: []u8, src: []const u8) usize {
@@ -69,6 +94,25 @@ fn jsonUnescape(dst: []u8, src: []const u8) usize {
                 'n'  => { dst[w] = '\n'; w += 1; i += 2; },
                 't'  => { dst[w] = '\t'; w += 1; i += 2; },
                 'r'  => { dst[w] = '\r'; w += 1; i += 2; },
+                'b'  => { dst[w] = 0x08; w += 1; i += 2; },
+                'f'  => { dst[w] = 0x0C; w += 1; i += 2; },
+                'u'  => {
+                    // Only the \u00XX form jsonEscape writes; anything else
+                    // is copied through unchanged.
+                    if (i + 5 < src.len and src[i + 2] == '0' and src[i + 3] == '0') {
+                        if (hexVal(src[i + 4])) |hi| {
+                            if (hexVal(src[i + 5])) |lo| {
+                                dst[w] = hi * 16 + lo;
+                                w += 1;
+                                i += 6;
+                                continue;
+                            }
+                        }
+                    }
+                    dst[w] = src[i];
+                    w += 1;
+                    i += 1;
+                },
                 else => { dst[w] = src[i]; w += 1; i += 1; },
             }
         } else {
@@ -111,5 +155,12 @@ pub fn main() !void {
     if (un != 12) return error.BadUnescape;
     if (!std.mem.eql(u8, unesc_buf[0..un], &s3)) return error.RoundtripBytes;
 
-    std.debug.print("jsonl_format: 8/8 ok\n", .{});
+    // Test 6: every other control byte is escaped, and round-trips
+    const s6 = [_]u8{ 'a', 0x00, 0x01, 0x08, 0x0C, 0x1F, 'z' };
+    const esc6 = jsonEscape(&esc_buf, &s6);
+    if (!std.mem.eql(u8, esc_buf[0..@intCast(esc6)], "a\\u0000\\u0001\\b\\f\\u001fz")) return error.ControlNotEscaped;
+    const unesc6 = jsonUnescape(&unesc_buf, esc_buf[0..@intCast(esc6)]);
+    if (!std.mem.eql(u8, unesc_buf[0..unesc6], &s6)) return error.ControlRoundtrip;
+
+    std.debug.print("jsonl_format: 10/10 ok\n", .{});
 }

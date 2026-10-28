@@ -158,6 +158,15 @@ class Parser {
         this.advance();
     }
 
+    // Entry point: an expression AND nothing after it. parseExpr alone stops
+    // at the first token it cannot continue with, so "2 3" or "(1))" would
+    // silently parse as 2 / 1 with the rest of the input ignored.
+    parse(): Expr {
+        const e = this.parseExpr(0);
+        this.expect("eof");
+        return e;
+    }
+
     parseExpr(minBP: number = 0): Expr {
         // ── Prefix / atoms ───────────────────────────────────────
         let lhs: Expr;
@@ -243,7 +252,7 @@ function main(): void {
 
     for (const [input, expected] of tests) {
         const parser = new Parser(input);
-        const ast = parser.parseExpr();
+        const ast = parser.parse();
         const result = evaluate(ast);
 
         const status = result === expected ? "ok" : "FAIL";
@@ -255,6 +264,17 @@ function main(): void {
         if (result !== expected) {
             throw new Error(`failed on "${input}": got ${result}, expected ${expected}`);
         }
+    }
+
+    // Shape, not just value: subtraction is left-associative
+    assert(exprToString(new Parser("10 - 3 - 2").parse()) === "((10 - 3) - 2)",
+        "left-associative AST");
+
+    // Malformed input must be rejected, not partially parsed
+    for (const bad of ["2 3", "(1 + 2))", "1 +", "(1 + 2", "4 (5)"]) {
+        let threw = false;
+        try { new Parser(bad).parse(); } catch { threw = true; }
+        assert(threw, `should reject ${JSON.stringify(bad)}`);
     }
 
     console.log(`\nAll ${tests.length} tests passed.`);

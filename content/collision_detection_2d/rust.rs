@@ -2,9 +2,10 @@
 //
 // All coordinates in 16.16 fixed-point on i64. Squared-distance
 // comparisons avoid sqrt — see best practice "use squared distances".
-// Pre-shift the deltas before squaring (asr by 4) so a 16.16 ×
-// 16.16 product can't overflow i64 even for large coordinates;
-// for fully precise products, widen to i128 explicitly. Rust's
+// Pre-shift the deltas before squaring (asr by 4): that buys 16× more
+// range — without it a 16.16 × 16.16 square overflows i64 past ~46k
+// whole units, with it past ~524k (both axes) — but it does not make
+// overflow impossible; for fully precise products, widen to i128. Rust's
 // `>>` on signed ints is arithmetic, so we don't need an `asr`
 // helper — but we keep the >>4 pattern from the Cyrius reference
 // to make the loss-of-precision step visible at every site.
@@ -78,17 +79,20 @@ fn swept_aabb_x(
     if vx == 0 {
         return fx_one;
     }
-    // Time to enter / exit on the X axis (positive sweep direction).
+    // Signed distances ALONG the direction of motion. Taking .abs() here
+    // would turn "already overlapping" (enter < 0) into a future impact.
     let (enter_dist, exit_dist) = if vx > 0 {
         (bl - ar, br - al)
     } else {
-        (br - al, bl - ar)
+        (al - br, ar - bl)
     };
-    // Avoid overflow: shift before dividing by velocity.
+    if exit_dist < 0 { return fx_one; } // B is behind A: no impact
+    if enter_dist < 0 { return 0; }     // already overlapping at t = 0
+    // Shift before dividing to keep 16 fractional bits in the quotient
+    // (this shift, not the divide, is the step that can overflow).
     let abs_v = vx.abs();
-    let enter = (enter_dist.abs() << FX_SHIFT) / abs_v;
-    let exit  = (exit_dist.abs()  << FX_SHIFT) / abs_v;
-    if enter > exit || enter > fx_one { fx_one } else { enter }
+    let enter = (enter_dist << FX_SHIFT) / abs_v;
+    if enter > fx_one { fx_one } else { enter }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -147,7 +151,7 @@ fn main() {
 
     // Distance squared sanity check (3-4-5 triangle, pre-shifted result > 0)
     let d2 = dist_sq(fx(0), fx(0), fx(3), fx(4));
-    assert!(d2 > 0, "distance squared positive for 3-4-5 triangle");
+    assert_eq!(d2, (fx(5) >> 4) * (fx(5) >> 4), "3-4-5 triangle: d2 == 5^2 in reduced units");
 
     // Push-apart along dominant axis
     let pdx = push_apart_x(fx(0), fx(0), fx(4), fx(0), fx(2));
@@ -157,7 +161,10 @@ fn main() {
     // Distance to enter = 6 - 2 = 4, velocity per frame = 8 → toi = 0.5
     let fx_one = 1i64 << FX_SHIFT;
     let toi = swept_aabb_x(fx(0), fx(2), fx(8), fx(6), fx(10));
-    assert!(toi < fx_one && toi > 0, "swept AABB returns mid-frame TOI");
+    assert_eq!(toi, fx_one / 2, "swept AABB returns mid-frame TOI 0.5");
+
+    // Swept AABB: A=[0,8] already overlaps B=[6,10] → impact at t = 0
+    assert_eq!(swept_aabb_x(fx(0), fx(8), fx(8), fx(6), fx(10)), 0, "already overlapping");
 
     // Swept AABB: A moving away from B → no collision in this frame
     let toi2 = swept_aabb_x(fx(0), fx(2), -fx(1), fx(6), fx(10));

@@ -262,10 +262,14 @@ static void test_call(void) {
 static void test_ret_and_syscall(void) {
     uint8_t buf[16];
 
-    assert(encode_ret(buf) == 1);
+    // The encoders write into buf, so they run outside assert(): under
+    // -DNDEBUG assert's expression is not evaluated and buf stays stale.
+    int len = encode_ret(buf);
+    assert(len == 1);
     assert(buf[0] == 0xC3);
 
-    assert(encode_syscall(buf) == 2);
+    len = encode_syscall(buf);
+    assert(len == 2);
     assert(buf[0] == 0x0F && buf[1] == 0x05);
 }
 

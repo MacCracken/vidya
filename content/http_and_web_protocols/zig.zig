@@ -1,12 +1,17 @@
 // Vidya — HTTP and Web Protocols in Zig
 //
 // HTTP/1.1 request parser, sequential.
+//
+// The body is framed by Content-Length (RFC 9112 §6.3), never "whatever
+// follows the headers": on a keep-alive connection the rest of the buffer
+// is the next pipelined request, and treating it as body is the root of
+// request smuggling. Chunked Transfer-Encoding is out of scope.
 
 const std = @import("std");
 
 const HEADER_CAP: usize = 16;
 const STR_CAP: usize = 256;
-const BODY_CAP: usize = 1024;
+const BODY_CAP: usize = 1024; // 413 Content Too Large above this
 
 const Request = struct {
     method: [16]u8 = undefined,
@@ -58,6 +63,14 @@ fn parse_request(buf: []const u8, req: *Request) bool {
     }
     if (sp2 == null) return false;
 
+    // Every field is copied into a fixed buffer, and the input is untrusted:
+    // reject anything longer than its buffer. Without these checks a 21-byte
+    // method panics in Debug and silently overruns into the next field in
+    // ReleaseFast.
+    if (sp1.? > req.method.len) return false;
+    if (sp2.? - sp1.? - 1 > STR_CAP) return false;
+    if (rl_end - sp2.? - 1 > req.version.len) return false;
+
     req.method_len = sp1.?;
     @memcpy(req.method[0..req.method_len], buf[0..req.method_len]);
     req.path_len = sp2.? - sp1.? - 1;
@@ -70,7 +83,21 @@ fn parse_request(buf: []const u8, req: *Request) bool {
         if (pos + 1 >= buf.len) return false;
         if (buf[pos] == '\r' and buf[pos + 1] == '\n') {
             pos += 2;
-            const bl = @min(buf.len - pos, BODY_CAP);
+            // No Content-Length means no body. Silently truncating an
+            // oversize body (the old @min with BODY_CAP) would corrupt
+            // the request instead of refusing it.
+            var bl: usize = 0;
+            if (header_lookup(req, "content-length")) |cl| {
+                if (cl.len == 0) return false; // 400 Bad Request
+                // Digits only, by hand: std.fmt.parseInt also takes a
+                // sign and "_" separators ("5_0" parses as 50).
+                for (cl) |c| {
+                    if (c < '0' or c > '9') return false; // 400
+                    bl = bl * 10 + (c - '0');
+                    if (bl > BODY_CAP) return false; // 413 (also stops overflow)
+                }
+            }
+            if (bl > buf.len - pos) return false; // body not fully received
             req.body_len = bl;
             if (bl > 0) @memcpy(req.body[0..bl], buf[pos .. pos + bl]);
             return true;
@@ -84,6 +111,7 @@ fn parse_request(buf: []const u8, req: *Request) bool {
         if (colon == null) return false;
         if (req.header_count >= HEADER_CAP) return false;
         const name_len = colon.? - pos;
+        if (name_len > STR_CAP) return false;
         var k: usize = 0;
         while (k < name_len) : (k += 1) {
             req.headers_name[req.header_count][k] = to_lower(buf[pos + k]);
@@ -92,6 +120,7 @@ fn parse_request(buf: []const u8, req: *Request) bool {
         var vstart = colon.? + 1;
         while (vstart < line_end and buf[vstart] == ' ') vstart += 1;
         const value_len = line_end - vstart;
+        if (value_len > STR_CAP) return false;
         @memcpy(req.headers_value[req.header_count][0..value_len], buf[vstart..line_end]);
         req.headers_value_len[req.header_count] = value_len;
         req.header_count += 1;
@@ -100,6 +129,7 @@ fn parse_request(buf: []const u8, req: *Request) bool {
 }
 
 fn header_lookup(req: *const Request, name: []const u8) ?[]const u8 {
+    if (name.len > STR_CAP) return null; // no stored name can be longer
     var lower: [STR_CAP]u8 = undefined;
     var i: usize = 0;
     while (i < name.len) : (i += 1) lower[i] = to_lower(name[i]);
@@ -148,8 +178,22 @@ pub fn main() !void {
     const req6 = "GET / HTTP/1.1\r\nHost: x\r\n";
     if (parse_request(req6, &r)) return error.MalformedAccepted;
 
+    const req7 = "GETGETGETGETGETGETGET / HTTP/1.1\r\nHost: x\r\n\r\n";
+    if (parse_request(req7, &r)) return error.OversizedMethodAccepted;
+
     _ = parse_request(req1, &r);
     if (header_lookup(&r, "authorization") != null) return error.Absent;
+    if (r.body_len != 0) return error.BodyWithoutContentLength;
 
-    std.debug.print("http_and_web_protocols: 24/24 ok\n", .{});
+    // Content-Length frames the body: trailing bytes are the next request
+    const req8 = "POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET / HTTP/1.1\r\n\r\n";
+    if (!parse_request(req8, &r)) return error.Req8;
+    if (!std.mem.eql(u8, r.body[0..r.body_len], "hello")) return error.BodyPastContentLength;
+    // A short body is incomplete, not accepted
+    if (parse_request("POST /x HTTP/1.1\r\nContent-Length: 20\r\n\r\nshort", &r)) return error.ShortBodyAccepted;
+    // Non-numeric ("5_0" would pass parseInt) and oversize lengths are refused
+    if (parse_request("POST /x HTTP/1.1\r\nContent-Length: 0_5\r\n\r\nhello", &r)) return error.BadLengthAccepted;
+    if (parse_request("POST /x HTTP/1.1\r\nContent-Length: 2000\r\n\r\nhello", &r)) return error.OversizeAccepted;
+
+    std.debug.print("http_and_web_protocols: 26/26 ok\n", .{});
 }

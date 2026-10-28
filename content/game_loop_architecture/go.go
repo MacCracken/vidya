@@ -3,9 +3,12 @@
 // Fixed-timestep accumulator loop with spiral-of-death cap. The driver
 // `loopStep` takes an elapsed-microsecond delta and returns the number
 // of fixed-step updates fired this frame. Go's `int64` matches the
-// other ports' wrap behavior (~292 years for microsecond ticks). A
-// production loop would source deltas from time.Now().UnixNano(); the
-// tests below use deterministic deltas for reproducibility.
+// other ports' wrap behavior (~292,000 years for microsecond ticks; the
+// often-quoted 292 years is for nanoseconds). A production loop would
+// measure deltas with time.Since(prev), which reads the monotonic clock;
+// differencing time.Now().UnixNano() values reads the WALL clock, which
+// jumps (even backwards) when NTP or the user resets it. The tests below
+// use deterministic deltas for reproducibility.
 
 package main
 

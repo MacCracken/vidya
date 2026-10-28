@@ -146,13 +146,30 @@ _start:
     cmp     w2, #42
     b.ne    fail
 
-    // ── Test 10: section type constants ─────────────────────────────
-    mov     w0, SHT_PROGBITS
-    cmp     w0, #1
+    // ── Test 10: check the constants against a real ELF header ──────
+    // Tests 1-5 read back a header this file built from these same
+    // constants, so they prove the field offsets but not the values
+    // (comparing SHT_PROGBITS with 1 would only restate its .equ). The
+    // linker's header for THIS executable — mapped at __ehdr_start, the
+    // start of the first PT_LOAD — is an independent witness.
+    adrp    x0, __ehdr_start
+    add     x0, x0, :lo12:__ehdr_start
+    ldr     w1, [x0]               // e_ident[0..3] as a little-endian word
+    mov     w2, #0x457F            // 0x7F 'E'
+    movk    w2, #0x464C, lsl #16   // 'L' 'F'
+    cmp     w1, w2
     b.ne    fail
-
-    mov     w0, SHT_NOBITS
-    cmp     w0, #8
+    ldrb    w1, [x0, #4]
+    cmp     w1, ELFCLASS64
+    b.ne    fail
+    ldrb    w1, [x0, #5]
+    cmp     w1, ELFDATA2LSB
+    b.ne    fail
+    ldrh    w1, [x0, #16]          // static, non-PIE link → ET_EXEC
+    cmp     w1, ET_EXEC
+    b.ne    fail
+    ldrh    w1, [x0, #18]
+    cmp     w1, EM_AARCH64
     b.ne    fail
 
     // ── Print success ────────────────────────────────────────────────

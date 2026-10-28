@@ -10,7 +10,9 @@ A semver major.minor.patch is encoded as one integer
     enc = major*1_000_000 + minor*1_000 + patch
 so version comparison IS integer comparison. A constraint is a
 half-open range [lo, hi). A caret ^X.Y.Z allows everything from X.Y.Z
-up to (but not including) the next major: [X.Y.Z, (X+1).0.0).
+up to (but not including) the next bump of its leftmost NON-ZERO part,
+as in Cargo and npm: ^1.2.3 = [1.2.3, 2.0.0), ^0.2.3 = [0.2.3, 0.3.0),
+^0.0.3 = [0.0.3, 0.0.4). Pre-1.0, a minor bump is a breaking change.
 """
 
 VMAJ = 1_000_000
@@ -26,13 +28,18 @@ def sv_major(v):
     return v // VMAJ
 
 
-# --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0) ---
+# --- Caret range [lo, hi): bump the leftmost non-zero component ---
 def caret_lo(v):
     return v
 
 
 def caret_hi(v):
-    return (sv_major(v) + 1) * VMAJ
+    maj, mnr, pat = sv_major(v), (v // VMIN) % 1000, v % VMIN
+    if maj > 0:
+        return sv(maj + 1, 0, 0)   # ^1.2.3 -> <2.0.0
+    if mnr > 0:
+        return sv(0, mnr + 1, 0)   # ^0.2.3 -> <0.3.0
+    return sv(0, 0, pat + 1)       # ^0.0.3 -> <0.0.4
 
 
 # --- Constraint satisfaction over a half-open range ---
@@ -128,6 +135,11 @@ def test_caret():
     assert satisfies(sv(1, 4, 0), lo, hi), "1.4.0 in ^1.2.0"
     assert not satisfies(sv(2, 0, 0), lo, hi), "2.0.0 not in ^1.2.0"
     assert not satisfies(sv(1, 1, 0), lo, hi), "1.1.0 below ^1.2.0"
+    # Pre-1.0: the leftmost non-zero part is the "major"
+    assert caret_hi(sv(0, 2, 3)) == sv(0, 3, 0), "^0.2.3 stops before 0.3.0"
+    assert caret_hi(sv(0, 0, 3)) == sv(0, 0, 4), "^0.0.3 allows only 0.0.3"
+    assert not satisfies(sv(0, 3, 0), sv(0, 2, 3), caret_hi(sv(0, 2, 3))), \
+        "0.3.0 is a breaking change from 0.2.3"
 
 
 def test_intersect():

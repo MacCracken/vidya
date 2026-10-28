@@ -7,14 +7,14 @@ set -uo pipefail
 
 readonly PASS_CAP=16
 
-declare -a PASS_ID READS WRITES TOPO_ORDER
+declare -a PASS_ID READS WRITES TOPO_ORDER CULLED
 COUNT=0
 TOPO_LEN=0
 
 graph_init() {
     local i
     for (( i = 0; i < PASS_CAP; i++ )); do
-        PASS_ID[i]=0; READS[i]=0; WRITES[i]=0; TOPO_ORDER[i]=0
+        PASS_ID[i]=0; READS[i]=0; WRITES[i]=0; TOPO_ORDER[i]=0; CULLED[i]=0
     done
     COUNT=0
     TOPO_LEN=0
@@ -37,14 +37,16 @@ has_edge() {
     if (( (WRITES[p] & READS[c]) != 0 )); then EDGE_OUT=1; else EDGE_OUT=0; fi
 }
 
-# topo_sort -> sets TOPO_LEN
+# topo_sort -> sets TOPO_LEN. Culled passes are never scheduled.
 topo_sort() {
     local -a in_degree
-    local i j k c
+    local i j k c live=0
     for (( i = 0; i < PASS_CAP; i++ )); do in_degree[i]=0; done
     for (( i = 0; i < COUNT; i++ )); do
+        if (( CULLED[i] )); then in_degree[i]=-1; continue; fi
+        live=$((live + 1))
         for (( j = 0; j < COUNT; j++ )); do
-            if (( i != j )); then
+            if (( i != j && CULLED[j] == 0 )); then
                 has_edge $j $i
                 (( EDGE_OUT == 1 )) && in_degree[i]=$((in_degree[i] + 1))
             fi
@@ -52,7 +54,7 @@ topo_sort() {
     done
     TOPO_LEN=0
     local emitted=0
-    while (( emitted < COUNT )); do
+    while (( emitted < live )); do
         local picked=-1
         for (( k = 0; k < COUNT; k++ )); do
             if (( in_degree[k] == 0 )); then picked=$k; break; fi
@@ -85,20 +87,28 @@ barrier_count() {
     BARRIER_OUT=$count
 }
 
-# cull_dead -> sets CULL_OUT
+# cull_dead -> sets CULL_OUT. A culled pass is REMOVED (CULLED[i]=1, so
+# topo_sort skips it), not just emptied — and culling runs to a fixed point,
+# because removing a pass can leave its producer with no reader either.
+# Passes that write nothing (sinks, e.g. present) are always kept.
 cull_dead() {
-    local culled=0 i j w any
-    for (( i = 0; i < COUNT; i++ )); do
-        w=${WRITES[i]}
-        (( w == 0 )) && continue
-        any=0
-        for (( j = 0; j < COUNT; j++ )); do
-            if (( i != j && (w & READS[j]) != 0 )); then any=1; break; fi
+    local culled=0 changed=1 i j w any
+    while (( changed )); do
+        changed=0
+        for (( i = 0; i < COUNT; i++ )); do
+            (( CULLED[i] )) && continue
+            w=${WRITES[i]}
+            (( w == 0 )) && continue
+            any=0
+            for (( j = 0; j < COUNT; j++ )); do
+                if (( i != j && CULLED[j] == 0 && (w & READS[j]) != 0 )); then any=1; break; fi
+            done
+            if (( any == 0 )); then
+                CULLED[i]=1; WRITES[i]=0; READS[i]=0
+                culled=$((culled + 1))
+                changed=1
+            fi
         done
-        if (( any == 0 )); then
-            WRITES[i]=0; READS[i]=0
-            culled=$((culled + 1))
-        fi
     done
     CULL_OUT=$culled
 }
@@ -124,12 +134,20 @@ add_pass 103 0 4; check $ADD_OUT 3 "d"
 cull_dead; check $CULL_OUT 1 "cull"
 check ${WRITES[3]} 0 "writes zeroed"
 
-topo_sort; check $TOPO_LEN 4 "topo4"
+topo_sort; check $TOPO_LEN 3 "topo skips the culled pass"
 barrier_count; check $BARRIER_OUT 2 "barriers post-cull"
+
+# Transitive cull: A -> B -> (nobody). Culling B leaves A unread too.
+graph_init
+add_pass 300 0 1
+add_pass 301 1 2
+add_pass 302 0 0      # sink, always kept
+cull_dead; check $CULL_OUT 2 "transitive cull removes A and B"
+topo_sort; check $TOPO_LEN 1 "only the sink is scheduled"
 
 graph_init
 add_pass 200 1 2
 add_pass 201 2 1
 topo_sort; check $TOPO_LEN 0 "cycle"
 
-echo "render_graph_architecture: $PASS/14 ok"
+echo "render_graph_architecture: $PASS/16 ok"

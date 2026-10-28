@@ -13,6 +13,7 @@ const Graph = struct {
     count: usize = 0,
     topo_order: [PASS_CAP]usize = @splat(0),
     topo_len: usize = 0,
+    culled: [PASS_CAP]bool = @splat(false),
 
     fn addPass(self: *Graph, id: u64, r: u64, w: u64) i32 {
         if (self.count >= PASS_CAP) return -1;
@@ -30,16 +31,20 @@ const Graph = struct {
 
     fn topoSort(self: *Graph) usize {
         var in_degree: [PASS_CAP]i32 = @splat(0);
+        var live: usize = 0;
         var i: usize = 0;
         while (i < self.count) : (i += 1) {
+            // A culled pass is never scheduled: mark it as already emitted
+            if (self.culled[i]) { in_degree[i] = -1; continue; }
+            live += 1;
             var j: usize = 0;
             while (j < self.count) : (j += 1) {
-                if (i != j and self.hasEdge(j, i)) in_degree[i] += 1;
+                if (i != j and !self.culled[j] and self.hasEdge(j, i)) in_degree[i] += 1;
             }
         }
         self.topo_len = 0;
         var emitted: usize = 0;
-        while (emitted < self.count) {
+        while (emitted < live) {
             var picked: i32 = -1;
             var k: usize = 0;
             while (k < self.count) : (k += 1) {
@@ -73,21 +78,32 @@ const Graph = struct {
         return count;
     }
 
+    // Remove passes whose outputs no live pass reads. Passes that write
+    // nothing are sinks (present / readback) and always stay. Iterates to
+    // a fixed point: culling a pass can strand the producer that only fed
+    // it, so a single sweep under-culls. Culled passes leave the schedule.
     fn cullDead(self: *Graph) usize {
         var culled: usize = 0;
-        var i: usize = 0;
-        while (i < self.count) : (i += 1) {
-            const w = self.writes[i];
-            if (w == 0) continue;
-            var any_reader = false;
-            var j: usize = 0;
-            while (j < self.count) : (j += 1) {
-                if (i != j and (w & self.reads[j]) != 0) { any_reader = true; break; }
-            }
-            if (!any_reader) {
-                self.writes[i] = 0;
-                self.reads[i] = 0;
-                culled += 1;
+        var changed = true;
+        while (changed) {
+            changed = false;
+            var i: usize = 0;
+            while (i < self.count) : (i += 1) {
+                if (self.culled[i]) continue;
+                const w = self.writes[i];
+                if (w == 0) continue;
+                var any_reader = false;
+                var j: usize = 0;
+                while (j < self.count) : (j += 1) {
+                    if (i != j and !self.culled[j] and (w & self.reads[j]) != 0) { any_reader = true; break; }
+                }
+                if (!any_reader) {
+                    self.culled[i] = true;
+                    self.writes[i] = 0;
+                    self.reads[i] = 0;
+                    culled += 1;
+                    changed = true;
+                }
             }
         }
         return culled;
@@ -111,13 +127,24 @@ pub fn main() !void {
     if (g.addPass(103, 0, 4) != 3) return error.D;
     if (g.cullDead() != 1) return error.Cull;
     if (g.writes[3] != 0) return error.WritesZeroed;
-    if (g.topoSort() != 4) return error.Topo4;
+    // The culled pass is out of the schedule: 3 passes run, not 4
+    if (g.topoSort() != 3) return error.CulledStillScheduled;
+    for (g.topo_order[0..g.topo_len]) |p| if (p == 3) return error.CulledInOrder;
     if (g.barrierCount() != 2) return error.BarriersPost;
+
+    // Transitive: P0 -> P1 -> (nobody); a sink P2 reads nothing.
+    // P1 is dead, and then so is P0, whose only reader was P1.
+    var g3 = Graph{};
+    _ = g3.addPass(300, 0, 1);
+    _ = g3.addPass(301, 1, 2);
+    _ = g3.addPass(302, 0, 0);
+    if (g3.cullDead() != 2) return error.CullTransitive;
+    if (g3.topoSort() != 1) return error.TopoAfterTransitive;
 
     var g2 = Graph{};
     _ = g2.addPass(200, 1, 2);
     _ = g2.addPass(201, 2, 1);
     if (g2.topoSort() != 0) return error.Cycle;
 
-    std.debug.print("render_graph_architecture: 14/14 ok\n", .{});
+    std.debug.print("render_graph_architecture: 17/17 ok\n", .{});
 }

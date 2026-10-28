@@ -21,8 +21,9 @@ fn main() {
         0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00,
         // mov rdi, 1 (stdout)
         0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00,
-        // lea rsi, [rip+msg] — point to message after this code
-        0x48, 0x8D, 0x35, 0x0E, 0x00, 0x00, 0x00,
+        // lea rsi, [rip+msg] — rel32 is measured from the END of this
+        // instruction (offset 21) to msg (offset 42): 42 - 21 = 0x15
+        0x48, 0x8D, 0x35, 0x15, 0x00, 0x00, 0x00,
         // mov rdx, 5 (length)
         0x48, 0xC7, 0xC2, 0x05, 0x00, 0x00, 0x00,
         // syscall
@@ -81,12 +82,22 @@ fn main() {
     // Write to file
     let mut f = std::fs::File::create("/tmp/vidya_elf_demo").unwrap();
     f.write_all(&elf).unwrap();
+    drop(f); // close the write handle: exec'ing a file still open for writing fails with ETXTBSY
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions("/tmp/vidya_elf_demo",
             std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // Run the generated binary and check what it actually prints —
+    // a wrong rel32 still produces a valid ELF that writes garbage.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let out = std::process::Command::new("/tmp/vidya_elf_demo").output().unwrap();
+        assert_eq!(out.stdout, b"ELF!\n", "generated binary printed {:?}", out.stdout);
+        assert!(out.status.success());
     }
 
     println!("Generated ELF binary: /tmp/vidya_elf_demo ({} bytes)", elf.len());

@@ -2,7 +2,8 @@
 //
 // Software sprite blitting to a flat 8-bit palette framebuffer.
 // The framebuffer is a `Vec<u8>` indexed `y * SCREEN_W + x`.
-// `Vec<u8>` gives us bounds-checked indexing in debug builds and a
+// `Vec<u8>` gives us bounds-checked indexing (in release builds too —
+// only overflow checks are debug-only) and a
 // contiguous heap allocation that maps directly to the C/Cyrius
 // `uint8_t*` layout — matching every other port byte-for-byte.
 
@@ -168,10 +169,12 @@ fn main() {
 
     // depth sort (painter's algorithm)
     fb.clear(0);
-    blit(&mut fb, &sprite, 50, 50);
-    assert_eq!(fb.get(51, 51), 2, "first sprite drawn");
-    fb.set(51, 51, 7);
-    assert_eq!(fb.get(51, 51), 7, "later draw overwrites");
+    blit(&mut fb, &sprite, 50, 50); // back sprite first...
+    let front_data = [5u8; 16];
+    let front = Sprite { data: &front_data, width: 4, height: 4 };
+    blit(&mut fb, &front, 52, 52);  // ...then the front one, overlapping it
+    assert_eq!(fb.get(52, 52), 5, "later (front) sprite wins where they overlap");
+    assert_eq!(fb.get(51, 51), 2, "back sprite still visible outside the overlap");
 
     // scaled shrink
     fb.clear(0);

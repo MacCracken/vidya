@@ -4,9 +4,11 @@
 # sources produce a byte-identical artifact, on any machine, at any
 # time. Three classic sources of non-determinism, and their fixes:
 #
-#   1. Embedded wall-clock timestamps  → clamp every timestamp to
-#      SOURCE_DATE_EPOCH (a fixed build time taken from the sources,
-#      e.g. the last commit date) so "now" never leaks in.
+#   1. Embedded wall-clock timestamps  → when SOURCE_DATE_EPOCH (a fixed
+#      build time taken from the sources, e.g. the last commit date) is
+#      set, the build time IS that value — not min(now, SDE), which lets
+#      a slow clock leak in. FILE mtimes newer than SDE are clamped down
+#      to it (tar --clamp-mtime); older ones are kept.
 #   2. Filesystem iteration order      → readdir() returns entries in
 #      inode/hash order, which varies; SORT filenames before processing
 #      so the output doesn't depend on directory layout.
@@ -31,10 +33,18 @@ var HSEED = 7;
 
 fn fold(h, v) { return (h * HB + v) % HM; }
 
-# --- 1. Deterministic timestamps: clamp "now" to SOURCE_DATE_EPOCH ---
+# --- 1. Deterministic timestamps (sde < 0 means SOURCE_DATE_EPOCH unset) ---
+# The build time: SOURCE_DATE_EPOCH whenever it is set, whatever the clock says.
 fn normalize_ts(now, sde) {
-    if (now > sde) { return sde; }
+    if (sde >= 0) { return sde; }
     return now;
+}
+
+# A file mtime: clamped down to SOURCE_DATE_EPOCH, never raised.
+fn clamp_mtime(mtime, sde) {
+    if (sde < 0) { return mtime; }
+    if (mtime > sde) { return sde; }
+    return mtime;
 }
 
 # --- 3. Content-addressed artifact path: a pure function of content ---
@@ -117,8 +127,11 @@ fn setup_order_b() {
 # === Tests ===
 
 fn test_normalize_ts() {
-    assert_eq(normalize_ts(9999, 5000), 5000, "clamp future now to SOURCE_DATE_EPOCH");
-    assert_eq(normalize_ts(3000, 5000), 3000, "keep timestamp already <= SDE");
+    assert_eq(normalize_ts(9999, 5000), 5000, "build time = SOURCE_DATE_EPOCH (fast clock)");
+    assert_eq(normalize_ts(3000, 5000), 5000, "build time = SOURCE_DATE_EPOCH (slow clock does not leak in)");
+    assert_eq(normalize_ts(3000, 0 - 1), 3000, "SDE unset: the clock is all there is");
+    assert_eq(clamp_mtime(9999, 5000), 5000, "newer file mtime clamped to SDE");
+    assert_eq(clamp_mtime(3000, 5000), 3000, "older file mtime kept");
     return 0;
 }
 
@@ -166,10 +179,16 @@ fn test_normalization_alone_kills_clock_drift() {
     # With sorting on but only the clock differing, normalization makes
     # the two runs identical; without it they differ.
     setup_order_a();
-    var norm1 = build_digest(1, 1, 9999, 5000);   # clamps 9999 → 5000
+    var norm1 = build_digest(1, 1, 9999, 5000);   # build time = SDE 5000
     setup_order_a();
-    var norm2 = build_digest(1, 1, 7777, 5000);   # clamps 7777 → 5000
+    var norm2 = build_digest(1, 1, 7777, 5000);   # build time = SDE 5000
     assert_eq(norm1, norm2, "normalized timestamp removes clock dependence");
+    # ...and without it the same sorted inputs still drift with the clock.
+    setup_order_a();
+    var raw1 = build_digest(1, 0, 9999, 5000);
+    setup_order_a();
+    var raw2 = build_digest(1, 0, 7777, 5000);
+    assert_eq(raw1 != raw2, 1, "un-normalized timestamp leaks into the digest");
     return 0;
 }
 

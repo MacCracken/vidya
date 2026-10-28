@@ -38,13 +38,16 @@ pool_free:
     ret
 
 # pool_alloc(rdi=size) -> rax
+# The fit test is size <= bytes left, compared UNSIGNED: with a signed
+# `bump + size > POOL_SIZE` a "negative" size passes, moves bump backwards,
+# and the next allocation overlaps a live block.
 pool_alloc:
     test    rdi, rdi
     jz      .pa_noop
-    mov     rax, [rip + bump]
-    add     rax, rdi
-    cmp     rax, POOL_SIZE
-    jg      .pa_full
+    mov     rax, POOL_SIZE
+    sub     rax, [rip + bump]       # bytes left
+    cmp     rdi, rax
+    ja      .pa_full
     mov     rax, [rip + bump]
     add     qword ptr [rip + bump], rdi
     ret
@@ -56,17 +59,24 @@ pool_alloc:
     ret
 
 # pool_alloc_aligned(rdi=size, rsi=align) -> rax
+# align must be a power of two: the mask trick is meaningless otherwise.
 pool_alloc_aligned:
-    mov     rax, rsi
-    dec     rax                   # mask
+    lea     rax, [rsi - 1]        # mask
+    test    rsi, rsi
+    jz      .paa_full
+    test    rax, rsi
+    jnz     .paa_full             # not a power of two
     mov     rdx, [rip + bump]
     add     rdx, rax
     not     rax
     and     rdx, rax              # aligned = (bump + mask) & ~mask
-    mov     rcx, rdx
-    add     rcx, rdi
-    cmp     rcx, POOL_SIZE
-    jg      .paa_full
+    cmp     rdx, POOL_SIZE
+    ja      .paa_full
+    mov     rcx, POOL_SIZE
+    sub     rcx, rdx              # bytes left after the padding
+    cmp     rdi, rcx
+    ja      .paa_full             # unsigned, as in pool_alloc
+    lea     rcx, [rdx + rdi]
     mov     [rip + bump], rcx
     mov     rax, rdx
     ret
@@ -186,6 +196,26 @@ _start:
     call    pool_used
     mov     rdi, rax
     mov     rsi, 80
+    call    assert_eq
+
+    # 9. a "negative" size is refused and leaves bump alone (a signed fit
+    #    test would accept it and hand out overlapping blocks)
+    mov     rdi, -100
+    call    pool_alloc
+    mov     rdi, rax
+    mov     rsi, -1
+    call    assert_eq
+    call    pool_used
+    mov     rdi, rax
+    mov     rsi, 80
+    call    assert_eq
+
+    # 10. non-power-of-two alignment is refused
+    mov     rdi, 32
+    mov     rsi, 24
+    call    pool_alloc_aligned
+    mov     rdi, rax
+    mov     rsi, -1
     call    assert_eq
 
     mov     rax, 1

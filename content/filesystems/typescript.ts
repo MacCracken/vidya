@@ -146,12 +146,16 @@ class SimpleFS {
             throw new Error(`File already exists: ${name}`);
         }
 
+        // Check space BEFORE touching any state: failing halfway would
+        // leave an orphan inode and leaked blocks marked used
+        const data = new TextEncoder().encode(content);
+        const blocksNeeded = Math.ceil(data.length / BLOCK_SIZE) || 1;
+        if (blocksNeeded > this.blockBitmap.freeCount()) throw new Error("No free blocks");
+
         // Allocate inode for the new file
         const inode = this.allocateInode(false);
 
         // Write content to blocks
-        const data = new TextEncoder().encode(content);
-        const blocksNeeded = Math.ceil(data.length / BLOCK_SIZE) || 1;
 
         for (let i = 0; i < blocksNeeded; i++) {
             const block = this.blockBitmap.allocate();
@@ -202,6 +206,15 @@ class SimpleFS {
         if (inode === undefined) throw new Error(`Inode not found: ${ino}`);
         if (inode.isDirectory) throw new Error(`Is a directory: inode ${ino}`);
 
+        // Check space before freeing anything: the old blocks will be
+        // reused, so failing after the free would overwrite the old
+        // content with a partial new one and leak the extra blocks
+        const data = new TextEncoder().encode(content);
+        const blocksNeeded = Math.ceil(data.length / BLOCK_SIZE) || 1;
+        if (blocksNeeded > this.blockBitmap.freeCount() + inode.blocks.length) {
+            throw new Error("No free blocks");
+        }
+
         // Free old blocks
         for (const block of inode.blocks) {
             this.blockBitmap.free(block);
@@ -209,9 +222,7 @@ class SimpleFS {
         }
 
         // Write new content
-        const data = new TextEncoder().encode(content);
         const newBlocks: BlockIndex[] = [];
-        const blocksNeeded = Math.ceil(data.length / BLOCK_SIZE) || 1;
 
         for (let i = 0; i < blocksNeeded; i++) {
             const block = this.blockBitmap.allocate();
@@ -377,6 +388,15 @@ function main(): void {
     let dupError = false;
     try { fs.createFile(ROOT, "dup.txt", "second"); } catch { dupError = true; }
     assert(dupError, "duplicate name rejected");
+
+    // ── Out of space: a failed update leaves the file untouched ────
+    const freeBeforeFull = fs.freeBlocks();
+    const tooBig = "B".repeat(BLOCK_SIZE * (TOTAL_BLOCKS + 1));
+    let fullError = false;
+    try { fs.updateFile(bigIno, tooBig); } catch { fullError = true; }
+    assert(fullError, "update larger than the disk rejected");
+    assert(fs.readFile(bigIno) === longContent, "old content intact after failed update");
+    assert(fs.freeBlocks() === freeBeforeFull, "no blocks leaked by failed update");
 
     // ── Inode/dentry separation: key filesystem insight ───────────
     // The name "big.txt" lives in the directory entry (dentry).

@@ -29,6 +29,17 @@ sql1: .asciz "SELECT * FROM users WHERE id = 1"
 sql2: .asciz "select * from T"
 sql3: .asciz "selected"
 sql4: .asciz "12345"
+sql5: .asciz "SELECT * FROM t WHERE id < 5"
+sql_full:                        // 63 tokens: exactly fills tok_buf + EOF
+    .rept 63
+    .ascii "*"
+    .endr
+    .byte 0
+sql_over:                        // 64 tokens: one more than tok_buf holds
+    .rept 64
+    .ascii "*"
+    .endr
+    .byte 0
 
 kw_select: .ascii "SELECT"
 .equ kw_select_len, 6
@@ -42,7 +53,8 @@ msg_pass:  .ascii "All sql_parsing examples passed.\n"
 
 .section .bss
 .align 4
-tok_buf:   .skip 1024            // 64 tokens × 16 bytes (kind, ptr)
+.equ TOK_MAX, 64                 // records in tok_buf (last one is EOF)
+tok_buf:   .skip TOK_MAX * 16     // 64 tokens × 16 bytes (kind, ptr)
 
 .section .text
 
@@ -179,6 +191,10 @@ classify:
 // ── tokenize(x0=sql) -> x0=token count ──────────────────────────
 // Walks the SQL string, writing 16-byte records {kind:i64, ptr:i64}
 // to tok_buf. Trailing T_EOF written but not included in count.
+// Returns -1 for a character this lexer does not know, or for more
+// tokens than tok_buf can hold. Refusing matters: silently skipping
+// '<' would turn `id < 5` into `id 5`, and silently truncating (or
+// writing past tok_buf) hands the parser a different query.
 // Callee-saved registers (x19..x24) hold loop state across bl calls.
 tokenize:
     stp     x29, x30, [sp, #-64]!
@@ -217,6 +233,10 @@ tokenize:
     b       .Ltk_loop
 
 .Ltk_chk_alpha:
+    // Every non-whitespace byte below either emits a token or is
+    // rejected, so one capacity check here covers every emit path.
+    cmp     x22, #TOK_MAX - 1       // keep the last record for T_EOF
+    b.hs    .Ltk_err
     mov     w0, w24
     bl      is_alpha
     cbz     w0, .Ltk_chk_digit
@@ -285,9 +305,8 @@ tokenize:
     b.eq    .Ltk_em_rparen
     cmp     w24, #','
     b.eq    .Ltk_em_comma
-    // Unknown: skip
-    add     x23, x23, #1
-    b       .Ltk_loop
+    // Unknown character: reject the whole input
+    b       .Ltk_err
 
 .Ltk_em_star:
     mov     x0, #T_STAR
@@ -312,6 +331,10 @@ tokenize:
     add     x23, x23, #1
     b       .Ltk_loop
 
+.Ltk_err:
+    mov     x0, #-1
+    b       .Ltk_ret
+
 .Ltk_done:
     // Append EOF sentinel
     mov     x0, #T_EOF
@@ -319,6 +342,7 @@ tokenize:
     str     xzr, [x21, #8]
 
     mov     x0, x22
+.Ltk_ret:
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
@@ -414,6 +438,25 @@ _start:
     mov     x0, #0
     bl      tk_kind
     cmp     x0, #T_INT
+    b.ne    fail
+
+    // ── Test 5: unknown character '<' is rejected, not skipped ──
+    adrp    x0, sql5
+    add     x0, x0, :lo12:sql5
+    bl      tokenize
+    cmn     x0, #1                  // -1?
+    b.ne    fail
+
+    // ── Test 6: capacity — 63 tokens fit, 64 are refused ────────
+    adrp    x0, sql_full
+    add     x0, x0, :lo12:sql_full
+    bl      tokenize
+    cmp     x0, #63
+    b.ne    fail
+    adrp    x0, sql_over
+    add     x0, x0, :lo12:sql_over
+    bl      tokenize
+    cmn     x0, #1
     b.ne    fail
 
     // ── Print success ───────────────────────────────────────────

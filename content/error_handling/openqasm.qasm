@@ -4,14 +4,14 @@
 // bit-flip errors via syndrome measurement, correct without
 // destroying the quantum state. Based on Shor's 1995 QEC proof.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Encode logical |0> as |000> ───────────────────────────────────
-qreg data[3];     // 3 physical qubits = 1 logical qubit
-qreg syn[2];      // 2 syndrome qubits for error detection
-creg sc[2];       // syndrome measurement results
-creg out[3];      // final data measurement
+qubit[3] data;     // 3 physical qubits = 1 logical qubit
+qubit[2] syn;      // 2 syndrome qubits for error detection
+bit[2] sc;       // syndrome measurement results
+bit[3] out;      // final data measurement
 
 // Encoding: |0> → |000>
 cx data[0], data[1];   // copy qubit 0 to qubit 1
@@ -29,14 +29,21 @@ cx data[1], syn[0];
 cx data[1], syn[1];
 cx data[2], syn[1];
 
-measure syn -> sc;
-// Syndrome "11" → qubit 1 flipped
-// Syndrome "10" → qubit 0 flipped
-// Syndrome "01" → qubit 2 flipped
-// Syndrome "00" → no error
+sc = measure syn;
+// Syndrome as an integer (sc[0] is bit 0, the way `if (sc == n)` reads):
+// sc == 3 (sc[0]=1, sc[1]=1) → qubit 1 flipped
+// sc == 1 (sc[0]=1, sc[1]=0) → qubit 0 flipped
+// sc == 2 (sc[0]=0, sc[1]=1) → qubit 2 flipped
+// sc == 0                    → no error
+// @expect sc == 3
 
-// ── Correction: flip qubit 1 back ─────────────────────────────────
-x data[1];
+// ── Correction: dispatch on the syndrome ──────────────────────────
+// OpenQASM 3 branches on the measured syndrome, so the correction is
+// chosen by what was detected, not hard-coded to the injected error.
+if (sc == 1) x data[0];
+if (sc == 3) x data[1];
+if (sc == 2) x data[2];
 
 // ── Verify: state should be |000> again ───────────────────────────
-measure data -> out;
+out = measure data;
+// @expect out == 0

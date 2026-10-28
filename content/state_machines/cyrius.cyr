@@ -8,9 +8,8 @@ include "lib/alloc.cyr"
 include "lib/assert.cyr"
 
 # --- Player state enum ---
-# Cyrius's enum/struct parser expects bodies on a single line (multi-line
-# blocks trip the parser's struct-literal disambiguation). Same shape
-# applies to enum / struct definitions throughout this file.
+# (Enums are kept to one line here for compactness; multi-line enum and
+# struct bodies parse just as well.)
 enum PlayerState { PS_IDLE = 0; PS_RUN = 1; PS_SHOOT = 2; PS_DUNK = 3; PS_PASS = 4; PS_STEAL = 5; PS_BLOCK = 6; PS_FALL = 7; PS_REBOUND = 8; }
 
 # --- Game state enum ---
@@ -31,15 +30,14 @@ struct Player { state; prev_state; timer; }
 fn player_new() {
     # TRAP: the obvious body here is
     #     var p = Player { PS_IDLE, PS_IDLE, 0 }; return &p;
-    # and it compiles clean. It is still wrong, but NOT for the reason it
-    # looks like — Cyrius gives every local a FIXED address (static
-    # storage, not a stack slot). The pointer never faults, but the data
-    # is not safe: every call returns the same address, so two "different"
-    # Players are one Player and the second `player_new()` silently resets
-    # the first — and an unrelated function's local can land on that same
-    # address and overwrite it outright. Heap the storage so each call owns
-    # its own object. (Tests below still build `var p = Player { … }`
-    # inline in their own scope, which is fine — one object, one owner.)
+    # and it compiles clean. It is the C bug: `p` lives in this function's
+    # stack frame, so `&p` dangles the moment we return, and the next call
+    # reuses that stack and silently overwrites the Player (measured: an
+    # escaped &local read 4242, then 0 after one unrelated call). Heap the
+    # storage so each call owns its own object, or return the struct by
+    # value (`var t: Player = Player { .. }; return t;`). (Tests below still
+    # build `var p = Player { … }` inline in their own scope, which is fine —
+    # one object, one owner.)
     var p = alloc(24);              # 3 fields * 8 bytes
     if (p == 0) { return 0; }
     store64(p, PS_IDLE);
@@ -201,29 +199,55 @@ fn test_transition_detection() {
     return 0;
 }
 
+# --- Game state machine: an explicit transition table ---
+# Only the listed edges are legal; anything else is rejected and the
+# state is unchanged (transition validation).
+fn game_can_transition(from, to) {
+    if (from == GS_MENU) {
+        if (to == GS_SELECT) { return 1; }
+        if (to == GS_ATTRACT) { return 1; }
+    }
+    if (from == GS_ATTRACT) { if (to == GS_MENU) { return 1; } }
+    if (from == GS_SELECT) { if (to == GS_TIPOFF) { return 1; } }
+    if (from == GS_TIPOFF) { if (to == GS_PLAYING) { return 1; } }
+    if (from == GS_PLAYING) {
+        if (to == GS_HALFTIME) { return 1; }
+        if (to == GS_OVERTIME) { return 1; }
+        if (to == GS_GAMEOVER) { return 1; }
+    }
+    if (from == GS_HALFTIME) { if (to == GS_PLAYING) { return 1; } }
+    if (from == GS_OVERTIME) { if (to == GS_GAMEOVER) { return 1; } }
+    if (from == GS_GAMEOVER) { if (to == GS_MENU) { return 1; } }
+    return 0;
+}
+
+# Returns the new state, or `cur` unchanged if the edge is illegal.
+fn game_transition(cur, to) {
+    if (game_can_transition(cur, to) == 1) { return to; }
+    return cur;
+}
+
 fn test_game_state_progression() {
     var game = GS_MENU;
 
-    # Menu -> Select -> Tipoff -> Playing
-    assert_eq(game, GS_MENU, "starts at menu");
-
-    game = GS_SELECT;
+    # Menu -> Select -> Tipoff -> Playing -> Halftime -> Playing -> Gameover
+    game = game_transition(game, GS_SELECT);
     assert_eq(game, GS_SELECT, "menu -> select");
-
-    game = GS_TIPOFF;
+    game = game_transition(game, GS_TIPOFF);
     assert_eq(game, GS_TIPOFF, "select -> tipoff");
-
-    game = GS_PLAYING;
+    game = game_transition(game, GS_PLAYING);
     assert_eq(game, GS_PLAYING, "tipoff -> playing");
-
-    game = GS_HALFTIME;
+    game = game_transition(game, GS_HALFTIME);
     assert_eq(game, GS_HALFTIME, "playing -> halftime");
-
-    game = GS_PLAYING;
+    game = game_transition(game, GS_PLAYING);
     assert_eq(game, GS_PLAYING, "halftime -> playing (2nd half)");
-
-    game = GS_GAMEOVER;
+    game = game_transition(game, GS_GAMEOVER);
     assert_eq(game, GS_GAMEOVER, "playing -> gameover");
+
+    # Illegal edges are rejected and leave the state alone.
+    assert_eq(game_transition(GS_MENU, GS_PLAYING), GS_MENU, "menu -/-> playing (skips select/tipoff)");
+    assert_eq(game_transition(GS_GAMEOVER, GS_HALFTIME), GS_GAMEOVER, "gameover -/-> halftime");
+    assert_eq(game_transition(GS_HALFTIME, GS_GAMEOVER), GS_HALFTIME, "halftime -/-> gameover");
     return 0;
 }
 

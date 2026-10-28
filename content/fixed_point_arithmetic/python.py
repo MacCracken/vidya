@@ -52,9 +52,13 @@ def fx_div(a: int, b: int) -> int:
     return q if (num < 0) == (b < 0) else -q
 
 
-# ── Sine table — quarter-wave, 256 entries ────────────────────────────
+# ── Sine table — quarter-wave, 257 entries (0 .. π/2 INCLUSIVE) ───────
+# The mirror sin(π - x) = sin(x) needs index 512 - a, which reaches 256,
+# so the table needs its π/2 endpoint. Mirroring with 511 - a instead (to
+# fit a 256-entry table) puts quadrants 2 and 4 one step out of phase:
+# max error 0.0061 there vs 0.000015 in quadrant 1.
 def build_sin_table() -> list[int]:
-    return [int(math.sin(i * math.pi / 2 / 256) * FX_ONE) for i in range(256)]
+    return [int(math.sin(i * math.pi / 2 / 256) * FX_ONE) for i in range(257)]
 
 
 def sin_lookup(table: list[int], angle: int) -> int:
@@ -62,10 +66,10 @@ def sin_lookup(table: list[int], angle: int) -> int:
     if a < 256:
         return table[a]
     if a < 512:
-        return table[511 - a]
+        return table[512 - a]
     if a < 768:
         return -table[a - 512]
-    return -table[1023 - a]
+    return -table[1024 - a]
 
 
 # ── Tests ─────────────────────────────────────────────────────────────
@@ -82,7 +86,9 @@ def main() -> None:
     assert fx_mul(FX_HALF, FX_HALF) == 16384, "0.5 * 0.5 == 0.25"
 
     big = fx_from_int(1000)
-    assert fx_mul_safe(big, big) > 0, "safe mul of 1000*1000 stays positive"
+    # "> 0" could never fail here (Python ints do not wrap); check the value.
+    # Pre-shifting drops 8 fraction bits per operand, exact for integers.
+    assert fx_mul_safe(big, big) == fx_from_int(1_000_000), "safe mul 1000*1000"
 
     assert fx_div(fx_from_int(10), fx_from_int(4)) == 163840, "10/4 == 2.5"
     assert fx_div(FX_ONE, 0) == 0, "div-by-zero returns 0"
@@ -96,6 +102,9 @@ def main() -> None:
     assert sin_lookup(table, 256) > 60000, "sin(π/2) near 1.0"
     assert sin_lookup(table, 512) == 0
     assert sin_lookup(table, 768) < -60000, "sin(3π/2) near -1.0"
+    worst = max(abs(sin_lookup(table, a) / FX_ONE - math.sin(a * math.pi / 512))
+                for a in range(1024))
+    assert worst < 0.0001, f"every quadrant within table precision (worst {worst})"
 
     for i in range(100):
         assert fx_to_int(fx_from_int(i)) == i

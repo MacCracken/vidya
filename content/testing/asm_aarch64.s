@@ -1,8 +1,8 @@
 // Vidya — Testing in AArch64 Assembly
 //
 // Same pattern as x86_64: compare expected vs actual, branch on
-// mismatch. AArch64's CSINC instruction makes pass/fail counting
-// branchless. CBZ/CBNZ simplify zero-checks.
+// mismatch. AArch64's CINC (an alias of CSINC) makes pass/fail
+// counting branchless. CBZ/CBNZ simplify zero-checks.
 
 .global _start
 
@@ -135,13 +135,11 @@ check_eq:
     add     w3, w3, #1
     str     w3, [x2]
 
-    cmp     w0, w1
-    b.ne    .Lce_fail
     adr     x2, tests_passed
     ldr     w3, [x2]
-    add     w3, w3, #1
+    cmp     w0, w1
+    cinc    w3, w3, eq          // passed += (got == expected), no branch
     str     w3, [x2]
-.Lce_fail:
     ret
 
 // clamp(value=w0, min=w1, max=w2) -> w0

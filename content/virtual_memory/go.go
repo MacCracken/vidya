@@ -6,7 +6,8 @@
 //   3. Virtual address decomposition into index fields
 //   4. TLB cache with hit/miss tracking
 //   5. Demand paging — page fault on unmapped access
-//   6. Page permission checking (read/write/execute/user)
+//   6. Page permission bits (read/write/execute/user) — encoded and
+//      decoded here; Translate does not enforce them
 //
 // In hardware, the MMU walks page tables and the TLB caches results.
 // Here we simulate the entire translation pipeline in software.
@@ -46,7 +47,8 @@ const (
 
 // ── Page Table Entry ─────────────────────────────────────────────────
 // A PTE is a 64-bit value encoding a physical frame address and flags.
-// Bits 12-51 hold the physical address (40 bits = 1 TB addressable).
+// Bits 12-51 hold the physical frame number: 40 bits of 4 KiB frames,
+// i.e. a 52-bit physical address space (4 PiB) — not 2^40 bytes.
 // Bits 0-11 and 63 hold permission/status flags.
 
 type PTE uint64
@@ -393,7 +395,7 @@ func testTLBCache() {
 	mmu.Translate(0x2FFF)
 	assert(mmu.tlb.hits == 2, "same page is hit")
 
-	// Flush TLB (like writing CR3 or INVLPG)
+	// Flush TLB (like writing CR3; INVLPG is the one-page Invalidate)
 	mmu.tlb.Flush()
 	mmu.Translate(0x1000)
 	assert(mmu.tlb.misses == 3, "after flush is miss")

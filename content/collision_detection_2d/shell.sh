@@ -132,7 +132,8 @@ assert_true  "$(point_in_circle "$(fx 1)" "$(fx 1)" "$(fx 0)" "$(fx 0)" "$(fx 5)
 assert_false "$(point_in_circle "$(fx 100)" "$(fx 100)" "$(fx 0)" "$(fx 0)" "$(fx 5)")" "point outside circle"
 
 d2=$(dist_sq "$(fx 0)" "$(fx 0)" "$(fx 3)" "$(fx 4)")
-(( d2 > 0 )) || { echo "FAIL: 3-4-5 dist²" >&2; exit 1; }
+five=$(( $(fx 5) >> 4 ))   # dist_sq pre-shifts deltas by 4, so compare against (5>>4)²
+(( d2 == five * five )) || { echo "FAIL: 3-4-5 dist² ($d2 != $(( five * five )))" >&2; exit 1; }
 
 push=$(push_apart_x "$(fx 0)" "$(fx 4)" "$(fx 2)")
 (( push < 0 )) || { echo "FAIL: push-apart direction" >&2; exit 1; }

@@ -1,29 +1,52 @@
 # Vidya — Binary Formats in Cyrius
 #
-# PATTERN-FOCUSED: documents cc2's binary output format.
-# cc2 emits a flat ELF with no sections, no dynamic linking,
-# no relocations. The simplest valid Linux executable.
+# PATTERN-FOCUSED: documents the ELF64 executable format through
+# Cyrius's own output, and checks it against the running binary
+# (/proc/self/exe) rather than against literals.
 #
-# Binary layout:
+# The bootstrap shape (the seed and the early cc2 compiler) was the
+# simplest valid Linux executable: a flat ELF, no dynamic linking, no
+# relocations, no section headers:
 #   Bytes 0-63:   ELF header (64 bytes)
-#   Bytes 64-119: Program header (56 bytes, PT_LOAD)
-#   Bytes 120+:   Machine code + data
+#   Bytes 64-119: Program header (56 bytes, one RWX PT_LOAD)
+#   Bytes 120+:   Machine code + data      (entry = BASE + 120)
 #
-# No section headers. No symbol tables. No string tables.
-# The kernel reads the ELF header and one program header.
-# Everything else is the actual program.
+# Today's compiler, cycc (6.7.18), still emits a static ET_EXEC with no
+# dynamic linking, but with TWO PT_LOADs — code R+X and data R+W (W^X by
+# default since v6.3.12; CYRIUS_WX=0 opts back into one RWE segment) —
+# so the entry is BASE + 64 + 2*56 = 0x4000B0, plus a small section
+# header table (5 entries) for tools. The kernel reads only the ELF
+# header and the program headers.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
 include "lib/alloc.cyr"
 include "lib/assert.cyr"
+include "lib/syscalls.cyr"
+
+# The running program's own first 256 bytes: ELF header + program headers.
+var self_hdr: u8[256];
+var self_hdr_len = 0;
+
+# Read /proc/self/exe's header once. Returns 1 on success, 0 on failure.
+fn read_self_header() {
+    if (self_hdr_len > 0) { return 1; }
+    var fd = syscall(SYS_OPEN, "/proc/self/exe", 0, 0);
+    if (fd < 0) { return 0; }
+    var n = syscall(SYS_READ, fd, &self_hdr, 256);
+    syscall(SYS_CLOSE, fd);
+    if (n < 64) { return 0; }
+    self_hdr_len = n;
+    return 1;
+}
 
 # ================================================================
-# Binary Layout — cc2's output structure
+# Binary Layout — the bootstrap (seed / cc2) shape
 # ================================================================
-# cc2's output is the simplest valid ELF:
+# The bootstrap output is the simplest valid ELF:
 #   ehdr (64B) + phdr (56B) + code (NB) + data (MB)
 # All in one PT_LOAD segment. No gaps, no alignment padding.
+# (cycc's current two-segment layout is checked from /proc/self/exe below.)
 
 fn test_binary_layout() {
     var ehdr_size = 64;
@@ -51,97 +74,76 @@ fn test_binary_layout() {
 }
 
 # ================================================================
-# ELF Header — 64 bytes, fixed template
+# ELF Header — 64 bytes, read back from the running binary
 # ================================================================
-# cc2 stores this as a constant. Only p_filesz/p_memsz change.
+# Field offsets (ELF64): e_ident[16], e_type @16, e_machine @18,
+# e_entry @24, e_phoff @32, e_ehsize @52, e_phentsize @54, e_phnum @56,
+# e_shnum @60.
 
 fn test_elf_header_constants() {
+    assert_eq(read_self_header(), 1, "read /proc/self/exe");
+    var h = &self_hdr;
     # Magic: \x7fELF
-    var magic_0 = 0x7F;
-    var magic_1 = 0x45;  # 'E'
-    var magic_2 = 0x4C;  # 'L'
-    var magic_3 = 0x46;  # 'F'
-    assert_eq(magic_0, 127, "0x7F");
-    assert_eq(magic_1, 69, "'E'");
-    assert_eq(magic_2, 76, "'L'");
-    assert_eq(magic_3, 70, "'F'");
-
-    # Class: ELFCLASS64 = 2
-    var elfclass64 = 2;
-    assert_eq(elfclass64, 2, "64-bit ELF");
-
-    # Data: ELFDATA2LSB = 1 (little-endian)
-    var elfdata2lsb = 1;
-    assert_eq(elfdata2lsb, 1, "little-endian");
-
-    # Type: ET_EXEC = 2 (not PIE, not shared object)
-    var et_exec = 2;
-    assert_eq(et_exec, 2, "executable");
-
-    # Machine: EM_X86_64 = 62 (0x3E)
-    var em_x86_64 = 62;
-    assert_eq(em_x86_64, 62, "x86-64");
-
-    # Entry point: always BASE + 120
-    var base = 0x400000;
-    var entry = base + 120;
-    assert_eq(entry, 0x400078, "entry = 0x400078");
+    assert_eq(load8(h + 0), 0x7F, "magic 0x7F");
+    assert_eq(load8(h + 1), 0x45, "magic 'E'");
+    assert_eq(load8(h + 2), 0x4C, "magic 'L'");
+    assert_eq(load8(h + 3), 0x46, "magic 'F'");
+    assert_eq(load8(h + 4), 2, "EI_CLASS = ELFCLASS64");
+    assert_eq(load8(h + 5), 1, "EI_DATA = ELFDATA2LSB (little-endian)");
+    assert_eq(load16(h + 16), 2, "e_type = ET_EXEC (not PIE, not shared)");
+    assert_eq(load16(h + 18), 62, "e_machine = EM_X86_64 (0x3E)");
+    assert_eq(load16(h + 52), 64, "e_ehsize = 64");
+    assert_eq(load16(h + 54), 56, "e_phentsize = 56");
+    assert_eq(load64(h + 32), 64, "e_phoff = 64: program headers follow the ELF header");
+    # The first instruction sits right after the program headers:
+    # entry = BASE + 64 + e_phnum * 56 (0x4000B0 for cycc's two headers;
+    # it was BASE + 120 = 0x400078 for the one-header bootstrap shape).
+    var phnum = load16(h + 56);
+    assert_eq(load64(h + 24), 0x400000 + 64 + phnum * 56, "e_entry = BASE + headers");
+    assert(load16(h + 60) > 0, "cycc emits a section header table (e_shnum > 0)");
     return 0;
 }
 
 # ================================================================
-# Program Header — 56 bytes, single PT_LOAD
+# Program Headers — 56 bytes each
 # ================================================================
-# cc2 uses one segment for everything: code + data in one PT_LOAD.
-# No separate data segment. No W^X separation for bootstrap.
+# The bootstrap shape used ONE PT_LOAD for everything, flags R+W+X (7).
+# cycc splits code (R+X) from data (R+W), so no page is both writable
+# and executable (W^X). Phdr field offsets: p_type @0, p_flags @4,
+# p_offset @8, p_vaddr @16, p_filesz @32, p_memsz @40, p_align @48.
 
 fn test_program_header_constants() {
-    # PT_LOAD = 1 (the only segment type cc2 uses)
-    var pt_load = 1;
-    assert_eq(pt_load, 1, "PT_LOAD");
-
-    # Flags for code-only binary: R+X = 5
+    assert_eq(read_self_header(), 1, "read /proc/self/exe");
+    var h = &self_hdr;
+    var phnum = load16(h + 56);
+    assert_eq(phnum, 2, "cycc: two PT_LOADs (code, data)");
+    assert(64 + phnum * 56 <= self_hdr_len, "both program headers were read");
+    var code = h + 64;
+    var data = h + 64 + 56;
     var pf_r = 4;
-    var pf_x = 1;
     var pf_w = 2;
-    var code_flags = pf_r + pf_x;
-    assert_eq(code_flags, 5, "R+X for code-only");
-
-    # Flags for code+data binary: R+W+X = 7 (bootstrap mode)
-    var bootstrap_flags = pf_r + pf_w + pf_x;
-    assert_eq(bootstrap_flags, 7, "R+W+X for bootstrap");
-
-    # p_offset = 0 (load from start of file)
-    # p_vaddr = 0x400000 (standard static base)
-    # p_align = 0x1000 (4KB page)
-    var p_offset = 0;
-    var p_vaddr = 0x400000;
-    var p_align = 0x1000;
-    assert_eq(p_vaddr, 4194304, "base = 4MB");
-    assert_eq(p_align, 4096, "page-aligned");
-
-    # p_filesz = total binary size (varies per program)
-    # p_memsz = p_filesz + extra space for runtime variables
+    var pf_x = 1;
+    assert_eq(load32(code), 1, "phdr 0 is PT_LOAD");
+    assert_eq(load32(code + 4), pf_r + pf_x, "code segment R+X (no W)");
+    assert_eq(load32(data), 1, "phdr 1 is PT_LOAD");
+    assert_eq(load32(data + 4), pf_r + pf_w, "data segment R+W (no X): W^X");
+    assert_eq(load64(code + 8), 0, "code p_offset = 0 (the headers are mapped too)");
+    assert_eq(load64(code + 16), 0x400000, "code p_vaddr = 0x400000 (static base)");
+    assert_eq(load64(code + 48), 0x1000, "p_align = 4 KB page");
+    # p_memsz may exceed p_filesz: the excess is zero-filled (variables).
+    assert(load64(data + 40) >= load64(data + 32), "data p_memsz >= p_filesz");
     return 0;
 }
 
 # ================================================================
-# No Sections — what cc2 omits and why
+# Sections — optional for the kernel
 # ================================================================
-# cc2 sets e_shoff=0, e_shnum=0. No section headers.
-# Section headers are for the linker and debugger, not the kernel.
-# By omitting them, cc2 saves space and complexity.
+# Section headers are for the linker and debugger, not the kernel. The
+# bootstrap shape set e_shoff = e_shnum = 0 and still ran; cycc emits a
+# small table (checked above) so tools like readelf and gdb can see it.
 
 fn test_no_sections() {
-    # e_shoff = 0 means no section header table
-    var e_shoff = 0;
-    assert_eq(e_shoff, 0, "no section headers");
-
-    # e_shnum = 0 means zero sections
-    var e_shnum = 0;
-    assert_eq(e_shnum, 0, "zero sections");
-
-    # What we don't need for a static bootstrap binary:
+    # What a static executable does not need for a static bootstrap binary:
     # .symtab  — no symbols to look up
     # .strtab  — no symbol names
     # .shstrtab — no section names
@@ -166,36 +168,42 @@ fn test_no_sections() {
 #   GOT/PLT — indirection for external symbols
 #   .dynstr, .dynsym — dynamic symbol tables
 #
-# cc2 avoids all of this. Every symbol is resolved at compile time.
+# Cyrius avoids all of this. Every symbol is resolved at compile time.
 # Every address is absolute. The binary is self-contained.
 
 fn test_no_dynamic_linking() {
     # PT_INTERP = 3 (dynamic linker path segment)
     # PT_DYNAMIC = 2 (dynamic linking info segment)
-    # cc2 never emits either of these
+    # Neither appears in the running binary's program headers.
     var pt_interp = 3;
     var pt_dynamic = 2;
-
-    # cc2's program header count: always 1
-    var cc2_phnum = 1;
-    assert_eq(cc2_phnum, 1, "cc2 has exactly 1 program header");
+    assert_eq(read_self_header(), 1, "read /proc/self/exe");
+    var phnum = load16(&self_hdr + 56);
+    var dyn_seen = 0;
+    var i = 0;
+    while (i < phnum) {
+        var t = load32(&self_hdr + 64 + i * 56);
+        if (t == pt_interp) { dyn_seen = 1; }
+        if (t == pt_dynamic) { dyn_seen = 1; }
+        i = i + 1;
+    }
+    assert_eq(dyn_seen, 0, "no PT_INTERP / PT_DYNAMIC: statically linked");
 
     # Dynamic binary program header count: typically 5+
     # PT_PHDR + PT_INTERP + PT_LOAD(code) + PT_LOAD(data) + PT_DYNAMIC
     var dynamic_phnum = 5;
-    assert(dynamic_phnum > cc2_phnum, "dynamic has more segments");
+    assert(dynamic_phnum > phnum, "dynamic has more segments");
 
-    # Each additional program header = 56 bytes overhead
-    var extra_phdrs = dynamic_phnum - cc2_phnum;
-    var phdr_overhead = extra_phdrs * 56;
-    assert_eq(phdr_overhead, 224, "dynamic adds 224 bytes of phdrs");
+    # Each additional program header = 56 bytes overhead:
+    # 3 more than cycc's 2 (4 more than the bootstrap's 1).
+    assert_eq((dynamic_phnum - phnum) * 56, 168, "dynamic adds 168 bytes of phdrs over cycc's");
     return 0;
 }
 
 # ================================================================
 # No Relocations — absolute addressing
 # ================================================================
-# cc2 emits absolute addresses (BASE + offset) at compile time.
+# Cyrius emits absolute addresses (BASE + offset) at compile time.
 # No relocation entries needed. No fixup pass at load time.
 # This works because:
 #   1. The binary is always loaded at BASE_ADDR (not PIE)
@@ -203,6 +211,7 @@ fn test_no_dynamic_linking() {
 #   3. All data addresses are known after code emission
 
 fn test_absolute_addressing() {
+    # Bootstrap shape: code starts right after the one 56-byte phdr.
     var base = 0x400000;
     var code_start = base + 120;
 
@@ -228,9 +237,10 @@ fn test_absolute_addressing() {
 }
 
 # ================================================================
-# Template as Constant Data — cc2's optimization
+# Template as Constant Data — the bootstrap compiler's trick
 # ================================================================
-# cc2 stores the 120-byte ELF template as 15 qwords of constant data.
+# The bootstrap compiler stored its 120-byte ELF template (one-phdr
+# shape) as 15 qwords of constant data.
 # To emit a binary: memcpy the template, patch p_filesz and p_memsz,
 # then append code and data.
 
@@ -274,8 +284,10 @@ fn test_size_comparison() {
     assert_eq(exit_binary, 129, "exit binary = 129 bytes");
 
     # exit(42): mov rdi,42 (7B) + mov rax,60 (7B) + syscall (2B)
+    # The 7-byte mov is REX.W C7 /0 with a sign-extended imm32; the imm64
+    # form (REX.W B8+r) would be 10 bytes each.
     var exit42_code = 7 + 7 + 2;
-    assert_eq(exit42_code, 16, "exit(42) = 16 bytes (imm64)");
+    assert_eq(exit42_code, 16, "exit(42) = 16 bytes (imm32 sign-extended movs)");
 
     # Cyrius seed: Hello, Cyrius! (write + exit)
     var seed = 199;

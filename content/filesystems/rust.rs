@@ -225,7 +225,10 @@ impl SimpleFs {
         let mut written = 0;
         let mut pos = offset;
 
-        for chunk in data.chunks(BLOCK_SIZE) {
+        // Walk by file position, not by fixed BLOCK_SIZE chunks of `data`: a
+        // write that starts mid-block must split at each block boundary, or
+        // the tail of every chunk is silently skipped.
+        while written < data.len() {
             let block_idx = pos / BLOCK_SIZE;
             let block_offset = pos % BLOCK_SIZE;
 
@@ -241,8 +244,8 @@ impl SimpleFs {
             }
 
             let blk = self.inodes[&ino].blocks[block_idx].unwrap();
-            let to_write = chunk.len().min(BLOCK_SIZE - block_offset);
-            self.device.write_block(blk, &chunk[..to_write], block_offset);
+            let to_write = (data.len() - written).min(BLOCK_SIZE - block_offset);
+            self.device.write_block(blk, &data[written..written + to_write], block_offset);
 
             pos += to_write;
             written += to_write;
@@ -294,7 +297,22 @@ impl SimpleFs {
 
     /// Close a file descriptor.
     fn close(&mut self, fd: u32) {
-        self.open_files.remove(&fd);
+        if let Some(of) = self.open_files.remove(&fd) {
+            self.release_if_unused(of.ino);
+        }
+    }
+
+    /// Free an inode once it has no names (nlink == 0) AND no open file
+    /// descriptions — POSIX unlink semantics: an open file stays readable.
+    fn release_if_unused(&mut self, ino: u32) {
+        let Some(inode) = self.inodes.get(&ino) else { return };
+        if inode.nlink > 0 || self.open_files.values().any(|of| of.ino == ino) {
+            return;
+        }
+        for b in inode.blocks.iter().flatten() {
+            self.device.free_block(*b);
+        }
+        self.inodes.remove(&ino);
     }
 
     /// Unlink (delete) a file from a directory.
@@ -304,19 +322,11 @@ impl SimpleFs {
         let ino = entries[pos].ino;
         entries.remove(pos);
 
-        // Decrement link count
+        // Decrement link count; blocks are freed only once nothing has it open
         if let Some(inode) = self.inodes.get_mut(&ino) {
             inode.nlink -= 1;
-            if inode.nlink == 0 {
-                // Free blocks
-                for blk in &inode.blocks {
-                    if let Some(b) = blk {
-                        self.device.free_block(*b);
-                    }
-                }
-                self.inodes.remove(&ino);
-            }
         }
+        self.release_if_unused(ino);
 
         Ok(())
     }
@@ -372,6 +382,21 @@ fn main() {
     let read_count = fs.read(fd1, &mut buf).unwrap();
     println!("   Read {} bytes from hello.txt: \"{}\"",
         read_count, std::str::from_utf8(&buf[..read_count]).unwrap());
+    assert_eq!(&buf[..read_count], b"Hello, filesystem world! This is inode-based storage.");
+
+    // A second write on the same fd starts mid-block; it must stay contiguous.
+    {
+        let mut t = SimpleFs::new();
+        let ino = t.create(1, "append.bin").unwrap();
+        let fd = t.open(ino).unwrap();
+        let tail: Vec<u8> = (0..100u8).collect();
+        t.write(fd, b"abc").unwrap();
+        assert_eq!(t.write(fd, &tail).unwrap(), 100);
+        let fd_r = t.open(ino).unwrap();
+        let mut back = [0u8; 103];
+        assert_eq!(t.read(fd_r, &mut back).unwrap(), 103);
+        assert!(back[..3] == *b"abc" && back[3..] == tail[..]);
+    }
 
     // ── stat ──────────────────────────────────────────────────────────
     println!("\n4. stat (inode metadata):");
@@ -395,8 +420,11 @@ fn main() {
 
     // ── Unlink ────────────────────────────────────────────────────────
     println!("\n6. Unlink (delete) hello.txt:");
+    fs.close(fd1); // while an fd is open, unlink only removes the name
     let blocks_before = fs.device.used;
     fs.unlink(1, "hello.txt").unwrap();
+    assert_eq!(blocks_before - fs.device.used, 1);
+    assert!(!fs.inodes.contains_key(&hello_ino));
     println!("   Blocks freed: {} → {} ({} freed)",
         blocks_before, fs.device.used, blocks_before - fs.device.used);
     println!("   Inode {} exists: {}", hello_ino, fs.inodes.contains_key(&hello_ino));

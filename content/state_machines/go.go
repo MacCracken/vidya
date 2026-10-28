@@ -2,8 +2,11 @@
 //
 // Finite state machines with iota-typed enum dispatch, committed states,
 // timers, and transition validation. Go's lack of tagged unions means we
-// use named int types + a switch — readable, exhaustive when paired with
-// a default-panic for unknown variants.
+// use named int types + a switch. The compiler does NOT check a switch
+// for exhaustiveness: a missed variant silently falls to default (or to
+// nothing). A default that panics makes the miss loud at run time; the
+// input switch below uses default deliberately (no input → Idle), and
+// gameTransition validates against an explicit edge table.
 
 package main
 
@@ -95,6 +98,28 @@ func tick(p *Player) {
 
 func didTransition(p *Player) bool { return p.State != p.PrevState }
 
+// gameTransition moves g to `to` only along an allowed edge; asserting a
+// variable right after assigning it would test nothing.
+func gameTransition(g *GameState, to GameState) bool {
+	allowed := map[GameState][]GameState{
+		GSAttract:  {GSMenu},
+		GSMenu:     {GSSelect, GSAttract},
+		GSSelect:   {GSTipoff, GSMenu},
+		GSTipoff:   {GSPlaying},
+		GSPlaying:  {GSHalftime, GSOvertime, GSGameOver},
+		GSHalftime: {GSPlaying},
+		GSOvertime: {GSOvertime, GSGameOver},
+		GSGameOver: {GSMenu},
+	}
+	for _, s := range allowed[*g] {
+		if s == to {
+			*g = to
+			return true
+		}
+	}
+	return false
+}
+
 func mustEq[T comparable](got, want T, msg string) {
 	if got != want {
 		panic(fmt.Sprintf("FAIL: %s: got %v, want %v", msg, got, want))
@@ -141,19 +166,15 @@ func main() {
 	mustEq(didTransition(&p), false, "run->run no transition")
 
 	g := GSMenu
-	g = GSSelect
-	mustEq(g, GSSelect, "menu->select")
-	g = GSTipoff
-	mustEq(g, GSTipoff, "select->tipoff")
-	g = GSPlaying
-	mustEq(g, GSPlaying, "tipoff->playing")
-	g = GSHalftime
-	mustEq(g, GSHalftime, "playing->halftime")
-	g = GSPlaying
-	mustEq(g, GSPlaying, "halftime->playing")
-	g = GSGameOver
-	mustEq(g, GSGameOver, "playing->gameover")
-	_ = g
+	mustEq(gameTransition(&g, GSPlaying), false, "menu->playing skips select+tipoff: rejected")
+	mustEq(g, GSMenu, "rejected transition leaves state unchanged")
+	mustEq(gameTransition(&g, GSSelect), true, "menu->select")
+	mustEq(gameTransition(&g, GSTipoff), true, "select->tipoff")
+	mustEq(gameTransition(&g, GSPlaying), true, "tipoff->playing")
+	mustEq(gameTransition(&g, GSHalftime), true, "playing->halftime")
+	mustEq(gameTransition(&g, GSGameOver), false, "halftime->gameover rejected")
+	mustEq(gameTransition(&g, GSPlaying), true, "halftime->playing")
+	mustEq(gameTransition(&g, GSGameOver), true, "playing->gameover")
 
 	p = newPlayer()
 	transition(&p, InShoot)

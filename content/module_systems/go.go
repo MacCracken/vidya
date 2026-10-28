@@ -6,7 +6,7 @@
 //   go.mod        — declares module path, Go version, dependencies
 //   go.sum        — cryptographic checksums for reproducible builds
 //   Capitalization — exported (public) vs unexported (private)
-//   internal/     — package visible only to parent module
+//   internal/     — importable only from the tree rooted at its parent dir
 //   replace       — redirect imports (local development, forks)
 //   vendor/       — vendored dependencies for hermetic builds
 //
@@ -14,9 +14,11 @@
 //   Rust crate   → Go module (go.mod)
 //   Rust mod      → Go package (directory)
 //   Rust pub      → Go Capitalized names
-//   Rust pub(crate) → Go unexported (lowercase) within module
+//   Rust pub(crate) → Go internal/ packages (lowercase = package-private,
+//                     which is narrower: Rust's default private, roughly)
 //   Rust Cargo.toml → Go go.mod
-//   Rust Cargo.lock → Go go.sum
+//   Rust Cargo.lock → Go go.mod's require list (MVS selects exactly the
+//                     listed versions); go.sum only holds checksums
 
 package main
 
@@ -40,8 +42,10 @@ func main() {
 }
 
 // ── go.mod Structure ────────────────────────────────────────────────
-// A go.mod file has four directives: module, go, require, replace.
-// Unlike Cargo.toml, go.mod is minimal — no [features], no [profile].
+// The everyday go.mod directives are module, go, require and replace;
+// the full set also has exclude, retract, toolchain, godebug, tool and
+// ignore (see `go help mod edit`). Unlike Cargo.toml, go.mod is minimal —
+// no [features], no [profile].
 
 type GoMod struct {
 	Module  string // module path (e.g., github.com/user/repo)
@@ -173,9 +177,11 @@ func testImportPaths() {
 }
 
 // ── Internal Packages ───────────────────────────────────────────────
-// Any package whose path contains "internal" can only be imported
-// by code in the parent of the internal directory. This is Go's
-// version of Rust's pub(crate) — module-private visibility.
+// A path containing the element "internal" can only be imported by code
+// in the tree rooted at the parent of that internal directory (cmd/go:
+// "importable only by code that shares the same import path above the
+// internal directory"). The boundary is a directory tree, not a module:
+// myapp/cmd/internal/x is off-limits to myapp/pkg in the same module.
 //
 // Example layout:
 //   myapp/
@@ -208,6 +214,12 @@ func testInternalPackages() {
 		{"github.com/other/pkg", "myapp/internal/db", false},
 		// myapp/cmd/internal/util is still under myapp, so it can import myapp/internal/db
 		{"other-module/pkg", "myapp/internal/db", false}, // different module entirely
+
+		// A string prefix is not a path prefix: myapp2 is NOT inside myapp
+		// (go build: "use of internal package ... not allowed")
+		{"myapp2/cmd", "myapp/internal/db", false},
+		// Tree, not module: internal under cmd/ is private to cmd/
+		{"myapp/pkg/api", "myapp/cmd/internal/flags", false},
 	}
 
 	for _, rule := range rules {
@@ -218,14 +230,21 @@ func testInternalPackages() {
 }
 
 func isInternalImportAllowed(importer, target string) bool {
-	// Find "internal" in the target path
-	idx := strings.Index(target, "/internal")
-	if idx == -1 {
-		return true // no "internal" in path — always allowed
+	// Work on path ELEMENTS: "/internal" as a substring would also match
+	// "/internalize", and a byte prefix would let "myapp2" into "myapp".
+	elems := strings.Split(target, "/")
+	last := -1
+	for i, e := range elems {
+		if e == "internal" {
+			last = i // the deepest internal element is the binding one
+		}
 	}
-	// Importer must share the parent prefix
-	parent := target[:idx]
-	return strings.HasPrefix(importer, parent)
+	if last == -1 {
+		return true // no "internal" element — always allowed
+	}
+	parent := strings.Join(elems[:last], "/")
+	// Importer must be the parent itself or inside its tree
+	return importer == parent || strings.HasPrefix(importer, parent+"/")
 }
 
 // ── Replace Directives ──────────────────────────────────────────────

@@ -1,11 +1,13 @@
 // Vidya — Sprite Rendering in Zig
 //
 // Software sprite blitting onto a flat 8-bit palette framebuffer.
-// Zig's `[]u8` is a slice (pointer + length) over a contiguous byte
-// region — same wire format as a C `uint8_t*` and a Go `[]byte`. We
-// stash the framebuffer in a module-level `var` so functions can
-// borrow it as `*[FB_SIZE]u8` without dynamic allocation; clipping
-// and indexing match the C/Cyrius reference byte-for-byte.
+// Zig's `[]u8` is a slice (pointer + length, 16 bytes on x86_64) over a
+// contiguous byte region — the pointer alone is what a C `uint8_t*` is,
+// and a Go `[]byte` adds a capacity (24 bytes), so the three are NOT the
+// same layout. We stash the framebuffer in a module-level
+// `var fb: [FB_SIZE]u8` that every function indexes directly, without
+// dynamic allocation; clipping and indexing match the C/Cyrius reference
+// byte-for-byte.
 
 const std = @import("std");
 const print = std.debug.print;
@@ -155,7 +157,7 @@ pub fn main() !void {
     assert(fbGet(22, 22) == 2);
     assert(fbGet(23, 23) == 2);
 
-    // depth sort
+    // painter's order (what depth sorting relies on): the later write wins
     fbClear(0);
     blit(&sprite, 50, 50);
     assert(fbGet(51, 51) == 2);

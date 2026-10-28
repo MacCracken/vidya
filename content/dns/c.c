@@ -14,7 +14,9 @@
 #define RR_TXT   5
 
 #define CNAME_MAX_DEPTH 16
-#define NXDOMAIN ((int64_t)-1)
+#define NXDOMAIN ((int64_t)-1) /* the name does not exist at all (RCODE 3) */
+#define NODATA   ((int64_t)-2) /* the name exists, but has no record of this type (RFC 2308 §2.2) */
+#define SERVFAIL ((int64_t)-3) /* CNAME loop or chain too deep: an error (RFC 1034 §3.6.2) */
 #define NEGATIVE_TTL 300
 
 #define ZONE_CAP 64
@@ -29,6 +31,11 @@ static CacheEntry cache[CACHE_CAP];
 static int cache_count = 0;
 static int64_t now_clock = 0;
 static int last_status = 0;
+/* TTL of the last successful zone_lookup: the MINIMUM over every record on
+ * the CNAME chain. Each link is its own cached record, and the collapsed
+ * answer is only valid while every link still is — so it may be cached no
+ * longer than its shortest link. */
+static int64_t last_ttl = 0;
 
 static void zone_add(uint64_t name, int32_t rtype, int64_t ttl, int64_t value) {
     if (zone_count < ZONE_CAP) {
@@ -36,29 +43,47 @@ static void zone_add(uint64_t name, int32_t rtype, int64_t ttl, int64_t value) {
     }
 }
 
+static int name_exists(uint64_t name) {
+    for (int i = 0; i < zone_count; i++) {
+        if (zone[i].name == name) return 1;
+    }
+    return 0;
+}
+
+/* Three negative outcomes, three answers. NXDOMAIN tells an RFC 8020
+ * resolver that nothing exists at or below the name, so answering it for a
+ * name that exists but lacks the type would deny that name's other records
+ * too; that case is NODATA. A loop or an over-deep chain is a failure to
+ * resolve (SERVFAIL), not a statement about the name. */
 static int64_t zone_lookup(uint64_t name, int32_t rtype) {
     int depth = 0;
     uint64_t cur = name;
+    int64_t min_ttl = INT64_MAX;
     while (depth <= CNAME_MAX_DEPTH) {
         for (int i = 0; i < zone_count; i++) {
-            if (zone[i].name == cur && zone[i].rtype == rtype) return zone[i].value;
+            if (zone[i].name == cur && zone[i].rtype == rtype) {
+                last_ttl = zone[i].ttl < min_ttl ? zone[i].ttl : min_ttl;
+                return zone[i].value;
+            }
         }
+        int64_t miss = name_exists(cur) ? NODATA : NXDOMAIN;
         if (rtype == RR_A) {
             uint64_t cn = 0;
             for (int i = 0; i < zone_count; i++) {
                 if (zone[i].name == cur && zone[i].rtype == RR_CNAME) {
                     cn = (uint64_t)zone[i].value;
+                    if (zone[i].ttl < min_ttl) min_ttl = zone[i].ttl;
                     break;
                 }
             }
-            if (cn == 0) return NXDOMAIN;
+            if (cn == 0) return miss;
             cur = cn;
             depth++;
         } else {
-            return NXDOMAIN;
+            return miss;
         }
     }
-    return NXDOMAIN;
+    return SERVFAIL;
 }
 
 static void cache_init(void) { cache_count = 0; now_clock = 0; }
@@ -91,15 +116,14 @@ static int64_t resolve(uint64_t name, int32_t rtype) {
     int64_t cached = cache_lookup(name, rtype);
     if (last_status == 1) return cached;
     int64_t v = zone_lookup(name, rtype);
-    if (v == NXDOMAIN) {
-        cache_insert(name, rtype, NXDOMAIN, NEGATIVE_TTL);
-        return NXDOMAIN;
+    if (v < 0) { /* NXDOMAIN, NODATA and SERVFAIL are all cached briefly */
+        cache_insert(name, rtype, v, NEGATIVE_TTL);
+        return v;
     }
-    int64_t ttl = NEGATIVE_TTL;
-    for (int i = 0; i < zone_count; i++) {
-        if (zone[i].name == name && zone[i].rtype == rtype) { ttl = zone[i].ttl; break; }
-    }
-    cache_insert(name, rtype, v, ttl);
+    /* Not NEGATIVE_TTL, and not "the TTL of a record named `name`": for a
+     * CNAME-chased answer no such record exists, and the old fallback
+     * cached 3 -> 4's A (ttl 60) for 300 s. */
+    cache_insert(name, rtype, v, last_ttl);
     return v;
 }
 
@@ -116,11 +140,19 @@ int main(void) {
     for (int k = 20; k <= 36; k++) zone_add(k, RR_CNAME, 600, k + 1);
     zone_add(37, RR_A, 60, 0x12345678);
 
-    assert(zone_lookup(1, RR_A) == 0x7F000001);
-    assert(zone_lookup(2, RR_A) == 0x7F000001);
-    assert(zone_lookup(3, RR_A) == 0x08080808);
-    assert(zone_lookup(10, RR_A) == NXDOMAIN);
-    assert(zone_lookup(20, RR_A) == NXDOMAIN);
+    /* zone_lookup sets last_ttl and resolve fills the cache, so both run
+     * outside assert(): under -DNDEBUG assert's expression is not
+     * evaluated, and the cache state the later checks rely on would differ. */
+    int64_t v = zone_lookup(1, RR_A);
+    assert(v == 0x7F000001);
+    v = zone_lookup(2, RR_A);
+    assert(v == 0x7F000001);
+    v = zone_lookup(3, RR_A);
+    assert(v == 0x08080808);
+    v = zone_lookup(10, RR_A);
+    assert(v == SERVFAIL); /* 10 -> 11 -> 10 loop */
+    v = zone_lookup(20, RR_A);
+    assert(v == SERVFAIL); /* 17 hops > CNAME_MAX_DEPTH */
 
     cache_init();
     int64_t first = resolve(1, RR_A);
@@ -134,15 +166,30 @@ int main(void) {
     assert(last_status == 0);
     assert(third == 0x7F000001);
 
+    /* CNAME chain 3 -> 4 (A ttl 60): the cached answer expires with the A */
     cache_init();
-    assert(resolve(99, RR_A) == NXDOMAIN);
+    v = resolve(3, RR_A);
+    assert(v == 0x08080808);
+    advance_time(61);
+    resolve(3, RR_A);
+    assert(last_status == 0);
+
+    cache_init();
+    v = resolve(99, RR_A);
+    assert(v == NXDOMAIN);
     resolve(99, RR_A);
     assert(last_status == 1);
 
-    assert(zone_lookup(1, RR_MX) == 10);
-    assert(zone_lookup(1, RR_TXT) == 99);
-    assert(zone_lookup(1, RR_AAAA) == NXDOMAIN);
+    v = zone_lookup(1, RR_MX);
+    assert(v == 10);
+    v = zone_lookup(1, RR_TXT);
+    assert(v == 99);
+    /* Name 1 exists (A, MX, TXT) but has no AAAA: NODATA, not NXDOMAIN. */
+    v = zone_lookup(1, RR_AAAA);
+    assert(v == NODATA);
+    v = zone_lookup(99, RR_AAAA);
+    assert(v == NXDOMAIN);
 
-    printf("dns: 15/15 ok\n");
+    printf("dns: 18/18 ok\n");
     return 0;
 }

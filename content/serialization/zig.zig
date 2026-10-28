@@ -32,6 +32,10 @@ fn decodeVarint(buf: []const u8) ?VarintResult {
     while (i < MAX_VARINT_BYTES) : (i += 1) {
         if (i >= buf.len) return null;
         const b = buf[i];
+        // The 10th byte lands at bit 63: only its lowest bit fits in a u64.
+        // `<<` silently discards the rest, so without this check
+        // 80 80 80 80 80 80 80 80 80 02 (= 2^64) would decode as 0.
+        if (i == MAX_VARINT_BYTES - 1 and b > 1) return null;
         value += @as(u64, b & 0x7F) << @intCast(shift);
         if (b & 0x80 == 0) return VarintResult{ .value = value, .consumed = i + 1 };
         shift += 7;
@@ -50,6 +54,10 @@ const FrameResult = struct { len: usize, consumed: usize };
 fn decodeFrame(buf: []const u8, max_msg: u64, payload_out: []u8) ?FrameResult {
     const r = decodeVarint(buf) orelse return null;
     if (r.value > max_msg) return null;
+    // max_msg is the protocol's DoS limit, not the size of payload_out: a
+    // 100-byte frame (under 1024) into a 64-byte buffer panics in Debug
+    // and writes past the buffer in ReleaseFast. Check the destination.
+    if (r.value > payload_out.len) return null;
     const total = r.consumed + @as(usize, @intCast(r.value));
     if (total > buf.len) return null;
     @memcpy(payload_out[0..@intCast(r.value)], buf[r.consumed..total]);
@@ -72,6 +80,11 @@ pub fn main() !void {
 
     const bomb: [11]u8 = @splat(0xFF);
     if (decodeVarint(&bomb) != null) return error.Overflow;
+    const two_pow_64 = [_]u8{ 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02 };
+    if (decodeVarint(&two_pow_64) != null) return error.Overflow64;
+    const max_u64 = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01 };
+    const mr = decodeVarint(&max_u64) orelse return error.MaxU64;
+    if (mr.value != std.math.maxInt(u64)) return error.MaxU64Value;
 
     const payload = "hello, world";
     const fn_ = encodeFrame(payload, &buf);
@@ -100,6 +113,11 @@ pub fn main() !void {
     var over: [16]u8 = undefined;
     const oh = encodeVarint(9999, &over);
     if (decodeFrame(over[0..oh], MAX_MSG_SIZE, &pl) != null) return error.Oversize;
+
+    // Under the DoS limit but larger than the 64-byte destination
+    var big: [101]u8 = @splat('X');
+    big[0] = 100;
+    if (decodeFrame(&big, MAX_MSG_SIZE, &pl) != null) return error.PayloadPastDestination;
 
     std.debug.print("serialization: 19/19 ok\n", .{});
 }

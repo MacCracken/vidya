@@ -1,8 +1,9 @@
 // Vidya — SQL Parsing in Go
 //
 // Idiomatic shape: a typed `Tok` constant family + a struct-of-tokens
-// returned from `tokenize`. The lexer walks the input rune-by-rune
-// using a position cursor (similar to a `bufio.Scanner` but
+// returned from `tokenize`. The lexer walks the input byte-by-byte (SQL
+// keywords and punctuation are ASCII) using a position cursor (similar
+// to a `bufio.Scanner` but
 // hand-written for span tracking). Keywords are matched case-
 // insensitively via `strings.ToUpper`. Mirrors cyrius.cyr.
 
@@ -27,6 +28,7 @@ const (
 	TSelect
 	TFrom
 	TWhere
+	TIllegal // a byte the lexer does not understand — never dropped
 )
 
 type Token struct {
@@ -95,8 +97,10 @@ func tokenize(sql string) []Token {
 		case ',':
 			k = TComma
 		default:
-			pos++
-			continue
+			// Skipping unknown bytes would turn "t; DROP TABLE t" into
+			// tokens that look like one harmless statement, and 'x' into
+			// the identifier x. Surface them instead.
+			k = TIllegal
 		}
 		out = append(out, Token{Kind: k, Text: string(c)})
 		pos++
@@ -108,6 +112,11 @@ func tokenize(sql string) []Token {
 func isValidSelect(toks []Token) bool {
 	if len(toks) == 0 || toks[0].Kind != TSelect {
 		return false
+	}
+	for _, t := range toks {
+		if t.Kind == TIllegal {
+			return false
+		}
 	}
 	fromIdx := -1
 	for i, t := range toks {
@@ -122,7 +131,17 @@ func isValidSelect(toks []Token) bool {
 	if fromIdx+1 >= len(toks) || toks[fromIdx+1].Kind != TIdent {
 		return false
 	}
-	return true
+	// ...then end of input, or exactly WHERE <ident> = <int|ident>. Without
+	// this, anything after the table name ("FROM t DROP TABLE t") passed.
+	tail := toks[fromIdx+2:]
+	switch len(tail) {
+	case 1:
+		return tail[0].Kind == TEOF
+	case 5:
+		return tail[0].Kind == TWhere && tail[1].Kind == TIdent && tail[2].Kind == TEq &&
+			(tail[3].Kind == TInt || tail[3].Kind == TIdent) && tail[4].Kind == TEOF
+	}
+	return false
 }
 
 func assertKinds(toks []Token, expected []Tok, msg string) {
@@ -191,6 +210,23 @@ func main() {
 	if isValidSelect(tokenize("SELECT * FROM")) {
 		panic("validator should reject missing table")
 	}
+	// Nothing may follow the table except one WHERE <ident> = <value>
+	for _, q := range []string{
+		"SELECT * FROM t DROP TABLE t", "SELECT * FROM t u",
+		"SELECT * FROM t WHERE DROP TABLE t",
+		"SELECT * FROM t WHERE id = 1 DROP TABLE t",
+	} {
+		if isValidSelect(tokenize(q)) {
+			panic("validator should reject trailing tokens: " + q)
+		}
+	}
+
+	// Test 6b: bytes the lexer doesn't know are reported, not skipped
+	if isValidSelect(tokenize("SELECT * FROM t; DROP TABLE t")) {
+		panic("validator should reject a stacked statement")
+	}
+	toks = tokenize("x = 'y'")
+	assertKinds(toks, []Tok{TIdent, TEq, TIllegal, TIdent, TIllegal, TEOF}, "unknown quotes surface")
 
 	// Test 7: whitespace tolerance
 	toks = tokenize("  SELECT\t*\nFROM\tt  ")

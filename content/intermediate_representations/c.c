@@ -11,6 +11,7 @@
 // Every optimizing compiler has one (LLVM IR, GCC GIMPLE/RTL, etc.).
 
 #include <assert.h>
+#include <stdckdint.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -314,8 +315,14 @@ static int constant_fold(IrBuilder *b) {
                     if (is_const[t->lhs] && is_const[t->rhs]) {
                         int64_t l = constants[t->lhs];
                         int64_t r = constants[t->rhs];
-                        int64_t val = t->kind == TAC_ADD ? l + r :
-                                      t->kind == TAC_SUB ? l - r : l * r;
+                        // A folder must not hit HOST undefined behaviour:
+                        // `l + r` on int64_t is UB on overflow. C23
+                        // <stdckdint.h> reports it; leave such ops unfolded.
+                        int64_t val;
+                        bool overflow = t->kind == TAC_ADD ? ckd_add(&val, l, r) :
+                                        t->kind == TAC_SUB ? ckd_sub(&val, l, r) :
+                                                             ckd_mul(&val, l, r);
+                        if (overflow) break;
                         constants[t->dst] = val;
                         is_const[t->dst] = 1;
                         t->kind = TAC_CONST;
@@ -325,7 +332,8 @@ static int constant_fold(IrBuilder *b) {
                     break;
                 case TAC_NEG:
                     if (is_const[t->src]) {
-                        int64_t val = -constants[t->src];
+                        int64_t val;
+                        if (ckd_sub(&val, (int64_t)0, constants[t->src])) break;  // -INT64_MIN
                         constants[t->dst] = val;
                         is_const[t->dst] = 1;
                         t->kind = TAC_CONST;
@@ -441,6 +449,16 @@ int main(void) {
         assert(dom[i] & (1 << i));
     }
 
+    // Both checks above also hold for the starting guess (every block
+    // dominates every block), so on their own they pass even if the
+    // fixed-point loop never runs. The exact sets cannot: each branch is
+    // dominated by entry and itself only, and the merge block by neither
+    // branch, since each path into it skips the other branch.
+    assert(b2.num_blocks == 4);
+    assert(dom[1] == 0x3);  // {B0, B1}
+    assert(dom[2] == 0x5);  // {B0, B2}
+    assert(dom[3] == 0x9);  // {B0, B3}
+
     for (int i = 0; i < b2.num_blocks; i++) {
         printf("  B%d dominated by: {", i);
         int first = 1;
@@ -477,12 +495,15 @@ int main(void) {
     Tac *ret = &b4.blocks[0].instructions[b4.blocks[0].num_insts - 1];
     assert(ret->kind == TAC_RETURN);
     // Find the const that feeds the return
+    int found_ret_const = 0;
     for (int j = 0; j < b4.blocks[0].num_insts; j++) {
         Tac *t = &b4.blocks[0].instructions[j];
         if (t->kind == TAC_CONST && t->dst == ret->ret_reg) {
             assert(t->value == 60);
+            found_ret_const = 1;
         }
     }
+    assert(found_ret_const);  // the loop alone passes if nothing matches
 
     // ── Test 5: Basic block properties ────────────────────────────
     printf("5. Basic block properties:\n");

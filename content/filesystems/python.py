@@ -7,7 +7,8 @@
 #   4. VFS-like operations: create, read, write, unlink, stat
 #   5. File descriptors and seek offsets
 #
-# This mirrors how ext4 works internally, simplified to the essentials.
+# This mirrors the classic Unix inode design (ext2/ext3-style direct block
+# pointers; ext4 replaces those with extents), simplified to the essentials.
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -78,7 +79,8 @@ class Inode:
       - file_type: regular file or directory
       - size: file size in bytes
       - blocks: direct block pointers (indices into the block device)
-      - nlink: number of hard links (unlink decrements; 0 = delete)
+      - nlink: number of hard links (unlink decrements; the inode is freed
+        once nlink == 0 AND no open file still references it)
       - mode: permissions (simplified)
     """
     ino: int
@@ -130,7 +132,8 @@ class SimpleFs:
       - open: create file descriptor
       - write: allocate blocks, copy data
       - read: follow block pointers, return data
-      - unlink: remove directory entry, free blocks when nlink=0
+      - unlink: remove directory entry; free blocks when nlink=0 and the
+        last open fd is closed (an unlinked-but-open file stays readable)
       - stat: return inode metadata
       - readdir: list directory entries
     """
@@ -231,24 +234,33 @@ class SimpleFs:
         return bytes(result)
 
     def close(self, fd: int) -> None:
-        """Close a file descriptor."""
-        del self.open_files[fd]
+        """Close a file descriptor; frees an already-unlinked inode."""
+        ino = self.open_files.pop(fd).ino
+        if ino in self.inodes:
+            self._release_if_unused(ino)
+
+    def _release_if_unused(self, ino: int) -> None:
+        """Free an inode only when no name AND no open file refers to it."""
+        inode = self.inodes[ino]
+        if inode.nlink > 0:
+            return
+        if any(of.ino == ino for of in self.open_files.values()):
+            return  # orphan: unlinked but still open (ext4's orphan list)
+        for blk in inode.blocks:
+            if blk is not None:
+                self.device.free_block(blk)
+        del self.inodes[ino]
 
     def unlink(self, parent_ino: int, name: str) -> None:
-        """Remove a directory entry. Frees inode when nlink reaches 0."""
+        """Remove a directory entry. Frees the inode when nlink reaches 0
+        and no fd has it open; otherwise the last close() frees it."""
         entries = self.directories[parent_ino]
         idx = next(i for i, e in enumerate(entries) if e.name == name)
         ino = entries[idx].ino
         del entries[idx]
 
-        inode = self.inodes[ino]
-        inode.nlink -= 1
-        if inode.nlink == 0:
-            # Free all allocated blocks
-            for blk in inode.blocks:
-                if blk is not None:
-                    self.device.free_block(blk)
-            del self.inodes[ino]
+        self.inodes[ino].nlink -= 1
+        self._release_if_unused(ino)
 
     def stat(self, ino: int) -> Optional[Inode]:
         """Get inode metadata (like stat(2))."""
@@ -335,6 +347,12 @@ def main() -> None:
     print("\n6. Unlink (delete) hello.txt:")
     blocks_before = fs.device.used
     fs.unlink(1, "hello.txt")
+    # fd1 is still open: like POSIX, the name is gone but the inode and its
+    # data survive until the last close.
+    assert fs.lookup(1, "hello.txt") is None
+    assert hello_ino in fs.inodes, "unlinked-but-open file must survive"
+    assert fs.device.used == blocks_before
+    fs.close(fd1)  # last reference dropped: NOW the blocks are freed
     blocks_after = fs.device.used
     print(f"   Blocks freed: {blocks_before} -> {blocks_after} ({blocks_before - blocks_after} freed)")
     print(f"   Inode {hello_ino} exists: {hello_ino in fs.inodes}")

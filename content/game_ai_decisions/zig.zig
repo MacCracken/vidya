@@ -1,8 +1,10 @@
 // Vidya — Game AI Decision Making in Zig
 //
-// Stat-driven AI scoring with PCG PRNG, urgency-multiplied shooting,
-// and weighted action selection. Zig has no implicit overflow in `*`
-// or `+`, so we use the wrapping operators `*%` and `+%` for the PCG
+// Stat-driven AI scoring with an LCG PRNG (PCG's 64-bit LCG constants,
+// but a plain top-bits output rather than PCG's permuted output, so it is
+// not PCG proper), urgency-multiplied shooting, and weighted action
+// selection. Zig has no implicit overflow in `*` or `+`, so we use the
+// wrapping operators `*%` and `+%` for the LCG
 // state update — overflow is part of the algorithm, and the operators
 // make that explicit at the call site. The `Action` enum is `i64`-
 // backed for parity with the Cyrius integer encoding.

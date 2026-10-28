@@ -5,9 +5,12 @@
 // passages by clearing the wall bit on both the current and neighbour
 // cell.
 //
-// Go's `int64` (and `uint64`) wraps silently on overflow — exactly what
-// PCG needs for the multiply-add step. No special wrapping helpers
-// required, the byte output matches cyrius's signed-i64 wrap.
+// The RNG is PCG's state step alone: a 64-bit LCG (Knuth's MMIX
+// constants) returning the high 31 bits — not full PCG, which also
+// permutes the output; math/rand/v2's rand.PCG is the real generator.
+// Go's `uint64` wraps silently on overflow — exactly what the multiply-add
+// step needs. No special wrapping helpers required, the byte output
+// matches cyrius's signed-i64 wrap.
 
 package main
 
@@ -39,8 +42,8 @@ func newRNG(seed uint64) *RNG { return &RNG{state: seed} }
 func (r *RNG) Seed(s uint64) { r.state = s }
 
 // Next returns the next pseudo-random value as a non-negative int64.
-// uint64 multiply/add wraps silently — that *is* the modular arithmetic
-// PCG expects.
+// uint64 multiply/add wraps silently — that *is* the mod-2^64 arithmetic
+// the LCG step expects.
 func (r *RNG) Next() int64 {
 	r.state = r.state*pcgMult + pcgInc
 	return int64((r.state >> 33) & 0x7fffffff)
@@ -232,21 +235,16 @@ func main() {
 	check(b.cells[63] == c63, "deterministic: cell 63")
 
 	// different seeds differ
+	// Compare the cells themselves (Go arrays are comparable). A sum of
+	// the wall masks only counts how many E-W vs N-S passages exist, so
+	// two different mazes with the same split would compare "equal".
 	rng.Seed(1)
 	x := NewMaze()
 	x.Generate(rng, 0, 0)
-	sum1 := 0
-	for _, v := range x.cells {
-		sum1 += int(v)
-	}
 	rng.Seed(2)
 	y := NewMaze()
 	y.Generate(rng, 0, 0)
-	sum2 := 0
-	for _, v := range y.cells {
-		sum2 += int(v)
-	}
-	check(sum1 != sum2, "different seeds produce different mazes")
+	check(x.cells != y.cells, "different seeds produce different mazes")
 
 	// starting cell visited
 	rng.Seed(42)

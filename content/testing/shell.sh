@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-# ── Test framework ───────────────────────────────────────���──────────
+# ── Test framework ──────────────────────────────────────────────────
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -51,6 +51,16 @@ assert_fails() {
 
 # ── Code under test ────────────────────────────────────────────────
 
+# Trim with parameter expansion. `$(echo "$s" | xargs)` is a broken trim:
+# xargs parses quotes/backslashes, so "msg = it's fine" came back as "msg="
+# (xargs: unmatched single quote) and C:\dir as C:dir.
+trim() {
+    local s=$1
+    s=${s#"${s%%[![:space:]]*}"}
+    s=${s%"${s##*[![:space:]]}"}
+    printf '%s' "$s"
+}
+
 parse_kv() {
     local line="$1"
     if [[ "$line" != *=* ]]; then
@@ -59,8 +69,8 @@ parse_kv() {
     fi
     local key="${line%%=*}"
     local value="${line#*=}"
-    key=$(echo "$key" | xargs)  # trim
-    value=$(echo "$value" | xargs)  # trim
+    key=$(trim "$key")
+    value=$(trim "$value")
     if [[ -z "$key" ]]; then
         echo "error: empty key" >&2
         return 1
@@ -92,6 +102,9 @@ assert_eq "$result" "port=3000" "parse trimmed"
 
 result=$(parse_kv "key=")
 assert_eq "$result" "key=" "parse empty value"
+
+result=$(parse_kv "msg = it's fine")
+assert_eq "$result" "msg=it's fine" "parse value with a quote"
 
 # ── Error case tests ───────────────────────────────────────────────
 assert_fails 'parse_kv "no_equals"' "missing equals"

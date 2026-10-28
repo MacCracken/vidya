@@ -9,6 +9,10 @@ max_length cap. All integer logits.
 VOCAB_SIZE = 8
 TOK_UNK = 0
 TOK_EOS = 1
+# Mask for filtered-out logits. NOT 0: logits are unnormalized and often
+# negative, so a token "removed" to 0 can outrank every survivor, and
+# softmax gives a 0 logit weight e^0 = 1. -inf gives weight e^-inf = 0.
+LOGIT_MASK = float("-inf")
 
 
 def init_bigram_table():
@@ -59,7 +63,7 @@ def topk_filter(logits, k):
         picked += 1
     for m in range(len(logits)):
         if not marks[m]:
-            logits[m] = 0
+            logits[m] = LOGIT_MASK
     return picked
 
 
@@ -105,7 +109,14 @@ def test_topk_keeps_top3():
     check(picked == 3, "topk picked 3")
     check(logits[6] == 60 and logits[1] == 50 and logits[4] == 40, "top 3 kept")
     for i in [0, 2, 3, 5, 7]:
-        check(logits[i] == 0, f"idx {i} zeroed")
+        check(logits[i] == LOGIT_MASK, f"idx {i} masked")
+
+
+def test_topk_masked_never_wins():
+    # All-negative logits: masking to 0 would let a filtered token win.
+    logits = [-100, -50, -200, -10]
+    topk_filter(logits, 2)
+    check(argmax_logits(logits) == 3, f"masked tokens never win argmax (got {logits})")
 
 
 def test_topk_k_equals_n_keeps_all():
@@ -136,9 +147,12 @@ def test_decode_respects_max_length():
 
 
 def test_decode_deterministic():
-    out1 = decode_sequence(2, 10)
-    out2 = decode_sequence(2, 10)
-    check(out1 == out2, "deterministic")
+    # decode_sequence is pure, so comparing two runs cannot fail. What makes
+    # greedy decoding deterministic is the tie rule: an all-zero logit row
+    # (UNK has no bigrams) argmaxes to index 0 every step, never reaches EOS,
+    # and stops only at max_length.
+    out = decode_sequence(TOK_UNK, 3)
+    check(out == [TOK_UNK] * 3, f"ties -> lowest index, capped (got {out})")
 
 
 if __name__ == "__main__":
@@ -147,6 +161,7 @@ if __name__ == "__main__":
     test_argmax_negative_logits()
     test_topk_keeps_top3()
     test_topk_k_equals_n_keeps_all()
+    test_topk_masked_never_wins()
     test_bigram_lookup()
     test_decode_hello_to_eos()
     test_decode_terminates_on_eos_short()

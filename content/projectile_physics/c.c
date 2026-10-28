@@ -1,11 +1,14 @@
 // Vidya — Projectile Physics in C
 //
 // Semi-implicit Euler integration in 16.16 fixed-point on int64_t.
-// C's `>>` on signed integers is implementation-defined for negatives,
-// so we promote the bounce-restitution multiply to __int128 and shift
-// the wide product back. The worst-case `vy * RESTITUTION` (~3.6e10)
-// fits in int64_t, but the wide form is uniformly portable across
-// compilers and avoids any UB pearl-clutching with -Werror.
+// The bounce-restitution multiply stays in int64_t: the worst-case
+// `vy * RESTITUTION` in these tests (~3.6e10) is far below INT64_MAX
+// (~9.2e18), so no 128-bit intermediate is needed (GNU __int128 is a
+// non-portable extension anyway; C23's standard spelling is
+// _BitInt(128)). Widening would not change the shift either: C23 6.5.7
+// still leaves `>>` of a negative signed value implementation-defined,
+// whatever its width. bounce_check runs after a step carried y past
+// the floor, so vy > 0 there and the `>>` sees a non-negative product.
 
 #include <assert.h>
 #include <stdint.h>
@@ -33,9 +36,8 @@ static void physics_step(Ball *b) {
 static void bounce_check(Ball *b) {
     if (b->y > FLOOR_Y) {
         b->y = FLOOR_Y;
-        // vy = -(vy * restitution) >> 16  — wide intermediate for safety.
-        __int128 wide = (__int128)b->vy * (__int128)RESTITUTION;
-        b->vy = -(int64_t)(wide >> FX_SHIFT);
+        // vy = -(vy * restitution) >> 16 — fits int64_t (see header).
+        b->vy = -((b->vy * RESTITUTION) >> FX_SHIFT);
     }
 }
 

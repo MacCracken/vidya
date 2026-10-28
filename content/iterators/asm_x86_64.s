@@ -52,6 +52,7 @@ _start:
     # Count how many even numbers in array
     xor     ecx, ecx            # i = 0
     xor     edx, edx            # even_count = 0
+    xor     r8d, r8d            # even_sum = 0
 .filter_loop:
     cmp     ecx, num_count
     jge     .filter_done
@@ -59,11 +60,14 @@ _start:
     test    eax, 1              # check bit 0
     jnz     .filter_skip        # odd, skip
     inc     edx
+    add     r8d, eax
 .filter_skip:
     inc     ecx
     jmp     .filter_loop
 .filter_done:
     cmp     edx, 5              # 2,4,6,8,10 = 5 evens
+    jne     fail
+    cmp     r8d, 30             # their sum — the 5 odds would give 25
     jne     fail
 
     # ── Map: square each element ────────────────────────────────────
@@ -115,20 +119,23 @@ _start:
 
     # ── Countdown (reverse iteration) ───────────────────────────────
     mov     ecx, num_count
-    xor     edx, edx            # sum of last 3
+    xor     eax, eax            # sum of last 3
+    xor     edx, edx            # elements taken
 .rev_loop:
     dec     ecx
     js      .rev_check          # ecx < 0, done
     cmp     edx, 3
     jge     .rev_check
     add     edx, 1
-    add     eax, [numbers + ecx * 4]  # not accumulating here, just testing iteration
+    add     eax, [numbers + ecx * 4]
     jmp     .rev_loop
 .rev_check:
-    # We iterated backward — that's the test
+    cmp     eax, 27             # 10 + 9 + 8: walked backward from the end
+    jne     fail
 
     # ── rep scasb: find byte in string ──────────────────────────────
-    # Search for 'l' in "hello"
+    # Search for 'l' in the pass message ("All iterator ...")
+    # (scasb walks forward because DF=0 — the ABI guarantees it at entry)
     lea     rdi, [msg_pass]     # search in pass message
     mov     rcx, msg_len
     mov     al, 'l'
@@ -136,7 +143,10 @@ _start:
     je      .scas_found
     jmp     fail
 .scas_found:
-    # Found 'l' — rdi points past it
+    # Found 'l' at index 1 — rdi points one past it
+    lea     rax, [msg_pass + 2]
+    cmp     rdi, rax
+    jne     fail
 
     # ── Print success ───────────────────────────────────────────────
     mov     rax, 1

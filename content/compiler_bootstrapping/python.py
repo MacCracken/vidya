@@ -116,6 +116,10 @@ def main():
     assert code[0] == 0x48, "first byte should be REX.W"
     assert code[1] == 0xB8, "second byte should be MOV r0 opcode"
     assert code[23] == 0xE9, "jump opcode at offset 23"
+    # The point of pass 2: rel32 is relative to the END of the jmp (23+5=28),
+    # so jumping back to "start" (offset 0) encodes -28 (E4 FF FF FF).
+    assert struct.unpack_from("<i", code, 24)[0] == labels["start"] - 28, \
+        "jmp rel32 must resolve to start"
     assert code[28] == 0xF4, "halt at offset 28"
     assert labels["start"] == 0, "start label at offset 0"
     print("All verifications passed.")

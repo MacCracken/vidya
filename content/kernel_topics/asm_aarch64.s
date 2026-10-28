@@ -1,8 +1,8 @@
 // Vidya — Kernel Topics in AArch64 Assembly
 //
 // AArch64 kernel assembly: page table entry construction, virtual
-// address decomposition, MMIO register manipulation, GDT-equivalent
-// (TCR/MAIR), and AAPCS64 calling convention. AArch64 uses a
+// address decomposition, MMIO register manipulation, and the AAPCS64
+// calling convention. AArch64 uses a
 // different privilege model (EL0-EL3) than x86's ring 0-3.
 
 .global _start
@@ -18,31 +18,35 @@ scratch:    .skip 64
 
 _start:
     // ── Test 1: Page Table Entry construction ─────────────────────────
-    // Build PTE: phys_addr=0x1000, flags=PRESENT|WRITABLE (0x3)
+    // AArch64 level-3 page descriptor (4 KB granule), NOT the x86 layout:
+    //   bit 0 = valid, bit 1 = 1 for a page (or table) descriptor,
+    //   bits [47:12] = output address (48-bit OA). Write permission is
+    //   AP[2] (bit 7, 1 = read-only), not bit 1 as on x86.
+    // Build: phys_addr=0x1000, VALID | PAGE (0x3), writable (AP[2]=0)
     mov     x0, #0x1000
-    orr     x0, x0, #0x3       // PRESENT | WRITABLE
-    // Verify present bit
+    orr     x0, x0, #0x3       // VALID | PAGE
+    // Verify valid bit
     tst     x0, #1
     b.eq    fail
-    // Verify writable bit
+    // Verify page-descriptor bit
     tst     x0, #2
     b.eq    fail
-    // Extract physical address (bits 12-51)
-    mov     x1, #0x000F
-    movk    x1, #0xFFFF, lsl #16
-    movk    x1, #0xFFFF, lsl #32
-    lsl     x2, x1, #12        // build ADDR_MASK
-    // Simpler: just mask low 12 bits to get page-aligned addr
-    and     x1, x0, #~0xFFF
+    // Verify writable: AP[2] (bit 7) clear
+    tst     x0, #(1 << 7)
+    b.ne    fail
+    // Extract output address (bits 12-47): one contiguous run of ones,
+    // so the mask is a single logical immediate
+    and     x1, x0, #0x0000FFFFFFFFF000
     cmp     x1, #0x1000
     b.ne    fail
 
     // ── Test 2: Virtual address decomposition ─────────────────────────
-    // Decompose address to get PML4 index (bits 39-47)
+    // Decompose address to get the level-0 table index (bits 39-47;
+    // the slot x86 calls the PML4 index)
     mov     x0, #0xFFFF
     movk    x0, #0xFFFF, lsl #16
     movk    x0, #0x7FFF, lsl #32
-    // PML4 index = (addr >> 39) & 0x1FF
+    // L0 index = (addr >> 39) & 0x1FF
     lsr     x1, x0, #39
     and     x1, x1, #0x1FF
     cmp     x1, #0xFF          // should be 255
@@ -142,8 +146,10 @@ add_two:
     ret
 
 // ── clobber_caller_saved() ───────────────────────────────────────────
-// Clobbers x0-x18 (caller-saved) but preserves x19-x28 (callee-saved)
+// Clobbers caller-saved registers freely, and uses callee-saved x19/x20
+// too, which obliges it to save and restore them (AAPCS64).
 clobber_caller_saved:
+    stp     x19, x20, [sp, #-16]!
     mov     x0, #0
     mov     x1, #0
     mov     x2, #0
@@ -151,4 +157,7 @@ clobber_caller_saved:
     mov     x9, #0
     mov     x10, #0
     mov     x11, #0
+    mov     x19, #0             // use the callee-saved pair...
+    mov     x20, #0
+    ldp     x19, x20, [sp], #16 // ...and restore it before returning
     ret

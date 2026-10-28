@@ -15,6 +15,8 @@ secret_a:       .ascii "secret_token_24"
 secret_b:       .ascii "secret_token_24"
 secret_c:       .ascii "secret_token_25"
 secret_len = 15
+bad_input:      .ascii "token;rm"   // ';' is outside [a-zA-Z0-9_]
+bad_len = 8
 
 .section .bss
 zero_buf:       .skip 32
@@ -107,6 +109,11 @@ verify_zero:
     mov     x1, secret_len
     bl      validate_alnum
     cbz     w0, fail                // "secret_token_24" is valid
+
+    adr     x0, bad_input
+    mov     x1, bad_len
+    bl      validate_alnum
+    cbnz    w0, fail                // "token;rm" must be rejected
 
     // ── All passed ────────────────────────────────────────────────────
     mov     x8, #64                 // sys_write

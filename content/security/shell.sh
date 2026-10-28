@@ -96,28 +96,38 @@ test_ifs() {
 test_ifs
 
 # ── Safe path handling ─────────────────────────────────────────────────
+# Check containment on the CANONICAL path, not on the input text. A
+# `*..*` pattern check misses symlinks ("escape/etc/passwd" where escape ->
+# /) and rejects harmless names like "photo..jpg". GNU `realpath -m`
+# canonicalises even paths that do not exist yet, resolving ".", ".." and
+# every symlink that does exist.
 safe_path() {
     local base="$1" user_input="$2"
-    # Reject obvious traversal
-    if [[ "$user_input" == *..* ]]; then
+    local real_base resolved
+    real_base=$(realpath -m -- "$base") || return 1
+    resolved=$(realpath -m -- "$base/$user_input") || return 1
+    if [[ "$resolved" != "$real_base"/* ]]; then
         echo "path traversal detected" >&2
         return 1
     fi
-    local resolved
-    resolved="$base/$user_input"
-    # Use realpath --relative-to to verify containment (if files exist)
-    # For non-existent paths, at least check for .. components
     echo "$resolved"
 }
 
+real_tmpdir=$(realpath -m -- "$tmpdir")
 result=$(safe_path "$tmpdir" "photo.jpg")
-assert_eq "$result" "$tmpdir/photo.jpg" "safe path"
+assert_eq "$result" "$real_tmpdir/photo.jpg" "safe path"
+result=$(safe_path "$tmpdir" "photo..jpg")
+assert_eq "$result" "$real_tmpdir/photo..jpg" "'..' inside a name is not traversal"
 assert_fail "traversal" safe_path "$tmpdir" "../../etc/passwd"
 assert_fail "traversal parent" safe_path "$tmpdir" "../secret"
+ln -s / "$tmpdir/escape"
+assert_fail "symlink escape" safe_path "$tmpdir" "escape/etc/passwd"
 
 # ── Secrets: use /dev/urandom, not $RANDOM ─────────────────────────────
 # BAD: $RANDOM is a 15-bit PRNG, trivially predictable
 #   token=$RANDOM    # only 32768 possible values!
+# $SRANDOM (bash 5.1+) is drawn from the kernel CSPRNG (getrandom), so it is
+# unpredictable — but it is only 32 bits per read. Use /dev/urandom for keys.
 # GOOD: read from /dev/urandom
 token=$(head -c 32 /dev/urandom | od -A n -t x1 | tr -d ' \n')
 assert_eq "${#token}" "64" "urandom hex token length"
@@ -135,8 +145,10 @@ secret_file="$tmpdir/secret.key"
 perms=$(stat -c %a "$secret_file")
 assert_eq "$perms" "600" "secret file permissions"
 
-# Verify group/other can't read
-if stat -c %A "$secret_file" | grep -q 'r.\{6\}r'; then
+# Verify group/other can't read: test the group-read (040) and other-read
+# (004) bits of the octal mode. (The old `grep 'r.\{6\}r'` on `stat -c %A`
+# could never match — r bits sit at offsets 1, 4, 7 — so it passed even 777.)
+if (( 8#$perms & 8#044 )); then
     echo "FAIL: others can read secret file" >&2
     exit 1
 fi

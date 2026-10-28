@@ -3,8 +3,9 @@
 // Fixed-timestep accumulator loop with spiral-of-death cap. The driver
 // `loop_step` takes an elapsed-microsecond delta and returns the number
 // of fixed-step updates fired this frame. Rust's `i64` is the natural
-// choice for monotonic-time math: 64 bits of microseconds wraps at
-// ~292 years, so wrap-around never bites a real game. Tests use
+// choice for monotonic-time math: a signed 64-bit count of microseconds
+// wraps after ~292,000 years (nanoseconds: ~292 years), so wrap-around
+// never bites a real game. Tests use
 // deterministic per-frame deltas (no real clock) so behavior is
 // reproducible across machines and CI.
 
@@ -87,9 +88,9 @@ fn test_accumulator_remainder() {
 fn test_input_update_render_separation() {
     // 30ms + 5ms + 30ms = 65ms total → 3 updates, 3 renders
     let mut g = GameLoop::default();
-    loop_step(&mut g, 30_000);  // 30ms → 1 update (8333 left)
-    loop_step(&mut g, 5_000);   //  5ms → 0 updates (13333 left)
-    loop_step(&mut g, 30_000);  // 30ms (43333 → 2 updates, 9999 left)
+    assert_eq!(loop_step(&mut g, 30_000), 1); // 30000 → 1 update (13333 left)
+    assert_eq!(loop_step(&mut g, 5_000), 1);  // 18333 → 1 update (1666 left)
+    assert_eq!(loop_step(&mut g, 30_000), 1); // 31666 → 1 update (14999 left)
     assert_eq!(g.update_count, 3, "3 updates from 65ms total");
     assert_eq!(g.render_count, 3, "3 renders from 3 frames");
 }

@@ -272,7 +272,40 @@ impl Codegen {
     }
 }
 
-// ── Simple interpreter for verification ───────────────────────────────────
+// ── Execute the emitted bytes (Linux x86_64) ─────────────────────────────
+// Map an anonymous page, copy the code in, flip it to read+execute (W^X),
+// and call it as `extern "C" fn() -> i64`. The result is in RAX, as the
+// System V ABI requires.
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+unsafe extern "C" {
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
+    fn munmap(addr: *mut u8, len: usize) -> i32;
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn run_jit(code: &[u8]) -> i64 {
+    const PROT_READ: i32 = 1;
+    const PROT_WRITE: i32 = 2;
+    const PROT_EXEC: i32 = 4;
+    const MAP_PRIVATE_ANON: i32 = 0x02 | 0x20;
+    let len = code.len().next_multiple_of(4096);
+    // SAFETY: a fresh private anonymous mapping that we own exclusively; the
+    // bytes are a complete function (prologue..ret) built by Codegen::compile.
+    unsafe {
+        let page = mmap(std::ptr::null_mut(), len, PROT_READ | PROT_WRITE, MAP_PRIVATE_ANON, -1, 0);
+        assert!(page as isize != -1, "mmap failed");
+        std::ptr::copy_nonoverlapping(code.as_ptr(), page, code.len());
+        assert_eq!(mprotect(page, len, PROT_READ | PROT_EXEC), 0, "mprotect failed");
+        let f: extern "C" fn() -> i64 = std::mem::transmute(page);
+        let result = f();
+        munmap(page, len);
+        result
+    }
+}
+
+// ── Reference interpreter: what the machine code must agree with ─────────
 
 fn eval(expr: &Expr) -> i64 {
     match expr {
@@ -336,6 +369,8 @@ fn main() {
     for (label, expr) in &tests {
         let expected = eval(expr);
         let code = Codegen::new().compile(expr);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        assert_eq!(run_jit(&code), expected, "machine code disagrees with eval for {label}");
 
         println!(
             "{:<30} {:>8} {:>7} bytes",

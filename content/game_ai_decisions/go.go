@@ -1,10 +1,13 @@
 // Vidya — Game AI Decision Making in Go
 //
-// Stat-driven AI scoring with PCG PRNG, urgency-multiplied shooting,
-// and weighted action selection. Go's `uint64` overflow wraps silently
-// (defined behavior), so the PCG state update is a one-liner with no
-// explicit masking. iota typed constants give readable Action variants
-// at zero runtime cost.
+// Stat-driven AI scoring with a seeded PRNG, urgency-multiplied shooting,
+// and weighted action selection. The PRNG is PCG's state step alone — a
+// 64-bit LCG with Knuth's MMIX constants, returning the high 31 bits.
+// Full PCG also permutes the output (xorshift + data-dependent rotate),
+// which is what fixes an LCG's weak low bits; math/rand/v2's rand.PCG is
+// the real generator. Go's `uint64` overflow wraps silently (defined
+// behavior), so the state update is a one-liner with no explicit masking.
+// iota typed constants give readable Action variants at zero runtime cost.
 
 package main
 

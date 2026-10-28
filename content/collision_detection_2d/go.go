@@ -83,13 +83,6 @@ func pushApartX(x1, x2, overlap int64) int64 {
 	return half
 }
 
-func absI64(v int64) int64 {
-	if v < 0 {
-		return -v
-	}
-	return v
-}
-
 func sweptAabbX(al, ar, vx, bl, br int64) int64 {
 	if vx == 0 {
 		return FxOne
@@ -100,11 +93,17 @@ func sweptAabbX(al, ar, vx, bl, br int64) int64 {
 	} else {
 		enterDist, exitDist = br-al, bl-ar
 	}
-	absV := absI64(vx)
-	enter := (absI64(enterDist) << FxShift) / absV
-	exit_ := (absI64(exitDist) << FxShift) / absV
-	if enter > exit_ || enter > FxOne {
+	// Divide by the SIGNED velocity: a negative entry time means A is
+	// already past B's entry edge (overlapping at t=0), a negative exit
+	// time means B is behind A. Taking abs() of the distances would turn
+	// both into spurious future impacts (or misses).
+	enter := (enterDist << FxShift) / vx
+	exit_ := (exitDist << FxShift) / vx
+	if exit_ < 0 || enter > exit_ || enter > FxOne {
 		return FxOne
+	}
+	if enter < 0 {
+		return 0 // already overlapping at the start of the frame
 	}
 	return enter
 }
@@ -153,7 +152,7 @@ func main() {
 	mustFalse(pointInCircle(fx(100), fx(100), fx(0), fx(0), fx(5)),
 		"point outside circle")
 
-	if distSq(fx(0), fx(0), fx(3), fx(4)) <= 0 {
+	if distSq(fx(0), fx(0), fx(3), fx(4)) != (fx(5)>>4)*(fx(5)>>4) {
 		panic("FAIL: 3-4-5 triangle dist²")
 	}
 
@@ -168,6 +167,13 @@ func main() {
 	toi2 := sweptAabbX(fx(0), fx(2), -fx(1), fx(6), fx(10))
 	if toi2 != FxOne {
 		panic("FAIL: moving away yields no impact")
+	}
+	if sweptAabbX(fx(0), fx(2), fx(8), fx(1), fx(5)) != 0 ||
+		sweptAabbX(fx(0), fx(4), fx(8), fx(-2), fx(1)) != 0 {
+		panic("FAIL: overlapping at t=0 yields TOI 0")
+	}
+	if sweptAabbX(fx(10), fx(12), fx(8), fx(0), fx(4)) != FxOne {
+		panic("FAIL: target behind the mover yields no impact")
 	}
 
 	fmt.Println("All collision_detection_2d examples passed.")

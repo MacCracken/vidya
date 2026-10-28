@@ -4,8 +4,11 @@
 // produce a byte-identical artifact, on any machine, at any time. Three
 // classic sources of non-determinism, and their fixes:
 //
-//  1. Embedded wall-clock timestamps  → clamp every timestamp to
-//     SOURCE_DATE_EPOCH so "now" never leaks in.
+//  1. Embedded wall-clock timestamps  → the build stamps
+//     SOURCE_DATE_EPOCH instead of "now", so the clock never reaches the
+//     output, fast or slow. Clamping (min(t, SDE)) is for FILE mtimes: a
+//     fresh checkout's newer mtimes are pinned down to SDE. Clamping the
+//     clock itself would still leak any clock that runs behind SDE.
 //  2. Filesystem iteration order      → sort filenames before processing,
 //     so output doesn't depend on directory layout.
 //  3. Non-deterministic artifact names → name artifacts by the HASH of
@@ -29,12 +32,14 @@ const (
 
 func fold(h, v int64) int64 { return (h*HB + v) % HM }
 
-// 1. Deterministic timestamps: clamp "now" to SOURCE_DATE_EPOCH.
-func normalizeTS(now, sde int64) int64 {
-	if now > sde {
+// 1. Deterministic timestamps: the mtime clamp (tar --clamp-mtime). A file
+// mtime newer than SOURCE_DATE_EPOCH is pinned down to it; an older one is
+// kept. The build time itself is SDE, not this.
+func normalizeTS(mtime, sde int64) int64 {
+	if mtime > sde {
 		return sde
 	}
-	return now
+	return mtime
 }
 
 // 3. Content-addressed artifact path: a pure function of content.
@@ -72,7 +77,7 @@ func (f *Files) buildDigest(doSort, doNorm bool, now, sde int64) int64 {
 	}
 	ts := now
 	if doNorm {
-		ts = normalizeTS(now, sde)
+		ts = sde // build time comes from the sources
 	}
 	h := fold(HSEED, ts)
 	for i := range f.name {
@@ -102,9 +107,9 @@ func check(cond bool, name string) {
 }
 
 func main() {
-	// 1. Deterministic timestamps.
-	check(normalizeTS(9999, 5000) == 5000, "clamp future now to SOURCE_DATE_EPOCH")
-	check(normalizeTS(3000, 5000) == 3000, "keep timestamp already <= SDE")
+	// 1. The mtime clamp.
+	check(normalizeTS(9999, 5000) == 5000, "newer mtime clamped to SOURCE_DATE_EPOCH")
+	check(normalizeTS(3000, 5000) == 3000, "older mtime kept")
 
 	// 2. Sorted iteration keeps content paired with its name.
 	{
@@ -116,8 +121,9 @@ func main() {
 		check(f.content[0] == 222, "content followed name 10")
 	}
 
-	// 3. Content-addressed paths.
-	check(casPath(111) == casPath(111), "same content → same path")
+	// 3. Content-addressed paths. ("same content → same path" holds
+	// because casPath is a pure function of content; comparing
+	// casPath(111) with itself would test nothing.)
 	check(casPath(111) != casPath(222), "different content → different path")
 
 	// Deterministic pipeline: two builds differing in BOTH input order and
@@ -137,9 +143,13 @@ func main() {
 
 	// Normalization alone kills clock drift (sort on, only clock differs).
 	{
-		n1 := orderA().buildDigest(true, true, 9999, 5000) // clamps 9999 → 5000
-		n2 := orderA().buildDigest(true, true, 7777, 5000) // clamps 7777 → 5000
+		n1 := orderA().buildDigest(true, true, 9999, 5000) // stamps 5000, not 9999
+		n2 := orderA().buildDigest(true, true, 7777, 5000) // stamps 5000, not 7777
 		check(n1 == n2, "normalized timestamp removes clock dependence")
+		// ...including a clock that runs BEHIND the epoch: min(now, sde)
+		// would stamp 3000 here and 5000 above, and the digests would differ.
+		n3 := orderA().buildDigest(true, true, 3000, 5000)
+		check(n3 == n1, "a slow clock does not leak into the build either")
 	}
 
 	fmt.Println("=== reproducible_builds ===")

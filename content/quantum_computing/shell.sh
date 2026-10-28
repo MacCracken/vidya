@@ -27,9 +27,10 @@ assert_eq "$(state_size 10)" "1024" "10 qubits"
 assert_eq "$(state_size 20)" "1048576" "20 qubits"
 
 # ── Grover iterations: floor(π/4 × √(N/M)) ───────────────────────────
-# awk is POSIX and always available, unlike bc — same floating-point
-# semantics for sqrt/log/exp; we just truncate via int() instead of
-# bc's `scale=0; x/1`.
+# awk is POSIX and installed everywhere (bc often is not on minimal
+# images). It computes sqrt/log/exp in IEEE double precision — unlike
+# bc -l, which is arbitrary-precision decimal — and we truncate via int()
+# instead of bc's `scale=0; x/1`.
 grover_iterations() {
     local n_items=$1 n_solutions=${2:-1}
     awk -v n="$n_items" -v m="$n_solutions" \
@@ -124,7 +125,7 @@ print_comparison() {
     printf "%-20s %-15s %-15s\n" "Problem" "Classical" "Quantum"
     printf "%-20s %-15s %-15s\n" "Search (N items)" "O(N)" "O(√N)"
     printf "%-20s %-15s %-15s\n" "Factoring (n bits)" "O(exp(n^⅓))" "O(n³)"
-    printf "%-20s %-15s %-15s\n" "Simulation (N elec)" "O(2^N)" "O(N)"
+    printf "%-20s %-15s %-15s\n" "Simulation (N elec)" "O(2^N)" "poly(N)"
     printf "%-20s %-15s %-15s\n" "Optimization" "varies" "quadratic ↑"
 }
 

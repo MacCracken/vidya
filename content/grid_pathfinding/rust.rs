@@ -1,7 +1,7 @@
 // Vidya — Grid Pathfinding in Rust
 //
 // BFS + A* on an 8x8 4-connected grid (0=walkable, 1=blocked).
-// Rust uses `Vec<u8>` for grid + visited (cache-locality wins per
+// Rust uses flat `[u8; GN]` arrays for grid + visited (cache-locality wins per
 // concept.toml's perf note), `VecDeque<usize>` for the BFS frontier,
 // and `BinaryHeap<Reverse<(f, idx)>>` for A*'s open set — a min-heap
 // over (f_score, cell_index). Manhattan distance is the heuristic.

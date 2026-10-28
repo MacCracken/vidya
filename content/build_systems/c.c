@@ -122,39 +122,47 @@ int main(void) {
     Builder b;
 
     /* topo orders all 3; app after util.o AND main.o */
+    /* bs_topo / bs_build mutate b, so they run outside assert(): under
+     * -DNDEBUG its expression is not evaluated at all. */
     build_graph(&b);
-    assert(bs_topo(&b) == 3);
+    int n = bs_topo(&b);
+    assert(n == 3);
     assert(order_pos(&b, 2) > order_pos(&b, 0));
     assert(order_pos(&b, 2) > order_pos(&b, 1));
 
     /* cold build rebuilds all 3 */
     build_graph(&b);
-    assert(bs_build(&b) == 3);
+    n = bs_build(&b);
+    assert(n == 3);
 
     /* second build, no edits, rebuilds nothing */
     build_graph(&b);
     bs_build(&b);
-    assert(bs_build(&b) == 0);
+    n = bs_build(&b);
+    assert(n == 0);
 
     /* edit main.c → rebuilds main.o + app = 2 */
     build_graph(&b);
     bs_build(&b);
     bs_set_src(&b, 1, 2999);
-    assert(bs_build(&b) == 2);
+    n = bs_build(&b);
+    assert(n == 2);
 
     /* edit util.c → rebuilds util.o + app = 2, main.o left untouched */
     build_graph(&b);
     bs_build(&b);
     long main_built = b.built[1];
     bs_set_src(&b, 0, 1999);
-    assert(bs_build(&b) == 2);
+    n = bs_build(&b);
+    assert(n == 2);
     assert(b.built[1] == main_built);
 
     /* 0 <-> 1 cycle leaves targets unordered */
     bs_reset(&b, 2);
     bs_add_dep(&b, 0, 1);
     bs_add_dep(&b, 1, 0);
-    assert(bs_topo(&b) < 2);
+    n = bs_topo(&b);
+    assert(n < 2);
 
     printf("All build_systems examples passed.\n");
     return 0;

@@ -9,13 +9,16 @@ package main
 import (
 	"fmt"
 	"strings"
+	"testing"
 	"unsafe"
 )
 
 func main() {
 	// ── Pre-allocation: make with capacity ─────────────────────────
-	// Growing a slice doubles capacity each time, copying all elements.
-	// Pre-allocate when you know the size.
+	// Growing a slice reallocates and copies all elements: capacity
+	// doubles while small, then grows by ~1.25-1.5x past 256 elements
+	// (runtime.growslice; e.g. 1280→1792→2560→3408 here). Pre-allocate
+	// when you know the size.
 
 	n := 10_000
 
@@ -46,11 +49,24 @@ func main() {
 	// ── Avoid unnecessary allocations ──────────────────────────────
 	// String to []byte and back allocates — reuse buffers
 
+	// Reusing buf only helps if nothing else allocates: append(buf,
+	// fmt.Sprintf(...)...) still builds a fresh string every iteration
+	// (10 allocs per 10 items); fmt.Appendf (Go 1.19) formats straight into
+	// buf (0 allocs).
 	buf := make([]byte, 0, 64)
-	for i := 0; i < 10; i++ {
-		buf = buf[:0] // reuse, no allocation
-		buf = append(buf, fmt.Sprintf("item%d", i)...)
-	}
+	viaSprintf := testing.AllocsPerRun(10, func() {
+		for i := 0; i < 10; i++ {
+			buf = buf[:0]                                  // reuse the backing array...
+			buf = append(buf, fmt.Sprintf("item%d", i)...) // ...but not the string
+		}
+	})
+	viaAppendf := testing.AllocsPerRun(10, func() {
+		for i := 0; i < 10; i++ {
+			buf = buf[:0]
+			buf = fmt.Appendf(buf, "item%d", i)
+		}
+	})
+	assert(viaAppendf < viaSprintf, fmt.Sprintf("Appendf (%v allocs) beats Sprintf (%v)", viaAppendf, viaSprintf))
 
 	// ── Struct size and alignment ──────────────────────────────────
 	// Field ordering affects struct size due to alignment padding
@@ -69,7 +85,8 @@ func main() {
 	}
 	// Total: 16 bytes
 
-	assert(unsafe.Sizeof(BadLayout{}) >= unsafe.Sizeof(GoodLayout{}), "layout optimization")
+	// Strict: ">=" would also pass if reordering saved nothing.
+	assert(unsafe.Sizeof(BadLayout{}) > unsafe.Sizeof(GoodLayout{}), "layout optimization")
 
 	// ── Map pre-allocation ─────────────────────────────────────────
 	// make(map, hint) avoids rehashing for known sizes
@@ -121,15 +138,22 @@ func main() {
 
 	x := 42 // stays on stack
 	_ = x
-	p := newOnHeap() // escapes to heap (returned pointer)
-	assert(*p > 0, "heap alloc")
+	// newOnHeap's x escapes ITS frame ("moved to heap: x"), but the call is
+	// inlined here and p never leaves main, so -m reports no heap move at
+	// this call site. Escape analysis runs after inlining.
+	p := newOnHeap()
+	assert(*p > 0, "pointer from inlined call")
 
 	// ── Sync.Pool for reducing GC pressure ─────────────────────────
 	// (Demonstrated in concurrency topic)
 	// Reuses allocated objects instead of creating new ones
 
 	// ── Avoid defer in tight loops ─────────────────────────────────
-	// defer has a small overhead (~35ns). In tight loops, call cleanup directly
+	// Not for speed: since Go 1.14 open-coded defers cost ~1-2 ns (the old
+	// ~35 ns figure is pre-1.14). The reason is semantics: a deferred call
+	// runs when the FUNCTION returns, not at the end of the iteration, so
+	// N iterations pile up N pending calls (N open files). Call cleanup
+	// directly, or move the loop body into its own function.
 	total := 0
 	for i := 0; i < 1000; i++ {
 		// Don't: defer cleanup()

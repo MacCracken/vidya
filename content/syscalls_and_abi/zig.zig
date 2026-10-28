@@ -1,8 +1,9 @@
 // Vidya — Syscalls and ABI in Zig
 //
 // Zig provides std.os.linux for raw syscall access — no libc required.
-// System V AMD64 ABI: args in rdi, rsi, rdx, r10, r8, r9; return in
-// rax; syscall number in rax. Zig's own calling convention differs
+// Linux x86_64 syscall convention (a variant of the System V AMD64 ABI,
+// whose user-space 4th argument is rcx): args in rdi, rsi, rdx, r10, r8,
+// r9; return in rax; syscall number in rax. Zig's own calling convention differs
 // from C ABI but can interop via `callconv(.c)`.
 
 const std = @import("std");
@@ -88,7 +89,8 @@ fn testSyscallNumbers() !void {
 
 // ── Raw Syscalls via Zig's std.os.linux ──────────────────────────────
 fn testLinuxSyscalls() !void {
-    if (builtin.os.tag != .linux) return;
+    // 0.17: `builtin.os` is deprecated (removal in 0.18); use builtin.target.os
+    if (builtin.target.os.tag != .linux) return;
 
     // write(fd=1, buf, len) — syscall number 1 on x86_64
     const msg = ""; // empty write to avoid output noise
@@ -145,8 +147,9 @@ fn testCallingConventions() !void {
 // System V AMD64 ABI specifies alignment and passing conventions
 
 // Packed: bit-packed into a backing integer — no padding between fields.
-// In Zig, packed structs use the smallest power-of-2 integer that fits.
-// u8 + u32 + u16 = 56 bits → backed by u64 (8 bytes with padding bits).
+// The backing integer is exactly as wide as the fields' bits added up,
+// not rounded to a power of 2: { u8, u32, u16 } is 56 bits, backed by a
+// u56 (@sizeOf is 8 only because that is u56's ABI size).
 const PackedBitfield = packed struct {
     flags: u4, // 4 bits
     tag: u4, // 4 bits
@@ -184,8 +187,11 @@ fn testAbiStructLayout() !void {
     // Could reorder to b(4) + c(2) + a(1) + pad(1) = 8 bytes
     try expect(@sizeOf(ZigExample) <= 12);
 
-    // System V ABI: structs <= 16 bytes can be passed in registers
-    // Larger structs are passed by pointer on the stack
+    // System V ABI: structs <= 16 bytes can be passed in registers.
+    // Larger ones are class MEMORY: the whole struct is COPIED into the
+    // stack argument area (gcc -O1: a 24-byte struct lands at [rsp] before
+    // the call and the callee reads 8/16/24[rsp]); no pointer is passed.
+    // Only a large RETURN value uses a hidden pointer (in rdi).
     try expect(@sizeOf(ExternExample) <= 16);
 
     // Verify packed struct field access — fields share a single integer
@@ -220,10 +226,16 @@ fn testErrno() !void {
         .{ "ENOSYS", 38 }, // Function not implemented
     };
 
-    // Errno 1 = EPERM, always
-    try expect(errnos[0][1] == 1);
-    // ENOSYS = 38 — returned for unimplemented syscalls
-    try expect(errnos[10][1] == 38);
+    // Check the table against std.os.linux.E rather than against itself
+    inline for (errnos) |e| {
+        try expect(@backingInt(@field(std.os.linux.E, e[0][1..])) == e[1]);
+    }
+
+    // And a real failing syscall: close(-1) returns -EBADF in rax, which
+    // std.os.linux.errno decodes into the E enum
+    const r = std.os.linux.syscall1(.close, @bitCast(@as(isize, -1)));
+    try expect(std.os.linux.errno(r) == .BADF);
+    try expect(@as(isize, @bitCast(r)) == -9);
 
     // Syscall error convention: return value > max_addr means error
     // Zig checks: if (ret > maxInt(usize) - 4096) it's an error

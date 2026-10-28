@@ -1,7 +1,9 @@
 // Vidya — Kernel Topics in Go
 //
-// Go isn't used for kernel code (it needs a runtime), but it's
-// excellent for kernel tooling, testing, and simulation. These
+// Go is rarely used for kernel code: its runtime (GC, scheduler) needs
+// an OS underneath, so the research kernel Biscuit (MIT, OSDI '18)
+// carries a modified runtime and gVisor's Go "kernel" runs in user space.
+// It is excellent for kernel tooling, testing, and simulation. These
 // examples model kernel data structures — page tables, interrupt
 // descriptors, MMIO registers, and ABIs — in Go's type system.
 

@@ -6,7 +6,9 @@
 // kernels use: page table entries, MMIO via volatile pointers,
 // interrupt descriptor layout, and ABI struct packing.
 
+#include <arpa/inet.h>
 #include <assert.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -194,26 +196,38 @@ typedef struct {
     uint32_t data;
 } __attribute__((packed)) icmp_header_t;
 
+// The frame the CPU itself pushes on an x86_64 interrupt or exception
+// (Intel SDM Vol. 3A, "64-Bit Mode Stack Frame"), lowest address first.
+// Every slot is 8 bytes: in 64-bit mode CS and SS are pushed
+// zero-extended, and SS:RSP is pushed unconditionally. Exceptions that
+// carry an error code (#DF, #GP, #PF, ...) push it below RIP.
 typedef struct {
-    uint32_t eax, ebx, ecx, edx;
-    uint32_t esi, edi, ebp, esp;
     uint64_t rip;
+    uint64_t cs;
     uint64_t rflags;
-} __attribute__((packed)) trap_frame_t;
+    uint64_t rsp;
+    uint64_t ss;
+} interrupt_frame_t;
 
 static void test_struct_packing(void) {
     // ICMP header must be exactly 8 bytes (no padding)
     assert(sizeof(icmp_header_t) == 8);
 
-    // Trap frame: 8 * 4 + 2 * 8 = 48 bytes
-    assert(sizeof(trap_frame_t) == 48);
+    // Interrupt frame: 5 * 8 = 40 bytes, RSP 24 bytes above RIP
+    assert(sizeof(interrupt_frame_t) == 40);
+    assert(offsetof(interrupt_frame_t, rsp) == 24);
 
-    // Verify no padding between fields
-    icmp_header_t icmp = {.type = 8, .code = 0, .checksum = 0x1234, .data = 0xDEADBEEF};
+    // Verify no padding between fields. Multi-byte header fields go on the
+    // wire big-endian: convert with htons/htonl, or a little-endian host
+    // emits the checksum as 34 12. (Accepting either byte order, as a test,
+    // can never fail.)
+    icmp_header_t icmp = {.type = 8, .code = 0, .checksum = htons(0x1234),
+                          .data = htonl(0xDEADBEEF)};
     uint8_t *bytes = (uint8_t *)&icmp;
     assert(bytes[0] == 8);       // type
     assert(bytes[1] == 0);       // code
-    assert(bytes[2] == 0x34 || bytes[2] == 0x12);  // checksum (endian-dependent)
+    assert(bytes[2] == 0x12 && bytes[3] == 0x34);  // checksum, network order
+    assert(bytes[4] == 0xDE && bytes[7] == 0xEF);  // data, network order
 }
 
 int main(void) {

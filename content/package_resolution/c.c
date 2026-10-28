@@ -5,8 +5,11 @@
  *
  * A semver major.minor.patch is encoded as one integer
  *   enc = major*1000000 + minor*1000 + patch
- * so version comparison IS integer comparison. A constraint is a
- * half-open range [lo, hi). A caret ^X.Y.Z = [X.Y.Z, (X+1).0.0). */
+ * so version comparison IS integer comparison (valid while minor and
+ * patch stay < 1000). A constraint is a half-open range [lo, hi).
+ * A caret ^X.Y.Z = [X.Y.Z, (X+1).0.0) for X >= 1; below 1.0 the leftmost
+ * non-zero field is the breaking one (npm/cargo): ^0.Y.Z = [0.Y.Z,
+ * 0.(Y+1).0) and ^0.0.Z = [0.0.Z, 0.0.(Z+1)). */
 
 #include <assert.h>
 #include <stdio.h>
@@ -19,9 +22,13 @@
 static long sv(long maj, long min, long pat) { return maj * VMAJ + min * VMIN + pat; }
 static long sv_major(long v) { return v / VMAJ; }
 
-/* --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0) --- */
+/* --- Caret range [lo, hi): bump the leftmost non-zero field --- */
 static long caret_lo(long v) { return v; }
-static long caret_hi(long v) { return (sv_major(v) + 1) * VMAJ; }
+static long caret_hi(long v) {
+    if (sv_major(v) > 0) return (sv_major(v) + 1) * VMAJ;   /* ^1.2.3 → 2.0.0 */
+    if (v / VMIN > 0)    return (v / VMIN + 1) * VMIN;      /* ^0.2.3 → 0.3.0 */
+    return v + 1;                                           /* ^0.0.3 → 0.0.4 */
+}
 
 /* --- Constraint satisfaction over a half-open range --- */
 static int satisfies(long v, long lo, long hi) {
@@ -141,6 +148,10 @@ int main(void) {
     assert(satisfies(sv(1, 4, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))) == 1);
     assert(satisfies(sv(2, 0, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))) == 0);
     assert(satisfies(sv(1, 1, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))) == 0);
+    /* below 1.0 the minor (then patch) is the breaking axis */
+    assert(caret_hi(sv(0, 2, 3)) == sv(0, 3, 0));
+    assert(satisfies(sv(0, 9, 0), caret_lo(sv(0, 2, 3)), caret_hi(sv(0, 2, 3))) == 0);
+    assert(caret_hi(sv(0, 0, 3)) == sv(0, 0, 4));
 
     /* intersection */
     assert(range_lo_max(sv(1, 0, 0), sv(1, 3, 0)) == sv(1, 3, 0));

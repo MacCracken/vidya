@@ -19,11 +19,11 @@
 //   3. A read-quorum subset measured (R=2). Because W+R > N=3, at
 //      least one measured qubit was in the write quorum.
 //
-// Plus a vector-clock analog: phase-encoded counter qubits that
-// commute (causal) or anti-commute (concurrent) under combination.
+// Plus a vector-clock analog: one qubit per node component, advanced
+// by a phase-tagged local event.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // === Quorum write to W=2 of N=3, then read R=2 =======================
 //
@@ -36,9 +36,9 @@ include "qelib1.inc";
 // quorum overlaps the write quorum at replica 1, the read sees
 // the written value with certainty.
 
-qreg replicas[3];
-qreg write_client[1];
-creg read_q[2];           // measure replicas {1, 2}
+qubit[3] replicas;
+qubit[1] write_client;
+bit[2] read_q;           // measure replicas {1, 2}
 
 // Prepare the value to write: |1>.
 x write_client[0];
@@ -48,11 +48,12 @@ cx write_client[0], replicas[0];
 cx write_client[0], replicas[1];
 
 // Read R=2 of 3: replicas {1, 2}.
-measure replicas[1] -> read_q[0];
-measure replicas[2] -> read_q[1];
+read_q[0] = measure replicas[1];
+read_q[1] = measure replicas[2];
 // read_q[0] = 1 (replica 1 was in write quorum, has the value).
 // read_q[1] = 0 (replica 2 not in write quorum).
 // The reader sees value=1 (max-seq wins), agreeing with the write.
+// @expect read_q == 1
 
 
 // === Partition: minority side cannot achieve write quorum =========
@@ -62,9 +63,9 @@ measure replicas[2] -> read_q[1];
 // then only lands on 1 replica — less than W=2 — and a quorum
 // reader from the other side returns the stale (|0>) value.
 
-qreg part_replicas[3];
-qreg part_client[1];
-creg part_read[2];
+qubit[3] part_replicas;
+qubit[1] part_client;
+bit[2] part_read;
 
 x part_client[0];
 
@@ -72,33 +73,32 @@ x part_client[0];
 cx part_client[0], part_replicas[0];
 
 // Read quorum {1, 2}: both still in |0>. Reader sees stale.
-measure part_replicas[1] -> part_read[0];
-measure part_replicas[2] -> part_read[1];
+part_read[0] = measure part_replicas[1];
+part_read[1] = measure part_replicas[2];
 // part_read = "00" — reader missed the write.
+// @expect part_read == 0
 
 
 // === Vector-clock analog: causal vs concurrent phases =============
 //
-// Each "node" has a phase qubit. Local events apply Z (advance
-// causally). Two nodes that each apply Z independently end up in
-// states whose product reveals concurrency: identical Z's (same
-// node) commute (causal); different-node Z's, prepared on
-// independently-superposed qubits, do NOT collapse to a single
-// total order — they're concurrent.
+// Each "node" has a phase qubit. Local events apply Z, sandwiched in
+// H so the phase tag becomes a readable bit flip (H-Z-H = X).
 //
-// Here we just demonstrate the phase advancement; concurrency
-// detection in OpenQASM 2.0 requires interference experiments
-// that exceed the corpus's static-circuit scope.
+// Here we just demonstrate the component advancement. Detecting
+// concurrency means comparing two clocks component by component
+// (neither vc_a <= vc_b nor vc_b <= vc_a). That comparison is
+// classical work: OpenQASM 3 could measure both clocks and branch on
+// the bits with `if`, but nothing quantum would be doing the work.
 
-qreg vclock[3];
-creg vclock_c[3];
+qubit[3] vclock;
+bit[3] vclock_c;
 
 // Node 0 records 1 local event: Z phase.
 h vclock[0];
 z vclock[0];
 h vclock[0];
-// vclock[0] now in a phase-tagged superposition: |1> with prob 1
-// after the H-Z-H sequence (X-equivalent). Modelling that node 0's
+// vclock[0] is now |1> with prob 1: the H-Z-H sequence is an X, so
+// the phase tag became a bit flip. Modelling that node 0's
 // component has incremented.
 
 // Node 1 records 1 local event: same.
@@ -108,9 +108,10 @@ h vclock[1];
 
 // Node 2 unchanged (still |0>) — no local events.
 
-measure vclock -> vclock_c;
+vclock_c = measure vclock;
 // vclock_c = "011" (read MSB-first) — two components at 1, one at 0.
 // Modelling vc = [1, 1, 0].
+// @expect vclock_c == 3
 
 
 // --- Notes — distributed systems vs entanglement-as-replication --

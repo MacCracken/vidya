@@ -258,6 +258,24 @@ func (p *Parser) ParseExpr(minBP int) Expr {
 	return lhs
 }
 
+// ParseAll parses a complete input. ParseExpr stops at the first token
+// that cannot continue an expression, so without the EOF check "2 3"
+// would parse as 2 and "1 + 2 ) * 100" as 3 — trailing input silently
+// dropped.
+func ParseAll(source string) Expr {
+	p := NewParser(source)
+	e := p.ParseExpr(0)
+	p.expect(TokEOF)
+	return e
+}
+
+// rejects reports whether parsing source panics (this parser's error path).
+func rejects(source string) (rejected bool) {
+	defer func() { rejected = recover() != nil }()
+	ParseAll(source)
+	return false
+}
+
 // ── Tree-walk evaluator ───────────────────────────────────────────────
 
 func Eval(expr Expr) int64 {
@@ -302,8 +320,7 @@ func main() {
 	}
 
 	for _, tc := range tests {
-		parser := NewParser(tc.input)
-		ast := parser.ParseExpr(0)
+		ast := ParseAll(tc.input)
 		result := Eval(ast)
 
 		status := "ok"
@@ -316,6 +333,12 @@ func main() {
 		if result != tc.expected {
 			panic(fmt.Sprintf("failed on %q: got %d, expected %d",
 				tc.input, result, tc.expected))
+		}
+	}
+
+	for _, bad := range []string{"2 3", "1 + 2 ) * 100", "(2 + 3", "2 +"} {
+		if !rejects(bad) {
+			panic(fmt.Sprintf("malformed input %q was accepted", bad))
 		}
 	}
 

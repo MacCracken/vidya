@@ -6,6 +6,8 @@
  * Mirrors the cyrius reference's test surface exactly.
  */
 
+#define _POSIX_C_SOURCE 200809L  /* mkstemp */
+
 #include <assert.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -69,17 +71,30 @@ static int page_write(int fd, uint64_t num, const uint8_t *buf) {
     return (int)write(fd, buf, PAGE_SZ);
 }
 
+/* The on-disk header is the allocator's source of truth: persist it after
+ * every change, and only AFTER the page write it describes. Skip this and
+ * a reopen reloads page_count=1 / freehead=0, hands out live pages again
+ * and loses the free list. */
+static void hdr_flush(int fd, const Header *h) {
+    uint8_t buf[PAGE_SZ];
+    hdr_to_bytes(h, buf);
+    io_ok(lseek(fd, 0, SEEK_SET) == 0, "lseek header");
+    io_ok(write(fd, buf, PAGE_SZ) == PAGE_SZ, "write header");
+}
+
 static uint64_t page_alloc(int fd, Header *h) {
     if (h->freehead != 0) {
         uint64_t fh = h->freehead;
         uint8_t buf[PAGE_SZ];
         io_ok(page_read(fd, fh, buf) == PAGE_SZ, "page_read (free page)");
         memcpy(&h->freehead, buf + FP_NEXT, 8);
+        hdr_flush(fd, h);
         return fh;
     }
     uint64_t num = h->page_count++;
     uint8_t zero[PAGE_SZ] = {0};
     io_ok(page_write(fd, num, zero) == PAGE_SZ, "page_write (new page)");
+    hdr_flush(fd, h);
     return num;
 }
 
@@ -89,12 +104,14 @@ static void page_free(int fd, Header *h, uint64_t num) {
     memcpy(buf + FP_NEXT, &h->freehead, 8);
     io_ok(page_write(fd, num, buf) == PAGE_SZ, "page_write (free)");
     h->freehead = num;
+    hdr_flush(fd, h);
 }
 
 int main(void) {
-    const char *path = "/tmp/vidya_page_c.bin";
-    unlink(path);
-    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    /* mkstemp, not a fixed /tmp name: it creates the file with O_EXCL, so
+     * nobody can pre-plant a symlink there, and parallel runs don't collide. */
+    char path[] = "/tmp/vidya_page_c.XXXXXX";
+    int fd = mkstemp(path);
     assert(fd >= 0);
 
     Header h;
@@ -134,8 +151,15 @@ int main(void) {
     uint64_t p3 = page_alloc(fd, &h);
     assert(p3 == 2 && "reused freed page");
 
+    /* the header on disk tracks the allocator, so a reopen resumes it */
+    io_ok(lseek(fd, 0, SEEK_SET) == 0, "lseek header");
+    io_ok(read(fd, rh, PAGE_SZ) == PAGE_SZ, "read header");
+    hdr_load(&loaded, rh);
+    assert(loaded.page_count == h.page_count && loaded.freehead == h.freehead
+           && "header persisted");
+
     io_ok(close(fd) == 0, "close");
     unlink(path);
-    printf("page_management: 6/6 ok\n");
+    printf("page_management: 8/8 ok\n");
     return 0;
 }

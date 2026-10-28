@@ -270,7 +270,10 @@ func (p *PIC8259A) RaiseIRQ(irq uint8) {
 }
 
 // AcknowledgeIRQ returns the vector of the highest-priority pending,
-// unmasked interrupt, or (0, false) if none available.
+// unmasked interrupt, or (0, false) if none available. Like the real
+// 8259A in fully nested mode, an IRQ is held while any IRQ of equal or
+// higher priority is still in service — which is why a handler that
+// forgets EOI silences its own line and every lower-priority one.
 func (p *PIC8259A) AcknowledgeIRQ() (uint8, bool) {
 	pending := p.irr & ^p.imr // pending AND not masked
 	if pending == 0 {
@@ -278,6 +281,9 @@ func (p *PIC8259A) AcknowledgeIRQ() (uint8, bool) {
 	}
 	// Find lowest-numbered (highest-priority) bit
 	for i := uint8(0); i < 8; i++ {
+		if p.isr&(1<<i) != 0 {
+			return 0, false // IRQ i in service blocks i and everything below it
+		}
 		if pending&(1<<i) != 0 {
 			p.irr &^= 1 << i // clear from IRR
 			p.isr |= 1 << i  // mark in-service
@@ -341,6 +347,27 @@ func testPIC8259A() {
 	// No pending interrupts
 	_, ok = master.AcknowledgeIRQ()
 	assert(!ok, "no pending interrupts")
+
+	// Forgetting EOI: the in-service timer blocks itself and the keyboard;
+	// only a higher-priority line could nest. EOI releases them.
+	pic := NewPIC("nested", 32)
+	pic.Unmask(0)
+	pic.Unmask(1)
+	pic.RaiseIRQ(1)
+	vec, ok = pic.AcknowledgeIRQ()
+	assert(ok && vec == 33, "keyboard delivered")
+	pic.RaiseIRQ(0)
+	vec, ok = pic.AcknowledgeIRQ()
+	assert(ok && vec == 32, "higher-priority timer nests over in-service keyboard")
+	pic.RaiseIRQ(1)
+	_, ok = pic.AcknowledgeIRQ()
+	assert(!ok, "no EOI yet: keyboard held behind in-service timer")
+	pic.EOI(0)
+	_, ok = pic.AcknowledgeIRQ()
+	assert(!ok, "keyboard still held: its own earlier instance is in service")
+	pic.EOI(1)
+	vec, ok = pic.AcknowledgeIRQ()
+	assert(ok && vec == 33, "after both EOIs the held keyboard IRQ is delivered")
 
 	fmt.Printf("   Master PIC: IRQ 0-7 -> vectors %d-%d\n", master.baseVector, master.baseVector+7)
 	fmt.Printf("   Slave PIC:  IRQ 8-15 -> vectors %d-%d\n", slave.baseVector, slave.baseVector+7)
@@ -505,25 +532,31 @@ func testInterruptDispatch() {
 }
 
 // ── Interrupt Priority ───────────────────────────────────────────────
-// Lower vector = higher priority for exceptions.
-// For PIC, lower IRQ = higher priority.
-// NMI (vector 2) is non-maskable — always delivered.
+// When several events are pending at an instruction boundary, the CPU
+// picks by event CLASS, not by vector number (Intel SDM Vol. 3A,
+// "Interrupt and Exception Handling", the priority table for concurrent
+// exceptions and interrupts). A pending hardware IRQ is taken before a
+// fault the next instruction would raise; the fault simply recurs when
+// that instruction is retried. Among maskable interrupts the local APIC
+// ranks HIGHER vectors higher (priority class = vector >> 4); the 8259A
+// PIC ranks lower IRQ numbers higher. NMI ignores IF, but a second NMI
+// is held until the first handler's IRET.
 
 func testInterruptPriority() {
 	fmt.Println("\n6. Interrupt priority and nesting:")
 
-	// Priority order: NMI > exceptions > hardware IRQs > software INT
+	// SDM priority classes (1 = highest), abridged
 	type IntClass struct {
 		name     string
 		vectors  string
 		priority int // lower = higher priority
 	}
 	classes := []IntClass{
-		{"Machine Check", "18", 0},
-		{"NMI", "2", 1},
-		{"CPU Exceptions", "0-31", 2},
-		{"Hardware IRQs", "32-47 (PIC)", 3},
-		{"Software INT", "any", 4},
+		{"Reset / Machine Check", "18", 1},
+		{"Debug traps (prev. instr)", "1", 4},
+		{"NMI", "2", 5},
+		{"Maskable hardware IRQs", "32-255", 6},
+		{"Faults (fetch/decode/exec)", "e.g. 14, 6, 0", 8}, // SDM classes 8-10
 	}
 
 	for i := 0; i < len(classes)-1; i++ {
@@ -531,10 +564,10 @@ func testInterruptPriority() {
 			fmt.Sprintf("%s > %s", classes[i].name, classes[i+1].name))
 	}
 
-	fmt.Printf("   %-20s %-15s %s\n", "Class", "Vectors", "Priority")
-	fmt.Printf("   %-20s %-15s %s\n", "----", "-------", "--------")
+	fmt.Printf("   %-26s %-15s %s\n", "Class", "Vectors", "Priority")
+	fmt.Printf("   %-26s %-15s %s\n", "----", "-------", "--------")
 	for _, c := range classes {
-		fmt.Printf("   %-20s %-15s %d (lower=higher)\n", c.name, c.vectors, c.priority)
+		fmt.Printf("   %-26s %-15s %d (lower=higher)\n", c.name, c.vectors, c.priority)
 	}
 
 	// Interrupt gate vs trap gate behavior

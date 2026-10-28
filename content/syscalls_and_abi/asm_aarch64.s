@@ -4,15 +4,19 @@
 //   x8  = syscall number
 //   x0-x5 = arguments (arg1-arg6)
 //   Return value in x0 (negative = -errno on error)
-//   Clobbered: none (unlike x86_64 which clobbers rcx/r11)
-//   Preserved: x1-x7, x9-x29, x30 (LR), sp
+//   Clobbered: no GPR but x0 (unlike x86_64 which clobbers rcx/r11).
+//     With SVE (mandatory in ARMv9-A) the kernel zeroes Z-register bits
+//     above 127, P0-P15 and FFR on every syscall (Linux arm64 sve.rst).
+//   Preserved: x1-x30 (x8 included), sp, the low 128 bits of each vector
 //
 // AArch64 function calling convention (AAPCS64):
 //   x0-x7  = arguments and return values (x0-x1 for 128-bit return)
 //   x8     = indirect result location register
 //   x9-x15 = temporary (caller-saved/volatile)
 //   x16-x17 = intra-procedure call scratch (IP0/IP1)
-//   x18    = platform register (reserved on Linux)
+//   x18    = platform register (reserved on Darwin, Windows and Android
+//            shadow-call-stack builds; a plain temporary on Linux, where
+//            gcc/clang allocate it freely — avoid it in portable code)
 //   x19-x28 = callee-saved (must be preserved across calls)
 //   x29    = frame pointer (FP)
 //   x30    = link register (LR) — return address from BL
@@ -79,9 +83,9 @@ _start:
     // ── Function calling convention (AAPCS64) ─────────────────────
     // Integer arguments: x0-x7
     // Return value: x0 (and x1 for 128-bit)
-    // Caller-saved (volatile):  x0-x15, x16-x17
+    // Caller-saved (volatile):  x0-x15, x16-x17 (and x18 on Linux)
     // Callee-saved (preserved): x19-x28, x29 (FP), x30 (LR)
-    // x18 is platform-reserved (do not use)
+    // x18 is the platform register: reserved on some OSes, so avoid it
     // Stack must be 16-byte aligned at all times
 
     // Demonstrate function call with arguments
@@ -112,8 +116,9 @@ _start:
 
     // ── AArch64 vs x86_64: no register clobbering by svc ─────────
     // Unlike x86_64 where syscall clobbers rcx and r11,
-    // AArch64's svc does NOT clobber any registers except x0 (return).
-    // This means x1-x7 are preserved across syscalls.
+    // AArch64's svc does NOT clobber any general-purpose register except
+    // x0 (return). This means x1-x7 are preserved across syscalls. (SVE
+    // state above the 128-bit V registers is the exception: see header.)
     mov     x1, #0xDEAD
     mov     x8, #172            // sys_getpid
     svc     #0

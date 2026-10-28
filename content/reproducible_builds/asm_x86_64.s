@@ -5,8 +5,11 @@
 # content/reproducible_builds/cyrius.cyr exactly. Three classic sources of
 # non-determinism and their fixes are modeled over an in-memory file set:
 #
-#   1. Wall-clock timestamps  → clamp "now" to SOURCE_DATE_EPOCH (normalize_ts)
-#      so a future clock never leaks in.
+#   1. Wall-clock timestamps  → the build stamps SOURCE_DATE_EPOCH instead of
+#      "now", so the clock never reaches the output — fast or slow. Clamping
+#      (normalize_ts: min(t, SDE)) is for FILE mtimes: a fresh checkout's
+#      newer mtimes are pinned down to SDE. Clamping the clock itself would
+#      still leak any clock that runs behind SDE.
 #   2. Filesystem iteration order → sort filenames before folding them, so
 #      output never depends on directory layout (files_sort).
 #   3. Artifact names → name by HASH of content (cas_path), making identical
@@ -51,7 +54,8 @@ fold:
     mov     rax, rdx
     ret
 
-# normalize_ts(rdi=now, rsi=sde) -> rax = (now > sde) ? sde : now
+# normalize_ts(rdi=mtime, rsi=sde) -> rax = (mtime > sde) ? sde : mtime
+# The mtime clamp (tar --clamp-mtime style).
 normalize_ts:
     mov     rax, rdi                    # now
     cmp     rdi, rsi
@@ -153,14 +157,12 @@ build_digest:
     jz      .bd_ts
     call    files_sort
 .bd_ts:
-    # ts = now; if do_norm: ts = normalize_ts(now, sde)
+    # ts = now; if do_norm: ts = sde — the build time comes from the
+    # sources, never from the clock
     mov     r15, r13                    # ts = now
     test    r12, r12
     jz      .bd_seed
-    mov     rdi, r13
-    mov     rsi, r14
-    call    normalize_ts
-    mov     r15, rax                    # ts = normalize_ts(now, sde)
+    mov     r15, r14                    # ts = SOURCE_DATE_EPOCH
 .bd_seed:
     # h = fold(HSEED, ts)
     mov     rdi, HSEED
@@ -237,7 +239,7 @@ setup_order_b:
     ret
 
 _start:
-    # ---- Test 1: normalize_ts clamps a future clock, keeps a past one ----
+    # ---- Test 1: normalize_ts clamps a newer mtime, keeps an older one ----
     mov     rdi, 9999
     mov     rsi, 5000
     call    normalize_ts
@@ -320,15 +322,44 @@ _start:
     mov     rdx, 9999
     mov     rcx, 5000
     call    build_digest
-    mov     rbx, rax                        # norm1 (clamps 9999 → 5000)
+    mov     rbx, rax                        # norm1 (stamps 5000, not 9999)
     call    setup_order_a
     mov     rdi, 1
     mov     rsi, 1
     mov     rdx, 7777
     mov     rcx, 5000
     call    build_digest
-    cmp     rax, rbx                        # norm2 (clamps 7777 → 5000)
+    cmp     rax, rbx                        # norm2 (stamps 5000, not 7777)
     jne     fail
+
+    # ---- Test 7: ...including a clock that runs BEHIND the epoch ----
+    # min(now, sde) would stamp 3000 here and 5000 above: still drift.
+    call    setup_order_a
+    mov     rdi, 1
+    mov     rsi, 1
+    mov     rdx, 3000
+    mov     rcx, 5000
+    call    build_digest
+    cmp     rax, rbx
+    jne     fail
+
+    # ---- Test 8: iteration order alone drifts (clock already normalized) ----
+    # Test 5 changes the clock too, so it cannot show that sorting matters.
+    call    setup_order_a
+    mov     rdi, 0                          # no sort
+    mov     rsi, 1
+    mov     rdx, 9999
+    mov     rcx, 5000
+    call    build_digest
+    mov     rbx, rax
+    call    setup_order_b
+    mov     rdi, 0
+    mov     rsi, 1
+    mov     rdx, 9999
+    mov     rcx, 5000
+    call    build_digest
+    cmp     rax, rbx
+    je      fail                            # must differ
 
     # ---- All passed ----
     mov     rax, 1

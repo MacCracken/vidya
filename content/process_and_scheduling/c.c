@@ -35,11 +35,25 @@ static const char *state_name(task_state_t s) {
     return "?";
 }
 
+/* Legal moves of the lifecycle table printed in main(). */
+static int valid_transition(task_state_t from, task_state_t to) {
+    switch (from) {
+        case TASK_READY:      return to == TASK_RUNNING;
+        case TASK_RUNNING:    return to == TASK_READY || to == TASK_BLOCKED
+                                  || to == TASK_TERMINATED;
+        case TASK_BLOCKED:    return to == TASK_READY;
+        case TASK_TERMINATED: return 0;
+    }
+    return 0;
+}
+
 /* ── Saved Registers ─────────────────────────────────────────────────── */
 
 /* On x86_64 context switch, only callee-saved registers are stored.
- * The calling convention guarantees caller-saved registers are already
- * on the stack. */
+ * context_switch is entered as an ordinary call, and the calling
+ * convention lets every caller assume caller-saved registers (RAX, RCX,
+ * RDX, RSI, RDI, R8-R11) are clobbered by a call — any the caller still
+ * needed it has already spilled itself. */
 typedef struct {
     uint64_t rsp;
     uint64_t rbp;
@@ -77,15 +91,25 @@ static void task_init(task_t *t, uint32_t pid, const char *name, int8_t nice) {
     t->time_slice = 10;
 }
 
-/* CFS weight: nice 0 = 1024, each nice level ~1.25x */
+/* CFS weight: nice 0 = 1024, each nice level ~1.25x — Linux's
+ * sched_prio_to_weight[] (kernel/sched/core.c). The ratio is chosen so one
+ * nice step moves a task's CPU share by ~10% against a nice-0 peer; a
+ * power-of-two table (x2 per level) would make nice -20 vs 19 a ratio of
+ * 2^39 instead of the kernel's ~5900. */
+static const uint32_t sched_prio_to_weight[40] = {
+    /* -20 */ 88761, 71755, 56483, 46273, 36291,
+    /* -15 */ 29154, 23254, 18705, 14949, 11916,
+    /* -10 */  9548,  7620,  6100,  4904,  3906,
+    /*  -5 */  3121,  2501,  1991,  1586,  1277,
+    /*   0 */  1024,   820,   655,   526,   423,
+    /*   5 */   335,   272,   215,   172,   137,
+    /*  10 */   110,    87,    70,    56,    45,
+    /*  15 */    36,    29,    23,    18,    15,
+};
+
 static uint64_t task_weight(const task_t *t) {
-    uint64_t base = 1024;
-    if (t->nice >= 0) {
-        unsigned shift = (unsigned)t->nice;
-        return base >> (shift > 10 ? 10 : shift);
-    }
-    unsigned shift = (unsigned)(-t->nice);
-    return base << (shift > 10 ? 10 : shift);
+    int nice = t->nice < -20 ? -20 : (t->nice > 19 ? 19 : t->nice);
+    return sched_prio_to_weight[nice + 20];
 }
 
 static void task_print(const task_t *t) {
@@ -305,9 +329,9 @@ int main(void) {
     task_init(&tw, 0, "w", 0);
     assert(task_weight(&tw) == 1024);
     tw.nice = -1;
-    assert(task_weight(&tw) == 2048);
+    assert(task_weight(&tw) == 1277);
     tw.nice = 1;
-    assert(task_weight(&tw) == 512);
+    assert(task_weight(&tw) == 820);
 
     /* ── 3. Context switch anatomy ───────────────────────────────────── */
     printf("\n3. Context switch anatomy (x86_64):\n");
@@ -344,17 +368,22 @@ int main(void) {
     printf("     exit()          RUNNING -> TERMINATED     resources freed\n");
     printf("     wait()          parent collects status    task_struct freed\n");
 
-    /* Verify state transitions */
+    /* Verify state transitions against the table above. Asserting that a
+     * field equals the value just assigned to it can never fail; checking
+     * each step against the transition rules can. */
     task_t lifecycle;
     task_init(&lifecycle, 99, "test", 0);
     assert(lifecycle.state == TASK_READY);
-    lifecycle.state = TASK_RUNNING;
-    assert(lifecycle.state == TASK_RUNNING);
-    lifecycle.state = TASK_BLOCKED;
-    assert(lifecycle.state == TASK_BLOCKED);
-    lifecycle.state = TASK_READY;
-    lifecycle.state = TASK_TERMINATED;
-    assert(lifecycle.state == TASK_TERMINATED);
+    const task_state_t walk[] = {
+        TASK_RUNNING, TASK_BLOCKED, TASK_READY, TASK_RUNNING, TASK_TERMINATED
+    };
+    for (size_t i = 0; i < sizeof(walk) / sizeof(walk[0]); i++) {
+        assert(valid_transition(lifecycle.state, walk[i]));
+        lifecycle.state = walk[i];
+    }
+    assert(!valid_transition(TASK_BLOCKED, TASK_RUNNING));   /* woken to READY first */
+    assert(!valid_transition(TASK_READY, TASK_TERMINATED));  /* exit() runs in the task */
+    assert(!valid_transition(TASK_TERMINATED, TASK_READY));  /* no resurrection */
 
     printf("\nAll assertions passed.\n");
     return 0;

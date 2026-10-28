@@ -13,6 +13,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sort"
 	"strings"
@@ -177,42 +178,48 @@ func sectionOrder(m map[string]*Section) []string {
 	return names
 }
 
-// Pass 1: Scan all objects, build global symbol table.
-// Strong definitions win over weak. Multiple strong = error.
-func (l *Linker) Pass1(objects []*ObjectFile) {
+// layout groups every object's chunk of a section into one output
+// section, then places the output sections one after another. Each input
+// chunk records its own address (sec.BaseAddr), because symbols and
+// relocations are offsets into THAT chunk, not into the merged section.
+//
+// Output sections are placed in a CANONICAL order, not map order. Go
+// randomises map iteration deliberately, so ranging a map here would assign
+// base addresses in a different order on every run. A real linker lays out
+// .text first, then read-only data, then writable data, then .bss; sorting
+// the names alphabetically would put .data before .text and teach the layout
+// backwards, which is why this is an explicit order rather than a sort.
+//
+// All chunks of a section are gathered BEFORE the next section is placed:
+// appending a later object's .text after .data had been given an address
+// would make the grown .text overlap .data.
+func (l *Linker) layout(objects []*ObjectFile) {
+	all := make(map[string]*Section)
 	for _, obj := range objects {
-		// Merge sections — append each object's section data.
-		//
-		// Iterate in a CANONICAL order, not map order. Go randomises map
-		// iteration deliberately, so ranging obj.Sections directly assigned
-		// base addresses in a different order on every run — this file was the
-		// only nondeterministic example in the corpus (6 runs produced 2
-		// distinct outputs). A real linker lays out .text first, then
-		// read-only data, then writable data, then .bss; sorting the names
-		// alphabetically would put .data before .text and teach the layout
-		// backwards, which is why this is an explicit order rather than a sort.
-		for _, name := range sectionOrder(obj.Sections) {
-			sec := obj.Sections[name]
-			if existing, ok := l.Sections[name]; ok {
-				// Record base address for this chunk
-				sec.BaseAddr = uint64(len(existing.Data)) + existing.BaseAddr
-				existing.Data = append(existing.Data, sec.Data...)
-			} else {
-				sec.BaseAddr = l.NextAddr
-				l.Sections[name] = &Section{
-					Name:     name,
-					Data:     make([]byte, len(sec.Data)),
-					BaseAddr: l.NextAddr,
-				}
-				copy(l.Sections[name].Data, sec.Data)
-				l.NextAddr += uint64(len(sec.Data))
-				// Align to 16 bytes
-				if l.NextAddr%16 != 0 {
-					l.NextAddr = (l.NextAddr + 15) & ^uint64(15)
-				}
+		for name, sec := range obj.Sections {
+			all[name] = sec
+		}
+	}
+	for _, name := range sectionOrder(all) {
+		out := &Section{Name: name, BaseAddr: l.NextAddr}
+		for _, obj := range objects {
+			if sec, ok := obj.Sections[name]; ok {
+				sec.BaseAddr = out.BaseAddr + uint64(len(out.Data)) // this chunk's address
+				out.Data = append(out.Data, sec.Data...)
 			}
 		}
+		l.Sections[name] = out
+		// Next section starts on a 16-byte boundary
+		l.NextAddr = (out.BaseAddr + uint64(len(out.Data)) + 15) &^ uint64(15)
+	}
+}
 
+// Pass 1: Lay out sections, then scan all objects and build the global
+// symbol table. Strong definitions win over weak. Multiple strong = error.
+func (l *Linker) Pass1(objects []*ObjectFile) {
+	l.layout(objects)
+
+	for _, obj := range objects {
 		// Collect symbols
 		for i := range obj.Symbols {
 			sym := obj.Symbols[i]
@@ -224,6 +231,11 @@ func (l *Linker) Pass1(objects []*ObjectFile) {
 				}
 				continue
 			}
+
+			// Symbol address = address of the DEFINING object's chunk +
+			// offset. (The merged section's base would give every object's
+			// first symbol the same address.)
+			sym.ResolvedAddr = obj.Sections[sym.Section].BaseAddr + sym.Offset
 
 			existing, exists := l.GlobalSymbols[sym.Name]
 			if !exists || !existing.IsDefined {
@@ -238,15 +250,6 @@ func (l *Linker) Pass1(objects []*ObjectFile) {
 				l.Errors = append(l.Errors, fmt.Sprintf("multiple definition of '%s'", sym.Name))
 			}
 			// weak + weak: keep first
-		}
-	}
-
-	// Resolve addresses: symbol address = section base + offset
-	for _, sym := range l.GlobalSymbols {
-		if sym.IsDefined {
-			if sec, ok := l.Sections[sym.Section]; ok {
-				sym.ResolvedAddr = sec.BaseAddr + sym.Offset
-			}
 		}
 	}
 
@@ -274,32 +277,39 @@ func (l *Linker) Pass2(objects []*ObjectFile) {
 				continue // already reported in pass 1
 			}
 
-			sec, ok := l.Sections[reloc.Section]
+			chunk, ok := obj.Sections[reloc.Section]
 			if !ok {
 				continue
 			}
+			out := l.Sections[reloc.Section]
 
-			target := sym.ResolvedAddr
-			patchAddr := sec.BaseAddr + reloc.Offset
+			// ELF psABI names: S = symbol address, A = addend, P = address
+			// of the field being patched (inside THIS object's chunk).
+			S := sym.ResolvedAddr
+			A := reloc.Addend
+			P := chunk.BaseAddr + reloc.Offset
+			at := int(P - out.BaseAddr) // index of the field in the merged bytes
 
 			switch reloc.Type {
 			case RelocAbs64:
-				// Patch 8 bytes with absolute address
-				addr := target + uint64(reloc.Addend)
+				// R_X86_64_64: S + A, 8 bytes
+				addr := S + uint64(A)
 				for i := 0; i < 8; i++ {
-					if int(reloc.Offset)+i < len(sec.Data) {
-						sec.Data[int(reloc.Offset)+i] = byte(addr >> (i * 8))
+					if at+i < len(out.Data) {
+						out.Data[at+i] = byte(addr >> (i * 8))
 					}
 				}
 
 			case RelocPC32, RelocPLT32:
-				// Patch 4 bytes with PC-relative offset
-				// PC-relative: target - (patch_address + 4) + addend
-				// The +4 accounts for the instruction reading past the displacement
-				rel := int64(target) - int64(patchAddr+4) + reloc.Addend
+				// R_X86_64_PC32: S + A - P, 4 bytes. The CPU adds the
+				// displacement to the address of the NEXT instruction, 4
+				// bytes past the field; the assembler already accounted for
+				// that by emitting A = -4, so the linker must not subtract
+				// another 4.
+				rel := int64(S) + A - int64(P)
 				for i := 0; i < 4; i++ {
-					if int(reloc.Offset)+i < len(sec.Data) {
-						sec.Data[int(reloc.Offset)+i] = byte(uint32(rel) >> (i * 8))
+					if at+i < len(out.Data) {
+						out.Data[at+i] = byte(uint32(rel) >> (i * 8))
 					}
 				}
 			}
@@ -462,6 +472,21 @@ func main() {
 	textSec := linker.Sections[".text"]
 	assert(textSec != nil, ".text section must exist")
 	fmt.Printf("  .text section: %d bytes at 0x%08x\n", len(textSec.Data), textSec.BaseAddr)
+
+	// add lives in math.o's chunk, right after main.o's 18 bytes of .text
+	addAddr := linker.GlobalSymbols["add"].ResolvedAddr
+	assert(addAddr == textSec.BaseAddr+18, fmt.Sprintf("add at 0x%x, want main.o .text + 18", addAddr))
+	// Decode the patched rel32 fields the way the CPU does: target =
+	// address of the next instruction + displacement.
+	rel32 := func(off int) int64 {
+		return int64(int32(binary.LittleEndian.Uint32(textSec.Data[off : off+4])))
+	}
+	callTarget := int64(textSec.BaseAddr) + 9 + rel32(5) // call ends at offset 9
+	assert(uint64(callTarget) == addAddr, fmt.Sprintf("call lands at 0x%x, want add 0x%x", callTarget, addAddr))
+	loadTarget := int64(textSec.BaseAddr) + 16 + rel32(12) // mov ends at offset 16
+	dataAddr := linker.GlobalSymbols["data"].ResolvedAddr
+	assert(uint64(loadTarget) == dataAddr, fmt.Sprintf("rip-relative load reads 0x%x, want data 0x%x", loadTarget, dataAddr))
+	fmt.Printf("  call add -> 0x%08x, mov rax,[rip+data] -> 0x%08x\n", callTarget, loadTarget)
 
 	// ── 2. Weak vs strong symbol resolution ──────────────────────────
 	fmt.Println("\n2. Weak vs strong symbol resolution:")

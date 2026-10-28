@@ -34,7 +34,7 @@ env_sustain_level:   .skip 8
 env_release_samples: .skip 8
 
 .section .rodata
-msg_pass: .ascii "audio_synthesis: 13/13 ok\n"
+msg_pass: .ascii "audio_synthesis: 14/14 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail: .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail

@@ -43,8 +43,11 @@ result=$(echo -e "banana\napple\ncherry" | sort | head -1)
 assert_eq "$result" "apple" "pipe sort"
 
 # ── Redirect stderr separately ──────────────────────────────────────
-echo "error msg" > "$tmpdir/stderr.txt" 2>&1
+# 2> sends fd 2 to its own file. (`> f 2>&1` would MERGE both streams into
+# f, and `echo` writes to stdout anyway, so it would prove nothing here.)
+{ echo "out msg"; echo "error msg" >&2; } > "$tmpdir/stdout.txt" 2> "$tmpdir/stderr.txt"
 assert_eq "$(cat "$tmpdir/stderr.txt")" "error msg" "stderr redirect"
+assert_eq "$(cat "$tmpdir/stdout.txt")" "out msg" "stdout kept separate"
 
 # ── Discard output ──────────────────────────────────────────────────
 echo "discarded" > /dev/null 2>&1

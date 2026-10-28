@@ -26,6 +26,7 @@ declare -a tx_wvals
 declare -a tx_rcount
 declare -a tx_rkeys
 declare -a tx_rsnaps
+declare -a tx_rfull   # 1 = a read could not be tracked: commit must fail
 
 _RET=0
 
@@ -39,6 +40,7 @@ store_init() {
         status[i]=$TX_FREE
         tx_wcount[i]=0
         tx_rcount[i]=0
+        tx_rfull[i]=0
     done
 }
 
@@ -62,6 +64,7 @@ tx_begin() {
             status[t]=$TX_ACTIVE
             tx_wcount[t]=0
             tx_rcount[t]=0
+            tx_rfull[t]=0
             _RET=$t
             return
         fi
@@ -112,6 +115,12 @@ tx_read() {
             tx_rkeys[pos]=$k
             tx_rsnaps[pos]=${version[k]}
             tx_rcount[tx]=$(( rn + 1 ))
+        else
+            # Read-set full. Silently not recording the snapshot would let a
+            # concurrent write to k go undetected at validation (a stale
+            # read commits). An untracked read is unvalidatable: doom the
+            # commit instead.
+            tx_rfull[tx]=1
         fi
     fi
     _RET=${accounts[k]}
@@ -137,6 +146,7 @@ tx_write() {
 
 tx_validate() {
     local tx=$1 n=${tx_rcount[$1]} i base k snap
+    if [[ ${tx_rfull[tx]} -eq 1 ]]; then _RET=0; return; fi
     base=$(( tx * TX_CAP ))
     for (( i=0; i<n; i++ )); do
         k=${tx_rkeys[base+i]}
@@ -179,6 +189,7 @@ crash_recovery() {
         status[t]=$TX_FREE
         tx_wcount[t]=0
         tx_rcount[t]=0
+        tx_rfull[t]=0
     done
 }
 
@@ -293,6 +304,19 @@ tx_write "$tx" 1 2
 tx_write "$tx" 2 3
 tx_write "$tx" 3 4
 tx_write "$tx" 4 5; eq "$_RET" 0; check $_RET "5th write rejected (cap=4)"
+
+# Read-set overflow: tx1 reads TX_CAP + 1 keys, tx2 then changes the last
+# one. tx1's untracked read must not commit (it would lose tx2's update).
+seed
+tx_begin; tx1=$_RET
+tx_begin; tx2=$_RET
+for (( k=0; k<=TX_CAP; k++ )); do tx_read "$tx1" "$k"; done; stale=$_RET
+tx_write "$tx2" "$TX_CAP" 777
+tx_commit "$tx2"
+tx_write "$tx1" "$TX_CAP" $(( stale + 1 ))
+tx_commit "$tx1"; ok1=$_RET
+eq "$ok1" 0;               check $_RET "untracked read aborts commit"
+eq "${accounts[TX_CAP]}" 777; check $_RET "tx2's update not lost"
 
 echo "=== transactions_and_acid ==="
 echo "$pass_count passed, $fail_count failed ($(( pass_count + fail_count )) total)"

@@ -33,7 +33,8 @@
 
 /* A PTE is just a uint64_t with defined bit fields:
  *   [63]    NX (no execute)
- *   [51:12] physical frame address (40 bits = 1 TB addressable)
+ *   [51:12] physical frame number (40 bits x 4 KiB pages = 52-bit
+ *           physical addresses, 4 PiB addressable)
  *   [11:0]  flags (present, writable, user, accessed, dirty, etc.)
  */
 typedef uint64_t pte_t;
@@ -265,7 +266,7 @@ int main(void) {
 
     /* ── 1. Address decomposition ────────────────────────────────────── */
     printf("1. Virtual address decomposition (48-bit, 4 levels):\n");
-    uint64_t addrs[] = { 0x0000000000400078ULL, 0x00007FFFFFFFFFFF0ULL,
+    uint64_t addrs[] = { 0x0000000000400078ULL, 0x00007FFFFFFFFFF0ULL,
                          0xFFFF800000000000ULL };
     for (int i = 0; i < 3; i++) {
         vaddr_parts_t p = decompose_vaddr(addrs[i]);
@@ -323,11 +324,16 @@ int main(void) {
         }
     }
 
-    /* Verify translations */
+    /* Verify translations. mmu_translate fills the TLB and counts hits,
+     * misses and faults, so it runs outside assert(): under -DNDEBUG the
+     * expression is not evaluated and the TLB statistics below change. */
     uint64_t result;
-    assert(mmu_translate(&mmu, 0x00400078, &result) && result == 0x00200078);
-    assert(mmu_translate(&mmu, 0x00600100, &result) && result == 0x00300100);
-    assert(!mmu_translate(&mmu, 0x00500000, &result));
+    int ok = mmu_translate(&mmu, 0x00400078, &result);
+    assert(ok && result == 0x00200078);
+    ok = mmu_translate(&mmu, 0x00600100, &result);
+    assert(ok && result == 0x00300100);
+    ok = mmu_translate(&mmu, 0x00500000, &result);
+    assert(!ok);
 
     /* ── 4. PTE bit layout ───────────────────────────────────────────── */
     printf("\n4. PTE bit layout:\n");

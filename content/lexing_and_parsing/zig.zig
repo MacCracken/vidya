@@ -3,7 +3,7 @@
 // Tokenizer + recursive descent parser for arithmetic expressions.
 // The parser uses Pratt-style precedence climbing to handle operator
 // priority without explicit grammar rules per precedence level.
-// Zig's tagged unions make tokens and AST nodes type-safe, and
+// Zig's tagged unions make AST nodes type-safe, and
 // error unions propagate parse failures cleanly.
 
 const std = @import("std");
@@ -204,7 +204,11 @@ const Parser = struct {
     }
 
     fn parse(self: *Parser) ParseError!*const Expr {
-        return self.parseExpr(0);
+        const expr = try self.parseExpr(0);
+        // parseExpr stops at the first token it cannot use. Without this
+        // check "2 3" would parse as 2 and "(2 + 3))" as 5, silently.
+        if (self.current.tag != .eof) return error.UnexpectedToken;
+        return expr;
     }
 };
 
@@ -264,4 +268,8 @@ fn testFullExpression() !void {
     var p = try Parser.init("3 + 4 * (2 - 1)");
     const ast = try p.parse();
     try expect(try eval(ast) == 7);
+
+    // Trailing input is an error, not ignored
+    var bad = try Parser.init("(2 + 3))");
+    try expect(bad.parse() == error.UnexpectedToken);
 }

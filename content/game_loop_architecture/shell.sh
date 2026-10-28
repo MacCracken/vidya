@@ -4,10 +4,13 @@
 # Fixed-timestep accumulator loop with spiral-of-death cap. The driver
 # `loop_step` takes an elapsed-microsecond delta in $1 and updates the
 # global accumulator/counter state. Bash arithmetic via $((...)) is
-# 64-bit signed integer on every supported platform — wraps at ~292
-# years of microseconds, so the math discipline matches the C/Go ports.
-# A real game would use $EPOCHREALTIME (bash 5+) for monotonic time;
-# tests use deterministic deltas only.
+# 64-bit signed integer on every supported platform — 2^63 microseconds
+# is ~292,000 years (it is 2^63 NANOseconds that is ~292 years), so the
+# math discipline matches the C/Go ports. $EPOCHREALTIME (bash 5.0+) gives
+# microsecond resolution, but it is WALL-CLOCK time since the Unix epoch,
+# not a monotonic clock: it jumps when NTP or the user sets the clock, so
+# clamp negative deltas if you drive a loop from it. Tests use
+# deterministic deltas only.
 
 set -euo pipefail
 

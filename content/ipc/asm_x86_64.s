@@ -259,6 +259,34 @@ _start:
     mov     rsi, -1
     call    assert_eq
 
+    # 4b. pipe full + wrap: head is now 3, so 8 writes run past the end
+    # of pipe_buf and wrap to index 0; the 9th must be refused, and the
+    # reads must come back in FIFO order across the wrap.
+    xor     ebx, ebx
+.pf_fill:
+    lea     rdi, [rbx + 100]
+    call    pipe_write
+    mov     rdi, rax
+    mov     rsi, 1
+    call    assert_eq
+    inc     rbx
+    cmp     rbx, PIPE_CAP
+    jl      .pf_fill
+    mov     rdi, 200
+    call    pipe_write              # full
+    mov     rdi, rax
+    mov     rsi, 0
+    call    assert_eq
+    xor     ebx, ebx
+.pf_drain:
+    call    pipe_read
+    mov     rdi, rax
+    lea     rsi, [rbx + 100]
+    call    assert_eq
+    inc     rbx
+    cmp     rbx, PIPE_CAP
+    jl      .pf_drain
+
     # 5. channel send to closed → 0
     mov     rdi, 1
     mov     rsi, 0xCAFE

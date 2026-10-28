@@ -11,25 +11,22 @@ include "lib/assert.cyr"
 enum Action { ACT_SHOOT = 0; ACT_DUNK = 1; ACT_PASS = 2; ACT_DRIVE = 3; ACT_STEAL = 4; }
 
 # --- Player stats (1-10 scale) ---
-# Cyrius's struct parser expects fields on a single line.
 struct Stats { speed; shooting; dunking; passing; stealing; blocking; clutch; rebounding; }
 
 fn stats_new(spd, sht, dnk, pas, stl, blk, clt, reb) {
-    # Cyrius's parser doesn't accept `return Stats { ... }` directly, so
-    # a helper has to build the object and return a pointer.
+    # This helper returns a heap pointer. (`return Stats { ... };` is
+    # refused — a struct literal is an initializer — but returning by VALUE
+    # works: `fn mk(..): Stats { var t: Stats = Stats { .. }; return t; }`.)
     #
     # TRAP: the tempting body is
     #     var s = Stats { … }; return &s;
-    # It compiles clean, and it does not dangle in the C sense — Cyrius
-    # gives every local a FIXED address (static storage), so the pointer
-    # never faults. That is WORSE than a dangling pointer, not better:
-    # nothing crashes, and the corruption is silent. Two ways it bites.
-    # (1) Aliasing: `var a = stats_new(...); var b = stats_new(...);`
-    # returns the same address twice, leaving a holding b's numbers.
-    # (2) Reuse: the compiler overlays frames, so an UNRELATED function's
-    # local can occupy that address. Measured — a helper returning &local
-    # read back 4242, then 999888 after one call to an unrelated function.
-    # Heap the storage so each call owns its own object.
+    # It compiles clean and it is wrong, exactly as in C: `s` lives in this
+    # function's stack frame, so the returned address dangles once the
+    # function returns, and the next call reuses the frame and overwrites
+    # it. Measured: a helper returning &local read back 4242, then 0 after
+    # one unrelated call. Nothing faults, so the corruption is silent.
+    # Heap the storage (or return the struct by value) so each call owns
+    # its own object.
     var s = alloc(64);              # 8 fields * 8 bytes
     if (s == 0) { return 0; }
     store64(s, spd);
@@ -43,7 +40,10 @@ fn stats_new(spd, sht, dnk, pas, stl, blk, clt, reb) {
     return s;
 }
 
-# --- PRNG (PCG multiply-add) ---
+# --- PRNG (64-bit LCG, Knuth's MMIX constants) ---
+# This is a plain linear congruential generator with a truncated output —
+# the state transition PCG uses, but NOT PCG: PCG adds a permuted output
+# function (O'Neill 2014, XSH-RR), which this does not apply.
 
 var _rng_state = 12345;
 
@@ -273,7 +273,7 @@ fn test_difficulty_scaling() {
 fn test_ai_decide() {
     # At dunk range with high dunk stat — should prefer dunk.
     # Construct Stats inline (see the stats_new note: a returned &local
-    # aliases and gets overwritten — it does not fault).
+    # dangles and gets overwritten by the next call — it does not fault).
     rng_seed(100);  # fixed seed for determinism
     var s = Stats { 5, 5, 10, 3, 3, 3, 3, 3 };
     var action = ai_decide_offense(&s, 1 << 16, 20);

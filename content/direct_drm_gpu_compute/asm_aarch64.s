@@ -1,6 +1,11 @@
 // Vidya — Direct DRM GPU Compute in AArch64 Assembly
 //
 // In-memory simulation of GEM BO + VA-map + submit + syncobj-wait flow.
+//
+// Handle bounds checks are UNSIGNED (b.hs). A handle arrives from the
+// caller (an ioctl argument in the real driver); with a signed b.ge any
+// negative handle passes, and [base, h, lsl #3] then reaches memory
+// outside bo_size[] — h = 1 - 2^61 even aliases slot 1 exactly.
 
 .global _start
 
@@ -22,7 +27,7 @@ next_seq:      .quad 1
 completed_seq: .quad 0
 
 .section .rodata
-msg_pass:     .ascii "direct_drm_gpu_compute: 20/20 ok\n"
+msg_pass:     .ascii "direct_drm_gpu_compute: 21/21 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail:     .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
@@ -60,7 +65,7 @@ gem_create:
 gem_destroy:
     cbz     x0, .gd_zero
     cmp     x0, #BO_CAP
-    b.ge    .gd_zero
+    b.hs    .gd_zero
     adrp    x1, bo_size
     add     x1, x1, :lo12:bo_size
     ldr     x2, [x1, x0, lsl #3]
@@ -95,7 +100,7 @@ gem_destroy:
 gem_va_map:
     cbz     x0, .gv_zero
     cmp     x0, #BO_CAP
-    b.ge    .gv_zero
+    b.hs    .gv_zero
     adrp    x2, bo_size
     add     x2, x2, :lo12:bo_size
     ldr     x3, [x2, x0, lsl #3]
@@ -150,7 +155,7 @@ va_lookup:
 do_submit:
     cbz     x0, .ds_zero
     cmp     x0, #BO_CAP
-    b.ge    .ds_zero
+    b.hs    .ds_zero
     adrp    x1, bo_size
     add     x1, x1, :lo12:bo_size
     ldr     x2, [x1, x0, lsl #3]
@@ -251,6 +256,15 @@ _start:
     mov     x0, #0
     mov     x1, #0x3000
     bl      gem_va_map
+    mov     x1, #0
+    bl      assert_eq
+
+    // A negative handle must be rejected: 1 - 2^61 = 0xE000000000000001
+    // scaled by 8 wraps to +8, i.e. bo_size[1], so a signed bounds check
+    // would destroy BO 1 through it.
+    mov     x0, #1
+    movk    x0, #0xE000, lsl #48
+    bl      gem_destroy
     mov     x1, #0
     bl      assert_eq
 

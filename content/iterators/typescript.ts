@@ -2,7 +2,9 @@
 //
 // TypeScript/JS iterators use the Symbol.iterator protocol, for-of loops,
 // and array methods (map, filter, reduce). Generators (function*) create
-// lazy sequences. Array methods are the idiomatic functional pipeline.
+// lazy sequences. Array methods are the idiomatic EAGER pipeline; for a
+// LAZY one, ES2025 Iterator helpers (map/filter/take/drop/flatMap/
+// reduce/toArray on every iterator, plus Iterator.from) are built in.
 
 function main(): void {
     // ── Array methods: the primary iteration API ───────────────────
@@ -67,16 +69,26 @@ function main(): void {
         }
     }
 
+    // Check the count AFTER pushing: testing it at the top of the loop
+    // pulls one extra item from the source (n + 1 pulls, and 1 for n = 0).
     function take<T>(iter: Iterable<T>, n: number): T[] {
         const result: T[] = [];
+        if (n <= 0) return result;
         for (const item of iter) {
-            if (result.length >= n) break;
             result.push(item);
+            if (result.length >= n) break;
         }
         return result;
     }
 
     assertArrayEq(take(naturals(), 5), [0, 1, 2, 3, 4], "take from infinite");
+
+    let pulls = 0;
+    function* counted(): Generator<number> {
+        while (true) yield ++pulls;
+    }
+    take(counted(), 3);
+    assert(pulls === 3, "take(3) pulls exactly 3 items");
 
     // ── Generator composition ──────────────────────────────────────
     function* filterGen<T>(iter: Iterable<T>, pred: (x: T) => boolean): Generator<T> {
@@ -99,6 +111,23 @@ function main(): void {
         5,
     );
     assertArrayEq(squares, [0, 4, 16, 36, 64], "composed generators");
+
+    // ── ES2025 Iterator helpers: the same pipeline, built in ───────
+    // Generator objects inherit from Iterator.prototype, so they have
+    // lazy .filter/.map/.take/.toArray — no hand-written mapGen needed.
+    const helperSquares = naturals()
+        .filter((n) => n % 2 === 0)
+        .map((n) => n * n)
+        .take(5)
+        .toArray();
+    assertArrayEq(helperSquares, squares, "Iterator helpers match generators");
+
+    pulls = 0;
+    counted().take(3).toArray();
+    assert(pulls === 3, "Iterator.prototype.take is lazy: 3 pulls");
+
+    // Iterator.from wraps any iterable (or iterator) to get the helpers
+    assertArrayEq(Iterator.from(new Set([1, 2, 3])).drop(1).toArray(), [2, 3], "Iterator.from + drop");
 
     // ── Custom iterable class ──────────────────────────────────────
     class Range {
@@ -142,11 +171,13 @@ function main(): void {
     const fromRange = Array.from({ length: 5 }, (_, i) => i * 2);
     assertArrayEq(fromRange, [0, 2, 4, 6, 8], "Array.from");
 
-    // ── sort (mutates!) ────────────────────────────────────────────
+    // ── sort (mutates!) vs toSorted (ES2023, returns a copy) ───────
     const unsorted = [3, 1, 4, 1, 5];
-    const sorted = [...unsorted].sort((a, b) => a - b);
-    assertArrayEq(sorted, [1, 1, 3, 4, 5], "sort");
+    const sorted = unsorted.toSorted((a, b) => a - b);
+    assertArrayEq(sorted, [1, 1, 3, 4, 5], "toSorted");
     assert(unsorted[0] === 3, "original unchanged");
+    const inPlace = [3, 1, 2];
+    assert(inPlace.sort((a, b) => a - b) === inPlace && inPlace[0] === 1, "sort mutates and returns the same array");
 
     console.log("All iterator examples passed.");
 }

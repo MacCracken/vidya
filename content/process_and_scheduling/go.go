@@ -16,7 +16,6 @@ package main
 
 import (
 	"fmt"
-	"math"
 	"sort"
 )
 
@@ -96,6 +95,25 @@ type Process struct {
 	Context   RegisterContext
 }
 
+// transition applies a state change only if it is an edge of the
+// process state machine; asserting a field right after assigning it
+// would test nothing, so the rules live here.
+func transition(p *Process, to ProcessState) bool {
+	allowed := map[ProcessState][]ProcessState{
+		StateNew:     {StateReady},
+		StateReady:   {StateRunning},
+		StateRunning: {StateReady, StateBlocked, StateZombie},
+		StateBlocked: {StateReady},
+	}
+	for _, s := range allowed[p.State] {
+		if s == to {
+			p.State = to
+			return true
+		}
+	}
+	return false
+}
+
 func testProcessStates() {
 	fmt.Println("1. Process state transitions:")
 
@@ -103,26 +121,16 @@ func testProcessStates() {
 	assert(p.State == StateNew, "starts as new")
 
 	// Valid transitions:
-	// new -> ready (admitted to run queue)
-	p.State = StateReady
-	assert(p.State == StateReady, "new -> ready")
-
-	// ready -> running (scheduler picks this process)
-	p.State = StateRunning
-	assert(p.State == StateRunning, "ready -> running")
-
-	// running -> blocked (process calls read(), waits for I/O)
-	p.State = StateBlocked
-	assert(p.State == StateBlocked, "running -> blocked")
-
-	// blocked -> ready (I/O completes, process can run again)
-	p.State = StateReady
-	assert(p.State == StateReady, "blocked -> ready")
-
-	// ready -> running -> zombie (process exits)
-	p.State = StateRunning
-	p.State = StateZombie
-	assert(p.State == StateZombie, "running -> zombie")
+	assert(transition(p, StateReady), "new -> ready (admitted to run queue)")
+	assert(transition(p, StateRunning), "ready -> running (scheduler picks it)")
+	assert(transition(p, StateBlocked), "running -> blocked (waits for I/O)")
+	assert(!transition(p, StateRunning), "blocked -> running is NOT allowed: I/O completion makes it ready, the scheduler decides when it runs")
+	assert(transition(p, StateReady), "blocked -> ready (I/O completes)")
+	assert(!transition(p, StateZombie), "only a running process can exit")
+	assert(transition(p, StateRunning), "ready -> running")
+	assert(transition(p, StateZombie), "running -> zombie (process exits)")
+	assert(!transition(p, StateReady), "a zombie never runs again; only the parent's wait() reaps it")
+	assert(p.State == StateZombie, "rejected transitions leave the state unchanged")
 
 	fmt.Println("   new -> ready -> running -> blocked -> ready -> running -> zombie")
 	fmt.Println("   Key: running->blocked on I/O, blocked->ready on I/O complete")
@@ -250,6 +258,9 @@ func testRoundRobin() {
 // Linux's Completely Fair Scheduler tracks virtual runtime (vruntime).
 // The process with the smallest vruntime runs next. Higher-priority
 // processes accumulate vruntime more slowly (they get more real time).
+// (Since Linux 6.6 the fair class picks by EEVDF — earliest virtual
+// deadline among eligible tasks — but keeps the same vruntime and nice
+// weights; smallest-vruntime is the classic CFS rule modeled here.)
 //
 // vruntime += delta * (NICE_0_WEIGHT / weight[nice])
 //
@@ -265,21 +276,26 @@ func NewCFS() *CFSScheduler {
 	return &CFSScheduler{}
 }
 
-// niceToWeight returns the CFS weight for a given nice value.
-// Simplified from the real kernel's sched_prio_to_weight table.
+// niceToWeight returns the CFS weight for a given nice value, from the
+// kernel's own table (sched_prio_to_weight[] in kernel/sched/core.c).
+// Adjacent levels differ by ~1.25x, so one nice step moves a task's CPU
+// share by ~10% relative to a nice-0 neighbour; computing 1024*1.25^-nice
+// instead drifts from the real values (88817 vs 88761 at -20, 14 vs 15 at
+// 19).
+var schedPrioToWeight = [40]uint64{
+	/* -20 */ 88761, 71755, 56483, 46273, 36291,
+	/* -15 */ 29154, 23254, 18705, 14949, 11916,
+	/* -10 */ 9548, 7620, 6100, 4904, 3906,
+	/*  -5 */ 3121, 2501, 1991, 1586, 1277,
+	/*   0 */ 1024, 820, 655, 526, 423,
+	/*   5 */ 335, 272, 215, 172, 137,
+	/*  10 */ 110, 87, 70, 56, 45,
+	/*  15 */ 36, 29, 23, 18, 15,
+}
+
 func niceToWeight(nice int) uint64 {
-	// Real kernel uses a precomputed table. Key entries:
-	//   nice -20 -> 88761
-	//   nice   0 -> 1024
-	//   nice  19 -> 15
-	// Each nice level is ~1.25x the adjacent weight.
-	base := 1024.0
-	factor := math.Pow(1.25, float64(-nice))
-	w := uint64(base * factor)
-	if w < 1 {
-		w = 1
-	}
-	return w
+	nice = min(max(nice, -20), 19)
+	return schedPrioToWeight[nice+20]
 }
 
 func (cfs *CFSScheduler) AddTask(p *Process) {
@@ -289,7 +305,9 @@ func (cfs *CFSScheduler) AddTask(p *Process) {
 }
 
 // PickNext returns the task with the smallest vruntime.
-// In the real kernel, this is an O(1) operation using a red-black tree.
+// In the real kernel the runnable tasks sit in a red-black tree keyed by
+// vruntime with the leftmost node cached, so the pick is O(1) and each
+// enqueue/dequeue is O(log n). This linear scan is O(n).
 func (cfs *CFSScheduler) PickNext() *Process {
 	if len(cfs.tasks) == 0 {
 		return nil
@@ -384,13 +402,15 @@ func testCFSScheduler() {
 //   3. Restore GP registers from new task's PCB
 //   4. Switch CR3 if address spaces differ (TLB flush)
 
-func contextSwitch(current, next *Process) {
-	// Save current process state
-	// In a real kernel: pushes all registers to kernel stack
+// cpu is the live register file of the simulated core.
+func contextSwitch(cpu *RegisterContext, current, next *Process) {
+	// Save current process state: the CPU's registers, as they are NOW,
+	// go into current's PCB (a real kernel pushes them to its kernel stack)
+	current.Context = *cpu
 	current.State = StateReady
 
-	// Load next process state
-	// In a real kernel: pops all registers from next's kernel stack
+	// Load next process state into the CPU
+	*cpu = next.Context
 	next.State = StateRunning
 }
 
@@ -419,17 +439,21 @@ func testContextSwitch() {
 	}
 
 	proc1.State = StateRunning
+	cpu := proc1.Context // proc1 is on the CPU...
+	cpu.RAX = 43         // ...and keeps executing: its live registers move on
+	cpu.RIP += 0x10
 
 	// Context switch: proc1 -> proc2
-	contextSwitch(proc1, proc2)
+	contextSwitch(&cpu, proc1, proc2)
 	assert(proc1.State == StateReady, "proc1 now ready")
 	assert(proc2.State == StateRunning, "proc2 now running")
 
-	// Registers are preserved in each process's context
-	assert(proc1.Context.RIP == 0x0040_0100, "proc1 RIP preserved")
-	assert(proc2.Context.RIP == 0x0040_2000, "proc2 RIP loaded")
-	assert(proc1.Context.RAX == 42, "proc1 RAX preserved")
-	assert(proc2.Context.RAX == 99, "proc2 RAX loaded")
+	// proc1's PCB holds the registers as they were AT the switch, and the
+	// CPU now holds proc2's saved registers
+	assert(proc1.Context.RIP == 0x0040_0110, "proc1 RIP saved at switch time")
+	assert(proc1.Context.RAX == 43, "proc1 RAX saved at switch time")
+	assert(cpu.RIP == 0x0040_2000, "proc2 RIP loaded into the CPU")
+	assert(cpu.RAX == 99, "proc2 RAX loaded into the CPU")
 
 	fmt.Printf("   proc1: RIP=0x%X RSP=0x%X RAX=%d -> saved (ready)\n",
 		proc1.Context.RIP, proc1.Context.RSP, proc1.Context.RAX)
@@ -463,8 +487,10 @@ func testPriorityAndNice() {
 			fmt.Sprintf("nice %d weight > nice %d weight", entries[i-1].nice, entries[i].nice))
 	}
 
-	// Nice 0 is always weight 1024
+	// Nice 0 is always weight 1024; spot-check the kernel table
 	assert(entries[2].weight == 1024, "nice 0 = 1024")
+	assert(niceToWeight(-1) == 1277 && niceToWeight(1) == 820, "adjacent levels ~1.25x apart")
+	assert(niceToWeight(-20) == 88761 && niceToWeight(19) == 15, "table endpoints")
 
 	// Sort by weight descending (= priority order)
 	sort.Slice(entries, func(i, j int) bool {
@@ -482,7 +508,7 @@ func testPriorityAndNice() {
 	ratio := float64(niceToWeight(-20)) / float64(niceToWeight(19))
 	assert(ratio > 100, "nice -20 gets >100x more CPU than nice 19")
 	fmt.Printf("\n   nice -20 / nice 19 ratio: %.0fx CPU time difference\n", ratio)
-	fmt.Println("   Each nice level ~= 10%% CPU share change (1.25x weight)")
+	fmt.Println("   Each nice level ~= 10% CPU share change (1.25x weight)")
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

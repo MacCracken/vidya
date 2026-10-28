@@ -5,8 +5,11 @@
  * produce a byte-identical artifact, on any machine, at any time. Three
  * classic sources of non-determinism, and their fixes:
  *
- *   1. Embedded wall-clock timestamps  -> clamp every timestamp to
- *      SOURCE_DATE_EPOCH so "now" never leaks in.
+ *   1. Embedded wall-clock timestamps  -> the build stamps
+ *      SOURCE_DATE_EPOCH instead of "now", so the clock never reaches the
+ *      output, fast or slow. Clamping (min(t, SDE)) is for FILE mtimes: a
+ *      fresh checkout's newer mtimes are pinned down to SDE. Clamping the
+ *      clock itself would still leak any clock that runs behind SDE.
  *   2. Filesystem iteration order      -> SORT filenames before processing
  *      so output doesn't depend on directory layout.
  *   3. Non-deterministic artifact names -> name artifacts by the HASH of
@@ -29,8 +32,10 @@
 
 static long fold(long h, long v) { return (h * HB + v) % HM; }
 
-/* --- 1. Deterministic timestamps: clamp "now" to SOURCE_DATE_EPOCH --- */
-static long normalize_ts(long now, long sde) { return now > sde ? sde : now; }
+/* --- 1. Deterministic timestamps: the mtime clamp (tar --clamp-mtime).
+ *     A file mtime newer than SOURCE_DATE_EPOCH is pinned down to it; an
+ *     older one is kept. The build time itself is SDE, not this. --- */
+static long normalize_ts(long mtime, long sde) { return mtime > sde ? sde : mtime; }
 
 /* --- 3. Content-addressed artifact path: a pure function of content --- */
 static long cas_path(long content) { return (content * HB + 7L) % HM; }
@@ -67,7 +72,7 @@ static void files_sort(void) {
  *     determinism fixes so we can contrast a correct vs naive pipeline. --- */
 static long build_digest(int do_sort, int do_norm, long now, long sde) {
     if (do_sort) files_sort();
-    long ts = do_norm ? normalize_ts(now, sde) : now;
+    long ts = do_norm ? sde : now; /* build time comes from the sources */
     long h = fold(HSEED, ts);
     for (int i = 0; i < f_n; i++) {
         h = fold(h, f_name[i]);
@@ -91,7 +96,7 @@ static void setup_order_b(void) {
 }
 
 int main(void) {
-    /* 1. Deterministic timestamps. */
+    /* 1. The mtime clamp: newer mtimes pinned to SDE, older ones kept. */
     assert(normalize_ts(9999, 5000) == 5000);
     assert(normalize_ts(3000, 5000) == 3000);
 
@@ -103,8 +108,10 @@ int main(void) {
     assert(f_name[2] == 30);
     assert(f_content[0] == 222);
 
-    /* 3. Content-addressed paths are a pure function of content. */
-    assert(cas_path(111) == cas_path(111));
+    /* 3. Content-addressed paths: cas_path takes only the content, so equal
+     *    content maps to an equal path by construction (asserting
+     *    cas_path(x) == cas_path(x) could never fail). What can fail is
+     *    distinct content colliding on one path: */
     assert(cas_path(111) != cas_path(222));
 
     /* Deterministic pipeline: two builds differing in BOTH input order and
@@ -128,6 +135,12 @@ int main(void) {
     setup_order_a();
     long norm2 = build_digest(1, 1, 7777, 5000);
     assert(norm1 == norm2);
+
+    /* ...including a clock that runs BEHIND the epoch: min(now, sde) would
+     * stamp 3000 here and 5000 above, and the digests would differ. */
+    setup_order_a();
+    long slow = build_digest(1, 1, 3000, 5000);
+    assert(slow == norm1);
 
     printf("All reproducible_builds examples passed.\n");
     return 0;

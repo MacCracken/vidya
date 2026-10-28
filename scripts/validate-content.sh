@@ -36,13 +36,25 @@ elif has_cmd qemu-aarch64-static; then QEMU_AA64=qemu-aarch64-static; HAS_QEMU_A
 fi
 HAS_CYRIUS=false;      has_cmd cyrius && HAS_CYRIUS=true
 
+# Python. The corpus targets 3.15 (docs/sources.md). VIDYA_PYTHON picks the
+# interpreter (CI sets it to python3.15); bare `python3` is the default. A run
+# on an older Python says nothing about the target, so VIDYA_STRICT fails it,
+# and a plain run says which version it used.
+PY_TARGET="3.15"
+PY_CMD="${VIDYA_PYTHON:-python3}"
+PY_VER="$($PY_CMD -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo none)"
+PY_OK=false
+if [[ "$PY_VER" != "none" ]] && [[ "$(printf '%s\n%s\n' "$PY_TARGET" "$PY_VER" | sort -V | head -1)" == "$PY_TARGET" ]]; then
+    PY_OK=true
+fi
+
 # C standard flag. The corpus targets C23 (ISO/IEC 9899:2024), but the SPELLING
 # of the flag depends on the compiler: gcc >= 14 accepts `-std=c23`, while
-# gcc 13 — which is what ubuntu-latest ships, and therefore what CI uses —
-# only knows the pre-ratification `-std=c2x`. They select the same standard
-# (`__STDC_VERSION__` is 202311 either way). Probing keeps one flag working on
-# both; hardcoding `c23` broke CI for eight commits while passing locally on
-# gcc 16.
+# gcc 13 (Ubuntu 24.04's) only knows the pre-ratification `-std=c2x`. They
+# select the same standard (`__STDC_VERSION__` is 202311 either way). CI has run
+# Arch's current GCC since 2.9.4, but probing keeps the gate working on an
+# older host. Hardcoding `c23` broke CI for eight commits while CI was on
+# ubuntu-latest's gcc 13.
 C_STD=c2x
 if echo 'int main(void){return 0;}' | gcc -std=c23 -x c - -o /dev/null 2>/dev/null; then
     C_STD=c23
@@ -80,10 +92,14 @@ fi
 # Rust-era debt (vidya migrated off Rust at v2.0; the example survives only in
 # rust-old/) AND a latent false-green: its branch printed "✓ OpenQASM (native)"
 # and incremented PASS without validating anything.
+#
+# The corpus is OpenQASM 3.1 (since vidya 2.9.4). scripts/qasm_check.py loads
+# each file with qiskit's OpenQASM 3 importer and runs its `// @expect` lines in
+# a seeded qiskit-aer simulation, so it needs all three packages.
 QASM_VALIDATOR=""
 QASM_PYTHON="python3"
 [[ -f ".venv/bin/python3" ]] && QASM_PYTHON=".venv/bin/python3"
-if $QASM_PYTHON -c "import qiskit" 2>/dev/null; then
+if $QASM_PYTHON -c "import qiskit, qiskit_qasm3_import, qiskit_aer" 2>/dev/null; then
     QASM_VALIDATOR="qiskit"
 fi
 
@@ -97,8 +113,15 @@ else
 fi
 
 echo "=== Vidya Content Validation ==="
-echo "  Toolchain: zig=$HAS_ZIG aarch64-as=$HAS_AARCH64_AS qemu-aarch64=$HAS_QEMU_AA64${QEMU_AA64:+ ($QEMU_AA64)} qasm=${QASM_VALIDATOR:-none} cyrius=$HAS_CYRIUS tsc=$HAS_TSC c-std=$C_STD"
+echo "  Toolchain: zig=$HAS_ZIG aarch64-as=$HAS_AARCH64_AS qemu-aarch64=$HAS_QEMU_AA64${QEMU_AA64:+ ($QEMU_AA64)} qasm=${QASM_VALIDATOR:-none} cyrius=$HAS_CYRIUS tsc=$HAS_TSC c-std=$C_STD python=$PY_VER ($PY_CMD)"
 [[ "${VIDYA_STRICT:-0}" == "1" ]] && echo "  VIDYA_STRICT=1 — any skipped example fails the run"
+if [[ "$PY_OK" != "true" ]]; then
+    echo "  ⚠ Python $PY_VER is older than the $PY_TARGET target (set VIDYA_PYTHON)"
+    if [[ "${VIDYA_STRICT:-0}" == "1" ]]; then
+        echo "  VIDYA_STRICT=1 — refusing to validate against the wrong Python"
+        exit 1
+    fi
+fi
 echo ""
 
 # run_lang <label> <topic-rel-file> <command...>
@@ -151,7 +174,7 @@ for topic_dir in "$CONTENT_DIR"/*/; do
         # -X warn_default_encoding + EncodingWarning as an error: an open()
         # with no explicit encoding= is a portability bug the corpus's own
         # concept.toml warns about, and it is invisible to a plain run.
-        run_lang "Python" "$topic/python.py" env PYTHONUNBUFFERED=1 python3 -X warn_default_encoding -W error::EncodingWarning "$topic_dir/python.py"
+        run_lang "Python" "$topic/python.py" env PYTHONUNBUFFERED=1 "$PY_CMD" -X warn_default_encoding -W error::EncodingWarning "$topic_dir/python.py"
     fi
 
     # C
@@ -189,9 +212,9 @@ for topic_dir in "$CONTENT_DIR"/*/; do
     if [[ -f "$topic_dir/openqasm.qasm" ]]; then
         if [[ "$QASM_VALIDATOR" == "qiskit" ]]; then
             run_lang "OpenQASM" "$topic/openqasm.qasm" \
-                $QASM_PYTHON -c "from qiskit import qasm2; qc = qasm2.load('$topic_dir/openqasm.qasm', include_path=['$CONTENT_DIR'], custom_instructions=qasm2.LEGACY_CUSTOM_INSTRUCTIONS); print(f'OpenQASM OK: {qc.num_qubits}q, depth {qc.depth()}')"
+                $QASM_PYTHON scripts/qasm_check.py "$topic_dir/openqasm.qasm"
         else
-            echo "  ⊘ OpenQASM (skipped — no qiskit or native validator)"
+            echo "  ⊘ OpenQASM (skipped — needs qiskit, qiskit-qasm3-import and qiskit-aer)"
             SKIP=$((SKIP + 1))
         fi
     fi

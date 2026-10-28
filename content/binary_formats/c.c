@@ -227,7 +227,12 @@ static void test_minimal_elf(void) {
 }
 
 // ── Static vs Dynamic Linking ───────────────────────────────────────
-// A static binary has one or two PT_LOAD segments and nothing else.
+// What makes a binary static is the ABSENCE of PT_INTERP and PT_DYNAMIC,
+// not a small segment count. The hand-built ELF above gets by with one
+// PT_LOAD; gcc -static on x86-64 Linux emits four (ld has defaulted to
+// -z separate-code since binutils 2.31: R headers, R+X .text, R .rodata,
+// RW .data/.bss) plus non-loadable PT_NOTE, PT_TLS, PT_GNU_STACK and
+// PT_GNU_RELRO. The tables below use the classic two-PT_LOAD model.
 // A dynamic binary adds PT_INTERP and PT_DYNAMIC.
 
 typedef struct {
@@ -238,7 +243,7 @@ typedef struct {
 } SegmentInfo;
 
 static void test_static_binary_segments(void) {
-    // A static binary: typically 2 PT_LOAD segments
+    // Classic static layout (pre -z separate-code): 2 PT_LOAD segments
     SegmentInfo static_segments[] = {
         {"code",  PT_LOAD, PF_R | PF_X, "executable code + rodata"},
         {"data",  PT_LOAD, PF_R | PF_W, "initialized data + BSS"},
@@ -261,6 +266,7 @@ static void test_static_binary_segments(void) {
 
 static void test_dynamic_binary_segments(void) {
     // A dynamic binary: PT_LOAD + PT_INTERP + PT_DYNAMIC + PT_PHDR
+    // (classic two-PT_LOAD split; separate-code makes it four)
     SegmentInfo dynamic_segments[] = {
         {"phdr",     PT_PHDR,    PF_R,         "program header table itself"},
         {"interp",   PT_INTERP,  PF_R,         "path to dynamic linker"},
@@ -348,22 +354,25 @@ static void test_got_plt(void) {
     size_t got_entry_size = sizeof(void *);
     assert(got_entry_size == 8);
 
-    // PLT entry size: 16 bytes on x86_64
-    //   6 bytes: jmp [GOT+N]
-    //   6 bytes: push relocation_index
-    //   4 bytes: jmp PLT[0] (resolver)
-    size_t plt_entry_size = 16;
-    assert(plt_entry_size == 16);
+    // PLT entry: 16 bytes on x86_64 (as `objdump -d -j .plt` shows them)
+    const uint8_t plt_n[] = {
+        0xFF, 0x25, 0, 0, 0, 0,   // jmp  *GOT[n](%rip)       6 bytes
+        0x68, 0, 0, 0, 0,         // push $relocation_index   5 bytes
+        0xE9, 0, 0, 0, 0,         // jmp  PLT[0] (rel32)      5 bytes
+    };
+    assert(sizeof(plt_n) == 16);
 
     // PLT[0] is special: jumps to the dynamic linker's resolver
-    //   6 bytes: push [GOT+8]  (link_map pointer)
-    //   6 bytes: jmp [GOT+16]  (resolver address)
-    size_t plt0_size = 16;
-    assert(plt0_size == 16);
+    const uint8_t plt0[] = {
+        0xFF, 0x35, 0, 0, 0, 0,   // push *GOT[1](%rip)  link_map pointer   6
+        0xFF, 0x25, 0, 0, 0, 0,   // jmp  *GOT[2](%rip)  resolver address   6
+        0x0F, 0x1F, 0x40, 0x00,   // nopl 0(%rax)        pad to 16          4
+    };
+    assert(sizeof(plt0) == 16);
 
     // With 10 external functions:
-    size_t total_got = (10 + 3) * 8;   // 3 reserved entries
-    size_t total_plt = 16 + 10 * 16;   // PLT[0] + 10 stubs
+    size_t total_got = (10 + 3) * got_entry_size;          // 3 reserved entries
+    size_t total_plt = sizeof(plt0) + 10 * sizeof(plt_n);  // PLT[0] + 10 stubs
     assert(total_got == 104);
     assert(total_plt == 176);
 }
@@ -371,19 +380,17 @@ static void test_got_plt(void) {
 // ── Binary Size Comparison ──────────────────────────────────────────
 
 static void test_size_comparison(void) {
-    // Minimal ELF (exit(0), static, no libc)
-    size_t minimal_elf = 64 + 56 + 9;  // 129 bytes
+    // Minimal ELF (exit(0), static, no libc) — measured from the builder
+    uint8_t bin[256];
+    size_t minimal_elf;
+    build_minimal_elf(bin, &minimal_elf);
     assert(minimal_elf == 129);
 
-    // C hello world sizes (approximate)
-    size_t c_static = 800000;   // gcc -static (includes all of libc)
-    size_t c_dynamic = 16000;   // gcc (dynamic, depends on libc.so)
-
-    // Static is ~6000x larger than the minimal ELF
-    assert(c_static / minimal_elf > 6000);
-
-    // Dynamic is ~120x larger
-    assert(c_dynamic / minimal_elf > 100);
+    // C hello world, stripped (measured with GCC 16.2 + glibc on x86-64):
+    //   gcc -static  ~772 KB  — ~6000x the minimal ELF
+    //   gcc          ~14 KB   — ~110x, and it still needs libc.so at run time
+    // Those are measurements of one toolchain, not something this program
+    // can check, so they are documented here rather than asserted.
 
     // The overhead is libc, crt0, and the dynamic linker setup
     // Our minimal binary avoids ALL of that

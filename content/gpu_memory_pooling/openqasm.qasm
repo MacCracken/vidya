@@ -19,11 +19,11 @@
 // classical bump-allocator-with-reset pattern maps onto this
 // directly.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
 // Allocate slots 0, 1, 2
 x q[0];
@@ -37,4 +37,5 @@ reset q[1];
 x q[1];
 
 // Measure: q[0]=1, q[1]=1, q[2]=1, q[3]=0
-measure q -> c;
+c = measure q;
+// @expect c == 7

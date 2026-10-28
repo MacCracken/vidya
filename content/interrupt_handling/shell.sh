@@ -199,20 +199,24 @@ fi
 
 declare -A found_irqs
 
+# `case` takes the FIRST matching pattern, so LOC must come before the
+# generic *timer* arm: x86's line is "LOC: ... Local timer interrupts".
 while IFS= read -r line; do
     case "$line" in
+        *"LOC:"*)               found_irqs["local_timer"]=1 ;;
         *"timer"*|*"Timer"*)    found_irqs["timer"]=1 ;;
         *"NMI"*)                found_irqs["nmi"]=1 ;;
-        *"LOC"*)                found_irqs["local_timer"]=1 ;;
         *"RES"*)                found_irqs["reschedule"]=1 ;;
         *"TLB"*)                found_irqs["tlb"]=1 ;;
     esac
 done < /proc/interrupts
 
-# Local timer (LOC) is always present on SMP systems
-if [[ -z "${found_irqs[local_timer]+x}" ]]; then
-    # Single-CPU VMs might not show LOC; that's acceptable
-    true
+# Every running kernel has a timer interrupt: LOC (x86 local APIC timer),
+# or a "timer" line (x86 IO-APIC IRQ 0, arm64 arch_timer). Single-CPU VMs
+# may lack LOC, so accept either.
+if [[ -z "${found_irqs[local_timer]+x}" && -z "${found_irqs[timer]+x}" ]]; then
+    echo "FAIL: no timer interrupt source in /proc/interrupts" >&2
+    exit 1
 fi
 
 # ── Interrupt descriptor table sizing ─────────────────────────────────

@@ -50,7 +50,8 @@ fn phase_advance(current, inc) {
 }
 
 # === Sine LUT (16 entries, Q15) ===
-# Values precomputed as round(32767 * sin(i * 2π / 16)) for i=0..15.
+# Values precomputed as round(32768 * sin(i * 2π / 16)) for i=0..15,
+# with the two peaks clamped to ±32767 (32768 does not fit the range).
 var sine_table[128];   # 16 × i64
 
 fn init_sine_table() {
@@ -110,7 +111,13 @@ var env_decay_samples        = 0;
 var env_sustain_level        = 0;
 var env_release_samples      = 0;
 
+# A zero-length stage ("instant attack") is clamped to one sample: each
+# stage divides by its sample count, and an integer divide by zero is a
+# SIGFPE, not an instant ramp.
 fn env_set_params(attack, decay, sustain, release) {
+    if (attack < 1) { attack = 1; }
+    if (decay < 1) { decay = 1; }
+    if (release < 1) { release = 1; }
     env_attack_samples = attack;
     env_decay_samples = decay;
     env_sustain_level = sustain;
@@ -340,6 +347,17 @@ fn test_env_gate_off_during_attack_no_click() {
     return 0;
 }
 
+fn test_env_instant_attack() {
+    # attack = 0 must not divide by zero: it is clamped to one sample.
+    env_set_params(0, 4, 16384, 4);
+    env_reset();
+    env_gate_on();
+    env_step();
+    assert_eq(env_level, ONE, "instant attack reaches ONE in one step");
+    assert_eq(env_state, ENV_DECAY, "instant attack moves straight to decay");
+    return 0;
+}
+
 fn test_voice_silent_when_idle() {
     init_sine_table();
     voice_init(WAVE_SINE, 8192);
@@ -381,6 +399,7 @@ fn main() {
     test_env_sustain_holds();
     test_env_release_to_idle();
     test_env_gate_off_during_attack_no_click();
+    test_env_instant_attack();
     test_voice_silent_when_idle();
     test_voice_audible_when_gated_on();
 

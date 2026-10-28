@@ -61,7 +61,11 @@ _start:
     // Together they reach +/- 4GB from PC
     //
     // For static executables, the linker resolves these at link time.
-    // For shared libraries, they work without fixups (PIC by design).
+    // In a shared library they work without fixups only for symbols that
+    // cannot be preempted (file-local or .hidden). A default-visibility
+    // .global like exported_value must be reached through the GOT
+    // (adrp x0, :got:sym ; ldr x0, [x0, :got_lo12:sym]); `ld -shared`
+    // rejects this file's ADR/ADRP to it ("may bind externally").
     adrp    x0, exported_value
     add     x0, x0, :lo12:exported_value
     ldr     x1, [x0]

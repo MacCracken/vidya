@@ -41,7 +41,7 @@ fn fx_mul(a, b) {
     #
     # >>> not >>. In Cyrius `>>` is LOGICAL (zero-fills) and `>>>` is
     # ARITHMETIC (sign-extends) — the opposite of C/Java, and the reason
-    # `asr()` below exists at all. The product of two Q16.16 values is
+    # this multiply spells the shift `>>>`. The product of two Q16.16 values is
     # signed, so a zero-filling shift turns every negative result into a
     # huge positive one: fx_mul(-3.0, 2.5) returned 281474976219136
     # instead of -491520. This is the exact defect the field note in
@@ -63,44 +63,36 @@ fn fx_div(a, b) {
 }
 
 fn asr(v, n) {
-    # Arithmetic shift right (sign-preserving)
-    # Cyrius >> is logical (zero-fills), this preserves the sign
+    # Signed shift that rounds toward ZERO (-1 -> 0), keeping fixed-point
+    # rounding symmetric. `>>>` is the true arithmetic shift, which floors
+    # (-1 >>> 1 == -1); plain `>>` is logical and would zero-fill.
     if (v < 0) {
         return 0 - ((0 - v) >> n);
     }
     return v >> n;
 }
 
-# --- Sine table (quarter-wave, 256 entries) ---
+# --- Sine table (quarter-wave, 257 entries: 0 .. π/2 INCLUSIVE) ---
+# 257, not 256: the mirrors below read index 512 - a and 1024 - a, which
+# reach 256 (= π/2) exactly. A 256-entry table has no π/2 endpoint and
+# forces an off-by-one mirror (511 - a), putting half the circle one step
+# out of phase.
 
-var _sin_table[256];
+var _sin_table: i64[257];
 var _sin_init_done = 0;
 
 fn sin_table_init() {
-    # Bhaskara I approximation: sin(x) ≈ 16x(π-x) / (5π²-4x(π-x))
-    # Compute for first quadrant (0-255 → 0 to π/2), mirror for rest.
-    # Using integer approximation of the formula.
+    # Bhaskara I approximation: sin(x) ≈ 16x(π-x) / (5π²-4x(π-x)),
+    # max error ≈ 0.0016. Here π = 32768 units, so x = i * 64 walks
+    # [0, π/2] inclusive as i goes 0..256; the result is scaled by FX_ONE.
+    var pi = 32768;
     var i = 0;
-    while (i < 256) {
-        # Map i (0-255) to angle (0 to 16384, representing 0 to π/2)
-        # sin(i/256 * π/2) * 65536
-        # Simple approximation: scale linearly for now, replace with
-        # precomputed values for production
-        var angle = i * 64;    # 0-16320
-        var quarter = 16384;
-        # Parabolic approximation: 4*x*(quarter-x) / quarter^2 * 65536
-        var x = angle;
-        var num = 4 * (x >> 4) * ((quarter - x) >> 4);
-        var denom = (quarter >> 4) * (quarter >> 4);
-        if (denom > 0) {
-            store64(&_sin_table + i * 8, (num * FX_ONE) / denom);
-        } else {
-            store64(&_sin_table + i * 8, 0);
-        }
+    while (i <= 256) {
+        var x = i * 64;
+        var t = x * (pi - x);
+        _sin_table[i] = (16 * t * FX_ONE) / (5 * pi * pi - 4 * t);
         i = i + 1;
     }
-    # Fixup: sin(90°) = 1.0
-    store64(&_sin_table + 255 * 8, FX_ONE);
     _sin_init_done = 1;
 }
 
@@ -114,15 +106,15 @@ fn sin_lookup(angle) {
         return load64(&_sin_table + angle * 8);
     }
     if (angle < 512) {
-        # Second quadrant: mirror
-        return load64(&_sin_table + (511 - angle) * 8);
+        # Second quadrant: mirror, sin(π - x) = sin(x)
+        return load64(&_sin_table + (512 - angle) * 8);
     }
     if (angle < 768) {
         # Third quadrant: negate first quadrant
         return 0 - load64(&_sin_table + (angle - 512) * 8);
     }
-    # Fourth quadrant: negate mirror
-    return 0 - load64(&_sin_table + (1023 - angle) * 8);
+    # Fourth quadrant: negate mirror, sin(2π - x) = -sin(x)
+    return 0 - load64(&_sin_table + (1024 - angle) * 8);
 }
 
 fn cos_lookup(angle) {
@@ -163,12 +155,12 @@ fn test_fx_mul() {
 }
 
 fn test_fx_mul_safe() {
-    # 1000.0 * 1000.0 — would overflow normal fx_mul on 32-bit
+    # 1000.0 * 1000.0 — the raw product needs 52 bits, which would overflow
+    # a 32-bit (or Q16.16-in-i32) multiply. Check the VALUE, not just the sign.
     var a = fx_from_int(1000);
     var b = fx_from_int(1000);
     var result = fx_mul_safe(a, b);
-    # Result should be positive (not wrapped negative from overflow)
-    assert(result > 0, "safe mul of 1000*1000 is positive");
+    assert_eq(result, fx_from_int(1000000), "safe mul of 1000.0*1000.0 == 1e6");
     return 0;
 }
 
@@ -185,10 +177,11 @@ fn test_fx_div() {
 }
 
 fn test_asr() {
-    # Arithmetic shift right preserves sign
+    # asr keeps the sign and rounds toward zero
     assert_eq(asr(-256, 1), -128, "asr(-256, 1) == -128");
     assert_eq(asr(256, 1), 128, "asr(256, 1) == 128");
-    assert_eq(asr(-1, 1), 0, "asr(-1, 1) == 0");
+    assert_eq(asr(-1, 1), 0, "asr(-1, 1) == 0 (rounds toward zero)");
+    assert_eq(-1 >>> 1, -1, "-1 >>> 1 == -1 (true arithmetic shift floors)");
     assert_eq(asr(0, 4), 0, "asr(0, 4) == 0");
     return 0;
 }
@@ -211,6 +204,14 @@ fn test_sin_lookup() {
 
     # cos(0) = sin(256) ≈ 1.0
     assert(cos_lookup(0) > 60000, "cos(0) near 1.0");
+
+    # Mid-quadrant values: sin(45°) = 0.70711 -> 46341 in 16.16.
+    var s45 = sin_lookup(128);
+    assert(s45 > 46000, "sin(128) ~ 0.7071 (lower)");
+    assert(s45 < 46700, "sin(128) ~ 0.7071 (upper)");
+    # Mirror identities hold exactly, one step from the quadrant edges.
+    assert_eq(sin_lookup(511), sin_lookup(1), "sin(pi - x) == sin(x)");
+    assert_eq(sin_lookup(1023), 0 - sin_lookup(1), "sin(2pi - x) == -sin(x)");
     return 0;
 }
 

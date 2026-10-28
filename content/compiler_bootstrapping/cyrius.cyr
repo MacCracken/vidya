@@ -3,18 +3,20 @@
 # Cyrius IS a bootstrapping compiler. This documents the patterns,
 # not reimplements them. See github.com/MacCracken/cyrius for the real thing.
 #
-# Bootstrap chain: seed (29KB asm) → stage1f (12KB) → bridge (transitional) → cc3 (~250KB)
-# Self-hosting proof: cc3 compiles its own source → cc4, cmp -s cc3 cc4
+# Bootstrap chain (Cyrius 6.7.18, cyrius/bootstrap/bootstrap.sh):
+#   seed bootstrap/asm (29,024 B, a committed x86_64 assembler binary —
+#   the root of trust) assembles bootstrap/cybs.cyr → build/cybs
+#   (23,551 B, the bootstrap compiler); cybs builds the full compiler,
+#   build/cycc (2,929,832 B). Closure check: cybs assembled by the
+#   cybs-built assembler must cmp-equal the cybs the seed assembled.
+# Self-hosting proof: cycc compiles its own source, and the output must
+#   be byte-identical to the cycc that produced it.
 #
 # Key concepts: seed trust, multi-stage, byte-identical verification,
-# cross-compilation (x86 cc3 → aarch64 cc3_aarch64 → native aarch64)
+# cross-compilation (x86 cycc → cycc_aarch64 → cycc-native-aarch64)
 #
-# Current state (Cyrius v3.4.17):
-#   cc3       = 250,304 bytes (x86_64, 8 modules, ~280 fns)
-#   cc3_arm   = 211 KB (aarch64 cross, same frontend, aarch64 backend)
-#   40 stdlib modules + 5 deps, 32 test suites (442 assertions)
-#   Heap audit: 47 regions, 0 overlaps, 0 warnings
-#   `./build/cc3 --version` → "cc3 3.4.17"
+# Sizes at 6.7.18 (cyrius docs/development/state.md): cycc 2,929,832 B
+# (x86_64), cycc_aarch64 2,737,832 B, cycc-native-aarch64 3,155,368 B.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -25,34 +27,32 @@ include "lib/assert.cyr"
 # Bootstrap Chain — the Cyrius architecture
 # ================================================================
 
-# Stage sizes (actual Cyrius values, v3.4.17)
-var SEED_SIZE_KB = 29;       # bootstrap/asm — hand-written x86_64 assembly (auditable)
-var STAGE1_SIZE_KB = 12;     # stage1f — minimal compiler, compiles the bridge language
-var BRIDGE_SIZE_KB = 45;     # bridge — stepping-stone compiler, lives in src/bridge.cyr
-var CC3_SIZE_KB = 250;       # cc3 — full modular compiler (8 modules)
-var CC3_ARM_SIZE_KB = 211;   # cc3_aarch64 — cross-compiler output (x86→aarch64)
+# Stage sizes in bytes (Cyrius 6.7.18)
+var SEED_BYTES = 29024;        # bootstrap/asm — the committed seed assembler
+var CYBS_BYTES = 23551;        # build/cybs — bootstrap compiler the seed assembles
+var CYCC_BYTES = 2929832;      # build/cycc — the full compiler
+var CYCC_ARM_BYTES = 2737832;  # build/cycc_aarch64 — x86-hosted, emits aarch64
 
 # Each stage compiles the next. The seed is the root of trust.
 # Thompson's "Reflections on Trusting Trust" (1984): if the seed is
 # compromised, every generation inherits the compromise.
 #
-# The bridge exists because stage1f's language subset is too limited to
-# compile the full cc3 source directly. bridge.cyr is written in stage1f's
-# subset AND can compile the full cc3 language. It is the conceptual
-# fixed-point between "what the seed can produce" and "what the real
-# compiler looks like."
+# Each stage only has to be good enough to build the next: the seed
+# only assembles cybs, cybs only has to compile cycc's source. Keeping
+# each step's job narrow is what keeps the root small enough to audit.
 
 fn test_chain_properties() {
-    # Each stage is larger than the previous (more features)
-    assert(STAGE1_SIZE_KB < BRIDGE_SIZE_KB, "stage1 < bridge");
-    assert(BRIDGE_SIZE_KB < CC3_SIZE_KB, "bridge < cc3");
-    assert(SEED_SIZE_KB < CC3_SIZE_KB, "seed < cc3");
+    # Capability grows along the chain; size does not have to: the seed
+    # (an assembler) is LARGER than the bootstrap compiler it assembles.
+    assert(SEED_BYTES > CYBS_BYTES, "seed is not the smallest stage");
+    assert(CYBS_BYTES < CYCC_BYTES, "cybs < cycc");
+    assert(SEED_BYTES < CYCC_BYTES, "seed < cycc");
 
     # The seed must be small enough for a human to audit
-    assert(SEED_SIZE_KB < 50, "seed is auditable (<50KB)");
+    assert(SEED_BYTES < 50 * 1024, "seed is auditable (<50KB)");
 
     # Cross-compiler is similar size to native (same frontend, different backend)
-    assert(CC3_ARM_SIZE_KB > 100, "cross-compiler is substantial");
+    assert(CYCC_ARM_BYTES > CYCC_BYTES / 2, "cross-compiler is substantial");
     return 0;
 }
 
@@ -92,11 +92,11 @@ fn test_instruction_sizes() {
 # Self-Hosting Verification
 # ================================================================
 # The gold standard: compile the compiler with itself, compare outputs.
-#   cat src/main.cyr | ./build/cc3 > /tmp/cc3a && chmod +x /tmp/cc3a
-#   cat src/main.cyr | /tmp/cc3a > /tmp/cc3b && chmod +x /tmp/cc3b
-#   cmp -s /tmp/cc3a /tmp/cc3b    # must be byte-identical
+#   cat src/main.cyr | ./build/cycc > /tmp/c1 && chmod +x /tmp/c1
+#   cat src/main.cyr | /tmp/c1 > /tmp/c2 && chmod +x /tmp/c2
+#   cmp -s /tmp/c1 /tmp/c2    # must be byte-identical
 #
-# If cc3a != cc3b, the compiler is not a fixed point — it doesn't
+# If c1 != c2, the compiler is not a fixed point — it doesn't
 # faithfully reproduce itself. This catches codegen bugs.
 #
 # For heap-layout changes that may shift offsets, use a three-step or
@@ -104,43 +104,65 @@ fn test_instruction_sizes() {
 # several self-compile iterations until the output stabilizes. The
 # final iteration must be byte-identical to its predecessor.
 
+# A simulated compile: the output should be a pure function of the
+# source. `embed_time` = 1 models a compiler that stamps the build time
+# into its output (a __DATE__-style timestamp).
+fn sim_compile(src, build_time, embed_time) {
+    var out = src * 31 + 7;                  # stand-in for codegen
+    if (embed_time == 1) { out = out + build_time; }
+    return out;
+}
+
 fn test_self_hosting_properties() {
-    # Fixed-point property: f(f(x)) == f(x) where f = compiler, x = source
-    # Simulated: two "compilation" passes should produce same result
-    var source_hash = 0xDEAD;
-    var cc3a_output = source_hash * 7 + 42;   # deterministic transform
-    var cc3b_output = source_hash * 7 + 42;   # same transform = same result
-    assert_eq(cc3a_output, cc3b_output, "self-hosting: cc3a==cc3b");
+    # The fixed point is c1 == c2, where c1 = cycc(S) and c2 = c1(S): the
+    # SAME source rebuilt by the NEW binary, at a different time. (It is
+    # not f(f(x)) == f(x); the source is never compiled twice over.)
+    var src = 0xDEAD;
+    assert_eq(sim_compile(src, 1000, 0), sim_compile(src, 2000, 0),
+              "deterministic compiler: a rebuild is byte-identical");
 
     # Non-deterministic compilation breaks self-hosting
     # (timestamps, ASLR, random padding — all must be eliminated)
+    assert(sim_compile(src, 1000, 1) != sim_compile(src, 2000, 1),
+           "an embedded build timestamp breaks the fixed point");
     return 0;
 }
 
 # ================================================================
 # Cross-Compilation Chain
 # ================================================================
-# x86 cc3 → cc3_aarch64 (cross-compiler, runs on x86, emits ARM)
-# cc3_aarch64 → cc3-native-aarch64 (native, runs on ARM, emits ARM)
-# Verification: cc3-native-aarch64 compiles itself → byte-identical
+# x86 cycc → cycc_aarch64 (cross-compiler, runs on x86, emits ARM)
+# cycc_aarch64 → cycc-native-aarch64 (native, runs on ARM, emits ARM)
+# Verification: cycc-native-aarch64 compiles itself → byte-identical
 #
 # This proves the cross-compiler is correct: it produces a native
 # compiler that can reproduce itself on the target architecture.
 
+# A chain is runnable only if each stage runs where the previous stage's
+# output runs: host[i] == target[i - 1].
+fn chain_runnable(hosts, targets, n) {
+    var i = 1;
+    while (i < n) {
+        if (load64(hosts + i * 8) != load64(targets + (i - 1) * 8)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 fn test_cross_compilation() {
-    # Architecture IDs
     var ARCH_X86 = 0;
     var ARCH_AARCH64 = 1;
-
-    # Cross-compiler: host != target
-    var cross_host = ARCH_X86;
-    var cross_target = ARCH_AARCH64;
-    assert(cross_host != cross_target, "cross: host != target");
-
-    # Native compiler: host == target
-    var native_host = ARCH_AARCH64;
-    var native_target = ARCH_AARCH64;
-    assert_eq(native_host, native_target, "native: host == target");
+    # cycc (x86→x86), cycc_aarch64 (x86→arm), cycc-native-aarch64 (arm→arm)
+    var hosts: i64[3];
+    var targets: i64[3];
+    hosts[0] = ARCH_X86;     targets[0] = ARCH_X86;
+    hosts[1] = ARCH_X86;     targets[1] = ARCH_AARCH64;
+    hosts[2] = ARCH_AARCH64; targets[2] = ARCH_AARCH64;
+    assert_eq(chain_runnable(&hosts, &targets, 3), 1, "x86 → cross → native chain runs");
+    assert(hosts[1] != targets[1], "stage 1 is a cross-compiler");
+    # Drop the cross step: an aarch64-hosted stage right after an x86-only one cannot run.
+    hosts[1] = ARCH_AARCH64;
+    assert_eq(chain_runnable(&hosts, &targets, 3), 0, "a stage whose host was never produced breaks the chain");
     return 0;
 }
 

@@ -7,6 +7,12 @@ MAX_MSG_SIZE = 1024
 
 
 def encode_varint(value):
+    # Unsigned LEB128 has no sign: a Python int is unbounded and signed, so
+    # refuse anything outside u64. Without this, -1 encoded as [127] (and
+    # decoded back as 127), and 2**64 gave 10 bytes our own decoder rejects.
+    # A signed value needs zigzag ((n << 1) ^ (n >> 63)) before encoding.
+    if not 0 <= value < 2**64:
+        raise ValueError(f"varint value out of u64 range: {value}")
     out = bytearray()
     while value >= 128:
         out.append((value & 0x7F) | 0x80)
@@ -23,6 +29,11 @@ def decode_varint(buf):
         if i >= len(buf):
             return None
         b = buf[i]
+        # The 10th byte holds bit 63 only (9 * 7 = 63 bits before it). Any
+        # higher bit is a value past 2**64 - 1: reject it rather than return
+        # a number a fixed-width u64 reader would silently truncate.
+        if i == MAX_VARINT_BYTES - 1 and b > 1:
+            return None
         value += (b & 0x7F) << shift
         if b & 0x80 == 0:
             return (value, i + 1)
@@ -66,6 +77,14 @@ def main():
     # Overflow guard
     bomb = bytes([0xFF] * 11)
     assert decode_varint(bomb) is None
+    assert decode_varint(encode_varint(2**64 - 1)) == (2**64 - 1, 10)  # u64 max fits
+    assert decode_varint(bytes([0xFF] * 9 + [0x7F])) is None          # 2**70 - 1 does not
+    for bad in (-1, 2**64):                     # no sign bit; nothing past u64
+        try:
+            encode_varint(bad)
+            assert False, f"encode_varint({bad}) should be rejected"
+        except ValueError:
+            pass
 
     # Frame round-trip
     payload = b"hello, world"
@@ -99,7 +118,7 @@ def main():
     over = encode_varint(9999)
     assert decode_frame(over) is None
 
-    print("serialization: 19/19 ok")
+    print("serialization: 20/20 ok")
 
 
 main()

@@ -1,11 +1,13 @@
 // Vidya — Game AI Decision Making in Rust
 //
-// Stat-driven AI scoring with PCG PRNG, urgency-multiplied shooting,
-// and weighted action selection. Rust's `wrapping_mul` / `wrapping_add`
-// give us the same modular 64-bit arithmetic as the C-shaped PCG
-// reference (overflow is defined behavior — we just have to ask for
-// it). `match` on a `#[repr(i64)]` enum gives self-documenting
-// dispatch with compiler-checked exhaustiveness.
+// Stat-driven AI scoring with a 64-bit LCG PRNG, urgency-multiplied
+// shooting, and noisy best-score action selection. The LCG uses PCG's
+// multiplier and increment but returns raw high state bits; real PCG32
+// adds an output permutation (xorshift + data-dependent rotate) that
+// this omits. Rust's `wrapping_mul` / `wrapping_add` give the modular
+// 64-bit arithmetic (overflow is defined behavior — we just have to ask
+// for it). `Action` is a `#[repr(i64)]` enum, so each variant has a
+// fixed discriminant matching the reference's integer codes.
 
 #![allow(dead_code, unused_assignments)]
 

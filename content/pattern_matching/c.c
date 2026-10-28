@@ -149,7 +149,10 @@ int main(void) {
     switch (val) {
         case 1:
             hit_one = 1;
-            // no break — falls through!
+            // no break — falls through! C23's [[fallthrough]] marks it as
+            // intentional (and silences -Wimplicit-fallthrough); an
+            // accidental missing break stays a warning.
+            [[fallthrough]];
         case 2:
             hit_two = 1;
             break;

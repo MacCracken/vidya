@@ -60,15 +60,19 @@ func main() {
 	// ── Raw syscalls via syscall.Syscall ──────────────────────────
 	// syscall.Syscall(trap, a1, a2, a3) → (r1, r2, errno)
 	//
-	// Under the hood, Go's runtime:
-	//   1. Saves goroutine state
-	//   2. Transitions to a system stack (goroutine stacks are small)
-	//   3. Loads registers per the kernel ABI: RAX=trap, RDI=a1, RSI=a2, RDX=a3
-	//   4. Executes SYSCALL
-	//   5. Checks if the goroutine's stack needs growing (preemption point)
+	// Under the hood (src/syscall/syscall_linux.go), Syscall is:
+	//   1. runtime.entersyscall() — mark the goroutine as in a syscall and
+	//      detach its P, so if the call blocks, sysmon can hand that P to
+	//      another thread and the other goroutines keep running
+	//   2. RawSyscall6: load the kernel ABI registers (RAX=trap, RDI=a1,
+	//      RSI=a2, RDX=a3) and execute SYSCALL — on the goroutine's own
+	//      stack; there is no switch to a system stack here
+	//   3. runtime.exitsyscall() — reacquire a P (possibly waiting for
+	//      one) before Go code continues
 	//
-	// syscall.RawSyscall skips steps 1, 3, 5 — faster but can block
-	// the entire OS thread (no preemption, no GC cooperation).
+	// syscall.RawSyscall is step 2 alone. It is cheaper, but a blocking
+	// call then holds the P: the goroutines queued on it stall and a
+	// stop-the-world (GC) waits until the syscall returns.
 
 	fmt.Println("\n2. Raw syscalls via syscall.Syscall:")
 

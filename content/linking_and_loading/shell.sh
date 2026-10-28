@@ -311,13 +311,17 @@ assert_eq "$(section_size "$tmpdir/main.o" ".text")" "18" "main.o .text = 18 byt
 assert_eq "$(section_size "$tmpdir/math.o" ".text")" "7" "math.o .text = 7 bytes"
 assert_eq "$(section_size "$tmpdir/libc.o" ".text")" "10" "libc.o .text = 10 bytes"
 
-# Total linked binary .text size
-total_text=$(( 18 + 7 + 10 ))
+# Total linked binary .text size — measured from the merged output, not
+# re-added from the constants above (which could never fail)
+total_text=$(( ${#MERGED_TEXT} / 2 ))
 assert_eq "$total_text" "35" "total .text = 35 bytes"
 
 # ── Load address assignment ─────────────────────────────────────────
-# The loader places sections at virtual addresses. .text typically starts
-# at a fixed base (e.g., 0x400000 on Linux x86_64).
+# The loader places sections at virtual addresses. A non-PIE executable is
+# linked at a fixed image base (0x400000 for GNU ld on x86_64 — the headers
+# sit there, and since binutils 2.31's -z separate-code .text itself lands
+# at 0x401000); a PIE (the default on modern distros) gets a random base at
+# load time. This model just places .text at the base.
 
 LOAD_BASE=0x400000
 

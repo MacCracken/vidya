@@ -5,12 +5,14 @@
  * passages by clearing the wall bit on both the current and neighbour
  * cell.
  *
- * The PCG step relies on signed-integer overflow being defined as
- * mod-2^64 wrap. C technically calls signed overflow undefined, but
- * gcc/clang with default flags both lower it to the natural CPU wrap.
- * We use uint64_t for the state to keep the language-defined wrap, and
- * cast to int64_t only when we mask the top bits down to a non-negative
- * 31-bit value.
+ * The RNG is a 64-bit LCG with PCG's constants and a plain top-bits
+ * output (no PCG output permutation). Its state update needs mod-2^64
+ * wrap. Signed overflow is undefined behaviour in C, and gcc/clang do
+ * NOT wrap it by default: they optimise on the assumption it never
+ * happens (`x + 1 > x` folds to 1 even for INT_MAX) unless built with
+ * -fwrapv. Unsigned arithmetic is defined to wrap, so the state is
+ * uint64_t, cast to int64_t only after masking the top bits down to a
+ * non-negative 31-bit value.
  */
 
 #include <stdint.h>

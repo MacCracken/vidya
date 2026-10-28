@@ -8,8 +8,10 @@
 # A semver major.minor.patch is encoded as one integer
 #   enc = major*1_000_000 + minor*1_000 + patch
 # so version comparison IS integer comparison. A constraint is a
-# half-open range [lo, hi). A caret ^X.Y.Z allows everything from
-# X.Y.Z up to (but not including) the next major: [X.Y.Z, (X+1).0.0).
+# half-open range [lo, hi). A caret bumps the leftmost NON-ZERO field
+# (npm / cargo): ^X.Y.Z = [X.Y.Z, (X+1).0.0) for X > 0, but below 1.0
+# the minor IS the breaking axis: ^0.Y.Z = [0.Y.Z, 0.(Y+1).0) and
+# ^0.0.Z = [0.0.Z, 0.0.(Z+1)).
 # Resolving a shared ("diamond") dependency means intersecting the
 # ranges every requirer imposes and picking the highest version that
 # survives — and backtracking on an earlier choice when the highest
@@ -27,9 +29,15 @@ var VMIN = 1000;
 fn sv(maj, min, pat) { return maj * VMAJ + min * VMIN + pat; }
 fn sv_major(v) { return v / VMAJ; }
 
-# --- Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0) ---
+# --- Caret range [lo, hi): bump the leftmost non-zero field ---
 fn caret_lo(v) { return v; }
-fn caret_hi(v) { return (sv_major(v) + 1) * VMAJ; }
+fn caret_hi(v) {
+    var maj = sv_major(v);
+    var min = (v / VMIN) % 1000;
+    if (maj > 0) { return (maj + 1) * VMAJ; }      # ^1.2.3 -> 2.0.0
+    if (min > 0) { return (min + 1) * VMIN; }      # ^0.2.3 -> 0.3.0
+    return v + 1;                                  # ^0.0.3 -> 0.0.4
+}
 
 # --- Constraint satisfaction over a half-open range ---
 fn satisfies(v, lo, hi) {
@@ -170,6 +178,11 @@ fn test_caret() {
     assert_eq(satisfies(sv(1, 4, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))), 1, "1.4.0 in ^1.2.0");
     assert_eq(satisfies(sv(2, 0, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))), 0, "2.0.0 not in ^1.2.0");
     assert_eq(satisfies(sv(1, 1, 0), caret_lo(sv(1, 2, 0)), caret_hi(sv(1, 2, 0))), 0, "1.1.0 below ^1.2.0");
+    # Below 1.0 the caret stops at the next MINOR (or patch, for 0.0.Z).
+    assert_eq(caret_hi(sv(0, 2, 3)), sv(0, 3, 0), "^0.2.3 upper = 0.3.0");
+    assert_eq(satisfies(sv(0, 9, 0), caret_lo(sv(0, 2, 3)), caret_hi(sv(0, 2, 3))), 0, "0.9.0 not in ^0.2.3");
+    assert_eq(satisfies(sv(0, 2, 9), caret_lo(sv(0, 2, 3)), caret_hi(sv(0, 2, 3))), 1, "0.2.9 in ^0.2.3");
+    assert_eq(caret_hi(sv(0, 0, 3)), sv(0, 0, 4), "^0.0.3 upper = 0.0.4");
     return 0;
 }
 

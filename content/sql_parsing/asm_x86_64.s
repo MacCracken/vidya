@@ -3,9 +3,12 @@
 # At the assembly level the SQL lexer is a byte-by-byte LODSB-style
 # walk: load a byte (movzx rax,[rsi]), classify with cmp/jb/ja against
 # ASCII ranges, and dispatch to the correct emit handler. Keyword
-# detection uppercases each byte (or'd with 0x20-mask after range check)
-# and compares against a literal. Tokens are written into a fixed
-# buffer of 16-byte records {kind:8, ptr:8} for simplicity.
+# detection uppercases each byte (subtracts 0x20 — clears bit 5 — after
+# an a-z range check) and compares against a literal. Tokens are written
+# into a fixed buffer of 16-byte records {kind:8, ptr:8} for simplicity.
+# A lexer must not guess: an unknown byte, or more tokens than the buffer
+# holds, makes tokenize return -1 rather than hand the parser a shorter
+# query than the one it was given.
 
 .intel_syntax noprefix
 .global _start
@@ -28,6 +31,9 @@ sql1: .asciz "SELECT * FROM users WHERE id = 1"
 sql2: .asciz "select * from T"
 sql3: .asciz "selected"
 sql4: .asciz "12345"
+sql5: .asciz "f(a1, b2)"
+sql_lt: .asciz "SELECT * FROM t WHERE id < 5"
+sql_many: .asciz "* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *"
 
 kw_select: .ascii "SELECT"
 kw_select_len = . - kw_select
@@ -40,9 +46,10 @@ msg_pass: .ascii "All sql_parsing examples passed.\n"
 msg_pass_len = . - msg_pass
 
 .section .bss
-# 64 tokens × 16 bytes = 1024 B
+# 64 tokens × 16 bytes = 1024 B (63 tokens + the EOF record)
+.equ TOK_CAP, 64
 .align 16
-tok_buf: .skip 1024
+tok_buf: .skip TOK_CAP * 16
 tok_count: .skip 8
 
 .section .text
@@ -166,7 +173,8 @@ classify:
     mov     eax, T_IDENT
     ret
 
-# ── tokenize(rdi=sql) -> rax = token count ────────────────────────
+# ── tokenize(rdi=sql) -> rax = token count, or -1 ─────────────────
+# -1: a byte no token starts with, or more than TOK_CAP-1 tokens.
 # Walks the SQL string byte-by-byte. Writes 16-byte records to
 # tok_buf: { kind:i64, ptr:i64 }. Trailing T_EOF written; not counted
 # in the returned count for ease of testing (matches Patra style:
@@ -206,6 +214,9 @@ tokenize:
     jmp     .Ltk_loop
 
 .Ltk_chk_alpha:
+    # A token starts here: make sure its record AND the EOF record fit
+    cmp     r15, TOK_CAP - 1
+    jae     .Ltk_error
     push    rax
     call    is_alpha
     mov     ecx, eax
@@ -283,9 +294,9 @@ tokenize:
     je      .Ltk_emit_rparen
     cmp     al, ','
     je      .Ltk_emit_comma
-    # Unknown: skip
-    inc     rbx
-    jmp     .Ltk_loop
+    # Unknown byte: refuse. Skipping it would turn "id < 5" into "id 5"
+    # and let "...; DROP TABLE t" through as one query.
+    jmp     .Ltk_error
 
 .Ltk_emit_star:
     mov     ecx, T_STAR
@@ -320,7 +331,10 @@ tokenize:
     mov     rax, r15
     lea     r10, [rip + tok_count]
     mov     qword ptr [r10], r15
-
+    jmp     .Ltk_ret
+.Ltk_error:
+    mov     rax, -1
+.Ltk_ret:
     pop     r15
     pop     r14
     pop     r13
@@ -418,6 +432,40 @@ _start:
     xor     rdi, rdi
     call    tk_kind
     cmp     rax, T_INT
+    jne     fail
+
+    # ── Test 5: alnum identifiers + ( ) , punctuation ────────────
+    lea     rdi, [rip + sql5]
+    call    tokenize
+    cmp     rax, 6                  # f ( a1 , b2 )
+    jne     fail
+    mov     rdi, 1
+    call    tk_kind
+    cmp     rax, T_LPAREN
+    jne     fail
+    mov     rdi, 2
+    call    tk_kind
+    cmp     rax, T_IDENT            # "a1": the digit stays in the identifier
+    jne     fail
+    mov     rdi, 3
+    call    tk_kind
+    cmp     rax, T_COMMA
+    jne     fail
+    mov     rdi, 5
+    call    tk_kind
+    cmp     rax, T_RPAREN
+    jne     fail
+
+    # ── Test 6: an unknown byte is an error, not silently dropped ─
+    lea     rdi, [rip + sql_lt]
+    call    tokenize
+    cmp     rax, -1
+    jne     fail
+
+    # ── Test 7: more tokens than tok_buf holds → -1, no overrun ───
+    lea     rdi, [rip + sql_many]   # 69 tokens
+    call    tokenize
+    cmp     rax, -1
     jne     fail
 
     # ── Print success message ────────────────────────────────────

@@ -3,6 +3,12 @@
 # In-memory descriptor table — slot 0 reserved as null sentinel,
 # LIFO free list for reuse. .bss arenas back the table; helpers in
 # .text. Same pattern as page_management's asm port.
+#
+# A handle is (generation << 8) | slot. Freeing a slot bumps its
+# generation, so a handle kept after free_handle no longer matches and is
+# refused — instead of silently resolving to whatever reuses the slot. The
+# same check turns a double free into an error rather than a free-list
+# cycle that hands one slot to two owners.
 
 .intel_syntax noprefix
 .global _start
@@ -13,6 +19,8 @@
 .align 8
 slots:        .skip 8 * TABLE_CAP
 free_links:   .skip 8 * TABLE_CAP
+gens:         .skip 8 * TABLE_CAP     # current generation of each slot
+live:         .skip 8 * TABLE_CAP     # 1 while the slot is allocated
 
 .section .data
 next_id:      .quad 1
@@ -30,23 +38,37 @@ table_init:
     mov     qword ptr [rip + next_id], 1
     mov     qword ptr [rip + free_head], 0
     lea     rdi, [rip + slots]
-    mov     rcx, TABLE_CAP
+    mov     rcx, TABLE_CAP * 4        # slots, free_links, gens, live
     xor     rax, rax
 .ti_loop:
     mov     [rdi], rax
     add     rdi, 8
     dec     rcx
     jnz     .ti_loop
-    lea     rdi, [rip + free_links]
-    mov     rcx, TABLE_CAP
-.ti_loop2:
-    mov     [rdi], rax
-    add     rdi, 8
-    dec     rcx
-    jnz     .ti_loop2
     ret
 
-# alloc_handle(rdi=desc) -> rax = id
+# live_index(rdi=handle) -> rax = slot, or -1 if the handle is not live
+# (slot 0 / out of range / freed / stale generation). Clobbers rcx, rdx.
+live_index:
+    mov     rax, rdi
+    and     rax, 0xFF                 # slot
+    jz      .li_bad
+    cmp     rax, TABLE_CAP
+    jae     .li_bad                   # unsigned
+    lea     rcx, [rip + live]
+    cmp     qword ptr [rcx + rax * 8], 0
+    je      .li_bad
+    mov     rdx, rdi
+    shr     rdx, 8                    # generation in the handle
+    lea     rcx, [rip + gens]
+    cmp     rdx, [rcx + rax * 8]
+    jne     .li_bad                   # stale: the slot was freed since
+    ret
+.li_bad:
+    mov     rax, -1
+    ret
+
+# alloc_handle(rdi=desc) -> rax = handle (0 if the table is full)
 alloc_handle:
     mov     rax, [rip + free_head]
     test    rax, rax
@@ -55,9 +77,7 @@ alloc_handle:
     lea     rcx, [rip + free_links]
     mov     rdx, [rcx + rax * 8]
     mov     [rip + free_head], rdx
-    lea     rcx, [rip + slots]
-    mov     [rcx + rax * 8], rdi
-    ret
+    jmp     .ah_take
 .ah_extend:
     mov     rax, [rip + next_id]
     cmp     rax, TABLE_CAP
@@ -66,49 +86,57 @@ alloc_handle:
     ret
 .ah_ok:
     inc     qword ptr [rip + next_id]
+.ah_take:
     lea     rcx, [rip + slots]
     mov     [rcx + rax * 8], rdi
+    lea     rcx, [rip + live]
+    mov     qword ptr [rcx + rax * 8], 1
+    lea     rcx, [rip + gens]
+    mov     rdx, [rcx + rax * 8]
+    shl     rdx, 8
+    or      rax, rdx                  # handle = gen << 8 | slot
     ret
 
-# lookup_handle(rdi=id) -> rax
+# lookup_handle(rdi=handle) -> rax (0 if not live)
 lookup_handle:
-    test    rdi, rdi
-    jz      .lh_zero
-    cmp     rdi, TABLE_CAP
-    jge     .lh_zero
-    lea     rax, [rip + slots]
-    mov     rax, [rax + rdi * 8]
+    call    live_index
+    cmp     rax, -1
+    je      .lh_zero
+    lea     rcx, [rip + slots]
+    mov     rax, [rcx + rax * 8]
     ret
 .lh_zero:
     xor     rax, rax
     ret
 
-# update_handle(rdi=id, rsi=desc) -> rax = 0/1
+# update_handle(rdi=handle, rsi=desc) -> rax = 0/1
 update_handle:
-    test    rdi, rdi
-    jz      .uh_zero
-    cmp     rdi, TABLE_CAP
-    jge     .uh_zero
-    lea     rax, [rip + slots]
-    mov     [rax + rdi * 8], rsi
+    call    live_index
+    cmp     rax, -1
+    je      .uh_zero
+    lea     rcx, [rip + slots]
+    mov     [rcx + rax * 8], rsi
     mov     rax, 1
     ret
 .uh_zero:
     xor     rax, rax
     ret
 
-# free_handle(rdi=id) -> rax = 0/1
+# free_handle(rdi=handle) -> rax = 0/1 (0: not live — stale or double free)
 free_handle:
-    test    rdi, rdi
-    jz      .fh_zero
-    cmp     rdi, TABLE_CAP
-    jge     .fh_zero
-    lea     rax, [rip + free_links]
-    mov     rcx, [rip + free_head]
-    mov     [rax + rdi * 8], rcx
-    mov     [rip + free_head], rdi
-    lea     rax, [rip + slots]
-    mov     qword ptr [rax + rdi * 8], 0
+    call    live_index
+    cmp     rax, -1
+    je      .fh_zero
+    lea     rcx, [rip + live]
+    mov     qword ptr [rcx + rax * 8], 0
+    lea     rcx, [rip + gens]
+    inc     qword ptr [rcx + rax * 8] # old handles to this slot go stale
+    lea     rcx, [rip + slots]
+    mov     qword ptr [rcx + rax * 8], 0
+    lea     rcx, [rip + free_links]
+    mov     rdx, [rip + free_head]
+    mov     [rcx + rax * 8], rdx
+    mov     [rip + free_head], rax
     mov     rax, 1
     ret
 .fh_zero:
@@ -214,12 +242,27 @@ _start:
     call    alloc_handle
     mov     r15, rax              # id4
     mov     rdi, rax
+    and     rdi, 0xFF             # same slot as id2...
     mov     rsi, r13
+    call    assert_eq
+    mov     rdi, r15
+    mov     rsi, r13
+    add     rsi, 0x100            # ...one generation later
     call    assert_eq
     mov     rdi, r15
     call    lookup_handle
     mov     rdi, rax
     mov     rsi, 0x4444444444444444
+    call    assert_eq
+    mov     rdi, r13              # the stale id2 must NOT see id4's data
+    call    lookup_handle
+    mov     rdi, rax
+    mov     rsi, 0
+    call    assert_eq
+    mov     rdi, r13              # and freeing it again is refused
+    call    free_handle
+    mov     rdi, rax
+    mov     rsi, 0
     call    assert_eq
 
     # Test 6: exhaustion
@@ -235,6 +278,18 @@ _start:
 .fill_done:
     mov     rdi, 0xDEADBEEF
     call    alloc_handle
+    mov     rdi, rax
+    mov     rsi, 0
+    call    assert_eq
+
+    # Test 7: negative handles are rejected (unsigned bounds check)
+    mov     rdi, -1
+    call    free_handle
+    mov     rdi, rax
+    mov     rsi, 0
+    call    assert_eq
+    mov     rdi, -1
+    call    lookup_handle
     mov     rdi, rax
     mov     rsi, 0
     call    assert_eq

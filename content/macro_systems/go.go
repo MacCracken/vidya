@@ -7,7 +7,8 @@
 //   1. go:generate — run code generators before compilation
 //   2. Build tags  — conditional compilation
 //   3. //go:embed   — embed files at compile time
-//   4. //go:linkname — link to unexported symbols (unsafe escape hatch)
+//   4. //go:linkname — link to unexported symbols (unsafe escape hatch;
+//                      restricted for the standard library since Go 1.23)
 //   5. text/template — runtime code/text generation
 //   6. reflect — runtime metaprogramming (with performance cost)
 //
@@ -22,6 +23,7 @@ package main
 
 import (
 	"bytes"
+	_ "embed"
 	"fmt"
 	"reflect"
 	"strings"
@@ -101,13 +103,12 @@ func testBuildTags() {
 // Rust: include_str!("file.txt"), include_bytes!("file.bin")
 // Go:   //go:embed file.txt     (requires import "embed")
 //
-// We can't use actual //go:embed in a standalone file (needs the
-// embed package and real files), so we model the concept.
+// //go:embed works in a single-file `go run` too: patterns are relative
+// to the source file's directory, so this file can embed itself. (It goes
+// on a package-level var; the corpus always names this file go.go.)
 
-type EmbeddedFile struct {
-	Name    string
-	Content []byte
-}
+//go:embed go.go
+var thisFile string
 
 func testGoEmbed() {
 	// In a real Go project:
@@ -120,14 +121,9 @@ func testGoEmbed() {
 	//   //go:embed schema.sql
 	//   var schema []byte
 
-	// Model the behavior
-	files := []EmbeddedFile{
-		{Name: "version.txt", Content: []byte("1.5.0\n")},
-		{Name: "schema.sql", Content: []byte("CREATE TABLE users (id INT);")},
-	}
-
-	assert(string(files[0].Content) == "1.5.0\n", "embedded version")
-	assert(len(files[1].Content) > 0, "embedded schema")
+	// The real thing: the compiler copied this source file into thisFile.
+	assert(strings.HasPrefix(thisFile, "// Vidya — Macro Systems in Go"), "embedded own header")
+	assert(strings.Contains(thisFile, "//go:embed go.go"), "embedded own directive")
 
 	// Key differences from Rust:
 	//   - Go embeds at compile time but into runtime variables
@@ -314,7 +310,7 @@ func testCompilerDirectives() {
 		},
 		{
 			Name:      "//go:linkname localname pkg.remotename",
-			Purpose:   "Access unexported symbols from other packages",
+			Purpose:   "Bind to another package's unexported symbol (std: only symbols marked for it, Go 1.23+)",
 			RustEquiv: "N/A (unsafe, no Rust equivalent)",
 		},
 		{
@@ -344,9 +340,11 @@ func testCompilerDirectives() {
 
 	// //go:linkname is the most dangerous — it breaks encapsulation.
 	// In practice, it's used by the Go runtime and stdlib internals.
+	// Since Go 1.23 the linker enforces that for the standard library: a
+	// "pull" linkname to an internal symbol not marked with its own
+	// //go:linkname fails to link ("invalid reference to runtime.gcount");
+	// only a grandfathered set of widely-used ones still resolves.
 	// Regular Go code should never use it.
-	assert(directives[3].Name == "//go:linkname localname pkg.remotename",
-		"linkname is dangerous")
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

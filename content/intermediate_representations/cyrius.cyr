@@ -1,15 +1,18 @@
 # Vidya — Intermediate Representations in Cyrius
 #
-# PATTERN-FOCUSED: documents IR concepts as they relate to cc2.
-# SSA properties, phi node semantics, basic block structure,
-# dominator tree concepts, and how cc2's IR differs from textbook SSA.
+# PATTERN-FOCUSED: documents IR concepts as they relate to Cyrius's
+# bootstrap compiler, cc2 (the ancestor of today's cycc): SSA properties,
+# phi node semantics, basic block structure, dominator tree concepts, and
+# how cc2's stack-machine model differs from textbook SSA.
 #
 # Key concepts:
 #   - SSA: every variable assigned exactly once
 #   - Phi nodes: merge values at control flow join points
 #   - Basic blocks: maximal straight-line instruction sequences
 #   - Dominator tree: determines where phi nodes are needed
-#   - cc2's approach: implicit SSA (variables on stack, no explicit phis)
+#   - cc2's approach: no SSA (variables on stack, no explicit phis);
+#     today's cycc also has an opt-in IR path (CYRIUS_IR=3) with
+#     constant folding and DCE
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -121,22 +124,44 @@ fn test_tac_format() {
 #   - Successor: block reachable from this block's terminator
 #   - Predecessor: block whose terminator can reach this block
 
+# The if/else CFG as a predecessor bitmask per block (bit p = edge p -> b):
+#   B0: evaluate condition, branch      (entry, no preds)
+#   B1: then body, jump to merge        (pred B0)
+#   B2: else body, jump to merge        (pred B0)
+#   B3: merge point (phi node here)     (preds B1, B2)
+var cfg_preds: i64[4];
+var cfg_n = 4;
+
+fn cfg_init_if_else() {
+    cfg_preds[0] = 0;
+    cfg_preds[1] = 1;          # {B0}
+    cfg_preds[2] = 1;          # {B0}
+    cfg_preds[3] = 2 | 4;      # {B1, B2}
+    return 0;
+}
+
+fn bit_count(x) {
+    var n = 0;
+    while (x != 0) { n = n + (x & 1); x = x >> 1; }
+    return n;
+}
+
+# Successors of block b = blocks that list b as a predecessor.
+fn cfg_succ_count(b) {
+    var n = 0;
+    var i = 0;
+    while (i < cfg_n) {
+        if ((cfg_preds[i] & (1 << b)) != 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
 fn test_basic_block_properties() {
-    # if/else creates 4 basic blocks:
-    #   B0: evaluate condition, branch
-    #   B1: then body, jump to merge
-    #   B2: else body, jump to merge
-    #   B3: merge point (phi node here)
-    var blocks_for_if_else = 4;
-    assert_eq(blocks_for_if_else, 4, "if/else = 4 blocks");
-
-    # B0 has 2 successors (then, else)
-    var b0_succs = 2;
-    assert_eq(b0_succs, 2, "condition block has 2 successors");
-
-    # B3 (merge) has 2 predecessors (then, else)
-    var b3_preds = 2;
-    assert_eq(b3_preds, 2, "merge block has 2 predecessors");
+    cfg_init_if_else();
+    assert_eq(cfg_succ_count(0), 2, "condition block has 2 successors");
+    assert_eq(bit_count(cfg_preds[3]), 2, "merge block has 2 predecessors");
+    assert_eq(cfg_succ_count(3), 0, "merge block is the exit");
 
     # A while loop creates 3 blocks:
     #   B0: evaluate condition, branch
@@ -207,6 +232,34 @@ fn test_phi_semantics() {
 # The dominator tree has idom(B) as B's parent.
 # Used for: SSA construction, loop detection, code motion.
 
+# Iterative dominator sets (bitmasks): dom(entry) = {entry};
+# dom(b) = {b} ∪ ⋂ dom(p) over b's predecessors p, until nothing changes.
+var dom_set: i64[4];
+
+fn compute_dominators() {
+    var all = (1 << cfg_n) - 1;
+    dom_set[0] = 1;
+    var b = 1;
+    while (b < cfg_n) { dom_set[b] = all; b = b + 1; }
+    var changed = 1;
+    while (changed == 1) {
+        changed = 0;
+        b = 1;
+        while (b < cfg_n) {
+            var meet = all;
+            var p = 0;
+            while (p < cfg_n) {
+                if ((cfg_preds[b] & (1 << p)) != 0) { meet = meet & dom_set[p]; }
+                p = p + 1;
+            }
+            var nd = meet | (1 << b);
+            if (nd != dom_set[b]) { dom_set[b] = nd; changed = 1; }
+            b = b + 1;
+        }
+    }
+    return 0;
+}
+
 fn test_dominator_properties() {
     # In if/else CFG (B0 -> B1/B2 -> B3):
     # B0 dominates everything (it's the entry)
@@ -214,26 +267,16 @@ fn test_dominator_properties() {
     # B2 only dominates B2
     # B3 dominates only B3
 
-    # Dominator set sizes for if/else:
-    var dom_b0 = 1;  # {B0}
-    var dom_b1 = 2;  # {B0, B1}
-    var dom_b2 = 2;  # {B0, B2}
-    var dom_b3 = 2;  # {B0, B3}
-    assert_eq(dom_b0, 1, "B0 dominated by {B0}");
-    assert_eq(dom_b1, 2, "B1 dominated by {B0, B1}");
-    assert_eq(dom_b3, 2, "B3 dominated by {B0, B3}");
+    cfg_init_if_else();
+    compute_dominators();
+    assert_eq(dom_set[0], 1, "B0 dominated by {B0}");
+    assert_eq(dom_set[1], 1 | 2, "B1 dominated by {B0, B1}");
+    assert_eq(dom_set[2], 1 | 4, "B2 dominated by {B0, B2}");
+    assert_eq(dom_set[3], 1 | 8, "B3 dominated by {B0, B3} (neither branch dominates it)");
 
-    # Immediate dominators:
-    # idom(B0) = none (entry)
-    # idom(B1) = B0
-    # idom(B2) = B0
-    # idom(B3) = B0
-    var idom_b1 = 0;  # B0
-    var idom_b2 = 0;  # B0
-    var idom_b3 = 0;  # B0
-    assert_eq(idom_b1, 0, "idom(B1) = B0");
-    assert_eq(idom_b2, 0, "idom(B2) = B0");
-    assert_eq(idom_b3, 0, "idom(B3) = B0");
+    # Immediate dominators: idom(B1) = idom(B2) = idom(B3) = B0 — for
+    # each, B0 is the only strict dominator.
+    assert_eq(dom_set[3] & (0 - 1 - 8), 1, "idom(B3) = B0");
 
     # Dominance frontier of B1: {B3}
     # (B3 is where B1's dominance "stops" because B2 also reaches B3)
@@ -244,7 +287,7 @@ fn test_dominator_properties() {
 # ================================================================
 # cc2's IR Model
 # ================================================================
-# cc2 does NOT use explicit SSA form. Instead:
+# The bootstrap compiler cc2 does NOT use explicit SSA form. Instead:
 #   - Variables live on the stack (every var has a stack slot)
 #   - Expressions use a stack machine (push/pop for temporaries)
 #   - No phi nodes needed (stack slots are implicitly mutable)
@@ -252,8 +295,10 @@ fn test_dominator_properties() {
 #
 # This is simpler but prevents most SSA-based optimizations.
 # The tradeoff: fast compilation, simpler codegen, slower output.
+# Today's cycc keeps an opt-in IR path for that (CYRIUS_IR=3: constant
+# folding, DCE) and a `#regalloc` fn attribute.
 #
-# A future cc2 with optimization would:
+# The textbook optimizing pipeline:
 #   1. Build CFG from parsed AST
 #   2. Convert to SSA (insert phi nodes at dominance frontiers)
 #   3. Run optimization passes (constant folding, DCE, etc.)
@@ -261,25 +306,39 @@ fn test_dominator_properties() {
 #   5. Register allocation
 #   6. Emit machine code
 
+# Expression trees for the stack-machine depth check: node i has left
+# child et_l[i] and right child et_r[i]; -1 marks a leaf.
+var et_l: i64[16];
+var et_r: i64[16];
+
+# Max pushes outstanding while evaluating node n with the scheme
+# "eval left -> push -> eval right -> pop -> operate": the left operand
+# needs nothing extra; the right one runs with this node's left value
+# pushed, so it costs 1 + its own need.
+fn max_pushes(n) {
+    if (et_l[n] < 0) { return 0; }
+    var l = max_pushes(et_l[n]);
+    var r = 1 + max_pushes(et_r[n]);
+    if (l > r) { return l; }
+    return r;
+}
+
+fn et_node(i, l, r) { et_l[i] = l; et_r[i] = r; return i; }
+
 fn test_cc2_ir_model() {
-    # cc2 uses implicit stack-based IR:
-    # Every variable has a known stack offset
-    # Binary operations: eval left -> push -> eval right -> pop -> operate
-    var uses_stack_machine = 1;
-    assert_eq(uses_stack_machine, 1, "cc2 uses stack machine");
-
-    # Stack depth for expression tree of depth d:
-    # Maximum simultaneous pushes = d - 1
-    # Example: (a + b) * (c + d) has depth 2, max stack = 1
-    # (but the nested (a+b) and (c+d) each need their own push)
-    var expr_depth = 2;
-    var max_stack = 1;
-    assert_eq(max_stack, expr_depth - 1, "stack depth = tree depth - 1");
-
-    # No explicit registers means no register allocation
-    # Everything goes through rax (result) and rcx (popped operand)
-    var num_used_regs = 2;  # rax and rcx
-    assert_eq(num_used_regs, 2, "cc2 uses rax + rcx");
+    # Every variable has a known stack offset; binary operations push the
+    # left value, evaluate the right into rax, pop the left into rcx.
+    # Leaves 0..3 = a b c d.
+    var k = 0;
+    while (k < 4) { et_node(k, 0 - 1, 0 - 1); k = k + 1; }
+    et_node(4, 0, 1);              # a + b
+    et_node(5, 2, 3);              # c + d
+    et_node(6, 4, 5);              # (a + b) * (c + d)
+    et_node(7, 4, 2);              # (a + b) * c
+    assert_eq(max_pushes(7), 1, "(a+b)*c needs 1 push outstanding");
+    # NOT tree depth - 1: the right subtree runs with the left value
+    # pushed, and (c + d) pushes c on top of it.
+    assert_eq(max_pushes(6), 2, "(a+b)*(c+d) needs 2 pushes outstanding");
     return 0;
 }
 

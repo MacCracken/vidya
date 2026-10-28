@@ -17,15 +17,15 @@
 //   1. A "signal" qubit prepared in a phase superposition modelling
 //      a sample value; controlled-Y rotation applies a filter
 //      coefficient.
-//   2. Two qubits combined via a Hadamard interference test that
-//      averages their phase amplitudes — the FIR moving-average
-//      analog.
+//   2. Two sample qubits CNOT-combined into a tap qubit — the 2-tap
+//      FIR structure. (What it computes is their parity, a
+//      difference rather than an average; see that section.)
 //   3. Measurement of the interfered register collapses to a
 //      single classical "sample" — the analog of fixed-point
 //      output emission.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // === Lowpass: phase-rotation as filter coefficient ===================
 //
@@ -35,9 +35,9 @@ include "qelib1.inc";
 // 2π*a, and measure. The probability of |1> after measurement is
 // the analog of the filtered amplitude.
 
-qreg sig[1];
-qreg state[1];
-creg sig_c[1];
+qubit[1] sig;
+qubit[1] state;
+bit[1] sig_c;
 
 // Prepare signal in superposition (modelling sample = ½).
 h sig[0];
@@ -47,10 +47,14 @@ h sig[0];
 // (anti-phase) components.
 ry(0.628) sig[0];           // 2π*0.1 ≈ 0.628 rad
 
-// Mix with previous state via CNOT (the IIR feedback channel).
+// Mix with previous state via CNOT (the IIR feedback channel). The
+// CNOT writes into `state` only; it never changes its control's
+// measurement statistics, so sig_c depends on the rotations alone.
 cx sig[0], state[0];
 
-measure sig[0] -> sig_c[0];
+sig_c[0] = measure sig[0];
+// P(1) = sin²((π/2 + 0.628)/2) ≈ 0.79: mostly 1, sometimes 0.
+// @expect sig_c in {0, 1}
 
 
 // === FIR moving-average: Hadamard as 2-tap interference ===============
@@ -58,14 +62,16 @@ measure sig[0] -> sig_c[0];
 // The simplest FIR is a 2-tap moving average:
 //   y[n] = (x[n] + x[n-1]) / 2
 //
-// In the quantum analog: two signal qubits are combined via
-// Hadamard interference. The output amplitude is the "average"
-// in the basis-state probability sense.
+// In the quantum analog: CNOT both samples into a tap qubit. Note what
+// that computes: avg = x[n] XOR x[n-1], which for bits is
+// |x[n] - x[n-1]| — the 2-tap DIFFERENCE (a high-pass), not the
+// average. A true average needs an adder; parity is the cheapest
+// 2-input reduction CNOTs give.
 
-qreg x_n[1];
-qreg x_n1[1];
-qreg avg[1];
-creg avg_c[1];
+qubit[1] x_n;
+qubit[1] x_n1;
+qubit[1] avg;
+bit[1] avg_c;
 
 // Prepare both samples in superposition (modelling x[n] = x[n-1] = ½).
 h x_n[0];
@@ -75,27 +81,28 @@ h x_n1[0];
 cx x_n[0], avg[0];
 cx x_n1[0], avg[0];
 
-// Hadamard the result for interference.
+// The Hadamard cannot interfere anything here: avg is entangled with
+// both samples, so on its own it is an even mixture of |0> and |1>,
+// and avg_c is 0 or 1 with equal probability with or without this gate.
 h avg[0];
 
-measure avg[0] -> avg_c[0];
+avg_c[0] = measure avg[0];
+// @expect avg_c in {0, 1}
 
 
 // === Peak detection: OR via Toffoli =================================
 //
 // Peak detection over N samples returns max(|x[i]|). In binary
-// form (sample is 0 or 1), peak = OR of all samples. Toffoli on a
-// pre-set ancilla in |1> implements this:
-//   peak qubit starts |0>; X (ancilla) sets it to |1> if ANY
-//   sample qubit is |1>; otherwise stays |0>.
+// form (sample is 0 or 1), peak = OR of all samples. There is no
+// OR gate, so use De Morgan: peak = NOT (all samples are 0).
 //
-// We use NOT-then-Toffoli-then-NOT to detect the |0|0|0|0> case
+// We use NOT-then-Toffoli-then-NOT to detect the |000> case
 // (all-quiet), and invert.
 
-qreg samples[3];
-qreg quiet_q[1];
-qreg pk_q[1];
-creg pk_c[1];
+qubit[3] samples;
+qubit[1] quiet_q;
+qubit[1] pk_q;
+bit[1] pk_c;
 
 // Set sample 0 = 1, others = 0 (peak should be 1).
 x samples[0];
@@ -110,8 +117,9 @@ x samples[0]; x samples[1]; x samples[2];
 // peak = NOT quiet
 x quiet_q[0];                             // peak signal lives here
 
-measure quiet_q[0] -> pk_c[0];
+pk_c[0] = measure quiet_q[0];
 // pk_c = "1" — at least one sample was set, so peak detected.
+// @expect pk_c == 1
 
 
 // --- Notes — DSP vs interference-as-filtering ------------------------
@@ -125,8 +133,8 @@ measure quiet_q[0] -> pk_c[0];
 // Quantum analog (this file):
 //   - Lowpass: ry(small angle) on signal qubit + CNOT feedback to
 //     state qubit; small angle = strong low-frequency pass
-//   - FIR moving-avg: Hadamard interference of two signal qubits
-//     into a "tap" register
+//   - FIR 2-tap: CNOT parity of two signal qubits into a "tap"
+//     register (a difference, not an average)
 //   - Peak: NOT-Toffoli-NOT chain detects the all-zero case;
 //     inverting gives "any non-zero" = OR = peak-present
 //

@@ -1,6 +1,11 @@
 // Vidya — Render Graph Architecture in AArch64 Assembly
 //
 // Tiny DAG: reads/writes bitmasks → topo sort + barriers + cull.
+//
+// Culling REMOVES a pass: cull_dead sets culled[i] and topo_sort never
+// schedules it. Zeroing its masks alone would still run it. Culling also
+// iterates to a fixed point, because removing a pass can leave its own
+// producers with no reader (A → B → nothing: B dies first, then A).
 
 .global _start
 
@@ -13,6 +18,7 @@ reads_arr:    .skip 8 * PASS_CAP
 writes_arr:   .skip 8 * PASS_CAP
 topo_order:   .skip 8 * PASS_CAP
 in_degree:    .skip 8 * PASS_CAP
+culled:       .skip 8 * PASS_CAP
 
 .data
 .align 8
@@ -20,7 +26,7 @@ pass_count:   .quad 0
 topo_len:     .quad 0
 
 .section .rodata
-msg_pass:     .ascii "render_graph_architecture: 14/14 ok\n"
+msg_pass:     .ascii "render_graph_architecture: 16/16 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail:     .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
@@ -50,6 +56,13 @@ graph_init:
     str     x0, [x1], #8
     subs    x2, x2, #1
     b.ne    .gi3
+    adrp    x1, culled
+    add     x1, x1, :lo12:culled
+    mov     x2, #PASS_CAP
+.gi4:
+    str     x0, [x1], #8
+    subs    x2, x2, #1
+    b.ne    .gi4
     adrp    x1, pass_count
     add     x1, x1, :lo12:pass_count
     str     x0, [x1]
@@ -144,6 +157,24 @@ topo_sort:
     b       .ts_i
 
 .ts_kahn_init:
+    // Culled passes are never scheduled: mark them as already emitted
+    // (-1), so the pick loop skips them and topo_len counts live passes.
+    adrp    x2, in_degree
+    add     x2, x2, :lo12:in_degree
+    adrp    x4, culled
+    add     x4, x4, :lo12:culled
+    mov     x20, #0
+.ts_cull_mark:
+    cmp     x20, x19
+    b.ge    .ts_cull_marked
+    ldr     x3, [x4, x20, lsl #3]
+    cbz     x3, .ts_cull_next
+    mov     x3, #-1
+    str     x3, [x2, x20, lsl #3]
+.ts_cull_next:
+    add     x20, x20, #1
+    b       .ts_cull_mark
+.ts_cull_marked:
     adrp    x0, topo_len
     add     x0, x0, :lo12:topo_len
     mov     x1, #0
@@ -254,20 +285,23 @@ barrier_count:
     ldp     x29, x30, [sp], #16
     ret
 
-// cull_dead -> x0
+// cull_dead -> x0 = passes culled. Sweeps until a sweep culls nothing.
 cull_dead:
     stp     x29, x30, [sp, #-16]!
     stp     x19, x20, [sp, #-16]!
     stp     x21, x22, [sp, #-16]!
     stp     x23, x24, [sp, #-16]!
+    stp     x25, x26, [sp, #-16]!
     adrp    x0, pass_count
     add     x0, x0, :lo12:pass_count
     ldr     x19, [x0]                 // count
     mov     x20, #0                   // culled
+.cd_sweep:
+    mov     x25, x20                  // culled before this sweep
     mov     x21, #0                   // i
 .cd_i:
     cmp     x21, x19
-    b.ge    .cd_done
+    b.ge    .cd_sweep_done
     adrp    x0, writes_arr
     add     x0, x0, :lo12:writes_arr
     ldr     x22, [x0, x21, lsl #3]    // w
@@ -298,12 +332,19 @@ cull_dead:
     adrp    x0, reads_arr
     add     x0, x0, :lo12:reads_arr
     str     x1, [x0, x21, lsl #3]
+    adrp    x0, culled
+    add     x0, x0, :lo12:culled
+    mov     x1, #1
+    str     x1, [x0, x21, lsl #3]     // removed from the graph
     add     x20, x20, #1
 .cd_i_next:
     add     x21, x21, #1
     b       .cd_i
-.cd_done:
+.cd_sweep_done:
+    cmp     x20, x25
+    b.ne    .cd_sweep                 // something died: its producers may now be dead
     mov     x0, x20
+    ldp     x25, x26, [sp], #16
     ldp     x23, x24, [sp], #16
     ldp     x21, x22, [sp], #16
     ldp     x19, x20, [sp], #16
@@ -389,7 +430,7 @@ _start:
     bl      assert_eq
 
     bl      topo_sort
-    mov     x1, #4
+    mov     x1, #3                    // the culled pass is not scheduled
     bl      assert_eq
     bl      barrier_count
     mov     x1, #2
@@ -406,6 +447,28 @@ _start:
     bl      add_pass
     bl      topo_sort
     mov     x1, #0
+    bl      assert_eq
+
+    // Chain A(w1) → B(r1,w2) → nothing, plus a sink: B is dead, and once
+    // B is gone A is dead too. Only the sink is scheduled.
+    bl      graph_init
+    mov     x0, #300
+    mov     x1, #0
+    mov     x2, #1
+    bl      add_pass
+    mov     x0, #301
+    mov     x1, #1
+    mov     x2, #2
+    bl      add_pass
+    mov     x0, #302
+    mov     x1, #0
+    mov     x2, #0
+    bl      add_pass
+    bl      cull_dead
+    mov     x1, #2
+    bl      assert_eq
+    bl      topo_sort
+    mov     x1, #1
     bl      assert_eq
 
     mov     x0, #1

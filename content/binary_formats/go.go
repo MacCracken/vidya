@@ -17,6 +17,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"math/bits"
 )
 
 func main() {
@@ -177,14 +178,12 @@ func testElfMagicAndConstants() {
 
 	// ELF magic: 0x7F 'E' 'L' 'F'
 	magic := [4]byte{0x7F, 'E', 'L', 'F'}
-	assert(magic[0] == 0x7F, "magic byte 0")
-	assert(magic[1] == 0x45, "magic byte 1 (E)")
-	assert(magic[2] == 0x4C, "magic byte 2 (L)")
-	assert(magic[3] == 0x46, "magic byte 3 (F)")
 
-	// Header sizes — fixed by the spec
-	assert(ELF_EHDR_SIZE == 64, "ehdr size")
-	assert(ELF_PHDR_SIZE == 56, "phdr size")
+	// Header sizes — fixed by the spec. binary.Size sums the encoded
+	// field widths (no Go padding), so this checks that the structs above
+	// really mirror the spec layout instead of re-asserting the constants.
+	assert(binary.Size(Elf64Ehdr{}) == ELF_EHDR_SIZE, "Elf64Ehdr fields sum to 64 bytes")
+	assert(binary.Size(Elf64Phdr{}) == ELF_PHDR_SIZE, "Elf64Phdr fields sum to 56 bytes")
 
 	fmt.Printf("   Magic: %02X %c %c %c\n", magic[0], magic[1], magic[2], magic[3])
 	fmt.Printf("   ELF header:     %d bytes\n", ELF_EHDR_SIZE)
@@ -292,11 +291,9 @@ func testPEHeaderLayout() {
 		SizeOfOptionalHeader: 240,    // PE32+ optional header
 		Characteristics:      0x0022, // EXECUTABLE | LARGE_ADDRESS_AWARE
 	}
-	assert(coff.Machine == 0x8664, "AMD64 machine type")
-	assert(COFF_HEADER_SIZE == 20, "COFF header is 20 bytes")
+	assert(binary.Size(coff) == COFF_HEADER_SIZE, "CoffHeader fields sum to 20 bytes")
 
-	// PE optional header magic distinguishes PE32 from PE32+
-	assert(PE_OPT_HDR64_MAGIC == 0x020B, "PE32+ magic")
+	// PE optional header magic distinguishes PE32 (0x010B) from PE32+ (0x020B)
 
 	fmt.Printf("   DOS magic:       MZ (0x%02X%02X)\n", dosMagic[0], dosMagic[1])
 	fmt.Printf("   PE signature:    %s (0x%08X)\n", string(peSig[:2]), PE_MAGIC)
@@ -363,7 +360,8 @@ func testMachOHeaderLayout() {
 	assert(magic == MH_MAGIC_64, "mach-o magic")
 
 	// Byte-swapped magic (big-endian host reading little-endian file)
-	assert(MH_CIGAM_64 == 0xCFFAEDFE, "byte-swapped magic")
+	assert(MH_CIGAM_64 == bits.ReverseBytes32(MH_MAGIC_64), "CIGAM is MAGIC byte-swapped")
+	assert(binary.Size(hdr) == MACHO_HDR_SIZE, "MachOHeader fields sum to 32 bytes")
 
 	cpuType := binary.LittleEndian.Uint32(raw[4:8])
 	assert(cpuType == CPU_TYPE_ARM64, "ARM64 CPU type")
@@ -440,18 +438,19 @@ type FormatInfo struct {
 func testFormatComparison() {
 	fmt.Println("\n7. Format comparison:")
 
+	// PE's 24 is only the "PE\0\0" signature + COFF header; a real PE
+	// also needs the 64-byte DOS header in front and (for an image) the
+	// optional header after, so its mandatory headers are the largest.
 	formats := []FormatInfo{
 		{"ELF", 4, 64, "Linux/BSD/Solaris", "configurable (usually LE)"},
-		{"PE", 2, 24, "Windows", "little-endian"},
+		{"PE", 2, 4 + COFF_HEADER_SIZE, "Windows", "little-endian"},
 		{"Mach-O", 4, 32, "macOS/iOS", "configurable (usually LE)"},
 	}
 
-	// ELF is the largest header but most flexible
-	assert(formats[0].HeaderSize == 64, "ELF header largest")
-	// Mach-O is smallest header
-	assert(formats[2].HeaderSize == 32, "Mach-O header smallest")
+	assert(formats[0].HeaderSize == binary.Size(Elf64Ehdr{}), "ELF header size")
+	assert(formats[2].HeaderSize == binary.Size(MachOHeader{}), "Mach-O header size")
 	// PE uses 2-byte magic (MZ), others use 4
-	assert(formats[1].MagicSize == 2, "PE 2-byte magic")
+	assert(formats[1].MagicSize == len("MZ"), "PE 2-byte magic")
 
 	fmt.Printf("   %-8s %-8s %-8s %-20s %s\n",
 		"Format", "Magic", "Header", "Platform", "Endianness")
@@ -468,7 +467,10 @@ func testFormatComparison() {
 	fmt.Printf("\n   Minimal static binary:\n")
 	fmt.Printf("   ELF:    %d bytes (ehdr+phdr+code)\n", minElf)
 	fmt.Printf("   PE:     ~%d bytes (DOS stub+COFF+optional header minimum)\n", minPE)
-	fmt.Printf("   Mach-O: ~%d bytes (header+LC_SEGMENT_64+code)\n", 32+72+9)
+	// Mach-O has no ELF-style entry field in its header: the entry point
+	// comes from a load command (LC_UNIXTHREAD, 184 bytes on x86_64, or
+	// LC_MAIN), and arm64 macOS refuses LC_UNIXTHREAD binaries outright.
+	fmt.Printf("   Mach-O: ~%d bytes (header+LC_SEGMENT_64+LC_UNIXTHREAD+code, x86_64)\n", 32+72+184+9)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

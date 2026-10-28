@@ -4,8 +4,10 @@
 // Go's `[]byte` is a slice header (ptr, len, cap) over a contiguous
 // heap allocation — the same memory layout as a C `uint8_t*`. We
 // index it `fb[y*SCREEN_W + x]` so byte offsets agree with every
-// other port. `copy(fb, ...)` and `for i := range fb` give us the
-// fast path for clear/blit without resorting to unsafe.
+// other port. Bounds-checked indexing keeps it safe without unsafe;
+// Clear's `for i := range` loop is compiled to a memclr only when the
+// value stored is 0, and the blits stay per-pixel loops because of the
+// color-key test.
 
 package main
 
@@ -167,12 +169,18 @@ func main() {
 	assertEq(int(fb.Get(22, 22)), 2, "2x scaled center pixel")
 	assertEq(int(fb.Get(23, 23)), 2, "2x scaled adjacent center")
 
-	// depth sort
+	// depth sort (painter's algorithm): draw back-to-front, and where
+	// sprites overlap the one drawn LATER wins
+	solid := &Sprite{Data: []byte{7, 7, 7, 7}, Width: 2, Height: 2}
 	fb.Clear(0)
-	blit(fb, sprite, 50, 50)
-	assertEq(int(fb.Get(51, 51)), 2, "first sprite drawn")
-	fb.Set(51, 51, 7)
-	assertEq(int(fb.Get(51, 51)), 7, "later draw overwrites")
+	blit(fb, sprite, 50, 50) // back
+	blit(fb, solid, 51, 51)  // front
+	assertEq(int(fb.Get(51, 51)), 7, "front sprite covers the overlap")
+	assertEq(int(fb.Get(50, 51)), 1, "back sprite still visible outside the overlap")
+	fb.Clear(0)
+	blit(fb, solid, 51, 51)  // wrong order: front first...
+	blit(fb, sprite, 50, 50) // ...back sprite paints over it
+	assertEq(int(fb.Get(51, 51)), 2, "drawing order decides visibility")
 
 	// scaled shrink
 	fb.Clear(0)

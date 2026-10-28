@@ -77,13 +77,18 @@ _start:
     # ── Test 4: Symbol addresses are resolved ────────────────────────
     # The linker resolves symbol references to virtual addresses.
     # These LEA instructions become RIP-relative addressing after linking.
+    # The ELF header itself is mapped at the start of the first PT_LOAD
+    # and GNU ld defines __ehdr_start there, so the entry point can be
+    # checked against the header: e_entry (offset 24) must be _start.
+    lea     __ehdr_start(%rip), %rcx
+    movzbl  (%rcx), %eax
+    cmp     $ELF_MAG0, %eax        # really the mapped ELF header
+    jne     fail
     lea     _start(%rip), %rax
-    test    %rax, %rax
-    jz      fail                   # _start should have a nonzero address
+    cmp     24(%rcx), %rax         # e_entry == &_start
+    jne     fail
 
     lea     data_val(%rip), %rbx
-    test    %rbx, %rbx
-    jz      fail
 
     # .text and .data should be at different addresses
     cmp     %rax, %rbx

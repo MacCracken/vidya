@@ -26,8 +26,8 @@ _start:
     movzbl 0(%rcx), %eax
     cmp $0xB8, %eax         # mov $imm32, %eax
     jne fail
-    movzbl 5(%rcx), %eax
-    cmp $0x01, %eax         # add %reg, %reg (opcode byte)
+    movzbl 6(%rcx), %eax
+    cmp $0x01, %eax         # add %reg, %reg (opcode byte, after REX.W)
     jne fail
     mov $seed_program_len, %eax
     cmp $10, %eax           # 5 + 3 + 2 bytes — variable length
@@ -95,7 +95,7 @@ fail:
 # fixed-width ISA this table would be exactly 12 bytes; here it is 10.
 seed_program:
     .byte 0xB8, 0x0A, 0x00, 0x00, 0x00   # mov  $10, %eax    — 5 bytes
-    .byte 0x01, 0xF0, 0x90               # add  %esi, %eax   — 3 bytes
+    .byte 0x48, 0x01, 0xF0               # add  %rsi, %rax   — 3 bytes (REX.W, opcode, ModRM)
     .byte 0x0F, 0x05                     # syscall           — 2 bytes
 seed_program_len = . - seed_program
 

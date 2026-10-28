@@ -71,11 +71,15 @@ assert_eq "${indices% }" "0 1 2" "array indices"
 # for f in *.sh; do ... done
 # for f in /etc/*.conf; do ... done
 
-# ── while-read with delimiter ──────────────────────────────────────
+# ── read with a delimiter ─────────────────────────────────────────
+# `read -ra` splits on IFS into an array (no pathname globbing, unlike an
+# unquoted `for entry in $csv`); `IFS=: read` splits each record on ':'
+# without forking a `cut` per entry.
 csv="alice:30:dev bob:25:ops charlie:35:mgr"
 names=""
-for entry in $csv; do
-    name=$(echo "$entry" | cut -d: -f1)
+read -ra entries <<< "$csv"
+for entry in "${entries[@]}"; do
+    IFS=: read -r name _ <<< "$entry"
     names+="$name "
 done
 assert_eq "${names% }" "alice bob charlie" "csv parsing"
@@ -88,7 +92,7 @@ assert_eq "$range_result" "1,2,3,4,5" "seq generation"
 brace_result=$(echo {1..5} | tr ' ' ',')
 assert_eq "$brace_result" "1,2,3,4,5" "brace expansion"
 
-# ── xargs: parallel iteration ──────────────────────────────────────
+# ── xargs: one command per item (add -P N to run N in parallel) ────
 result=$(echo "1 2 3 4 5" | xargs -n1 | sort -r | head -3 | paste -sd, -)
 assert_eq "$result" "5,4,3" "xargs + sort"
 

@@ -6,9 +6,11 @@
 # passages by clearing the wall bit on both the current and the
 # neighbour cell.
 #
-# Bash arithmetic is signed 64-bit two's-complement with defined wrap
-# on overflow — the PCG step `state = state*MULT + INC` produces the
-# same byte-for-byte trajectory as cyrius. Indexed arrays hold cells,
+# Bash arithmetic is signed 64-bit; the manual promises only "no check
+# for overflow", and in practice it wraps two's-complement — so the LCG
+# step `state = state*MULT + INC` (PCG's constants, truncated output, no
+# PCG permutation) produces the same byte-for-byte trajectory as cyrius,
+# which the parity test below checks. Indexed arrays hold cells,
 # visited flags, and the DFS stack.
 
 set -euo pipefail

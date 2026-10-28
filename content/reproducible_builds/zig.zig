@@ -4,9 +4,13 @@
 // sources produce a byte-identical artifact, on any machine, at any
 // time. Three classic sources of non-determinism, and their fixes:
 //
-//   1. Embedded wall-clock timestamps  → clamp every timestamp to
+//   1. Embedded wall-clock timestamps  → the build stamps
 //      SOURCE_DATE_EPOCH (a fixed build time taken from the sources,
-//      e.g. the last commit date) so "now" never leaks in.
+//      e.g. the last commit date) instead of "now", so the clock never
+//      reaches the output, fast or slow. Clamping (min(t, SDE)) is for
+//      FILE mtimes: a fresh checkout's newer mtimes are pinned down to
+//      SDE. Clamping the clock itself would still leak any clock that
+//      runs behind SDE.
 //   2. Filesystem iteration order      → readdir() returns entries in
 //      inode/hash order, which varies; SORT filenames before processing
 //      so the output doesn't depend on directory layout.
@@ -35,9 +39,11 @@ fn fold(h: i64, v: i64) i64 {
     return @mod(h * HB + v, HM);
 }
 
-// --- 1. Deterministic timestamps: clamp "now" to SOURCE_DATE_EPOCH ---
-fn normalize_ts(now: i64, sde: i64) i64 {
-    return if (now > sde) sde else now;
+// --- 1. Deterministic timestamps: the mtime clamp (tar --clamp-mtime).
+//     A file mtime newer than SOURCE_DATE_EPOCH is pinned down to it; an
+//     older one is kept. The build time itself is SDE, not this. ---
+fn normalize_ts(mtime: i64, sde: i64) i64 {
+    return if (mtime > sde) sde else mtime;
 }
 
 // --- 3. Content-addressed artifact path: a pure function of content ---
@@ -82,7 +88,7 @@ const FileSet = struct {
     //     pipeline. ---
     fn build_digest(self: *FileSet, do_sort: bool, do_norm: bool, now: i64, sde: i64) i64 {
         if (do_sort) self.sort();
-        const ts = if (do_norm) normalize_ts(now, sde) else now;
+        const ts = if (do_norm) sde else now; // build time comes from the sources
         var h = fold(HSEED, ts);
         var i: usize = 0;
         while (i < self.n) : (i += 1) {
@@ -113,9 +119,9 @@ fn order_b() FileSet {
 }
 
 pub fn main() !void {
-    // 1. Deterministic timestamps
-    assert(normalize_ts(9999, 5000) == 5000); // clamp future now to SDE
-    assert(normalize_ts(3000, 5000) == 3000); // keep timestamp already <= SDE
+    // 1. The mtime clamp
+    assert(normalize_ts(9999, 5000) == 5000); // newer mtime clamped to SDE
+    assert(normalize_ts(3000, 5000) == 3000); // older mtime kept
 
     // 2. Sorted iteration: names ascending, content stays paired
     {
@@ -128,7 +134,7 @@ pub fn main() !void {
     }
 
     // 3. Content-addressed path: pure function of content
-    assert(cas_path(111) == cas_path(111)); // same content → same path
+    assert(cas_path(111) == 14548); // same content → the same path, every run: (111*131 + 7) mod HM
     assert(cas_path(111) != cas_path(222)); // different content → different path
 
     // Deterministic pipeline (sort + normalize): two builds that differ
@@ -152,13 +158,18 @@ pub fn main() !void {
     }
 
     // Normalization alone kills clock drift: same order, differing clock,
-    // both clamp to SDE → identical digests.
+    // both stamp SDE → identical digests.
     {
         var a1 = order_a();
         var a2 = order_a();
-        const norm1 = a1.build_digest(true, true, 9999, 5000); // 9999 → 5000
-        const norm2 = a2.build_digest(true, true, 7777, 5000); // 7777 → 5000
+        const norm1 = a1.build_digest(true, true, 9999, 5000); // stamps 5000, not 9999
+        const norm2 = a2.build_digest(true, true, 7777, 5000); // stamps 5000, not 7777
         assert(norm1 == norm2); // normalized timestamp removes clock dependence
+        // ...including a clock that runs BEHIND the epoch: min(now, sde)
+        // would stamp 3000 here and 5000 above, and the digests would differ.
+        var a3 = order_a();
+        const slow = a3.build_digest(true, true, 3000, 5000);
+        assert(slow == norm1); // a slow clock does not leak into the build either
     }
 
     print("All reproducible_builds examples passed.\n", .{});

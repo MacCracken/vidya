@@ -8,7 +8,10 @@
 # manages processes and decides which one runs next.
 #
 # Requires bash >= 4.0 — $BASHPID and associative arrays (declare -A).
-# macOS's stock /bin/bash is 3.2.57 and has neither.
+# macOS's stock /bin/bash is 3.2.57 and has neither. The /proc/self
+# snapshots below additionally need bash >= 5.2: only since 5.2 does
+# `$(<file)` read the file without forking (CHANGES, bash-5.2-alpha y.), so
+# that "self" is this shell; on 5.1 and older it is a forked child.
 
 set -euo pipefail
 
@@ -46,16 +49,24 @@ if (( my_pid == my_ppid )); then
 fi
 
 # $$ stays the same in subshells; $BASHPID changes
-subshell_dollar=$(bash -c 'echo $$')
-# The subshell gets its own PID
-if [[ "$subshell_dollar" == "$$" ]]; then
-    echo "FAIL: subshell should have different PID" >&2
+subshell_dollar=$(echo "$$")
+subshell_bashpid=$(echo "$BASHPID")
+assert_eq "$subshell_dollar" "$$" "\$\$ in a subshell is still the parent's PID"
+if [[ "$subshell_bashpid" == "$$" ]]; then
+    echo "FAIL: \$BASHPID in a subshell should be the subshell's own PID" >&2
+    exit 1
+fi
+# A NEW bash process (not a subshell) has its own $$
+child_dollar=$(bash -c 'echo $$')
+if [[ "$child_dollar" == "$$" ]]; then
+    echo "FAIL: child bash should have a different PID" >&2
     exit 1
 fi
 
 # ── /proc/self/status — detailed process info ────────────────────────
 # /proc/self/status contains human-readable process metadata.
-# Snapshot it to avoid subshell PID mismatch when piping to awk.
+# Snapshot it ONCE: `awk ... /proc/self/status` would read awk's own
+# status. ($(<file) runs in this shell only on bash >= 5.2 — see header.)
 
 status_snapshot=$(</proc/self/status)
 proc_name=$(echo "$status_snapshot" | awk '/^Name:/ {print $2}')
@@ -97,7 +108,7 @@ assert_eq "${#PROC_STATES[@]}" "6" "6 process states"
 # Fields are space-separated but field 2 (comm) is in parentheses and
 # may contain spaces, so we parse carefully.
 
-# Snapshot /proc/self/stat — bash builtin read avoids forking
+# Snapshot /proc/self/stat — $(<file) avoids forking (bash >= 5.2)
 stat_line=$(</proc/self/stat)
 # Remove the (comm) field to get clean field parsing
 # comm is between first ( and last )
@@ -172,9 +183,11 @@ if [[ ! -d "/proc/$bg_pid" ]]; then
     exit 1
 fi
 
-# wait reaps the child process (equivalent to waitpid syscall)
-wait "$bg_pid"
-exit_status=$?
+# wait reaps the child process (equivalent to waitpid syscall). Capture
+# the status with ||: under set -e a failing bare `wait` exits the script,
+# so `exit_status=$?` on the next line could only ever be 0.
+exit_status=0
+wait "$bg_pid" || exit_status=$?
 assert_eq "$exit_status" "0" "background job exited cleanly"
 
 # After wait, /proc entry should eventually disappear
@@ -221,11 +234,14 @@ assert_eq "$(signal_from_exit 143)" "15" "exit 143 = SIGTERM"
 assert_eq "$(signal_from_exit 0)" "0" "exit 0 = no signal"
 
 # ── Scheduler time slice concepts ─────────────────────────────────────
-# CFS (Completely Fair Scheduler) doesn't use fixed time slices.
-# Instead, it tracks virtual runtime and gives CPU time proportionally.
-# These constants illustrate the concepts.
+# Since Linux 6.6 the fair class is EEVDF (Earliest Eligible Virtual
+# Deadline First), not CFS. Both track weighted virtual runtime, but EEVDF
+# drops CFS's latency target: each task has a request size, base_slice
+# (0.75 ms at 6.6, 0.7 ms on current kernels; scaled by
+# 1 + ilog2(min(ncpus, 8))), shown as se.slice in /proc/self/sched.
+# The constants below are the historic, unscaled CFS defaults.
 
-# Default scheduler latency (target for one full cycle through all tasks)
+# CFS scheduler latency (target for one full cycle through all tasks)
 SCHED_LATENCY_NS=6000000       # 6ms in nanoseconds
 SCHED_MIN_GRANULARITY_NS=750000  # 0.75ms minimum slice
 
@@ -257,10 +273,10 @@ if [[ -f /proc/self/sched ]]; then
     # nr_switches: total context switches (voluntary + involuntary)
     sched_snapshot=$(</proc/self/sched)
     nr_switches=$(echo "$sched_snapshot" | awk '/nr_switches/ {print $NF}' | head -1)
-    if [[ "$nr_switches" =~ ^[0-9.]+$ ]]; then
-        # Process has had at least some scheduler interaction
-        # (could be 0 if very fast, which is fine in a test)
-        true
+    # Present whenever the file is; 0 is a legitimate count, so check shape
+    if [[ ! "$nr_switches" =~ ^[0-9]+$ ]]; then
+        echo "FAIL: nr_switches not a count: '$nr_switches'" >&2
+        exit 1
     fi
 fi
 
@@ -295,25 +311,30 @@ if [[ -z "$allowed_cpus" ]]; then
     exit 1
 fi
 
-# Count online CPUs
+# CPUs this process may run on (nproc honours the affinity mask)
 online_cpus=$(nproc)
 if (( online_cpus < 1 )); then
     echo "FAIL: must have at least 1 CPU" >&2
     exit 1
 fi
 
-# CPU affinity mask: for N CPUs, at least N bits should be set
-# Example: 4 CPUs → mask = 0xf (binary 1111)
-expected_min_mask=$(( (1 << online_cpus) - 1 ))
-actual_mask=$(( 16#$allowed_cpus ))
-# The actual mask should have at least as many bits as online CPUs
-if (( (actual_mask & expected_min_mask) != expected_min_mask )); then
-    # Some systems have offline CPUs, so the mask might not match exactly.
-    # Just verify the mask is nonzero.
-    if (( actual_mask == 0 )); then
-        echo "FAIL: CPU affinity mask is zero" >&2
-        exit 1
-    fi
+# Cpus_allowed is a hex bitmap printed in 32-bit groups separated by commas
+# ("ffffffff,ffffffff" on 64 CPUs) and can be wider than 64 bits, so
+# `$(( 16#$allowed_cpus ))` breaks on big hosts (under set -u the comma
+# group parses as a variable name: "ffffffff: unbound variable"). Count the
+# set bits one hex digit at a time instead.
+mask_hex=${allowed_cpus//,/}
+allowed_count=0
+for (( k = 0; k < ${#mask_hex}; k++ )); do
+    digit=$(( 16#${mask_hex:k:1} ))
+    while (( digit )); do
+        allowed_count=$(( allowed_count + (digit & 1) ))
+        digit=$(( digit >> 1 ))
+    done
+done
+if (( allowed_count < 1 )); then
+    echo "FAIL: CPU affinity mask is zero" >&2
+    exit 1
 fi
 
 echo "All process and scheduling examples passed."

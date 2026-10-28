@@ -2,8 +2,11 @@
 #
 # At the assembly level, tracing is write() syscalls with context:
 # function name, timing, and data values. The rdtsc instruction reads
-# the CPU timestamp counter — hardware-level profiling with cycle
-# accuracy. A trace line is built by writing strings and converting
+# the CPU time-stamp counter. On current CPUs the TSC is invariant: it
+# ticks at a fixed reference rate, not at the (turbo-varying) core clock,
+# so a delta is reference ticks, not core cycles. rdtsc is also not
+# ordered with the surrounding code: put lfence before it (or use rdtscp)
+# when timing a short region. A trace line is built by writing strings and converting
 # numbers to decimal ASCII, then emitting everything via sys_write.
 
 .intel_syntax noprefix
@@ -36,6 +39,7 @@ numbuf:     .skip 24
 # Buffer for storing timestamps
 ts_start:   .skip 8
 ts_end:     .skip 8
+convbuf:    .skip 24
 
 .section .text
 
@@ -125,6 +129,13 @@ _start:
     cmp     byte ptr [rsi + 4], '5'
     jne     fail
 
+    # Same conversion into a caller buffer other than numbuf
+    mov     rdi, 12345
+    lea     rsi, [convbuf]
+    call    u64_to_str
+    cmp     eax, 5
+    jne     fail
+
     # Test zero
     mov     rdi, 0
     lea     rsi, [numbuf]
@@ -174,6 +185,7 @@ read_tsc:
 u64_to_str:
     push    rbx
     lea     rbx, [rsi + 23]     # point to end of buffer
+    mov     r8, rbx             # remember the end: length = end - start
     mov     byte ptr [rbx], 0   # null terminate (not used, but safe)
     mov     rax, rdi            # value to convert
     mov     rcx, 10
@@ -200,15 +212,8 @@ u64_to_str:
 
 .u2s_done:
     mov     rsi, rbx            # pointer to first digit
-    lea     rax, [rsi + 23]
-    sub     rax, rbx            # length = (buf+23) - start
-    # rax was rsi+23 before sub, recalculate properly
-    mov     rax, rsi
-    push    rdi
-    lea     rdi, [numbuf + 23]
-    sub     rdi, rax            # length
-    mov     rax, rdi
-    pop     rdi
+    mov     rax, r8
+    sub     rax, rbx            # length = (buf + 23) - start, for THIS buf
     pop     rbx
     ret
 
@@ -237,20 +242,11 @@ trace_fn_enter:
     syscall
     pop     rsi
     pop     rdi
-    # Print function name
-    push    rdi
-    push    rsi
+    # Print function name: write(1, name, name_len)
     mov     rdx, rsi            # length
-    mov     rsi, rdi            # name pointer — but rdi is about to be fd
+    mov     rsi, rdi            # name pointer
+    mov     rax, 1
     mov     rdi, 1              # fd = stdout
-    mov     rax, 1
-    # rsi was set to name pointer above... but we need to fix order
-    # rdi=name, rsi=name_len on stack; we popped into rsi,rdi reversed
-    # Let's redo:
-    pop     rdx                 # name_len (was pushed as rsi)
-    pop     rsi                 # name (was pushed as rdi)
-    mov     rax, 1
-    mov     rdi, 1
     syscall
     # Print newline
     mov     rax, 1

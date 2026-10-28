@@ -78,9 +78,11 @@ assert_eq "$output" "ran" "and-then"
 set +e
 result=$(false | true; echo $?)
 set -e
-# pipefail was set at the top, so this catches it
+# pipefail was set at the top (and is inherited by the $(...) subshell),
+# so this catches it
+assert_eq "$result" "1" "pipefail: false | true exits 1"
 
-# ── trap: cleanup on exit/error ───────────────────────��─────────────
+# ── trap: cleanup on exit/error ─────────────────────────────────────
 cleanup_ran="no"
 cleanup() {
     cleanup_ran="yes"
@@ -89,7 +91,10 @@ cleanup() {
 # Run cleanup on EXIT (normal exit, error exit, or signal)
 trap cleanup EXIT
 
-# trap on ERR runs only on error (with set -e)
+# trap on ERR runs whenever a command fails — it does NOT need set -e (the
+# demo below fires it under set +e). It honours the same exemptions as
+# set -e (if/while tests, before || and &&), and functions and subshells do
+# not inherit it unless set -E (errtrace) is on.
 error_trapped="no"
 err_handler() {
     error_trapped="yes"
@@ -138,7 +143,9 @@ set -e
 assert_eq "$exit_code" "1" "parse port failure code"
 
 # ── Subshell error isolation ────────────────────────────────────────
-# Errors in subshells don't propagate to parent (without pipefail/set -e)
+# A subshell's failure DOES reach the parent — as its exit status, which
+# set -e acts on like any other command's. What stays isolated is its
+# state: variables, cd, and `set` options changed inside die with it.
 parent_ok="yes"
 (
     set +e

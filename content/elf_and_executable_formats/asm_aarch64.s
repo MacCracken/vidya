@@ -133,8 +133,10 @@ _start:
     b.ne    fail
 
     // ── Test 8: PC-relative addressing demonstration ────────────────
-    // ADR computes address relative to PC. This is how AArch64 avoids
-    // absolute addresses — everything is position-independent.
+    // ADR computes an address relative to PC, which is what lets AArch64
+    // code be position-independent. Absolute addresses still exist: a
+    // `.quad sym` needs an R_AARCH64_ABS64 relocation, and this binary
+    // is a non-PIE executable linked at a fixed address.
     adr     x0, msg_pass
     ldrb    w1, [x0]               // first byte of message
     cmp     w1, #'A'               // "All elf..."

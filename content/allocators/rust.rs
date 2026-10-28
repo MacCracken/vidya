@@ -3,7 +3,9 @@
 // Demonstrates four allocation strategies:
 //   1. Bump allocator (arena) — O(1) alloc, batch free
 //   2. Slab allocator — O(1) alloc/free for fixed-size objects
-//   3. Buddy allocator — O(log n) alloc/free with coalescing
+//   3. Buddy allocator — O(log n) split/merge levels with coalescing
+//      (this demo finds a buddy by scanning the free list; real ones keep a
+//      per-order bitmap so each buddy check is O(1))
 //   4. Pool allocator — fixed-count object reuse
 //
 // Each allocator is purpose-built for a specific usage pattern.
@@ -32,8 +34,11 @@ impl BumpAllocator {
 
     /// Allocate `size` bytes with the given alignment. Returns offset into memory.
     fn alloc(&mut self, layout: Layout) -> Option<usize> {
-        // Round up to alignment
-        let aligned = (self.offset + layout.align() - 1) & !(layout.align() - 1);
+        // Round the real ADDRESS up to alignment, not just the offset: a Vec<u8>
+        // buffer is only guaranteed 1-byte alignment, so an aligned offset can
+        // still be a misaligned pointer.
+        let pad = self.memory.as_ptr().wrapping_add(self.offset).align_offset(layout.align());
+        let aligned = self.offset + pad;
         let end = aligned + layout.size();
 
         if end > self.memory.len() {
@@ -330,7 +335,9 @@ fn main() {
     // Allocate some more with different alignment
     let _ = bump.alloc(Layout::from_size_align(3, 1).unwrap());
     let aligned = bump.alloc(layout8).unwrap();
-    println!("   After 3-byte + 8-byte alloc: 8-byte at offset {} (aligned: {})", aligned, aligned % 8 == 0);
+    let addr_aligned = (bump.memory.as_ptr() as usize + aligned) % 8 == 0;
+    assert!(addr_aligned);
+    println!("   After 3-byte + 8-byte alloc: 8-byte at offset {} (address aligned: {})", aligned, addr_aligned);
 
     bump.reset();
     println!("   After reset: {}\n", bump);
@@ -352,6 +359,7 @@ fn main() {
     // Reallocate — should reuse freed slots
     let reused1 = slab.alloc().unwrap();
     let reused2 = slab.alloc().unwrap();
+    assert_eq!((reused1, reused2), (slots[3], slots[1])); // LIFO reuse of freed slots
     println!("   Reallocated: got slots {} and {} (reused)", reused1, reused2);
     println!("   {}\n", slab);
 
@@ -376,6 +384,7 @@ fn main() {
     println!("   free({})   → {} (coalesced!)", b, buddy);
 
     buddy.free(c);
+    assert_eq!(buddy.free_lists.last().unwrap(), &vec![0]); // one 1024B block again
     println!("   free({})   → {} (fully coalesced)", c, buddy);
 
     // ── Pool allocator demo ───────────────────────────────────────────
@@ -391,6 +400,7 @@ fn main() {
 
     pool.free(c1);
     let c3 = pool.alloc().unwrap(); // reuses c1's slot
+    assert_eq!((c3, pool.get(c3)[0]), (c1, 0));
     println!("   After free+realloc: new slot {} (reused), value = 0x{:02X} (zeroed)",
         c3, pool.get(c3)[0]);
 

@@ -44,6 +44,20 @@ class SavedRegisters:
     rip: int = 0  # return address (where to resume)
 
 
+# Linux's nice -> weight table (kernel/sched/core.c, sched_prio_to_weight).
+# Neighbouring levels differ by ~1.25x, so one nice step moves ~10% CPU.
+NICE_TO_WEIGHT = [
+    88761, 71755, 56483, 46273, 36291,  # -20 .. -16
+    29154, 23254, 18705, 14949, 11916,  # -15 .. -11
+     9548,  7620,  6100,  4904,  3906,  # -10 ..  -6
+     3121,  2501,  1991,  1586,  1277,  #  -5 ..  -1
+     1024,   820,   655,   526,   423,  #   0 ..   4
+      335,   272,   215,   172,   137,  #   5 ..   9
+      110,    87,    70,    56,    45,  #  10 ..  14
+       36,    29,    23,    18,    15,  #  15 ..  19
+]
+
+
 # ── Task Control Block ───────────────────────────────────────────────────
 
 @dataclass
@@ -71,11 +85,10 @@ class Task:
 
         Each nice level changes priority by ~1.25x. Lower nice (higher
         priority) = higher weight = vruntime grows slower = more CPU time.
+        (Doubling per level — 1024 >> nice — would make nice 1 vs nice 0 a
+        2:1 split instead of the kernel's ~1.25:1.)
         """
-        base = 1024
-        if self.nice >= 0:
-            return base >> min(self.nice, 10)
-        return base << min(-self.nice, 10)
+        return NICE_TO_WEIGHT[max(-20, min(self.nice, 19)) + 20]
 
     def __str__(self) -> str:
         return (f"PID={self.pid:<3} {self.name:<12} {self.state.name:>10} "
@@ -153,8 +166,10 @@ class CfsScheduler:
     slower, so they get selected more often. The result is that CPU time
     is distributed proportionally to weight.
 
-    Real CFS uses a red-black tree for O(log n) min-vruntime lookup.
-    We use a linear scan for clarity.
+    Real CFS (Linux 2.6.23 to 6.5) kept tasks in a red-black tree for
+    O(log n) min-vruntime lookup; since 6.6 the default is EEVDF, which
+    picks the eligible task with the earliest virtual deadline. We use a
+    linear scan for clarity.
     """
 
     def __init__(self, min_granularity: int = 1):
@@ -267,8 +282,10 @@ def main() -> None:
 
     # Verify weight calculation
     assert Task(pid=0, name="t", nice=0).weight() == 1024
-    assert Task(pid=0, name="t", nice=-1).weight() == 2048  # higher priority = more weight
-    assert Task(pid=0, name="t", nice=1).weight() == 512   # lower priority = less weight
+    assert Task(pid=0, name="t", nice=-1).weight() == 1277  # higher priority = more weight
+    assert Task(pid=0, name="t", nice=1).weight() == 820    # lower priority = less weight
+    # ~1.25x per level, as the docstring says
+    assert 1.2 < 1024 / 820 < 1.3 and 1.2 < 1277 / 1024 < 1.3
 
     # ── 3. Context switch anatomy ─────────────────────────────────────
     print("\n3. Context switch anatomy (x86_64):")

@@ -45,6 +45,10 @@ export interface Vector2D {
 // Like Rust's pub use — expose items from submodules through a
 // parent module. This decouples internal structure from public API.
 //
+// Under --module nodenext, a relative import in an ES module must name
+// the emitted file ("./user-service.js"); the extensionless specifiers
+// below are bundler-style and fail with TS2835 in a "type": "module" package.
+//
 // Barrel file pattern (index.ts):
 // export { UserService } from "./user-service";
 // export { AuthService } from "./auth-service";
@@ -64,7 +68,11 @@ export interface Vector2D {
 
 // ── Namespace: TypeScript's legacy module system ──────────────────
 // Before ESM, TypeScript used namespaces (formerly "internal modules").
-// Still useful for grouping related types without a separate file.
+// A namespace with values is NOT erasable syntax: Node 26 running a .ts
+// file directly (type stripping) rejects it with
+// ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX, and tsc --erasableSyntaxOnly (5.8+)
+// flags it (TS1294). This file runs under tsx, which transpiles it.
+// Prefer a module (file) or a plain object for new code.
 
 namespace MathUtils {
     export function clamp(value: number, min: number, max: number): number {
@@ -126,8 +134,11 @@ namespace Color {
 // dlopen/libloading is the closest for dynamic loading.
 
 // ── Path mapping: module resolution configuration ─────────────────
-// tsconfig.json paths map import specifiers to filesystem locations.
-// Like Rust's [dependencies] in Cargo.toml + use statements.
+// tsconfig.json paths tell the TYPE CHECKER where a specifier lives.
+// They do not change emitted JS: tsc accepts "@app/logging", then Node
+// throws ERR_MODULE_NOT_FOUND unless a bundler or loader rewrites it.
+// For Node itself, use package.json "imports" ("#app/*": "./src/*"),
+// which both Node and tsc (nodenext) resolve.
 //
 // {
 //   "compilerOptions": {
@@ -139,7 +150,7 @@ namespace Color {
 // }
 //
 // import { Logger } from "@app/logging";
-// // resolves to ./src/logging
+// // tsc resolves this to ./src/logging; Node at runtime does not
 
 // ── Declaration files (.d.ts): type-only module interface ─────────
 // .d.ts files describe the shape of a JS module without implementation.
@@ -183,12 +194,15 @@ declare const __VERSION__: string; // provided by bundler at build time
 // TypeScript allows circular imports, but they cause runtime issues:
 // the imported module may be partially initialized.
 //
-// // a.ts: import { b } from "./b"; export const a = b + 1;
-// // b.ts: import { a } from "./a"; export const b = a + 1;
-// // Result: one of them gets undefined (partially initialized)
+// // a.ts: import { b } from "./b.js"; export const a = b + 1;
+// // b.ts: import { a } from "./a.js"; export const b = a + 1;
+// // Result (ESM): ReferenceError "Cannot access 'a' before
+// //   initialization" — the const binding is still in its TDZ.
+// //   Under CommonJS (or with var) it reads undefined instead → NaN.
 //
 // Fix: extract shared code into a third module (break the cycle)
-// Rust prevents this entirely: circular mod dependencies are a compiler error
+// Rust forbids cycles between CRATES (Cargo rejects them); modules
+// inside one crate may use each other freely.
 
 // ── Simulated module system for testing ───────────────────────────
 
@@ -363,7 +377,8 @@ function main(): void {
     // 2. TS has no pub(crate) — exports are all-or-nothing per item
     //    Rust has pub, pub(crate), pub(super), pub(in path)
     // 3. TS allows circular imports (runtime risk)
-    //    Rust forbids circular mod dependencies (compile error)
+    //    Rust forbids circular crate dependencies; mods within a crate
+    //    may reference each other (items are not initialized at runtime)
     // 4. TS type-only imports are erased — zero cost at runtime
     //    Rust use is always zero-cost (all resolved at compile time)
     // 5. TS barrel files are convention; Rust lib.rs is the crate root

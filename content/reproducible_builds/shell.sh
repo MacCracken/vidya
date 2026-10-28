@@ -5,9 +5,12 @@
 # produce a byte-identical artifact, on any machine, at any time. Three
 # classic sources of non-determinism, and their fixes:
 #
-#   1. Embedded wall-clock timestamps  → clamp every timestamp to
-#      SOURCE_DATE_EPOCH (a fixed build time from the sources) so "now"
-#      never leaks in.
+#   1. Embedded wall-clock timestamps  → the build stamps
+#      SOURCE_DATE_EPOCH (a fixed build time from the sources) instead of
+#      "now", so the clock never reaches the output, fast or slow.
+#      Clamping (min(t, SDE)) is for FILE mtimes: a fresh checkout's newer
+#      mtimes are pinned down to SDE. Clamping the clock itself would still
+#      leak any clock that runs behind SDE.
 #   2. Filesystem iteration order      → readdir() order varies; SORT
 #      filenames before processing so output ignores directory layout.
 #   3. Non-deterministic artifact names → name artifacts by the HASH of
@@ -32,7 +35,10 @@ _RET=0
 
 fold() { _RET=$(( ($1 * HB + $2) % HM )); }
 
-# --- 1. Deterministic timestamps: clamp "now" to SOURCE_DATE_EPOCH ---
+# --- 1. Deterministic timestamps: the mtime clamp (tar --clamp-mtime).
+#     normalize_ts MTIME SDE: a file mtime newer than SOURCE_DATE_EPOCH is
+#     pinned down to it; an older one is kept. The build time itself is
+#     SDE, not this. ---
 normalize_ts() {
     if [[ $1 -gt $2 ]]; then _RET=$2; else _RET=$1; fi
 }
@@ -79,7 +85,7 @@ build_digest() {
     local do_sort=$1 do_norm=$2 now=$3 sde=$4 ts h i
     if [[ $do_sort -eq 1 ]]; then files_sort; fi
     ts=$now
-    if [[ $do_norm -eq 1 ]]; then normalize_ts "$now" "$sde"; ts=$_RET; fi
+    if [[ $do_norm -eq 1 ]]; then ts=$sde; fi  # build time comes from the sources
     fold "$HSEED" "$ts"; h=$_RET
     for (( i=0; i<f_n; i++ )); do
         fold "$h" "${name_key[i]}"; h=$_RET
@@ -111,9 +117,9 @@ assert_eq() {
 
 # === Contract ===
 
-# 1. Deterministic timestamps
-normalize_ts 9999 5000; assert_eq "$_RET" 5000 "clamp future now to SOURCE_DATE_EPOCH"
-normalize_ts 3000 5000; assert_eq "$_RET" 3000 "keep timestamp already <= SDE"
+# 1. The mtime clamp
+normalize_ts 9999 5000; assert_eq "$_RET" 5000 "newer mtime clamped to SOURCE_DATE_EPOCH"
+normalize_ts 3000 5000; assert_eq "$_RET" 3000 "older mtime kept"
 
 # 2. Sorted iteration (content stays paired with its name)
 setup_order_a
@@ -123,10 +129,10 @@ assert_eq "${name_key[1]}" 20 "sorted name[1] = 20"
 assert_eq "${name_key[2]}" 30 "sorted name[2] = 30"
 assert_eq "${content[0]}" 222 "content followed name 10"
 
-# 3. Content-addressed paths
-cas_path 111; a=$_RET
-cas_path 111; b=$_RET
-assert_eq "$a" "$b" "same content -> same path"
+# 3. Content-addressed paths: cas_path takes only the content, so equal
+#    content maps to an equal path by construction (comparing cas_path 111
+#    with itself could never fail). What can fail is distinct content
+#    colliding on one path:
 cas_path 111; c=$_RET
 cas_path 222; d=$_RET
 [[ $c -ne $d ]] && _RET=1 || _RET=0
@@ -149,6 +155,10 @@ assert_eq "$_RET" 1 "naive build drifts with order + timestamp"
 setup_order_a; build_digest 1 1 9999 5000; norm1=$_RET
 setup_order_a; build_digest 1 1 7777 5000; norm2=$_RET
 assert_eq "$norm1" "$norm2" "normalized timestamp removes clock dependence"
+# ...including a clock that runs BEHIND the epoch: min(now, sde) would stamp
+# 3000 here and 5000 above, and the digests would differ.
+setup_order_a; build_digest 1 1 3000 5000; slow=$_RET
+assert_eq "$slow" "$norm1" "a slow clock does not leak into the build either"
 
 echo "All reproducible_builds examples passed."
 exit 0

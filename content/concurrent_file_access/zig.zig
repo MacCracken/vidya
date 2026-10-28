@@ -52,7 +52,9 @@ pub fn main() !void {
     defer f2.close(io);
     if (flock(f1.handle, LOCK_EX) != 0) return error.ReLockEx;
     const nb = flock(f2.handle, LOCK_EX | LOCK_NB);
-    if (nb >= 0) return error.ContentionNotDetected;
+    // Must fail with EWOULDBLOCK specifically: any error (EBADF from a bad
+    // fd, say) would satisfy a bare `nb < 0` check.
+    if (nb != -@as(i32, @backingInt(linux.E.AGAIN))) return error.ContentionNotDetected;
 
     // Test 4: release fd1, fd2 acquires
     _ = flock(f1.handle, LOCK_UN);
@@ -66,5 +68,5 @@ pub fn main() !void {
     _ = flock(f2.handle, LOCK_UN);
 
     cwd.deleteFile(io, path) catch {};
-    std.debug.print("concurrent_file_access: 12/12 ok\n", .{});
+    std.debug.print("concurrent_file_access: 9/9 ok\n", .{});
 }

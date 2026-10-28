@@ -24,10 +24,10 @@
 // the "content-addressed digest" that the deterministic inputs map to:
 // inputs in, one fixed address out, idempotently.
 //
-// qelib1.inc gates only — no `swap`, no custom gates.
+// Gates used: x, cx, ccx, h — no custom gates.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Two registers, two builds running side by side ────────────────────
 //   det[0..2]  = the DETERMINISTIC build pipeline (reversible gates only)
@@ -35,10 +35,10 @@ include "qelib1.inc";
 //
 // Each qubit reads |0> or |1>; the artifact "digest" is the measured
 // bitstring. We want det to be constant across shots and ndet to vary.
-qreg det[3];
-qreg ndet[1];
-creg digest[3];      // measured digest of the deterministic build
-creg drift[1];       // measured bit of the non-deterministic build
+qubit[3] det;
+qubit[1] ndet;
+bit[3] digest;      // measured digest of the deterministic build
+bit[1] drift;       // measured bit of the non-deterministic build
 
 // ── The two source inputs, encoded deterministically ──────────────────
 // Think of det[0] and det[1] as two source files whose CONTENT is fixed.
@@ -74,7 +74,8 @@ ccx det[0], det[1], det[2];   // stamp clamped SOURCE_DATE_EPOCH into digest
 
 // At this point det[] is in ONE fixed basis state. det[2] was flipped by
 // two CX (1 XOR 1 = 0) then once by the CCX (0 XOR 1 = 1): a definite |1>.
-// Every shot measures the SAME digest -> the build is reproducible.
+// Every shot measures the SAME digest, 111 = 7 -> the build is
+// reproducible.
 
 // ── The non-reproducible build: a Hadamard leaks the wall clock ───────
 // Now the counterexample. ndet[0] models a build that bakes the live
@@ -93,8 +94,10 @@ h ndet[0];                // leaked entropy: artifact in superposition
 // shot — byte-identical artifacts, the reproducible-build guarantee.
 // drift[0] (non-deterministic build) reads a random bit that varies shot
 // to shot — the embedded-clock build that never reproduces.
-measure det  -> digest;
-measure ndet -> drift;
+digest = measure det;
+drift = measure ndet;
+// @expect digest == 7
+// @expect drift in {0, 1}
 
 // ── Notes — the reproducible-build / quantum bridge ───────────────────
 //

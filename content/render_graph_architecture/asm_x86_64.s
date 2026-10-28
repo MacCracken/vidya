@@ -1,6 +1,9 @@
 # Vidya — Render Graph Architecture in x86_64 Assembly
 #
 # Tiny DAG: reads/writes bitmasks → topo sort + barriers + cull.
+# Culling runs to a fixpoint (a producer whose only reader was culled is
+# dead too) and culled passes are dropped from the schedule: topo_sort
+# never emits them.
 
 .intel_syntax noprefix
 .global _start
@@ -14,6 +17,7 @@ reads_arr:    .skip 8 * PASS_CAP
 writes_arr:   .skip 8 * PASS_CAP
 topo_order:   .skip 8 * PASS_CAP
 in_degree:    .skip 8 * PASS_CAP
+culled:       .skip 8 * PASS_CAP      # 1 = removed by cull_dead
 
 .section .data
 pass_count:   .quad 0
@@ -50,6 +54,13 @@ graph_init:
     add     rdi, 8
     dec     rcx
     jnz     .gi_loop3
+    lea     rdi, [rip + culled]
+    mov     rcx, PASS_CAP
+.gi_loop4:
+    mov     [rdi], rax
+    add     rdi, 8
+    dec     rcx
+    jnz     .gi_loop4
     mov     qword ptr [rip + pass_count], 0
     mov     qword ptr [rip + topo_len], 0
     ret
@@ -135,7 +146,22 @@ topo_sort:
 
 .ts_kahn_init:
     mov     qword ptr [rip + topo_len], 0
-    xor     r15, r15                  # emitted
+    # Culled passes are not scheduled: mark them emitted (in_degree -1)
+    # and count them as handled up front.
+    xor     r15, r15                  # emitted (+ culled)
+    xor     r13, r13
+.ts_skip_culled:
+    cmp     r13, r12
+    jge     .ts_kahn_loop
+    lea     rcx, [rip + culled]
+    cmp     qword ptr [rcx + r13 * 8], 0
+    je      .ts_skip_next
+    lea     rcx, [rip + in_degree]
+    mov     qword ptr [rcx + r13 * 8], -1
+    inc     r15
+.ts_skip_next:
+    inc     r13
+    jmp     .ts_skip_culled
 .ts_kahn_loop:
     cmp     r15, r12
     jge     .ts_done
@@ -239,17 +265,22 @@ barrier_count:
     ret
 
 # cull_dead -> rax = culled count
+# Repeats until a whole round culls nothing: culling a pass zeroes its
+# reads, which can leave its producers with no reader in the next round.
 cull_dead:
     push    rbx
     push    r12
     push    r13
     push    r14
+    push    rbp
     mov     r12, [rip + pass_count]
     xor     rbx, rbx                  # culled
+.cd_round:
+    xor     ebp, ebp                  # culled this round
     xor     r13, r13                  # i
 .cd_i:
     cmp     r13, r12
-    jge     .cd_done
+    jge     .cd_round_done
     lea     rcx, [rip + writes_arr]
     mov     r14, [rcx + r13 * 8]      # w
     test    r14, r14
@@ -285,14 +316,20 @@ cull_dead:
     mov     qword ptr [rcx + r13 * 8], 0
     lea     rcx, [rip + reads_arr]
     mov     qword ptr [rcx + r13 * 8], 0
+    lea     rcx, [rip + culled]
+    mov     qword ptr [rcx + r13 * 8], 1
     inc     rbx
+    inc     ebp
 .cd_pop_next:
     pop     r15
 .cd_i_next:
     inc     r13
     jmp     .cd_i
-.cd_done:
+.cd_round_done:
+    test    ebp, ebp
+    jnz     .cd_round
     mov     rax, rbx
+    pop     rbp
     pop     r14
     pop     r13
     pop     r12
@@ -379,13 +416,37 @@ _start:
     mov     rsi, 0
     call    assert_eq
 
-    call    topo_sort
+    call    topo_sort                 # the culled pass is not scheduled
     mov     rdi, rax
-    mov     rsi, 4
+    mov     rsi, 3
     call    assert_eq
     call    barrier_count
     mov     rdi, rax
     mov     rsi, 2
+    call    assert_eq
+
+    # Transitive cull: A → B → (nobody), plus a sink that writes nothing.
+    # Round 1 culls B; that leaves A with no reader, so round 2 culls A.
+    call    graph_init
+    mov     rdi, 300                  # A: writes 8
+    mov     rsi, 0
+    mov     rdx, 8
+    call    add_pass
+    mov     rdi, 301                  # B: reads 8, writes 16 (unread)
+    mov     rsi, 8
+    mov     rdx, 16
+    call    add_pass
+    mov     rdi, 302                  # sink: reads 1, writes nothing
+    mov     rsi, 1
+    mov     rdx, 0
+    call    add_pass
+    call    cull_dead
+    mov     rdi, rax
+    mov     rsi, 2
+    call    assert_eq
+    call    topo_sort
+    mov     rdi, rax
+    mov     rsi, 1                    # only the sink is scheduled
     call    assert_eq
 
     # Cycle test

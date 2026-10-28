@@ -3,9 +3,9 @@
 // All-octant integer Bresenham on a 16x16 byte framebuffer.
 //
 // AArch64 ABI notes (see field-note aarch64_callee_saved_and_imm_limits):
-// loop state for draw_line lives in callee-saved x19-x25 across `bl
-// fb_set`. Iterator (x, y) lives on the frame because each iteration
-// calls fb_set, which clobbers x0-x18.
+// all of draw_line's loop state, including the iterator (x, y), lives in
+// callee-saved x19-x28, because each iteration calls fb_set and AAPCS64
+// lets a callee clobber x0-x18. draw_line saves x19-x28 on entry.
 
 .global _start
 

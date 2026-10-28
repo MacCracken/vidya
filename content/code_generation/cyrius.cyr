@@ -1,8 +1,11 @@
 # Vidya — Code Generation in Cyrius
 #
-# PATTERN-FOCUSED: documents Cyrius cc2's actual codegen patterns.
-# This is not a reimplementation — it verifies the constants, offsets,
-# and conventions that cc2 uses when emitting x86_64 machine code.
+# PATTERN-FOCUSED: documents the codegen patterns of Cyrius's bootstrap
+# compiler, cc2 (the ancestor of today's cycc). This is not a
+# reimplementation — it checks the constants, offsets and conventions of
+# that stack-machine baseline. The current compiler, cycc, adds opt-in
+# optimisation on top (the `#regalloc` fn attribute, and the CYRIUS_IR=3
+# IR path with constant folding and DCE), so its output can differ.
 #
 # Key patterns:
 #   - Stack frame layout: params at [rbp-8], [rbp-16], locals after
@@ -15,6 +18,7 @@ include "lib/string.cyr"
 include "lib/fmt.cyr"
 include "lib/alloc.cyr"
 include "lib/assert.cyr"
+include "lib/syscalls.cyr"
 
 # ================================================================
 # Stack Frame Layout — cc2's convention
@@ -29,55 +33,34 @@ include "lib/assert.cyr"
 #   ...
 #   [rsp]     = bottom of frame (16-byte aligned)
 
+# Slot of register-passed param i (0-based): [rbp - (i + 1) * 8].
+fn param_offset(i) { return 0 - (i + 1) * 8; }
+# Stack-passed arg n (1-based, n >= 7): above the saved rbp (8) and the
+# return address (8), one slot per arg.
+fn stack_arg_offset(n) { return 16 + (n - 7) * 8; }
+
 fn test_frame_offsets() {
-    # Parameters are stored to stack starting at [rbp-8]
-    var param0_offset = 0 - 8;
-    var param1_offset = 0 - 16;
-    var param2_offset = 0 - 24;
-    assert_eq(param0_offset, 0 - 8, "param 0 at [rbp-8]");
-    assert_eq(param1_offset, 0 - 16, "param 1 at [rbp-16]");
-    assert_eq(param2_offset, 0 - 24, "param 2 at [rbp-24]");
-
-    # Offset formula: -(param_index + 1) * 8
-    var i = 0;
-    while (i < 6) {
-        var expected = 0 - (i + 1) * 8;
-        var computed = 0 - i * 8 - 8;
-        assert_eq(expected, computed, "param offset formula");
-        i = i + 1;
-    }
-
-    # Stack arguments (7+) are above rbp
-    # +16 because return address (8) + saved rbp (8)
-    var stack_arg7 = 16;
-    var stack_arg8 = 24;
-    assert_eq(stack_arg7, 16, "arg 7 at [rbp+16]");
-    assert_eq(stack_arg8, 24, "arg 8 at [rbp+24]");
+    assert_eq(param_offset(0), 0 - 8, "param 0 at [rbp-8]");
+    assert_eq(param_offset(1), 0 - 16, "param 1 at [rbp-16]");
+    assert_eq(param_offset(2), 0 - 24, "param 2 at [rbp-24]");
+    assert_eq(stack_arg_offset(7), 16, "arg 7 at [rbp+16]");
+    assert_eq(stack_arg_offset(8), 24, "arg 8 at [rbp+24]");
     return 0;
 }
+
+# Frame size for n 8-byte locals, rounded up to 16 (System V AMD64).
+# Same as (n * 8 + 15) & ~15.
+fn frame_size(n) { return ((n * 8 + 15) / 16) * 16; }
 
 fn test_frame_alignment() {
     # Frame size must be 16-byte aligned (System V AMD64 ABI)
     # RSP must be 16-byte aligned before any CALL instruction
 
-    # 1 local = 8 bytes -> round to 16
-    var frame_1 = 16;
-    assert_eq(frame_1 % 16, 0, "1 local: 16-aligned");
-
-    # 2 locals = 16 bytes -> already 16
-    var frame_2 = 16;
-    assert_eq(frame_2 % 16, 0, "2 locals: 16-aligned");
-
-    # 3 locals = 24 bytes -> round to 32
-    var frame_3 = 32;
-    assert_eq(frame_3 % 16, 0, "3 locals: 16-aligned");
-
-    # 5 locals = 40 bytes -> round to 48
-    var frame_5 = 48;
-    assert_eq(frame_5 % 16, 0, "5 locals: 16-aligned");
-
-    # Alignment formula: ((n * 8 + 15) / 16) * 16
-    # In integer math: ((n * 8 + 15) & ~15) but cc2 uses division
+    assert_eq(frame_size(1), 16, "1 local = 8 bytes -> 16");
+    assert_eq(frame_size(2), 16, "2 locals = 16 bytes -> 16");
+    assert_eq(frame_size(3), 32, "3 locals = 24 bytes -> 32");
+    assert_eq(frame_size(5), 48, "5 locals = 40 bytes -> 48");
+    assert_eq(frame_size(0), 0, "no locals -> no sub rsp");
     return 0;
 }
 
@@ -87,7 +70,8 @@ fn test_frame_alignment() {
 # cc2's codegen for expressions:
 #   1. Evaluate expression, result in rax
 #   2. For binary ops: eval left -> push rax -> eval right -> pop rcx -> op
-#   3. This is the simplest correct pattern (no register allocation)
+#   3. This is the simplest correct pattern (no register allocation:
+#      every intermediate goes through rax and the stack)
 
 fn test_stack_machine_pattern() {
     # Simulating stack depth for expression: (2 + 3) * 4
@@ -101,9 +85,10 @@ fn test_stack_machine_pattern() {
     # Step 8: pop rcx -> rcx=5, rax=4 (depth 0)
     # Step 9: imul rax, rcx -> rax=20 (depth 0)
 
-    # Max stack depth for binary tree of depth d = d
-    # (2 + 3) * 4 has depth 2, max stack depth = 2
-    # But the pop happens before the next push, so actual max = 1
+    # Pushes outstanding at once = the number of enclosing binops whose
+    # RIGHT operand is still being evaluated (each holds its left value
+    # on the stack). (2 + 3) * 4 needs 1 (traced above); (a + b) * (c + d)
+    # needs 2; a + (b + (c + d)) needs 3. It is not the tree depth.
 
     var result = (2 + 3) * 4;
     assert_eq(result, 20, "expression eval");
@@ -163,14 +148,9 @@ fn test_instruction_sizes() {
 # Return value: rax (both conventions)
 
 fn test_syscall_abi() {
-    # Syscall numbers (Linux x86_64)
-    var SYS_READ = 0;
-    var SYS_WRITE = 1;
-    var SYS_OPEN = 2;
-    var SYS_CLOSE = 3;
-    var SYS_MMAP = 9;
-    var SYS_EXIT = 60;
-
+    # Syscall numbers (Linux x86_64) — checked against lib/syscalls.cyr's
+    # own table, not against local copies of the same literals.
+    assert_eq(SYS_READ, 0, "read syscall number");
     assert_eq(SYS_WRITE, 1, "write syscall number");
     assert_eq(SYS_EXIT, 60, "exit syscall number");
     assert_eq(SYS_MMAP, 9, "mmap syscall number");
@@ -189,13 +169,14 @@ fn test_syscall_abi() {
     # write(1, buf, len) = 3 args
     # Codegen: eval 1 -> push; eval buf -> push; eval len -> push
     # Then: pop rdx; pop rsi; pop rdi; mov rax, 1; syscall
-    var write_args = 3;
-    assert_eq(write_args, 3, "write takes 3 args");
-
-    # mmap(addr, len, prot, flags, fd, offset) = 6 args
-    var mmap_args = 6;
-    assert_eq(mmap_args, 6, "mmap takes 6 args");
+    # mmap(addr, len, prot, flags, fd, offset) = 6 args: all six registers.
     return 0;
+}
+
+fn popcount(x) {
+    var n = 0;
+    while (x != 0) { n = n + (x & 1); x = x >> 1; }
+    return n;
 }
 
 fn test_function_call_abi() {
@@ -203,21 +184,19 @@ fn test_function_call_abi() {
     # Args 1-6: rdi, rsi, rdx, rcx, r8, r9
     # Args 7+:  pushed to stack right-to-left
 
-    # Caller-saved registers (must save before call):
-    # rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11 = 9 registers
-    var caller_saved = 9;
-    assert_eq(caller_saved, 9, "9 caller-saved registers");
-
-    # Callee-saved registers (function must preserve):
-    # rbx, rbp, r12, r13, r14, r15 = 6 registers
-    var callee_saved = 6;
-    assert_eq(callee_saved, 6, "6 callee-saved registers");
-
-    # Total general-purpose registers = 16
-    # (rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8-r15)
-    # rsp is stack pointer — not allocatable
-    var allocatable = 15;
-    assert_eq(allocatable, 16 - 1, "15 allocatable registers");
+    # As bitmasks over the hardware register numbers (rax=0 rcx=1 rdx=2
+    # rbx=3 rsp=4 rbp=5 rsi=6 rdi=7 r8..r15=8..15):
+    # Caller-saved (clobbered by a call): rax rcx rdx rsi rdi r8-r11
+    var caller_saved = 1 | 2 | 4 | 64 | 128 | 256 | 512 | 1024 | 2048;
+    # Callee-saved (a function must preserve): rbx rbp r12-r15
+    var callee_saved = 8 | 32 | 4096 | 8192 | 16384 | 32768;
+    var rsp_bit = 16;
+    assert_eq(popcount(caller_saved), 9, "9 caller-saved registers");
+    assert_eq(popcount(callee_saved), 6, "6 callee-saved registers");
+    assert_eq(caller_saved & callee_saved, 0, "no register is in both sets");
+    # Together with rsp (the stack pointer, never allocatable) they
+    # cover all 16 general-purpose registers exactly once.
+    assert_eq(caller_saved | callee_saved | rsp_bit, 65535, "sets + rsp = all 16 GPRs");
     return 0;
 }
 
@@ -237,15 +216,17 @@ fn test_division_correctness() {
     assert_eq(100 / 10, 10, "positive division");
     assert_eq(42 / 7, 6, "positive division 2");
 
-    # Negative division: MUST use sign extension
-    assert_eq(0 - 10 / 2, 0 - 5, "negative dividend");
+    # Negative division: MUST use sign extension. The dividend goes
+    # through a variable so a real idiv runs (`0 - 10 / 2` would parse as
+    # 0 - (10 / 2) and never divide a negative number at all).
+    var neg = 0 - 10;
+    assert_eq(neg / 3, 0 - 3, "-10 / 3 == -3 (cqo sign-extends, truncates toward 0)");
+    assert_eq(neg % 3, 0 - 1, "-10 % 3 == -1 (remainder takes the dividend's sign)");
 
-    # CQO instruction: 2 bytes (48 99)
-    # XOR RDX,RDX: 3 bytes (48 31 D2)
-    # CQO is both correct AND smaller!
-    var cqo_size = 2;
-    var xor_size = 3;
-    assert(cqo_size < xor_size, "cqo is smaller than xor rdx,rdx");
+    # Size is not the reason to prefer CQO: CQO is 2 bytes (48 99), and the
+    # usual zeroing idiom xor edx,edx is also 2 bytes (31 D2; it zero-
+    # extends into rdx — the REX.W form 48 31 D2 is 3). Choose by
+    # signedness: cqo for idiv, xor edx,edx for div.
     return 0;
 }
 

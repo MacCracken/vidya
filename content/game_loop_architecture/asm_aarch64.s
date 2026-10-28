@@ -5,9 +5,10 @@
 // number of fixed-step updates fired this frame in x0. AArch64's
 // CNTVCT_EL0 virtual counter would normally feed deltas to a real
 // engine; tests use deterministic deltas so the exit code is portable
-// across host hardware. Constants like 16667/83335/50000/1000000
-// exceed the 12-bit `add` immediate, so they are loaded via the
-// assembler's literal-pool form `ldr xN, =literal`.
+// across host hardware. `mov xN, #imm` (MOVZ) takes a 16-bit
+// immediate: 16667 and 50000 fit, but 83335 and 1000000 do not and need
+// a movz/movk pair or the literal-pool form `ldr xN, =literal`. The file
+// loads all of them from the literal pool for uniformity.
 
 .global _start
 
@@ -90,7 +91,8 @@ _start:
     cmp     x0, #1
     b.ne    fail
 
-    // Test 2: under dt fires zero updates (DT_US/2 = 8333 fits 12-bit imm)
+    // Test 2: under dt fires zero updates (DT_US/2 = 8333 = 0x208D fits
+    // MOVZ's 16-bit immediate, though not the 12-bit add/cmp immediate)
     bl      loop_reset
     mov     x0, #8333
     bl      loop_step

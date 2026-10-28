@@ -10,6 +10,7 @@ struct Graph {
     reads: [u64; PASS_CAP],
     writes: [u64; PASS_CAP],
     count: usize,
+    culled: [bool; PASS_CAP],
     topo_order: [usize; PASS_CAP],
     topo_len: usize,
 }
@@ -21,6 +22,7 @@ impl Graph {
             reads: [0; PASS_CAP],
             writes: [0; PASS_CAP],
             count: 0,
+            culled: [false; PASS_CAP],
             topo_order: [0; PASS_CAP],
             topo_len: 0,
         }
@@ -41,8 +43,14 @@ impl Graph {
     }
 
     fn topo_sort(&mut self) -> usize {
+        // Culled passes are not scheduled at all: mark them as already emitted.
         let mut in_degree = [0i32; PASS_CAP];
+        let live = (0..self.count).filter(|&i| !self.culled[i]).count();
         for i in 0..self.count {
+            if self.culled[i] {
+                in_degree[i] = -1;
+                continue;
+            }
             for j in 0..self.count {
                 if i != j && self.has_edge(j, i) {
                     in_degree[i] += 1;
@@ -51,7 +59,7 @@ impl Graph {
         }
         self.topo_len = 0;
         let mut emitted = 0;
-        while emitted < self.count {
+        while emitted < live {
             let mut picked: Option<usize> = None;
             for k in 0..self.count {
                 if in_degree[k] == 0 {
@@ -88,25 +96,33 @@ impl Graph {
         count
     }
 
+    /// Remove passes whose outputs no live pass reads. Iterate to a fixed
+    /// point: culling a pass can leave its producers with no reader either.
+    /// (Passes that write nothing are the graph's sinks — e.g. present — and
+    /// are always kept.)
     fn cull_dead(&mut self) -> usize {
         let mut culled = 0;
-        for i in 0..self.count {
-            let w = self.writes[i];
-            if w != 0 {
-                let mut any_reader = false;
-                for j in 0..self.count {
-                    if i != j && (w & self.reads[j]) != 0 {
-                        any_reader = true;
-                    }
+        loop {
+            let mut changed = false;
+            for i in 0..self.count {
+                let w = self.writes[i];
+                if self.culled[i] || w == 0 {
+                    continue;
                 }
+                let any_reader = (0..self.count)
+                    .any(|j| i != j && !self.culled[j] && (w & self.reads[j]) != 0);
                 if !any_reader {
+                    self.culled[i] = true;
                     self.writes[i] = 0;
                     self.reads[i] = 0;
                     culled += 1;
+                    changed = true;
                 }
             }
+            if !changed {
+                return culled;
+            }
         }
-        culled
     }
 }
 
@@ -135,8 +151,17 @@ fn main() {
     assert_eq!(g.cull_dead(), 1);
     assert_eq!(g.writes[3], 0);
     let n2 = g.topo_sort();
-    assert_eq!(n2, 4);
+    assert_eq!(n2, 3); // the culled pass is not scheduled
     assert_eq!(g.barrier_count(), 2);
+
+    // 4b: culling is transitive. X's output is read only by Y, and Y's by
+    // nobody: culling Y leaves X dead too. The sink (writes nothing) stays.
+    let mut g3 = Graph::new();
+    g3.add_pass(300, 0, 1 << 5);      // X
+    g3.add_pass(301, 1 << 5, 1 << 6); // Y
+    g3.add_pass(302, 0, 0);           // sink
+    assert_eq!(g3.cull_dead(), 2);
+    assert_eq!(g3.topo_sort(), 1);
 
     // 5: cycle detection
     let mut g2 = Graph::new();
@@ -144,5 +169,5 @@ fn main() {
     g2.add_pass(201, 2, 1);
     assert_eq!(g2.topo_sort(), 0);
 
-    println!("render_graph_architecture: 14/14 ok");
+    println!("render_graph_architecture: 16/16 ok");
 }

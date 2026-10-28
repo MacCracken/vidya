@@ -212,14 +212,41 @@ fn testGHZState() !void {
 }
 
 fn testNoiseChannels() !void {
-    // Depolarizing: prob(0) = 1 - 2p/3, total = 1
+    // Each channel is a probabilistic mix of Pauli branches. Run every
+    // branch through the simulator and average, rather than asserting the
+    // closed form against itself.
     const p: f64 = 0.1;
-    const noisy_p0 = 1.0 - 2.0 * p / 3.0;
-    const noisy_p1 = 2.0 * p / 3.0;
-    try assertNear(noisy_p0 + noisy_p1, 1.0);
+    const i_c = Complex.init(0, 1);
+    const mi_c = Complex.init(0, -1);
+    var br: [2]Complex = undefined;
 
-    // Dephasing
-    const dephased: f64 = 0.5 * (1.0 - 0.2);
+    // Depolarizing on |0>: rho -> (1-p) rho + p/3 (X rho X + Y rho Y + Z rho Z)
+    initState(&br);
+    const p0_i = prob(&br, 0);
+    initState(&br);
+    pauliX(&br, 0, 1);
+    const p0_x = prob(&br, 0);
+    initState(&br);
+    applyGate(&br, 0, 1, .{ .{ Complex.zero(), mi_c }, .{ i_c, Complex.zero() } }); // Y
+    const p0_y = prob(&br, 0);
+    initState(&br);
+    pauliZ(&br, 0, 1);
+    const p0_z = prob(&br, 0);
+    const noisy_p0 = (1.0 - p) * p0_i + p / 3.0 * (p0_x + p0_y + p0_z);
+    try assertNear(noisy_p0, 1.0 - 2.0 * p / 3.0); // X and Y flip, Z does not
+
+    // Dephasing (phase flip) on |+>: rho -> (1-p) rho + p Z rho Z. The
+    // populations are untouched; the coherence rho01 = a0 * conj(a1)
+    // shrinks by (1 - 2p): 0.5 -> 0.4.
+    var plus: [2]Complex = undefined;
+    initState(&plus);
+    hadamard(&plus, 0, 1);
+    var flipped = plus;
+    pauliZ(&flipped, 0, 1);
+    const c_plus = plus[0].re * plus[1].re + plus[0].im * plus[1].im;
+    const c_flip = flipped[0].re * flipped[1].re + flipped[0].im * flipped[1].im;
+    const dephased = (1.0 - p) * c_plus + p * c_flip;
+    try assertNear(dephased, 0.5 * (1.0 - 2.0 * p));
     try assertNear(dephased, 0.4);
 
     // Circuit fidelity

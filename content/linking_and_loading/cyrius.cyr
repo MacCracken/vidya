@@ -1,6 +1,7 @@
 # Vidya — Linking and Loading in Cyrius
 #
-# PATTERN-FOCUSED: documents linker concepts as they apply to cc2.
+# PATTERN-FOCUSED: documents linker concepts, and how the cycc compiler
+# relates to them (last section).
 # Covers symbol tables, relocation types, GOT/PLT lazy binding,
 # static vs dynamic linking, and section merging.
 #
@@ -59,6 +60,13 @@ fn test_symbol_binding() {
 # A = addend (from relocation entry)
 # P = place being patched (address of the relocation site)
 
+# 1 if v fits a sign-extended 32-bit relocation field, else 0.
+fn rel32s_fits(v) {
+    if (v < 0 - 0x80000000) { return 0; }
+    if (v > 0x7FFFFFFF) { return 0; }
+    return 1;
+}
+
 fn test_relocation_formulas() {
     var sym_addr = 0x401000;
     var addend = 0;
@@ -67,16 +75,22 @@ fn test_relocation_formulas() {
     var abs64 = sym_addr + addend;
     assert_eq(abs64, 0x401000, "ABS64 = S + A");
 
-    # PC32: value = S + A - (P + 4)
-    # The +4 is because x86 measures PC-relative from the END of the instruction
+    # PC32: value = S + A - P (the linker never adds anything else).
+    # x86 measures PC-relative from the END of the instruction, 4 bytes past
+    # the rel32 field — so the ASSEMBLER emits A = -4 (`call foo` produces
+    # R_X86_64_PLT32 foo-4). A linker that also subtracted 4 would be off by 4.
     var patch_addr = 0x400100;
-    var pc32 = sym_addr + addend - (patch_addr + 4);
-    assert_eq(pc32, 0xEFC, "PC32 = S + A - (P + 4)");
+    var pc_addend = 0 - 4;
+    var pc32 = sym_addr + pc_addend - patch_addr;
+    assert_eq(pc32, 0xEFC, "PC32 = S + A - P with A = -4");
 
-    # ABS32 has same formula as ABS64 but truncated to 32 bits
-    # Used for disp32 fields in SIB addressing
+    # R_X86_64_32S has the same formula, S + A, but the field is 32 bits and
+    # the CPU sign-extends it, so the value must fit in [-2^31, 2^31). The
+    # linker does NOT truncate: a value outside that range is an error
+    # ("relocation truncated to fit"). Used for disp32 / imm32 fields.
     var abs32 = sym_addr + addend;
-    assert_eq(abs32, 0x401000, "ABS32 = S + A (truncated)");
+    assert_eq(rel32s_fits(abs32), 1, "32S: 0x401000 fits a sign-extended 32-bit field");
+    assert_eq(rel32s_fits(0x80000000), 0, "32S: 0x80000000 does not fit (ld errors)");
     return 0;
 }
 
@@ -261,8 +275,11 @@ fn test_resolution_rules() {
     # Two .o files both define "main" → ld: multiple definition of 'main'
 
     # Rule 2: strong + weak = strong wins
-    # Default allocator: libc defines malloc (weak)
-    # Custom allocator: user defines malloc (strong) → overrides libc
+    # (glibc's malloc is NOT weak — it is a strong alias of __libc_malloc.
+    # A user malloc still wins: statically, the archive member holding libc's
+    # malloc is never pulled in; dynamically, the executable is searched
+    # before libc.so. A weak/strong pair is e.g. a library's weak default
+    # hook overridden by the program's strong definition.)
     var strong_wins = 1;
     assert_eq(strong_wins, 1, "strong overrides weak");
 
@@ -283,27 +300,29 @@ fn test_resolution_rules() {
 }
 
 # ================================================================
-# cc2's Linking Model
+# The cycc compiler's linking model
 # ================================================================
-# cc2 does NOT use a separate linker. It emits a complete ELF directly:
-#   - Single compilation unit (no .o files, no linking step)
+# By default cycc does NOT use a separate linker. It emits a complete
+# static ELF directly:
+#   - Single compilation unit: every `include`d file is part of it (so a
+#     multi-file program needs no linking step)
 #   - Two-pass assembly: pass 1 computes offsets, pass 2 emits bytes
 #   - Forward references resolved by backpatching jump offsets
-#   - All functions in one .text section, all globals in one .data section
-#
-# This is simpler but limits to single-file programs (no separate compilation).
+# It can also emit relocatable objects for `ld` (`shared;` object mode)
+# and position-independent ET_DYN executables (`--pie`), which go through
+# exactly the relocations described above.
 
-fn test_cc2_model() {
-    # cc2 uses backpatching for forward jumps:
+fn test_cycc_model() {
+    # cycc uses backpatching for forward jumps:
     # Pass 1: emit placeholder, record patch location
     # Pass 2: compute target offset, overwrite placeholder
     var uses_backpatch = 1;
-    assert_eq(uses_backpatch, 1, "cc2 uses backpatching");
+    assert_eq(uses_backpatch, 1, "cycc uses backpatching");
 
-    # No separate .o files means no symbol resolution phase
+    # No separate .o files (default mode) means no symbol resolution phase
     # Every function is visible to every other function
     var needs_linker = 0;
-    assert_eq(needs_linker, 0, "cc2 has no linking step");
+    assert_eq(needs_linker, 0, "default cycc build has no linking step");
 
     # Two-pass assembly: first pass for sizes, second for bytes
     # This is exactly what a linker does, just within one file
@@ -322,7 +341,7 @@ fn main() {
     test_lazy_binding_sequence();
     test_static_vs_dynamic();
     test_resolution_rules();
-    test_cc2_model();
+    test_cycc_model();
     return assert_summary();
 }
 var exit_code = main();

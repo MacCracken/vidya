@@ -2,10 +2,12 @@
 //
 // Semi-implicit Euler integration in 16.16 fixed-point on i64. Zig's
 // `>>` on signed integers is arithmetic, and overflow is checked at
-// runtime in safe modes — `*%` is the explicit "wrap on overflow"
-// multiply, used for the bounce intermediate (vy * RESTITUTION ≈
-// 3.6e10 worst case fits in i64, but `*%` makes the wrap-on-overflow
-// intent visible at the call site rather than implicit).
+// runtime in safe modes. The bounce intermediate (vy * RESTITUTION ≈
+// 3.6e10 worst case) fits in i64, so it uses plain `*`: if it ever did
+// overflow, a wrapped velocity would be silently wrong, and the safety
+// check is what would catch it. `*%` is for arithmetic where wrapping IS
+// the algorithm (hashes, LCG steps); using it here would only switch the
+// check off.
 
 const std = @import("std");
 const print = std.debug.print;
@@ -33,8 +35,8 @@ fn physicsStep(b: *Ball) void {
 fn bounceCheck(b: *Ball) void {
     if (b.y > FLOOR_Y) {
         b.y = FLOOR_Y;
-        // vy = -(vy * restitution) >> 16  — wrapping mul keeps intent explicit.
-        const prod: i64 = b.vy *% RESTITUTION;
+        // vy = -(vy * restitution) >> 16  — checked mul: no wrap intended.
+        const prod: i64 = b.vy * RESTITUTION;
         b.vy = -(prod >> FX_SHIFT);
     }
 }

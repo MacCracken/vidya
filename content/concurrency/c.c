@@ -1,8 +1,11 @@
 // Vidya — Concurrency in C
 //
-// C concurrency uses POSIX threads (pthreads). You manage thread
-// creation, mutexes, condition variables, and atomic operations
-// manually. No runtime, no garbage collector — you control everything.
+// C concurrency here uses POSIX threads (pthreads), still the common
+// choice on Unix. Since C11 the standard library also has <threads.h>
+// (thrd_create, mtx_t, cnd_t; in glibc since 2.28) alongside
+// <stdatomic.h>. You manage thread creation, mutexes, condition
+// variables, and atomic operations manually. No runtime, no garbage
+// collector — you control everything.
 
 #include <assert.h>
 #include <pthread.h>
@@ -151,7 +154,8 @@ int main(void) {
     for (int i = 0; i < NUM_THREADS; i++) {
         tasks[i].start = i * per_thread;
         tasks[i].end = (i + 1) * per_thread;
-        pthread_create(&threads[i], NULL, sum_range, &tasks[i]);
+        rc = pthread_create(&threads[i], NULL, sum_range, &tasks[i]);
+        assert(rc == 0);  // joining a thread that was never created is UB
     }
 
     long total = 0;
@@ -170,7 +174,8 @@ int main(void) {
     for (int i = 0; i < 4; i++) {
         ctasks[i].counter = &counter;
         ctasks[i].times = 1000;
-        pthread_create(&cthreads[i], NULL, counter_worker, &ctasks[i]);
+        rc = pthread_create(&cthreads[i], NULL, counter_worker, &ctasks[i]);
+        assert(rc == 0);
     }
     for (int i = 0; i < 4; i++) {
         pthread_join(cthreads[i], NULL);
@@ -194,7 +199,8 @@ int main(void) {
 
     ProducerTask ptask = {.queue = &queue, .count = 5};
     pthread_t prod_thread;
-    pthread_create(&prod_thread, NULL, producer, &ptask);
+    rc = pthread_create(&prod_thread, NULL, producer, &ptask);
+    assert(rc == 0);
 
     int results[5];
     for (int i = 0; i < 5; i++) {

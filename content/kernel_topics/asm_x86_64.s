@@ -36,7 +36,7 @@ _start:
     jne     fail
 
     # ── Test 2: Virtual address decomposition ──────────────────────────
-    # Decompose 0x0000_7FFF_FFFF_F000
+    # Decompose 0x0000_7FFF_FFFF_FFFF (the top canonical user address)
     mov     rax, 0x00007FFFFFFFFFFF
     # PML4 index: bits 39-47
     mov     rbx, rax

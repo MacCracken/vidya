@@ -51,6 +51,10 @@ fn sys_write(fd: u64, buf: &[u8]) -> i64 {
 }
 
 /// Get current break (heap end). Pass 0 to query, non-zero to set.
+/// Unlike most syscalls the raw brk never returns -errno: on failure it
+/// returns the UNCHANGED current break (glibc's brk() wrapper is what turns
+/// that into -1/ENOMEM). Moving the break behind malloc's back is tolerable
+/// here only because nothing ever uses the extra page.
 fn sys_brk(addr: u64) -> i64 {
     unsafe { syscall3(nr::BRK, addr, 0, 0) }
 }
@@ -109,19 +113,31 @@ extern "C" fn make_big_struct(x: u64) -> BigStruct {
 
 // ── Stack frame layout ────────────────────────────────────────────────────
 
-/// Demonstrates reading the current stack pointer and frame pointer.
-fn show_stack_layout() {
+#[inline(never)]
+fn callee_rsp() -> u64 {
     let rsp: u64;
-    let rbp: u64;
     unsafe {
         asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack));
-        asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack));
     }
+    rsp
+}
+
+/// Demonstrates reading the stack pointer. RBP is NOT read as a frame
+/// pointer: rustc omits frame pointers by default on x86_64 Linux (this
+/// function's prologue is just `sub rsp, N`), so RBP holds some caller's
+/// value and `rbp - rsp` is not this frame's size. Build with
+/// `-C force-frame-pointers=yes` to get push rbp / mov rbp, rsp prologues.
+fn show_stack_layout() {
+    let rsp: u64;
+    unsafe {
+        asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack));
+    }
+    let inner = callee_rsp();
+    assert!(inner < rsp, "the stack grows down");
 
     println!("  Stack layout:");
-    println!("    RBP (frame pointer): 0x{:016X}", rbp);
     println!("    RSP (stack pointer): 0x{:016X}", rsp);
-    println!("    Frame size:          {} bytes", rbp - rsp);
+    println!("    RSP in a callee:     0x{:016X} ({} bytes lower — stack grows down)", inner, rsp - inner);
     println!(
         "    RSP aligned to 16:   {}",
         if rsp % 16 == 0 { "yes" } else { "no" }

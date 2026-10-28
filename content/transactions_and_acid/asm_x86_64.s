@@ -32,6 +32,8 @@ tx_wvals:    .skip 32
 tx_rcount:   .skip 8
 tx_rkeys:    .skip 32
 tx_rsnaps:   .skip 32
+store_end:
+.equ STORE_QWORDS, (store_end - accounts) / 8   # 27: everything above
 
 .section .rodata
 msg_pass: .ascii "transactions_and_acid: 12/12 ok\n"
@@ -44,7 +46,8 @@ msg_fail: .ascii "FAIL\n"
 # store_init — zero accounts/versions/tx state
 store_init:
     lea     rdi, [rip + accounts]
-    mov     rcx, 28
+    mov     rcx, STORE_QWORDS       # derived, not counted: a hand-typed 28
+                                    # zeroed 8 bytes past tx_rsnaps
 .si_loop:
     mov     qword ptr [rdi + rcx*8 - 8], 0
     loop    .si_loop

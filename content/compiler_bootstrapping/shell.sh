@@ -52,9 +52,10 @@ result=$(compile_stage0 "$input")
 assert_eq "$result" "$expected" "stage0 basic compilation"
 
 # ── Idempotency check ────────────────────────────────────────────────
-# A well-designed transform applied to its own output should be stable.
-# If compile(compile(x)) == compile(x), the compiler is idempotent on
-# its output — meaning stage1 built by stage0 matches stage1 built by stage1.
+# A well-designed transform applied to its own output should be stable:
+# compile(compile(x)) == compile(x). That is idempotency of the TRANSFORM.
+# It is not the bootstrap fixed point (that compares two compiler BUILDS —
+# the compiler as built by stage0 vs as built by itself; see the chain below).
 
 result_pass2=$(compile_stage0 "$result")
 assert_eq "$result_pass2" "$result" "idempotency: compile twice = compile once"
@@ -143,12 +144,19 @@ expected_s1="LET x = 1;
 LET y = 2;"
 assert_eq "$stage1_binary" "$expected_s1" "stage0 compiles stage1 source"
 
-# Now stage1 compiles itself (applying the same transform to the output)
+# Now feed the output back through the same transform
 stage1_from_stage1=$(stage0_compiler "$stage1_binary")
-# The second pass adds another semicolon — this shows why real compilers
-# must handle their own output format correctly for true self-hosting
-[[ -n "$stage1_from_stage1" ]] || { echo "FAIL: stage1 self-build empty" >&2; exit 1; }
-(( ++PASS ))
+# The second pass adds another semicolon — the naive transform is NOT a
+# fixed point. This shows why real compilers must handle their own output
+# format correctly for true self-hosting.
+assert_eq "$stage1_from_stage1" "LET x = 1;;
+LET y = 2;;" "naive transform is not a fixed point (second ';' appended)"
+
+# A stage1 that understands its own output: normalise trailing ';' runs.
+stage1_compiler() {
+    sed -e 's/let /LET /g' -e 's/;*$/;/' <<< "$1"
+}
+stage1_rebuilt=$(stage1_compiler "$stage1_binary")
 
 # ── Checksum verification ────────────────────────────────────────────
 # Real bootstrap uses checksums to verify reproducibility.
@@ -157,9 +165,9 @@ stage1_from_stage1=$(stage0_compiler "$stage1_binary")
 
 echo "$stage1_binary" > "$tmpdir/s1_from_s0.bin"
 cksum_s0=$(sha256sum "$tmpdir/s1_from_s0.bin" | cut -d' ' -f1)
-echo "$stage1_binary" > "$tmpdir/s1_from_s1.bin"
+echo "$stage1_rebuilt" > "$tmpdir/s1_from_s1.bin"
 cksum_s1=$(sha256sum "$tmpdir/s1_from_s1.bin" | cut -d' ' -f1)
-assert_eq "$cksum_s0" "$cksum_s1" "identical source yields identical checksum"
+assert_eq "$cksum_s0" "$cksum_s1" "fixed point: rebuild through stage1 is byte-identical"
 
 # ── Instruction size table ───────────────────────────────────────────
 # A bootstrap assembler must know instruction sizes for offset calculation.

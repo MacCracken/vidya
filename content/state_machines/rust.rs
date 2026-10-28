@@ -22,6 +22,21 @@ enum GameState {
     Halftime = 4, Overtime = 5, GameOver = 6, Attract = 7,
 }
 
+impl GameState {
+    /// Transition validation: the legal game-flow edges; anything else is rejected.
+    fn can_go(self, to: GameState) -> bool {
+        use GameState::*;
+        matches!(
+            (self, to),
+            (Menu, Select) | (Menu, Attract) | (Attract, Menu)
+                | (Select, Tipoff) | (Tipoff, Playing)
+                | (Playing, Halftime) | (Halftime, Playing)
+                | (Playing, Overtime) | (Overtime, GameOver)
+                | (Playing, GameOver) | (GameOver, Menu)
+        )
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum Input { None, Move, Shoot, Pass, Steal }
 
@@ -114,14 +129,15 @@ fn main() {
     p.transition(Input::Move);
     assert!(!p.did_transition(), "run->run is not a transition");
 
-    // game state progression — plain enum reassignment
-    let mut g = GameState::Menu;
-    g = GameState::Select;   assert_eq!(g, GameState::Select);
-    g = GameState::Tipoff;   assert_eq!(g, GameState::Tipoff);
-    g = GameState::Playing;  assert_eq!(g, GameState::Playing);
-    g = GameState::Halftime; assert_eq!(g, GameState::Halftime);
-    g = GameState::Playing;  assert_eq!(g, GameState::Playing);
-    g = GameState::GameOver; assert_eq!(g, GameState::GameOver);
+    // game state progression — every step must be a legal edge
+    // (assigning a variant and asserting it back could never fail)
+    use GameState::*;
+    let flow = [Menu, Select, Tipoff, Playing, Halftime, Playing, GameOver];
+    for w in flow.windows(2) {
+        assert!(w[0].can_go(w[1]), "{:?} -> {:?} is legal", w[0], w[1]);
+    }
+    assert!(!Menu.can_go(Playing), "cannot skip select + tipoff");
+    assert!(!GameOver.can_go(Playing), "a finished game cannot resume");
 
     // committed-then-free
     let mut p = Player::new();

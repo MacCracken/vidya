@@ -68,6 +68,14 @@ func pageWrite(f *os.File, num uint64, buf []byte) error {
 	return err
 }
 
+// hdrSync writes the header page back. PageCount and FreeHead live in the
+// file, not just in memory: without this, reopening the file would lose
+// every allocation and the whole free list.
+func hdrSync(f *os.File, h *Header) error {
+	_, err := f.WriteAt(hdrToBytes(h), 0)
+	return err
+}
+
 func pageAlloc(f *os.File, h *Header) (uint64, error) {
 	if h.FreeHead != 0 {
 		fh := h.FreeHead
@@ -76,7 +84,7 @@ func pageAlloc(f *os.File, h *Header) (uint64, error) {
 			return 0, err
 		}
 		h.FreeHead = binary.LittleEndian.Uint64(buf[FPNext : FPNext+8])
-		return fh, nil
+		return fh, hdrSync(f, h)
 	}
 	num := h.PageCount
 	h.PageCount++
@@ -84,7 +92,7 @@ func pageAlloc(f *os.File, h *Header) (uint64, error) {
 	if err := pageWrite(f, num, zero); err != nil {
 		return 0, err
 	}
-	return num, nil
+	return num, hdrSync(f, h)
 }
 
 func pageFree(f *os.File, h *Header, num uint64) error {
@@ -94,22 +102,34 @@ func pageFree(f *os.File, h *Header, num uint64) error {
 		return err
 	}
 	h.FreeHead = num
-	return nil
+	return hdrSync(f, h)
 }
 
 func mustEq(got, want uint64, label string) {
+	checks++
 	if got != want {
 		panic(fmt.Sprintf("%s: got %d want %d", label, got, want))
 	}
 }
 
+// checks counts the assertions this file runs, for the final tally.
+var checks int
+
+func check(cond bool, label string) {
+	checks++
+	if !cond {
+		panic(label)
+	}
+}
+
 func main() {
-	path := "/tmp/vidya_page_go.bin"
-	os.Remove(path)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	// os.CreateTemp, not a fixed /tmp name: a fixed name collides with a
+	// concurrent run and with whatever another user created there first.
+	f, err := os.CreateTemp("", "vidya_page_go_*.bin")
 	if err != nil {
 		panic(err)
 	}
+	path := f.Name()
 
 	h := Header{PageCount: 1, FreeHead: 0}
 	if _, err := f.Write(hdrToBytes(&h)); err != nil {
@@ -124,9 +144,7 @@ func main() {
 	if _, err := f.Read(rh); err != nil {
 		panic(err)
 	}
-	if !hdrVerify(rh) {
-		panic("magic ok failed")
-	}
+	check(hdrVerify(rh), "magic ok failed")
 	loaded := hdrLoad(rh)
 	mustEq(loaded.PageCount, 1, "pgcount starts at 1")
 
@@ -153,7 +171,16 @@ func main() {
 	p3, _ := pageAlloc(f, &h)
 	mustEq(p3, 2, "reused freed page")
 
+	// 7. the header on disk tracks the allocator (what a reopen would see)
+	if _, err := f.ReadAt(rh, 0); err != nil {
+		panic(err)
+	}
+	mustEq(hdrLoad(rh).PageCount, h.PageCount, "on-disk page count persisted")
+	mustEq(hdrLoad(rh).FreeHead, h.FreeHead, "on-disk free head persisted")
+
 	f.Close()
 	os.Remove(path)
-	fmt.Println("page_management: 6/6 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("page_management: %d/%d ok\n", checks, checks)
 }

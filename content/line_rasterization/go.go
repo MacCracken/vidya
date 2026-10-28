@@ -83,10 +83,14 @@ func drawLine(x0, y0, x1, y1 int, v byte) {
 }
 
 func eq(got, want int, label string) {
+	checks++
 	if got != want {
 		panic(fmt.Sprintf("%s: got %d want %d", label, got, want))
 	}
 }
+
+// checks counts the assertions this file runs, for the final tally.
+var checks int
 
 func main() {
 	fbClear()
@@ -137,5 +141,7 @@ func main() {
 	eq(int(fbGet(2, 5)), 1, "rev L")
 	eq(int(fbGet(8, 5)), 1, "rev R")
 
-	fmt.Println("line_rasterization: 27/27 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("line_rasterization: %d/%d ok\n", checks, checks)
 }

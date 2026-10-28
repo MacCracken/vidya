@@ -21,7 +21,11 @@ fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
     for i in 0..MAX_VARINT_BYTES {
         if i >= buf.len() { return None; }
         let b = buf[i];
-        value += ((b & 0x7F) as u64) << shift;
+        // The 10th byte holds only bit 63: anything above 1 encodes a value
+        // >= 2^64, and `<<` would silently drop those bits (it is checked
+        // only for the shift amount), so [0x80 x9, 0x02] would decode as 0.
+        if i == MAX_VARINT_BYTES - 1 && b > 1 { return None; }
+        value |= ((b & 0x7F) as u64) << shift;
         if b & 0x80 == 0 { return Some((value, i + 1)); }
         shift += 7;
     }
@@ -73,6 +77,13 @@ fn main() {
     // Overflow guard: 11 bytes all-continuation
     let bomb = vec![0xFFu8; 11];
     assert!(decode_varint(&bomb).is_none());
+    // ...and a 10-byte varint whose value doesn't fit in u64
+    let mut wide = vec![0x80u8; 9];
+    wide.push(0x02);
+    assert!(decode_varint(&wide).is_none());
+    let mut max = vec![0xFFu8; 9];
+    max.push(0x01);
+    assert_eq!(decode_varint(&max), Some((u64::MAX, 10)));
 
     // Frame round-trip
     let payload = b"hello, world";
@@ -107,5 +118,5 @@ fn main() {
     encode_varint(9999, &mut over);
     assert!(decode_frame(&over, MAX_MSG_SIZE).is_none());
 
-    println!("serialization: 19/19 ok");
+    println!("serialization: 21/21 ok");
 }

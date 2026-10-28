@@ -6,7 +6,9 @@
 // (low>>16) to perform the fixed-point shift without losing bits if
 // the product ever exceeds 2^63 — same idiom as the AArch64 fx_mul
 // in fixed_point_arithmetic. Constants > 16 bits use `ldr xN, =N`
-// (literal-pool load) since `mov` only takes 16-bit immediates.
+// (literal-pool load) for uniformity. `mov` itself takes one 16-bit chunk
+// at bit 0/16/32/48 (so 14745600 = 0xE1 << 16 would fit) or a bitmask
+// pattern; anything else needs movz/movk or the literal pool.
 //
 // Linux Aarch64 syscall ABI: x8 = syscall number, x0–x5 = args,
 // return in x0. Functions calling other functions save x29/x30.

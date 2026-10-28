@@ -4,11 +4,16 @@
 // are satisfied implicitly (structural typing). You never write
 // "implements Foo" — if your type has the right methods, it satisfies
 // the interface. This enables decoupled design but loses some of
-// Rust's compile-time guarantees (associated types, default methods,
-// trait bounds on generics).
+// Rust's compile-time guarantees (associated types, default methods).
+// Trait bounds exist since Go 1.18 — interfaces double as type-parameter
+// constraints — and Go 1.27 allows generic METHODS on concrete types,
+// but an interface method still cannot have type parameters ("interface
+// method must have no type parameters"), so a generic method never
+// satisfies an interface: Go's version of Rust's "no generic methods in
+// a dyn Trait" object-safety rule.
 //
 // Key contrasts with Rust traits:
-//   Go:   implicit satisfaction, no generics on interfaces (until 1.18)
+//   Go:   implicit satisfaction; generic interfaces since 1.18
 //   Rust: explicit `impl Trait for Type`, associated types, trait bounds
 //   Go:   embedding for composition (not inheritance)
 //   Rust: supertraits for composition
@@ -302,11 +307,12 @@ func testErrorInterface() {
 	assert(err != nil, "validation failed")
 	assert(strings.Contains(err.Error(), "cannot be empty"), "error message")
 
-	// Recover the structured error. Use errors.As, never a bare
-	// `err.(*ValidationError)` type assertion: As walks the Unwrap chain,
-	// a type assertion only inspects the outermost error.
-	var ve *ValidationError
-	assert(errors.As(err, &ve), "is ValidationError")
+	// Recover the structured error. Use errors.AsType (Go 1.26; errors.As
+	// before that), never a bare `err.(*ValidationError)` type assertion:
+	// AsType walks the Unwrap chain, a type assertion only inspects the
+	// outermost error.
+	ve, ok := errors.AsType[*ValidationError](err)
+	assert(ok, "is ValidationError")
 	assert(ve.Field == "name", "error field")
 
 	// The trap, demonstrated: one %w wrap and the bare assertion goes blind.
@@ -316,8 +322,8 @@ func testErrorInterface() {
 	_, direct := wrapped.(*ValidationError)
 	assert(!direct, "bare type assertion misses the wrapped error")
 
-	var wrappedVE *ValidationError
-	assert(errors.As(wrapped, &wrappedVE), "errors.As unwraps %w")
+	wrappedVE, ok := errors.AsType[*ValidationError](wrapped)
+	assert(ok, "errors.AsType unwraps %w")
 	assert(wrappedVE.Field == "name", "unwrapped error field")
 
 	assert(validate("Alice") == nil, "valid input")

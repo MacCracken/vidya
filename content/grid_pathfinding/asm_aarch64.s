@@ -65,7 +65,7 @@ manhattan:
     add     x0, x9, x10
     ret
 
-// grid_clear: zero out grid + visited
+// grid_clear: zero out grid (visited[] is reset by init_visited)
 grid_clear:
     adrp    x9, grid
     add     x9, x9, :lo12:grid

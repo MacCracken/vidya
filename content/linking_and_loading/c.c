@@ -232,17 +232,24 @@ int linker_apply_relocations(Linker *l, uint8_t *output, size_t output_size) {
 
             // Find section base
             uint64_t sec_base = 0;
+            size_t sec_size = 0;
             int found_sec = 0;
             for (int k = 0; k < l->num_placements; k++) {
                 Placement *p = &l->placements[k];
                 if (strcmp(p->obj_name, obj->name) == 0 &&
                     strcmp(p->sec_name, r->section) == 0) {
                     sec_base = p->base;
+                    sec_size = p->size;
                     found_sec = 1;
                     break;
                 }
             }
             if (!found_sec) return -1;
+
+            // r->offset comes from the object file: the patched field must lie
+            // inside its own section, or the memcpy below writes out of bounds.
+            size_t width = (r->type == RELOC_ABS64) ? 8 : 4;
+            if (r->offset > sec_size || sec_size - r->offset < width) return -1;
 
             // Find symbol address
             GlobalSymbol *g = find_global(l, r->symbol);
@@ -257,14 +264,23 @@ int linker_apply_relocations(Linker *l, uint8_t *output, size_t output_size) {
                     break;
                 }
                 case RELOC_ABS32: {
-                    int32_t val = (int32_t)((int64_t)g->addr + r->addend);
+                    // 32S: the value must survive sign-extension back to 64
+                    // bits. ld refuses ("relocation truncated to fit") rather
+                    // than silently patching in a different address.
+                    int64_t wide = (int64_t)g->addr + r->addend;
+                    if (wide < INT32_MIN || wide > INT32_MAX) return -1;
+                    int32_t val = (int32_t)wide;
                     memcpy(output + file_offset, &val, 4);
                     break;
                 }
                 case RELOC_PC32: {
+                    // P is the address of the 4-byte field itself; the "-4"
+                    // that makes the displacement relative to the NEXT
+                    // instruction lives in the addend the assembler emitted.
                     uint64_t patch_addr = sec_base + r->offset;
-                    int32_t val = (int32_t)((int64_t)g->addr + r->addend -
-                                            (int64_t)(patch_addr + 4));
+                    int64_t wide = (int64_t)g->addr + r->addend - (int64_t)patch_addr;
+                    if (wide < INT32_MIN || wide > INT32_MAX) return -1;
+                    int32_t val = (int32_t)wide;
                     memcpy(output + file_offset, &val, 4);
                     break;
                 }
@@ -358,7 +374,7 @@ int main(void) {
     main_obj.relocs[0].offset = 15;
     strcpy(main_obj.relocs[0].symbol, "add_numbers");
     main_obj.relocs[0].type = RELOC_PC32;
-    main_obj.relocs[0].addend = 0;
+    main_obj.relocs[0].addend = -4;  // as emits "add_numbers - 4" for call rel32
     strcpy(main_obj.relocs[1].section, ".text");
     main_obj.relocs[1].offset = 23;
     strcpy(main_obj.relocs[1].symbol, "GLOBAL_BASE");
@@ -393,11 +409,13 @@ int main(void) {
     linker_add_object(&linker, &main_obj);
     linker_add_object(&linker, &math_obj);
 
-    assert(linker_collect_symbols(&linker) == 0);
+    int rc = linker_collect_symbols(&linker);  // outside assert(): it must run under -DNDEBUG too
+    assert(rc == 0);
     linker_layout_sections(&linker);
 
     uint8_t output[256];
-    assert(linker_apply_relocations(&linker, output, sizeof(output)) == 0);
+    rc = linker_apply_relocations(&linker, output, sizeof(output));
+    assert(rc == 0);
 
     // Total: main.o .text(28) + math.o .text(5) + math.o .data(8) = 41
     size_t total = 28 + 5 + 8;
@@ -435,8 +453,10 @@ int main(void) {
     printf("\n3. Relocation type formulas:\n");
 
     // R_X86_64_64:   value = S + A
-    // R_X86_64_32S:  value = S + A (truncated to 32 bits)
-    // R_X86_64_PC32: value = S + A - P (where P = patch address + 4)
+    // R_X86_64_32S:  value = S + A (must fit a sign-extended 32-bit field,
+    //                or the link fails: "relocation truncated to fit")
+    // R_X86_64_PC32: value = S + A - P (P = address of the field; for a
+    //                call/jmp rel32 the assembler sets A = -4)
     uint64_t S = 0x401000;
     int64_t A = 0;
     uint64_t P = 0x400100;
@@ -446,10 +466,25 @@ int main(void) {
     printf("   %s: S(0x%lX) + A(%ld) = 0x%lX\n",
            reloc_type_name(RELOC_ABS64), S, A, abs64_val);
 
-    int32_t pc32_val = (int32_t)((int64_t)S + A - (int64_t)(P + 4));
+    int64_t A_call = -4;
+    int32_t pc32_val = (int32_t)((int64_t)S + A_call - (int64_t)P);
     assert(pc32_val == 0xEFC);
     printf("   %s: S(0x%lX) + A(%ld) - P(0x%lX) = 0x%X\n",
-           reloc_type_name(RELOC_PC32), S, A, P + 4, (unsigned)pc32_val);
+           reloc_type_name(RELOC_PC32), S, A_call, P, (unsigned)pc32_val);
+
+    // An address above 2 GiB cannot sit in a 32S field: the link must fail.
+    Linker high;
+    linker_init(&high, 0x180000000ULL);
+    linker_add_object(&high, &main_obj);
+    linker_add_object(&high, &math_obj);
+    rc = linker_collect_symbols(&high);
+    assert(rc == 0);
+    linker_layout_sections(&high);
+    uint8_t high_out[256];
+    rc = linker_apply_relocations(&high, high_out, sizeof(high_out));
+    assert(rc == -1);
+    printf("   %s at base 0x180000000: rejected (relocation truncated to fit)\n",
+           reloc_type_name(RELOC_ABS32));
 
     // ── Test 4: GOT/PLT lazy binding ──────────────────────────────
     printf("\n4. GOT/PLT lazy binding:\n");
@@ -484,10 +519,6 @@ int main(void) {
     printf("\n5. Static vs dynamic linking:\n");
     // Static: all code included, no runtime deps, larger binary
     // Dynamic: shares .so in memory, smaller binary, PLT overhead
-    int static_self_contained = 1;
-    int dynamic_shares_memory = 1;
-    assert(static_self_contained == 1);
-    assert(dynamic_shares_memory == 1);
     printf("   Static: self-contained, no runtime deps\n");
     printf("   Dynamic: shared .so, smaller binary, PLT/GOT indirection\n");
 

@@ -7,7 +7,9 @@
 // holders exist and whether one exclusive holder is active. The state
 // transitions match real flock semantics — LOCK_NB returns EAGAIN
 // when an exclusive request conflicts; multiple shared holders coexist;
-// downgrades drop the exclusive count first.
+// a conversion (SH↔EX) drops the old lock first and is NOT atomic, so on
+// Linux a conversion that fails with EAGAIN leaves the open holding no
+// lock at all (flock(2); fs/locks.c flock_lock_inode).
 
 import * as fs from "fs";
 
@@ -28,12 +30,8 @@ class Lockable {
 
     if (want === LockMode.Exclusive) {
       if (this.shared > 0 || this.exclusive > 0) {
-        if (nonBlocking) {
-          // restore prior
-          if (prev === LockMode.Shared) this.shared++;
-          if (prev === LockMode.Exclusive) this.exclusive++;
-          return false;
-        }
+        // The prior lock is already gone and is NOT restored (Linux semantics)
+        if (nonBlocking) return false;
         // blocking would block here — caller doesn't expect that in single-thread
         throw new Error("would block");
       }
@@ -42,11 +40,7 @@ class Lockable {
     }
     if (want === LockMode.Shared) {
       if (this.exclusive > 0) {
-        if (nonBlocking) {
-          if (prev === LockMode.Shared) this.shared++;
-          if (prev === LockMode.Exclusive) this.exclusive++;
-          return false;
-        }
+        if (nonBlocking) return false;
         throw new Error("would block");
       }
       this.shared++;
@@ -62,7 +56,7 @@ class Open {
 
   flock(op: LockMode, nonBlocking: boolean): boolean {
     const ok = this.lockable.acquire(this.mode, op, nonBlocking);
-    if (ok) this.mode = op;
+    this.mode = ok ? op : LockMode.None; // failed conversion: old lock dropped
     return ok;
   }
 }
@@ -75,12 +69,18 @@ function openLockable(path: string): Lockable {
 }
 
 function open(path: string, mode: string): Open {
-  const fd = fs.openSync(path, mode === "rw" ? "w+" : "r+");
+  // O_RDWR|O_CREAT, never "w+": "w+" adds O_TRUNC, and truncation is not
+  // stopped by an advisory lock — a second open would wipe data another
+  // open is holding LOCK_EX over.
+  const rw = fs.constants.O_RDWR | fs.constants.O_CREAT;
+  const fd = fs.openSync(path, mode === "rw" ? rw : "r+");
   return new Open(openLockable(path), fd);
 }
 
+let checks = 0;
 function check(cond: boolean, label: string): void {
   if (!cond) throw new Error(`FAIL: ${label}`);
+  checks++;
 }
 
 function main(): void {
@@ -105,8 +105,9 @@ function main(): void {
   check(got === val, "data roundtrip");
   f1.flock(LockMode.None, true);
 
-  // Test 3: exclusive contention via second OPEN
+  // Test 3: exclusive contention via second OPEN (which must not truncate)
   const f2 = open(path, "rw");
+  check(fs.fstatSync(f1.fd).size === 8, "second open keeps fd1's data");
   check(f1.flock(LockMode.Exclusive, true), "fd1 re-acquires LOCK_EX");
   check(!f2.flock(LockMode.Exclusive, true), "fd2 LOCK_NB blocked");
 
@@ -121,10 +122,20 @@ function main(): void {
   f1.flock(LockMode.None, true);
   f2.flock(LockMode.None, true);
 
+  // Test 6: a failed non-blocking upgrade loses the shared lock (not atomic)
+  const f3 = open(path, "rw");
+  check(f1.flock(LockMode.Shared, true) && f2.flock(LockMode.Shared, true), "fd1+fd2 LOCK_SH");
+  check(!f1.flock(LockMode.Exclusive, true), "fd1 SH→EX LOCK_NB fails (fd2 holds SH)");
+  check(f1.mode === LockMode.None, "fd1's shared lock was dropped by the failed upgrade");
+  f2.flock(LockMode.None, true);
+  check(f3.flock(LockMode.Exclusive, true), "fd3 LOCK_EX: nobody holds the file");
+  f3.flock(LockMode.None, true);
+  fs.closeSync(f3.fd);
+
   fs.closeSync(f1.fd);
   fs.closeSync(f2.fd);
   fs.unlinkSync(path);
-  console.log("concurrent_file_access: 12/12 ok");
+  console.log(`concurrent_file_access: ${checks}/${checks} ok`);
 }
 
 main();

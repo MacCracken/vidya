@@ -5,8 +5,11 @@
 // carves passages by clearing the wall bit on both the current and the
 // neighbour cell.
 //
-// JavaScript `number` is double-precision float; bitwise ops collapse
-// to 32 bits — neither matches PCG's 64-bit modular arithmetic. We use
+// The RNG is a 64-bit LCG (the PCG_MULT/PCG_INC constants are the state
+// step PCG is built on; real PCG also permutes the output, this one just
+// takes the top 31 bits). JavaScript `number` is double-precision float;
+// bitwise ops collapse to 32 bits — neither matches the LCG's 64-bit
+// modular arithmetic. We use
 // `BigInt` for the state, mask to 64 bits, then drop to a regular
 // `number` once the value is in the safe-integer range. Output bytes
 // match cyrius byte-for-byte.

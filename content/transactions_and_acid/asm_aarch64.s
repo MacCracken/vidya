@@ -42,11 +42,13 @@ msg_fail: .ascii "FAIL\n"
 .endm
 
 // store_init: zero accounts + versions + tx state
+// accounts (32 bytes) and versions (32 bytes) are adjacent in .bss, so one
+// 64-byte sweep from `accounts` clears both.
 store_init:
     LDADDR  x0, accounts
     mov     x1, #0
 .si_loop:
-    cmp     x1, #28
+    cmp     x1, #64
     b.ge    .si_done_a
     str     xzr, [x0, x1, lsl #0]
     add     x1, x1, #8

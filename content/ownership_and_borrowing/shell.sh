@@ -2,7 +2,8 @@
 # Vidya — Ownership and Borrowing in Shell (Bash)
 #
 # Shell has no ownership system — variables are always copied (value
-# semantics). There is no aliasing, no borrow checker, no lifetimes.
+# semantics). Plain variables never alias (namerefs, below, are the one
+# opt-in exception); there is no borrow checker and no lifetimes.
 # We show how shell's behavior maps to ownership concepts:
 #   - Assignment copies (no moves)
 #   - Subshells isolate mutations (no shared mutable state)
@@ -121,14 +122,17 @@ assert_eq "$CONSTANT" "immutable" "readonly var"
 
 # ── trap for cleanup: RAII pattern ────────────────────────────────
 # Rust uses Drop for automatic cleanup. Shell uses trap.
-# trap EXIT runs cleanup when the scope (script/function) exits.
+# trap EXIT is NOT scoped: set inside a function, it still runs only when
+# the whole shell exits. Function-scoped cleanup is trap RETURN — which runs
+# on a normal return only (not on `exit`, a set -e abort or a fatal signal)
+# and stays installed globally, so the handler clears itself.
 
 test_raii_cleanup() {
     local tmpfile
     tmpfile=$(mktemp)
 
-    # Register cleanup — runs on function exit, error, or signal
-    trap "rm -f '$tmpfile'" RETURN
+    # Register cleanup — runs when this function returns normally
+    trap 'rm -f "$tmpfile"; trap - RETURN' RETURN
 
     echo "owned resource" > "$tmpfile"
     assert_eq "$(cat "$tmpfile")" "owned resource" "RAII resource"
@@ -145,7 +149,7 @@ test_raii_cleanup
 owner_creates_resource() {
     local resource
     resource=$(mktemp)
-    trap "rm -f '$resource'" RETURN
+    trap 'rm -f "$resource"; trap - RETURN' RETURN
 
     echo "payload" > "$resource"
 

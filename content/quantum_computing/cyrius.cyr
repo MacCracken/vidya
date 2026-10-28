@@ -52,7 +52,7 @@ fn test_qubit_basics() {
     assert_eq(prob_1, PROB_FULL, "|1> measures 1 with certainty");
 
     # Normalization: |alpha|^2 + |beta|^2 must = 1.0 (1000)
-    assert_eq(SCALE, PROB_FULL, "normalization check");
+    assert_eq(prob_0 + prob_1, PROB_FULL, "normalization check");
     return 0;
 }
 
@@ -71,19 +71,23 @@ fn hadamard(alpha, beta) {
     # In fixed-point: multiply by 707, divide by 1000
     var new_alpha = ((alpha + beta) * FRAC_1_SQRT2) / SCALE;
     var new_beta = ((alpha - beta) * FRAC_1_SQRT2) / SCALE;
-    # Return packed as (new_alpha * 10000 + new_beta) — poor man's tuple
-    # Actually, just store in globals for simplicity
-    return new_alpha;
+    # Both amplitudes come back at once: multi-value return (`return (a, b);`
+    # puts them in two registers; the caller binds `var a, b = hadamard(..);`).
+    return (new_alpha, new_beta);
 }
 
 fn test_hadamard() {
     # H|0⟩: alpha=1000, beta=0
     # new_alpha = (1000+0)*707/1000 = 707
     # new_beta  = (1000-0)*707/1000 = 707
-    var h_alpha = ((SCALE + 0) * FRAC_1_SQRT2) / SCALE;
-    var h_beta = ((SCALE - 0) * FRAC_1_SQRT2) / SCALE;
+    var h_alpha, h_beta = hadamard(SCALE, 0);
     assert_eq(h_alpha, 707, "H|0> alpha = 1/sqrt(2)");
     assert_eq(h_beta, 707, "H|0> beta = 1/sqrt(2)");
+
+    # H|1>: alpha=0, beta=1000 → (707, -707), the phase flip
+    var g_alpha, g_beta = hadamard(0, SCALE);
+    assert_eq(g_alpha, 707, "H|1> alpha = 1/sqrt(2)");
+    assert_eq(g_beta, 0 - 707, "H|1> beta = -1/sqrt(2)");
 
     # Probabilities: each ~500 (50%)
     var p0 = (h_alpha * h_alpha) / SCALE;
@@ -139,10 +143,9 @@ fn test_cnot() {
 fn test_bell_state() {
     # Start: |00⟩ = [1000, 0, 0, 0]
     # After H on qubit 0: (|0⟩+|1⟩)/√2 ⊗ |0⟩ = [707, 0, 707, 0]
-    var a00 = 707;
-    var a01 = 0;
-    var a10 = 707;
-    var a11 = 0;
+    # H acts on the (|0x⟩, |1x⟩) pairs: (a00, a10) and (a01, a11).
+    var a00, a10 = hadamard(SCALE, 0);
+    var a01, a11 = hadamard(0, 0);
 
     # After CNOT: swap a10 ↔ a11
     var tmp = a10;
@@ -172,7 +175,7 @@ fn test_bell_state() {
 #
 # Structure:
 #   1. Initialize: H⊗n on all qubits → uniform superposition
-#   2. Repeat √N times:
+#   2. Repeat ≈ (π/4)·√N times:
 #      a. Oracle: flip sign of target state amplitude
 #      b. Diffusion: reflect about mean amplitude
 #   3. Measure: target state has high probability
@@ -186,13 +189,28 @@ fn test_grover_concept() {
 
     # Optimal iterations: floor(π/4 * √N) = floor(π/4 * 2) ≈ 1
     # (π/4 * 2 ≈ 1.57, floor = 1)
-    var optimal_iters = 1;
-    assert_eq(optimal_iters, 1, "2-qubit Grover: 1 iteration");
+
+    # Run that one iteration on the 4 amplitudes (all real, scale 1000).
+    # 1. H⊗2 on |00⟩: uniform superposition, every amplitude 1/2 = 500.
+    var amp: i64[4];
+    var k = 0;
+    while (k < N) { amp[k] = SCALE / 2; k = k + 1; }
+    # 2a. Oracle: flip the sign of the target amplitude.
+    amp[target] = 0 - amp[target];
+    # 2b. Diffusion: reflect every amplitude about the mean (a → 2·mean − a).
+    var sum = 0;
+    k = 0;
+    while (k < N) { sum = sum + amp[k]; k = k + 1; }
+    var mean = sum / N;                       # (3·500 − 500) / 4 = 250
+    k = 0;
+    while (k < N) { amp[k] = 2 * mean - amp[k]; k = k + 1; }
 
     # After 1 Grover iteration on 2 qubits, P(target) = 1.0
     # This is exact for N=4 — the algorithm finds it with certainty
-    var p_target = PROB_FULL;
-    assert_eq(p_target, 1000, "2-qubit Grover: certain find");
+    assert_eq(amp[target], SCALE, "2-qubit Grover: target amplitude = 1.0");
+    assert_eq(amp[0], 0, "2-qubit Grover: non-target amplitude = 0");
+    var p_target = (amp[target] * amp[target]) / SCALE;
+    assert_eq(p_target, PROB_FULL, "2-qubit Grover: certain find");
 
     # Speedup: classical needs O(N)=4 queries, quantum needs O(√N)=2
     # But for N=4, Grover needs exactly 1 oracle call

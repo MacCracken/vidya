@@ -45,7 +45,7 @@ content/{topic}/
 ├── zig.zig            # Tested Zig implementation
 ├── asm_x86_64.s       # Tested x86_64 Assembly implementation
 ├── asm_aarch64.s      # Tested AArch64 Assembly implementation
-├── openqasm.qasm      # Tested OpenQASM 2.0 quantum circuit
+├── openqasm.qasm      # Tested OpenQASM 3.1 quantum circuit
 └── cyrius.cyr         # Tested Cyrius implementation
 ```
 
@@ -84,7 +84,7 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 | Language | File ext | Validation command |
 |---|---|---|
 | Rust | `.rs` | `rustc --edition 2024 <file> -o X && X`, **plus an additive `--test` pass** when the file matches `#[test]` / `#[cfg(test)]` — otherwise everything behind `cfg(test)` is never compiled |
-| Python | `.py` | `python3 -X warn_default_encoding -W error::EncodingWarning <file>` |
+| Python | `.py` | `$VIDYA_PYTHON -X warn_default_encoding -W error::EncodingWarning <file>`. The corpus targets **3.15**; `VIDYA_PYTHON` picks the interpreter (default `python3`), and `VIDYA_STRICT=1` refuses an older one. On this host: `VIDYA_PYTHON=python3.15` (uv-managed, `~/.local/bin`) |
 | C | `.c` | `gcc -std=c23 -Wall -Werror <file> -lm -lpthread -o X && X` |
 | Go | `.go` | `gofmt -l` (must be empty) → `go vet` → `go run` |
 | TypeScript | `.ts` | `tsc --noEmit --strict …` **then** `npx tsx <file>` — tsx strips types and never checks them, so the run alone proves nothing about the types |
@@ -92,10 +92,10 @@ Vidya has two distinct surfaces, each with its own toolchain. Do not cross the s
 | Zig | `.zig` | `zig build-exe <file> -femit-bin=X && X` |
 | x86_64 ASM | `.s` | `as --64 <file> -o X.o && ld X.o -o X && X` |
 | AArch64 ASM | `.s` | `aarch64-linux-gnu-as` + `aarch64-linux-gnu-ld` + `qemu-aarch64` (or `qemu-aarch64-static`) |
-| OpenQASM | `.qasm` | `qasm2.load(..., custom_instructions=LEGACY_CUSTOM_INSTRUCTIONS)` — qiskit substitutes its own table for `qelib1.inc`, so the corpus's copy is never read |
+| OpenQASM | `.qasm` | `.venv/bin/python3 scripts/qasm_check.py <file>`: loads with qiskit's OpenQASM 3 importer (the corpus is **3.1**), then runs every `// @expect` line in a seeded qiskit-aer simulation. Needs `qiskit`, `qiskit-qasm3-import`, `qiskit-aer` in `.venv` |
 | Cyrius | `.cyr` | `cyrius run <file>`, **failing on any `duplicate fn`** — a shadow of a stdlib name is a latent crash, not a warning |
 
-**What the gate still cannot see**: comment-level falsehoods, semantics it never executes (no OpenQASM circuit is simulated), and anything a language's own tooling does not flag. `847/847 green` is a real guarantee but a narrower one than it looks — the 2.8.2/2.8.3 example review found 80 verified defects behind a green gate.
+**What the gate still cannot see**: comment-level falsehoods, semantics it never executes (an OpenQASM circuit is simulated only against its `@expect` lines), and anything a language's own tooling does not flag. `847/847 green` is a real guarantee but a narrower one than it looks — the 2.8.2/2.8.3 example review found 80 verified defects behind a green gate.
 
 ### Aggregate scripts
 

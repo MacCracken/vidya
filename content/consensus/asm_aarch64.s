@@ -1,7 +1,7 @@
 // Vidya — Consensus and Raft — AArch64 Assembly
 //
 // Election state machine focus (no log replication — see cyrius.cyr).
-// Same 6 tests / 12 asserts as the x86_64 port.
+// Same 6 tests / 15 asserts as the x86_64 port.
 
 .global _start
 
@@ -18,7 +18,7 @@ node_term:      .skip 24
 node_voted_for: .skip 24
 
 .section .rodata
-msg_pass: .ascii "consensus: 12/12 ok\n"
+msg_pass: .ascii "consensus: 15/15 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail: .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
@@ -106,7 +106,7 @@ run_election:
     // "request_vote doesn't trash it" is the wrong test twice over: it is
     // request_vote's obligation to preserve x21, and it is OUR obligation to
     // save x21 before using it, because our own caller expects it intact.
-    // The stp below discharges the second obligation.
+    // The str x19-x22 saves above discharge the second obligation.
     mov     x21, #1                             // votes
     LDADDR  x1, node_term
     ldr     x20, [x1, x19, lsl #3]

@@ -6,8 +6,10 @@
 //   3. SSA construction with phi nodes
 //   4. Simple constant folding on SSA form
 //
-// Go's interfaces make IR instruction types extensible — each
-// instruction kind implements the Instruction interface. Slices of
+// Each instruction kind implements the Instruction interface, so new
+// kinds can be declared anywhere — but every pass that type-switches on
+// instructions (the interpreter, constant folding) must then learn the
+// new case; the interpreter's default panics so a missed one is loud. Slices of
 // instructions form basic blocks. The CFG is a slice of blocks with
 // successor/predecessor edges.
 
@@ -254,6 +256,11 @@ func (interp *SSAInterpreter) Run(f *Function) int64 {
 					blockIdx = v.ElseBlock
 				}
 				goto nextBlock
+
+			default:
+				// Without this, a new Instruction type is silently skipped
+				// and the run returns a wrong answer instead of failing.
+				panic(fmt.Sprintf("interpreter: unhandled instruction %T", inst))
 			}
 		}
 		break

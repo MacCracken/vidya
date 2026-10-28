@@ -55,10 +55,13 @@
 
 _start:
     # ── Test 1: Verify IDT entry layout ──────────────────────────────
-    # Our mock handler address is 0x0000FFFF_12345678.
-    # offset_low  = 0x5678  (bits 0-15)
-    # offset_mid  = 0x1234  (bits 16-31)
-    # offset_high = 0x0000FFFF (bits 32-63)
+    # Our mock handler address is 0xFFFFFFFF_81234567 — a higher-half
+    # kernel address. It must be CANONICAL (bits 63-48 copy bit 47): a
+    # gate pointing at e.g. 0x0000FFFF_12345678 (bit 47 set, 63-48 clear)
+    # raises #GP when the interrupt is delivered.
+    # offset_low  = 0x4567  (bits 0-15)
+    # offset_mid  = 0x8123  (bits 16-31)
+    # offset_high = 0xFFFFFFFF (bits 32-63)
     #
     # Verify the split-address encoding in the mock IDT entry.
 
@@ -66,7 +69,7 @@ _start:
 
     # Extract offset_low (bytes 0-1)
     movzwl  0(%rsi), %eax
-    cmp     $0x5678, %eax
+    cmp     $0x4567, %eax
     jne     fail
 
     # Extract selector (bytes 2-3) — should be 0x08 (kernel code segment)
@@ -81,12 +84,12 @@ _start:
 
     # Extract offset_mid (bytes 6-7)
     movzwl  6(%rsi), %eax
-    cmp     $0x1234, %eax
+    cmp     $0x8123, %eax
     jne     fail
 
     # Extract offset_high (bytes 8-11)
     movl    8(%rsi), %eax
-    cmp     $0x0000FFFF, %eax
+    cmp     $0xFFFFFFFF, %eax
     jne     fail
 
     # Reserved (bytes 12-15) must be zero
@@ -103,8 +106,14 @@ _start:
     movl    8(%rsi), %ecx          # offset_high
     shlq    $32, %rcx
     or      %rcx, %rax
-    movq    $0x0000FFFF12345678, %rdx
+    movabsq $0xFFFFFFFF81234567, %rdx
     cmp     %rdx, %rax
+    jne     fail
+    # ...and it is canonical: sign-extending from bit 47 changes nothing
+    mov     %rax, %rcx
+    shl     $16, %rcx
+    sar     $16, %rcx
+    cmp     %rax, %rcx
     jne     fail
 
     # ── Test 3: Verify second IDT entry (trap gate) ──────────────────
@@ -180,21 +189,21 @@ fail:
 
 .section .data
 
-# IDT entry 0: interrupt gate for handler at 0x0000FFFF_12345678
-#   offset_low  = 0x5678
+# IDT entry 0: interrupt gate for handler at 0xFFFFFFFF_81234567
+#   offset_low  = 0x4567
 #   selector    = 0x0008 (kernel CS)
 #   IST         = 0
 #   type_attr   = 0x8E (interrupt gate, DPL=0, present)
-#   offset_mid  = 0x1234
-#   offset_high = 0x0000FFFF
+#   offset_mid  = 0x8123
+#   offset_high = 0xFFFFFFFF
 #   reserved    = 0
 idt_entry0:
-    .word   0x5678          # offset_low  (handler bits 0-15)
+    .word   0x4567          # offset_low  (handler bits 0-15)
     .word   0x0008          # selector    (kernel code segment)
     .byte   0x00            # IST index   (0 = no IST)
     .byte   0x8E            # type_attr   (interrupt gate, present, DPL=0)
-    .word   0x1234          # offset_mid  (handler bits 16-31)
-    .long   0x0000FFFF      # offset_high (handler bits 32-63)
+    .word   0x8123          # offset_mid  (handler bits 16-31)
+    .long   0xFFFFFFFF      # offset_high (handler bits 32-63)
     .long   0x00000000      # reserved
 
 # IDT entry 1: trap gate for handler at 0x00000000_AABBCCDD

@@ -28,6 +28,24 @@ class Input(IntEnum):
 SHOOT_FRAMES = 30
 DUNK_FRAMES = 45
 
+# Legal game-flow edges. Anything else is a bug in the caller.
+GAME_NEXT = {
+    GameState.MENU: {GameState.SELECT, GameState.ATTRACT},
+    GameState.ATTRACT: {GameState.MENU},
+    GameState.SELECT: {GameState.TIPOFF},
+    GameState.TIPOFF: {GameState.PLAYING},
+    GameState.PLAYING: {GameState.HALFTIME, GameState.OVERTIME, GameState.GAMEOVER},
+    GameState.HALFTIME: {GameState.PLAYING},
+    GameState.OVERTIME: {GameState.GAMEOVER},
+    GameState.GAMEOVER: {GameState.MENU},
+}
+
+
+def game_advance(g: GameState, nxt: GameState) -> GameState:
+    if nxt not in GAME_NEXT[g]:
+        raise ValueError(f"illegal game transition {g.name} -> {nxt.name}")
+    return nxt
+
 
 @dataclass
 class Player:
@@ -112,14 +130,18 @@ def main() -> None:
     transition(p, Input.MOVE)
     assert not did_transition(p), "run->run is not a transition"
 
-    # game state progression
+    # game state progression: every step goes through the validator
+    # (plain `g = GameState.X; assert g == GameState.X` checks nothing)
     g = GameState.MENU
-    g = GameState.SELECT;   assert g == GameState.SELECT
-    g = GameState.TIPOFF;   assert g == GameState.TIPOFF
-    g = GameState.PLAYING;  assert g == GameState.PLAYING
-    g = GameState.HALFTIME; assert g == GameState.HALFTIME
-    g = GameState.PLAYING;  assert g == GameState.PLAYING
-    g = GameState.GAMEOVER; assert g == GameState.GAMEOVER
+    for nxt in (GameState.SELECT, GameState.TIPOFF, GameState.PLAYING,
+                GameState.HALFTIME, GameState.PLAYING, GameState.GAMEOVER):
+        g = game_advance(g, nxt)
+    assert g == GameState.GAMEOVER
+    try:
+        game_advance(GameState.MENU, GameState.GAMEOVER)  # skips the game
+        assert False, "should have raised"
+    except ValueError:
+        pass
 
     # committed-then-free
     p = Player()

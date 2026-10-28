@@ -6,9 +6,12 @@ const N_IN = 2;
 const N_HIDDEN = 3;
 const N_OUT = 2;
 
+// NOT `p >> SCALE`: `>>` truncates its operand to int32 first, and dense()
+// never saturates, so activations grow past 1.0 — a 3.0 activation times a
+// 1.0 weight is 98304 * 32768 > 2^31, which `>>` wrapped to -32768. Dividing
+// by 2^15 is exact in a double up to 2^53 and Math.trunc rounds toward zero.
 function qMul(a: number, b: number): number {
-    const p = a * b;
-    return p < 0 ? -((-p) >> SCALE) : (p >> SCALE);
+    return Math.trunc((a * b) / (1 << SCALE));
 }
 
 const W_HIDDEN = [16384, -16384, -16384, 16384, 16384, 16384];
@@ -70,6 +73,7 @@ function arrEq(a: number[], b: number[]): boolean {
 check(qMul(ONE, 100) === 100, "ONE * 100 = 100");
 check(qMul(16384, 16384) === 8192, "0.5 * 0.5 = 0.25");
 check(qMul(-16384, 16384) === -8192, "-0.5 * 0.5 = -0.25");
+check(qMul(ONE, 3 * ONE) === 3 * ONE, "1.0 * 3.0 = 3.0 (product past int32)");
 
 {
     const W = [16384, 16384, 8192, 24576];

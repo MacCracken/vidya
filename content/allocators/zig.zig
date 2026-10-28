@@ -28,7 +28,8 @@ fn BumpAllocator(comptime capacity: usize) type {
         offset: usize = 0,
         alloc_count: usize = 0,
 
-        /// Allocate size bytes with given alignment. Returns a slice or null.
+        /// Allocate size bytes with given alignment (a power of two).
+        /// Returns a many-item pointer (no length) or null.
         pub fn alloc(self: *Self, size: usize, alignment: usize) ?[*]u8 {
             // Trap: rounding the OFFSET up to `alignment` only aligns the
             // returned pointer when the backing store's base address is

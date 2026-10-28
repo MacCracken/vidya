@@ -162,11 +162,13 @@ const SimpleFS = struct {
             }
         }
 
+        // Check directory capacity BEFORE claiming an inode: failing after
+        // marking it .file would leave an orphan inode no name points to.
+        if (self.root_entry_count >= MAX_DIR_ENTRIES) return null;
+
         const ino = self.allocInode() orelse return null;
         self.inodes[ino].itype = .file;
         self.inodes[ino].size = 0;
-
-        if (self.root_entry_count >= MAX_DIR_ENTRIES) return null;
         self.root_entries[self.root_entry_count].setName(name);
         self.root_entries[self.root_entry_count].inode = ino;
         self.root_entry_count += 1;

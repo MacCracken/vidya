@@ -15,7 +15,10 @@ use std::fmt;
 
 /// An x86_64 IDT entry is 16 bytes (128 bits).
 /// It describes where to jump when an interrupt fires.
+/// `#[repr(C)]` pins the field order to the hardware layout; the default
+/// Rust repr may reorder fields, which would be wrong once `lidt` reads it.
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 struct IdtEntry {
     offset_low: u16,    // handler address bits 0-15
     selector: u16,      // code segment selector (GDT)
@@ -237,9 +240,18 @@ fn simulate_interrupt(idt: &Idt, vector: u8, frame: &InterruptFrame, error_code:
         if entry.ist > 0 {
             println!("    Stack switch: IST[{}]", entry.ist);
         }
-        println!("    Action: save registers → call handler → send EOI → IRETQ");
+        if vector >= 32 {
+            println!("    Action: save registers → call handler → send EOI → IRETQ");
+        } else {
+            // CPU exceptions are not delivered through the LAPIC: no EOI
+            println!("    Action: save registers → call handler → IRETQ");
+        }
     } else {
-        println!("    ERROR: no handler registered! Would cause #DF (double fault)");
+        // A not-present gate raises #NP with error code vector*8 | 2 (IDT bit)
+        // [| 1 if external] (Intel SDM Vol. 2, INT n pseudocode). It only
+        // escalates to #DF if delivering that #NP also faults.
+        println!("    ERROR: no handler registered! Raises #NP (error code 0x{:X}); #DF only if that also fails",
+            (vector as u64) * 8 + 2 + 1);
     }
 }
 
@@ -249,6 +261,7 @@ fn main() {
     // ── Build the IDT ─────────────────────────────────────────────────
     println!("1. Building IDT (256 entries):");
     let mut idt = Idt::new();
+    assert_eq!(std::mem::size_of::<IdtEntry>(), 16);
 
     // Register exception handlers
     for exc in EXCEPTIONS {
@@ -289,10 +302,11 @@ fn main() {
 
     let user_frame = InterruptFrame {
         rip: 0x0000_0000_0040_1234,
-        cs: 0x2B,    // user code segment
+        cs: 0x33,    // user code segment (Linux __USER_CS = GDT entry 6 | RPL 3)
         rflags: 0x202, // IF set
         rsp: 0x0000_7FFF_FFFF_F000,
-        ss: 0x33,    // user stack segment
+        ss: 0x2B,    // user stack segment (__USER_DS = entry 5 | RPL 3; data
+                     // sits BELOW code because SYSRET loads SS = STAR+8, CS = STAR+16)
     };
 
     // Page fault: user-mode write to unmapped page
@@ -319,7 +333,7 @@ fn main() {
     simulate_interrupt(&idt, 50, &kernel_frame, None);
 
     println!("\n4. Key implementation rules:");
-    println!("   - Compile kernel with -mno-red-zone (handlers clobber red zone)");
+    println!("   - Compile kernel with -mno-red-zone (the CPU pushes the interrupt frame over it)");
     println!("   - Double fault handler MUST use IST (needs guaranteed-good stack)");
     println!("   - Push dummy error code for exceptions that don't push one");
     println!("   - Send EOI to LAPIC after handling hardware interrupts");

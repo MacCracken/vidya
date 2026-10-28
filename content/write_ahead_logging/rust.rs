@@ -133,6 +133,12 @@ impl Wal {
             let op = self.load64(pos);
             let key = self.load64(pos + 8);
             let val = self.load64(pos + 16);
+            // Recovery is exactly when torn/corrupt records show up: never
+            // trust the log. An unknown op or out-of-range key ends the
+            // durable prefix instead of panicking on data_vals[key].
+            if (op != OP_SET && op != OP_DEL) || key < 0 || key >= STORE_KEYS as i64 {
+                break;
+            }
             if op == OP_SET {
                 let k = key as usize;
                 self.data_vals[k] = val;
@@ -251,6 +257,18 @@ fn test_log_capacity_limit() {
     check(failures > 0, "log capacity is bounded");
 }
 
+fn test_replay_stops_at_corrupt_record() {
+    let mut w = Wal::new();
+    w.reset_all();
+    w.store_set(0, 1);
+    w.store_set(1, 2);
+    w.log_commit();
+    w.store64(REC_SZ + 8, 1_000_000); // corrupt record 2's key
+    w.store_clear();
+    check(w.replay() == 1, "replay stops at the corrupt record");
+    check(w.store_get(0) == 1, "records before it still apply");
+}
+
 fn main() {
     test_append_and_replay();
     test_log_before_data_invariant();
@@ -259,5 +277,6 @@ fn main() {
     test_overwrite_uses_last_record();
     test_sequential_offsets_monotonic();
     test_log_capacity_limit();
+    test_replay_stops_at_corrupt_record();
     println!("All write_ahead_logging examples passed.");
 }

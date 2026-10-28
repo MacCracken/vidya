@@ -1,7 +1,10 @@
 // Vidya — Networking Fundamentals in Rust
 //
 // In-memory simulation of TCP socket state machine + lifecycle.
-// 6-state subset: CLOSED, LISTEN, SYN_RCVD, ESTABLISHED, FIN_WAIT, CLOSED.
+// 5 states declared: CLOSED, LISTEN, SYN_RCVD, ESTABLISHED, FIN_WAIT. The
+// demo only walks CLOSED → LISTEN → ESTABLISHED → CLOSED: connect() skips
+// the SYN / SYN-ACK / ACK handshake (no SYN_RCVD) and close() skips the FIN
+// exchange (no FIN_WAIT), so those two variants are never entered.
 
 use std::collections::HashMap;
 

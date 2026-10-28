@@ -17,13 +17,14 @@
 
 // ── Simple IR ───────────────────────────────────────────────────────
 
-typedef enum { OP_ADD, OP_SUB, OP_MUL } OpKind;
+typedef enum { OP_ADD, OP_SUB, OP_MUL, OP_SHL } OpKind;
 
 static const char *op_str(OpKind op) {
     switch (op) {
         case OP_ADD: return "+";
         case OP_SUB: return "-";
         case OP_MUL: return "*";
+        case OP_SHL: return "<<";
     }
     return "?";
 }
@@ -39,7 +40,7 @@ typedef enum {
 typedef struct {
     InstKind kind;
     int dst;
-    int64_t value;    // INST_CONST
+    int64_t value;    // INST_CONST; shift amount for an OP_SHL BINOP
     OpKind op;        // INST_BINOP
     int lhs, rhs;     // INST_BINOP
     int src;           // INST_COPY, INST_RETURN
@@ -51,6 +52,10 @@ static void inst_print(const Inst *inst) {
             printf("    v%d = %ld\n", inst->dst, inst->value);
             break;
         case INST_BINOP:
+            if (inst->op == OP_SHL) {
+                printf("    v%d = v%d << %ld\n", inst->dst, inst->lhs, inst->value);
+                break;
+            }
             printf("    v%d = v%d %s v%d\n", inst->dst, inst->lhs,
                    op_str(inst->op), inst->rhs);
             break;
@@ -106,7 +111,9 @@ static int constant_fold(Program *p) {
                 is_const[inst->dst] = 1;
                 break;
             case INST_BINOP:
-                if (is_const[inst->lhs] && is_const[inst->rhs]) {
+                // OP_SHL's amount is an immediate, so only lhs must be known
+                if (is_const[inst->lhs] &&
+                    (inst->op == OP_SHL || is_const[inst->rhs])) {
                     int64_t l = constants[inst->lhs];
                     int64_t r = constants[inst->rhs];
                     int64_t val;
@@ -114,6 +121,7 @@ static int constant_fold(Program *p) {
                         case OP_ADD: val = l + r; break;
                         case OP_SUB: val = l - r; break;
                         case OP_MUL: val = l * r; break;
+                        case OP_SHL: val = (int64_t)((uint64_t)l << inst->value); break;
                         default: continue;
                     }
                     constants[inst->dst] = val;
@@ -148,7 +156,7 @@ static int dead_code_elimination(Program *p) {
         switch (inst->kind) {
             case INST_BINOP:
                 used[inst->lhs] = 1;
-                used[inst->rhs] = 1;
+                if (inst->op != OP_SHL) used[inst->rhs] = 1;
                 break;
             case INST_COPY:
                 used[inst->src] = 1;
@@ -205,11 +213,11 @@ static int constant_propagation(Program *p) {
             inst->kind = INST_CONST;
             inst->value = constants[inst->src];
             propagated++;
-        } else if (inst->kind == INST_BINOP) {
-            if (is_const[inst->lhs] || is_const[inst->rhs]) {
-                propagated++;
-            }
         }
+        // A BINOP with one constant operand has nothing to rewrite here:
+        // operands are registers, and constant_fold folds it once both are
+        // known. Counting it as "propagated" would report a change that was
+        // never made, and the pass manager would never reach a fixed point.
     }
     return propagated;
 }
@@ -247,7 +255,7 @@ static int strength_reduction(Program *p) {
                 int shift = 0;
                 int64_t v = *rhs_val;
                 while (v > 1) { v >>= 1; shift++; }
-                int64_t result = *lhs_val << shift;
+                int64_t result = (int64_t)((uint64_t)*lhs_val << shift);
                 constants[inst->dst] = result;
                 is_const[inst->dst] = 1;
                 inst->kind = INST_CONST;
@@ -272,6 +280,17 @@ static int strength_reduction(Program *p) {
             if (lhs_val && *lhs_val == 1) {
                 inst->kind = INST_COPY;
                 inst->src = inst->rhs;
+                reduced++;
+                continue;
+            }
+            // x * 2^k -> x << k: the classic strength reduction, for an x
+            // that is NOT known at compile time (a shift is cheaper than a
+            // multiply). The shift amount becomes an immediate.
+            if (rhs_val && !lhs_val && is_power_of_two(*rhs_val)) {
+                int shift = 0;
+                for (int64_t v = *rhs_val; v > 1; v >>= 1) shift++;
+                inst->op = OP_SHL;
+                inst->value = shift;
                 reduced++;
                 continue;
             }
@@ -370,23 +389,28 @@ int main(void) {
     assert(p1.count <= 3);
     Inst *ret1 = &p1.instructions[p1.count - 1];
     assert(ret1->kind == INST_RETURN);
+    int found150 = 0;
     for (int i = 0; i < p1.count; i++) {
         if (p1.instructions[i].kind == INST_CONST &&
             p1.instructions[i].dst == ret1->src) {
             assert(p1.instructions[i].value == 150);
+            found150 = 1;
         }
     }
+    assert(found150);  // without this, a missing constant passes silently
 
     // ── Test 2: Strength reduction ────────────────────────────────
     printf("\n2. Strength reduction: x * 8 -> x << 3\n");
+    // v9 is the parameter x: used but never defined, so it is not a
+    // compile-time constant. (With x constant, folding would just compute
+    // the product and strength reduction would never run.)
     Program p2 = {
         .instructions = {
-            {.kind = INST_CONST,  .dst = 0, .value = 42},
             {.kind = INST_CONST,  .dst = 1, .value = 8},
-            {.kind = INST_BINOP,  .dst = 2, .op = OP_MUL, .lhs = 0, .rhs = 1},
+            {.kind = INST_BINOP,  .dst = 2, .op = OP_MUL, .lhs = 9, .rhs = 1},
             {.kind = INST_RETURN, .src = 2},
         },
-        .count = 4,
+        .count = 3,
     };
 
     printf("  Before:\n");
@@ -397,13 +421,11 @@ int main(void) {
     printf("  After:\n");
     prog_print(&p2);
 
-    // 42 * 8 = 336
-    for (int i = 0; i < p2.count; i++) {
-        if (p2.instructions[i].kind == INST_CONST &&
-            p2.instructions[i].dst == 2) {
-            assert(p2.instructions[i].value == 336);
-        }
-    }
+    // x * 8 became x << 3, and DCE removed the now-unused constant 8
+    assert(p2.count == 2);
+    assert(p2.instructions[0].kind == INST_BINOP);
+    assert(p2.instructions[0].op == OP_SHL);
+    assert(p2.instructions[0].lhs == 9 && p2.instructions[0].value == 3);
 
     // ── Test 3: Dead code elimination ─────────────────────────────
     printf("\n3. Dead code elimination:\n");

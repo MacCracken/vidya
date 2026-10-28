@@ -1,10 +1,11 @@
 // Vidya — Game AI Decision Making in TypeScript
 //
-// Stat-driven AI scoring with PCG PRNG, urgency-multiplied shooting, and
-// weighted action selection. JS `number` is float64 — too narrow to hold
-// the full 64-bit PCG state without precision loss past 2^53. We use
-// `BigInt` for the state update, then narrow back to `number` (i32) for
-// the bit-mixed return value, which is safely under 2^31. const enums
+// Stat-driven AI scoring with an LCG PRNG (PCG's constants, but plain
+// top-bits output rather than PCG's output permutation), urgency-multiplied
+// shooting, and weighted action selection. JS `number` is float64 — too
+// narrow to hold the full 64-bit LCG state without precision loss past
+// 2^53. We use `BigInt` for the state update, then narrow back to `number`
+// for the top 31 bits (state >> 33), which is safely under 2^31. const enums
 // give zero-cost Action variants that match the Cyrius integer encoding.
 
 const enum Action {

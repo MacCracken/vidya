@@ -1,11 +1,12 @@
 // Vidya — Sprite Rendering in AArch64 Assembly
 //
 // Software sprite blitting onto a flat 8-bit palette framebuffer.
-// AArch64 has no implicit 16-bit immediates; constants like FB_SIZE
-// (76800) must be loaded with `ldr xN, =literal` so the assembler
-// pools them. The framebuffer is reserved with `.skip 76800` in
-// .bss and addressed by `adrp` + `add :lo12:` (PC-relative GOT-style
-// stride pointer arithmetic). Functions that issue `bl` save x29/x30
+// `mov` takes one 16-bit chunk (or a bitmask pattern), so FB_SIZE
+// (76800 = 0x12C00) needs a movz/movk pair or, as here, the literal
+// pool: `ldr xN, =literal`. The framebuffer is reserved with
+// `.skip 76800` in .bss and addressed by `adrp` + `add :lo12:` — plain
+// PC-relative addressing, no GOT involved (a GOT load would be
+// `adrp` + `ldr :got_lo12:`). Functions that issue `bl` save x29/x30
 // in the prologue.
 
 .global _start
@@ -28,6 +29,13 @@ test_sprite:
     .byte 1, 2, 2, 1
     .byte 1, 2, 2, 1
     .byte 0, 1, 1, 0
+
+// 4x4 front sprite for the depth test: solid 7 with one key pixel at (1,1)
+front_sprite:
+    .byte 7, 7, 7, 7
+    .byte 7, 0, 7, 7
+    .byte 7, 7, 7, 7
+    .byte 7, 7, 7, 7
 
 .section .bss
 .align 4
@@ -366,24 +374,42 @@ _start:
     cmp     x0, #2
     b.ne    fail
 
-    // Test 7: depth sort
+    // Test 7: depth sort (painter's algorithm): background, then back
+    // sprite at (50,50), then front sprite at (51,51), back to front.
     mov     x0, #0
     bl      fb_clear
+    mov     x0, #51
+    mov     x1, #50
+    mov     x2, #9
+    bl      fb_set              // background pixel under the back sprite
     adrp    x0, test_sprite
     add     x0, x0, :lo12:test_sprite
     mov     x1, #4
     mov     x2, #4
     mov     x3, #50
     mov     x4, #50
-    bl      blit
+    bl      blit                // back
+    adrp    x0, front_sprite
+    add     x0, x0, :lo12:front_sprite
+    mov     x1, #4
+    mov     x2, #4
+    mov     x3, #51
+    mov     x4, #51
+    bl      blit                // front
     mov     x0, #51
-    mov     x1, #51
-    mov     x2, #7
-    bl      fb_set
+    mov     x1, #50
+    bl      fb_get
+    cmp     x0, #1              // back covers the background
+    b.ne    fail
     mov     x0, #51
     mov     x1, #51
     bl      fb_get
-    cmp     x0, #7
+    cmp     x0, #7              // front covers the back
+    b.ne    fail
+    mov     x0, #52
+    mov     x1, #52
+    bl      fb_get
+    cmp     x0, #2              // back shows through the front's key pixel
     b.ne    fail
 
     // Test 8: scaled shrink — has at least one non-zero pixel

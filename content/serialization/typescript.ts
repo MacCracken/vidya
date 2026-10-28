@@ -6,6 +6,13 @@ const MAX_VARINT_BYTES = 10;
 const MAX_MSG_SIZE = 1024n;
 
 function encodeVarint(value: bigint): Uint8Array {
+  // Unsigned LEB128 has no sign, and bigint is signed and unbounded: refuse
+  // anything outside u64. Without this, -1n encoded as [127] (decoded back as
+  // 127n), and 2n ** 64n gave 10 bytes our own decoder rejects. A signed value
+  // needs zigzag ((n << 1n) ^ (n >> 63n)) before encoding.
+  if (value < 0n || value > 0xFFFF_FFFF_FFFF_FFFFn) {
+    throw new RangeError(`varint value out of u64 range: ${value}`);
+  }
   const out: number[] = [];
   while (value >= 128n) {
     out.push(Number((value & 0x7Fn) | 0x80n));
@@ -21,6 +28,8 @@ function decodeVarint(buf: Uint8Array): { value: bigint; consumed: number } | nu
   for (let i = 0; i < MAX_VARINT_BYTES; i++) {
     if (i >= buf.length) return null;
     const b = buf[i];
+    // Byte 10 carries only bit 63: anything above 1 there overflows u64.
+    if (i === MAX_VARINT_BYTES - 1 && b > 1) return null;
     value += BigInt(b & 0x7F) << shift;
     if ((b & 0x80) === 0) return { value, consumed: i + 1 };
     shift += 7n;
@@ -67,6 +76,16 @@ function main(): void {
 
   const bomb = new Uint8Array(11).fill(0xFF);
   if (decodeVarint(bomb) !== null) throw new Error("overflow");
+  const u64max = encodeVarint(0xFFFF_FFFF_FFFF_FFFFn);   // 10 bytes, last = 0x01
+  const past = new Uint8Array(u64max); past[9] = 0x7F;  // same length, value ≥ 2^64
+  if (decodeVarint(u64max)?.value !== 0xFFFF_FFFF_FFFF_FFFFn || decodeVarint(past) !== null) {
+    throw new Error("u64 range");
+  }
+  for (const bad of [-1n, 2n ** 64n]) {               // no sign bit; nothing past u64
+    let threw = false;
+    try { encodeVarint(bad); } catch (err) { threw = err instanceof RangeError; }
+    if (!threw) throw new Error(`encodeVarint(${bad}) should be rejected`);
+  }
 
   const payload = new Uint8Array(Buffer.from("hello, world"));
   const frame = encodeFrame(payload);
@@ -98,7 +117,7 @@ function main(): void {
   const over = encodeVarint(9999n);
   if (decodeFrame(over, MAX_MSG_SIZE) !== null) throw new Error("oversize");
 
-  console.log("serialization: 19/19 ok");
+  console.log("serialization: 15/15 ok");
 }
 
 main();

@@ -5,9 +5,13 @@ const ONE = 32768;
 const SMAX = 32767;
 const SMIN = -32767;
 
+// NOT `p >> SCALE`: `>>` first truncates its operand to int32, so any
+// product >= 2^31 wraps and flips sign. Biquad coefficients reach 2.0
+// (a1 spans ±2 for a 2nd-order section): 2.0 × 1.0 = 65536 × 32768 = 2^31
+// came back as -65536. Dividing by 2^15 is exact in a double up to 2^53;
+// Math.trunc rounds toward zero, same as a sign-magnitude shift.
 function qMul(a: number, b: number): number {
-    const p = a * b;
-    return p < 0 ? -((-p) >> SCALE) : (p >> SCALE);
+    return Math.trunc((a * b) / (1 << SCALE));
 }
 
 function clip(s: number): number {
@@ -68,6 +72,8 @@ check(qMul(ONE, 100) === 100, "ONE * 100 = 100");
 check(qMul(ONE / 2, ONE / 2) === ONE / 4, "0.5 * 0.5 = 0.25");
 const r = qMul(ONE / 2, SMAX);
 check(r >= 16383 && r <= 16384, "0.5 * SMAX in [16383,16384]");
+check(qMul(2 * ONE, ONE) === 2 * ONE, "2.0 * 1.0 = 2.0 (product 2^31, past int32)");
+check(qMul(-ONE / 2, 3) === -1, "negative rounds toward zero");
 
 check(clip(50000) === SMAX, "clip(50000) = SMAX");
 check(clip(-50000) === SMIN, "clip(-50000) = SMIN");

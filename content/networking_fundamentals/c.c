@@ -1,6 +1,13 @@
 /* Vidya — Networking Fundamentals in C
  *
  * In-memory simulation of TCP socket state machine + lifecycle.
+ *
+ * Simplified on purpose: there is no handshake (SYN_RCVD and FIN_WAIT
+ * are never entered) and no accept() — connect() turns the listening
+ * socket itself into the connection, so a listener serves one client.
+ * A real listener stays in LISTEN and accept() returns a NEW socket per
+ * connection. Closing one end only unlinks its peer; real TCP would move
+ * the peer to CLOSE_WAIT.
  */
 
 #include <assert.h>
@@ -89,6 +96,7 @@ static int sock_recv_byte(Net *n, int s) {
 static int sock_close(Net *n, int s) {
     if (s == 0 || s >= SOCK_CAP || n->state[s] == ST_CLOSED) return 0;
     if (n->port[s] != 0) n->port_to_sock[n->port[s]] = 0;
+    if (n->peer[s] != 0) n->peer[n->peer[s]] = 0;  /* peer can't send into a closed socket */
     n->state[s] = ST_CLOSED;
     n->port[s] = 0;
     n->peer[s] = 0;
@@ -102,34 +110,53 @@ int main(void) {
     int srv = sock_create(&n);
     assert(state_get(&n, srv) == ST_CLOSED);
 
-    assert(sock_bind(&n, srv, 8080));
-    assert(sock_listen(&n, srv));
+    // Socket calls run OUTSIDE assert() and the saved result is checked:
+    // under -DNDEBUG assert's expression is not evaluated, so
+    // assert(sock_bind(...)) would compile the bind itself out.
+    int r = sock_bind(&n, srv, 8080);
+    assert(r);
+    r = sock_listen(&n, srv);
+    assert(r);
     assert(state_get(&n, srv) == ST_LISTEN);
 
     int cli = sock_create(&n);
-    assert(sock_connect(&n, cli, 8080));
+    r = sock_connect(&n, cli, 8080);
+    assert(r);
     assert(state_get(&n, cli) == ST_ESTABLISHED);
     assert(state_get(&n, srv) == ST_ESTABLISHED);
 
-    assert(sock_send_byte(&n, cli, 65));
-    assert(sock_send_byte(&n, cli, 66));
-    assert(sock_recv_byte(&n, srv) == 65);
-    assert(sock_recv_byte(&n, srv) == 66);
-    assert(sock_recv_byte(&n, srv) == -1);
-    assert(sock_send_byte(&n, srv, 67));
-    assert(sock_recv_byte(&n, cli) == 67);
+    r = sock_send_byte(&n, cli, 65);
+    assert(r);
+    r = sock_send_byte(&n, cli, 66);
+    assert(r);
+    r = sock_recv_byte(&n, srv);
+    assert(r == 65);
+    r = sock_recv_byte(&n, srv);
+    assert(r == 66);
+    r = sock_recv_byte(&n, srv);
+    assert(r == -1);
+    r = sock_send_byte(&n, srv, 67);
+    assert(r);
+    r = sock_recv_byte(&n, cli);
+    assert(r == 67);
 
-    assert(sock_close(&n, cli));
+    r = sock_close(&n, cli);
+    assert(r);
     assert(state_get(&n, cli) == ST_CLOSED);
+    r = sock_send_byte(&n, srv, 68);
+    assert(!r);
 
     int srv2 = sock_create(&n);
-    assert(!sock_bind(&n, srv2, 8080));
+    r = sock_bind(&n, srv2, 8080);
+    assert(!r);
 
-    assert(sock_recv_byte(&n, cli) == -1);
+    r = sock_recv_byte(&n, cli);
+    assert(r == -1);
 
     sock_close(&n, srv);
-    assert(sock_bind(&n, srv2, 8080));
+    r = sock_bind(&n, srv2, 8080);
+    assert(r);
 
-    printf("networking_fundamentals: 19/19 ok\n");
+    printf("networking_fundamentals: 20/20 ok\n");
     return 0;
 }

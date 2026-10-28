@@ -1,8 +1,10 @@
 // Vidya — Boot and Startup in Go
 //
-// Go can't run as a bootloader (it needs a runtime and OS), but it's
-// excellent for modeling boot data structures and verifying their
-// layout. This file encodes GDT/IDT entries as byte arrays, builds
+// The stock Go toolchain can't build a bootloader (its runtime expects an
+// OS; bare-metal Go needs a replacement runtime such as TamaGo, whose
+// go-boot is a UEFI boot manager), but Go is excellent for modeling
+// boot data structures and verifying their layout. This file encodes
+// GDT/IDT entries as byte arrays, builds
 // multiboot headers with checksums, and models the CR0/CR4 bit
 // transitions required for the 32-bit → 64-bit long mode switch.
 
@@ -169,9 +171,11 @@ func testIdtEntryEncoding() {
 	df := NewIdtGate(handler, 0x08, 1, 0)
 	assert(df.IST == 1, "double fault IST")
 
-	// Verify encoded size
+	// Verify the struct's fields really add up to the 16-byte gate
+	// (len of the [16]byte from Encode would be true by construction).
+	assert(binary.Size(gate) == 16, "IDT gate fields sum to 16 bytes")
 	encoded := gate.Encode()
-	assert(len(encoded) == 16, "IDT gate is 16 bytes")
+	assert(binary.LittleEndian.Uint32(encoded[8:12]) == 0xFFFF_8000, "offset high encoded at bytes 8..11")
 }
 
 // ── Multiboot Header ────────────────────────────────────────────────
@@ -190,8 +194,10 @@ type MultibootHeader struct {
 }
 
 func NewMultibootHeader() MultibootHeader {
-	// Checksum: magic + flags + checksum must equal 0 (mod 2^32)
-	// Use ^(x-1) trick to avoid constant overflow in Go compiler
+	// Checksum: magic + flags + checksum must equal 0 (mod 2^32), i.e.
+	// checksum = -(magic+flags). Written as ^x + 1 (two's-complement
+	// negation) because -(MultibootMagic + MultibootFlags) on these typed
+	// constants is a compile error: "constant -464367621 ... overflows uint32".
 	checksum := ^(MultibootMagic + MultibootFlags) + 1
 	return MultibootHeader{
 		Magic:    MultibootMagic,
@@ -260,6 +266,25 @@ const (
 	EFER_NXE uint64 = 1 << 11 // No-execute enable
 )
 
+// enablePaging models what the CPU does on a MOV to CR0 that sets PG
+// (Intel SDM Vol. 3A "Initializing IA-32e Mode" and the #GP conditions
+// of MOV to CR0): PG requires PE;
+// with EFER.LME set it also requires CR4.PAE, and then the CPU itself
+// sets EFER.LMA — software never writes LMA.
+func enablePaging(cr0, cr4, efer uint64) (newCr0, newEfer uint64, ok bool) {
+	if cr0&CR0_PE == 0 {
+		return cr0, efer, false // #GP: paging needs protected mode
+	}
+	if efer&EFER_LME != 0 && cr4&CR4_PAE == 0 {
+		return cr0, efer, false // #GP: long mode needs PAE paging
+	}
+	cr0 |= CR0_PG
+	if efer&EFER_LME != 0 {
+		efer |= EFER_LMA
+	}
+	return cr0, efer, true
+}
+
 func testCr0Cr4LongModeTransition() {
 	// ── Start: 32-bit protected mode ──
 	cr0 := CR0_PE | CR0_ET // protected mode, extension type
@@ -278,13 +303,19 @@ func testCr0Cr4LongModeTransition() {
 	efer |= EFER_LME
 	assert(efer&EFER_LME != 0, "EFER.LME set")
 
-	// Step 4: Enable paging in CR0 — this activates long mode
-	cr0 |= CR0_PG | CR0_WP | CR0_NE | CR0_MP
-	assert(cr0&CR0_PG != 0, "paging enabled")
+	// Step 4: Enable paging in CR0 — this activates long mode.
+	// Getting the order wrong is the classic failure: PG with LME but
+	// without PAE faults instead of entering long mode.
+	_, _, ok := enablePaging(cr0, 0, efer)
+	assert(!ok, "PG with EFER.LME but CR4.PAE=0 raises #GP")
+	cr0, efer, ok = enablePaging(cr0, cr4, efer)
+	assert(ok && cr0&CR0_PG != 0, "paging enabled")
+	cr0 |= CR0_WP | CR0_NE | CR0_MP
 
-	// CPU sets EFER.LMA automatically when paging + LME are both set
-	efer |= EFER_LMA
+	// The CPU (enablePaging here) sets EFER.LMA because PG + LME are both set
 	assert(efer&EFER_LMA != 0, "long mode active")
+	_, legacy, _ := enablePaging(CR0_PE, CR4_PAE, 0)
+	assert(legacy&EFER_LMA == 0, "PG without EFER.LME is 32-bit PAE paging, not long mode")
 
 	// Step 5: Enable NX bit for security
 	efer |= EFER_NXE | EFER_SCE

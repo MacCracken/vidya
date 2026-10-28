@@ -156,7 +156,11 @@ static void test_graph_bfs(void) {
 // ── Graph DFS (iterative with stack) ──────────────────────────────────
 static void dfs_reachable(const Graph *g, int start, bool *visited) {
     memset(visited, false, sizeof(bool) * (size_t)g->n);
-    int stack[MAX_NODES];
+    // visited is checked at POP, so a node is pushed once per edge that
+    // reaches it before it is popped: the stack needs 1 + 2E slots, not n.
+    // With int stack[MAX_NODES], K16 (degree 15 each) overflows it on the
+    // second pop. Every node holds at most MAX_NODES neighbours in adj[].
+    int stack[1 + MAX_NODES * MAX_NODES];
     int top = 0;
     stack[top++] = start;
 
@@ -185,6 +189,13 @@ static void test_graph_dfs(void) {
     dfs_reachable(&g, 0, visited);
     assert(visited[0] && visited[1] && visited[2] && visited[3]);
     assert(!visited[4]);
+
+    // Dense graph: K16 pushes far more than MAX_NODES entries
+    graph_init(&g, MAX_NODES);
+    for (int u = 0; u < MAX_NODES; u++)
+        for (int v = u + 1; v < MAX_NODES; v++) graph_add_edge(&g, u, v);
+    dfs_reachable(&g, 0, visited);
+    for (int i = 0; i < MAX_NODES; i++) assert(visited[i]);
 }
 
 // ── Dynamic programming: Fibonacci ────────────────────────────────────
@@ -202,9 +213,13 @@ static uint64_t fibonacci(int n) {
 // LCS length
 static int lcs_length(const char *a, const char *b) {
     int m = (int)strlen(a), n = (int)strlen(b);
-    // Use VLA for small inputs (stack-allocated DP table)
-    int dp[m + 1][n + 1];
-    memset(dp, 0, sizeof(dp));
+    // The table is (m+1)(n+1) ints sized by the INPUT — a stack VLA
+    // `int dp[m + 1][n + 1]` overflows an 8 MiB stack at ~1450x1450 and
+    // crashes with no error to check. Heap-allocate it, keeping 2-D
+    // indexing through a pointer to a variably modified type (a feature
+    // C23 makes mandatory, unlike VLA objects, which stay optional).
+    int (*dp)[n + 1] = calloc((size_t)m + 1, sizeof(*dp));
+    if (dp == NULL) return -1;
     for (int i = 1; i <= m; i++) {
         for (int j = 1; j <= n; j++) {
             if (a[i - 1] == b[j - 1]) {
@@ -215,7 +230,9 @@ static int lcs_length(const char *a, const char *b) {
             }
         }
     }
-    return dp[m][n];
+    int result = dp[m][n];
+    free(dp);
+    return result;
 }
 
 static void test_dynamic_programming(void) {
@@ -228,6 +245,15 @@ static void test_dynamic_programming(void) {
     assert(lcs_length("", "ABC") == 0);
     assert(lcs_length("ABC", "ABC") == 3);
     assert(lcs_length("ABC", "DEF") == 0);
+
+    // Input-sized table: 2000x2000 ints (16 MB) used to blow the stack.
+    char *big_a = malloc(2001), *big_b = malloc(2001);
+    assert(big_a != NULL && big_b != NULL);
+    memset(big_a, 'A', 2000); big_a[2000] = '\0';
+    memset(big_b, 'A', 2000); big_b[2000] = '\0';
+    assert(lcs_length(big_a, big_b) == 2000);
+    free(big_a);
+    free(big_b);
 }
 
 // ── GCD (Euclidean) ───────────────────────────────────────────────────

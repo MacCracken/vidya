@@ -10,6 +10,9 @@
 .section .data
 hello_payload: .ascii "hello, world"
 .equ hello_len, 12
+big_frame:     .byte 100            // varint length 100 ...
+               .fill 100, 1, 'X'    // ... and 100 payload bytes
+.equ big_frame_len, 101
 
 .bss
 .align 8
@@ -23,7 +26,7 @@ dec_val:      .quad 0
 dec_bytes:    .quad 0
 
 .section .rodata
-msg_pass:     .ascii "serialization: 6/6 ok\n"
+msg_pass:     .ascii "serialization: 8/8 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail:     .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
@@ -36,7 +39,7 @@ encode_varint:
     mov     x3, x0                // remaining
 .ev_loop:
     cmp     x3, #128
-    b.lt    .ev_last
+    b.lo    .ev_last              // UNSIGNED: b.lt would treat values >= 2^63 as negative
     and     x4, x3, #0x7F
     orr     x4, x4, #0x80
     strb    w4, [x1, x2]
@@ -62,6 +65,13 @@ decode_varint:
     cmp     x3, x1
     b.ge    .dv_neg
     ldrb    w5, [x0, x3]
+    // The 10th byte holds bit 63 only: anything above 1 is >= 2^64, and
+    // lsl would drop those bits (80x9 02 decoded as 0) — reject it.
+    cmp     x3, #MAX_VARINT_BYTES - 1
+    b.ne    .dv_fits
+    cmp     w5, #1
+    b.hi    .dv_neg
+.dv_fits:
     and     x6, x5, #0x7F
     lsl     x6, x6, x4
     ldr     x7, [x2]
@@ -114,7 +124,11 @@ encode_frame:
     ldp     x29, x30, [sp], #16
     ret
 
-// decode_frame(x0=buf, x1=buf_len, x2=out, x3=max_msg) -> x0 = consumed or -1
+// decode_frame(x0=buf, x1=buf_len, x2=out, x3=max_msg, x4=out_cap)
+//   -> x0 = consumed or -1
+// Three separate limits: max_msg is the protocol's DoS cap, buf_len is
+// what actually arrived, and out_cap is the size of the destination. The
+// declared length must fit all three; max_msg alone does not protect out.
 decode_frame:
     stp     x29, x30, [sp, #-16]!
     stp     x19, x20, [sp, #-16]!
@@ -124,20 +138,23 @@ decode_frame:
     mov     x20, x1               // buf_len
     mov     x21, x2               // out
     mov     x22, x3               // max_msg
+    mov     x24, x4               // out_cap (callee-saved across the call)
     mov     x0, x19
     mov     x1, x20
     bl      decode_varint
     cmn     x0, #1
     b.eq    .dfr_neg
     cmp     x0, x22
-    b.gt    .dfr_neg
+    b.hi    .dfr_neg              // unsigned: a length >= 2^63 must not pass as "negative"
+    cmp     x0, x24
+    b.hi    .dfr_neg              // would overflow the destination buffer
     mov     x23, x0               // length
     adrp    x4, dec_bytes
     add     x4, x4, :lo12:dec_bytes
     ldr     x4, [x4]              // hdr_len
     add     x24, x4, x23          // total
     cmp     x24, x20
-    b.gt    .dfr_neg
+    b.hi    .dfr_neg
     mov     x5, #0                // i
 .dfr_copy:
     cmp     x5, x23
@@ -246,8 +263,20 @@ _start:
     adrp    x2, pl_out
     add     x2, x2, :lo12:pl_out
     mov     x3, #MAX_MSG_SIZE
+    mov     x4, #64               // sizeof pl_out
     bl      decode_frame
     mov     x1, #13
+    bl      assert_eq
+    // ...and the payload itself must survive (12 bytes = 8 + 4)
+    adrp    x2, pl_out
+    add     x2, x2, :lo12:pl_out
+    adrp    x3, hello_payload
+    add     x3, x3, :lo12:hello_payload
+    ldr     x0, [x2]
+    ldr     x1, [x3]
+    bl      assert_eq
+    ldr     w0, [x2, #8]
+    ldr     w1, [x3, #8]
     bl      assert_eq
 
     // 6. truncated frame
@@ -271,7 +300,42 @@ _start:
     adrp    x2, pl_out
     add     x2, x2, :lo12:pl_out
     mov     x3, #MAX_MSG_SIZE
+    mov     x4, #64               // sizeof pl_out
     bl      decode_frame
+    mov     x1, #-1
+    bl      assert_eq
+
+    // 7. a complete, under-max_msg frame that is larger than the
+    //    destination must be rejected, not copied past pl_out
+    adrp    x0, big_frame
+    add     x0, x0, :lo12:big_frame
+    mov     x1, #big_frame_len
+    adrp    x2, pl_out
+    add     x2, x2, :lo12:pl_out
+    mov     x3, #MAX_MSG_SIZE
+    mov     x4, #64               // sizeof pl_out
+    bl      decode_frame
+    mov     x1, #-1
+    bl      assert_eq
+
+    // 8. 9 continuation bytes then 0x02 (= 2^64, past u64) → rejected;
+    //    dec_bytes is the failure flag, since -1 is also a valid u64
+    adrp    x0, bomb_buf
+    add     x0, x0, :lo12:bomb_buf
+    mov     w1, #0x80
+    mov     x2, #0
+.fill_past:
+    strb    w1, [x0, x2]
+    add     x2, x2, #1
+    cmp     x2, #9
+    b.lo    .fill_past
+    mov     w1, #0x02
+    strb    w1, [x0, #9]
+    mov     x1, #10
+    bl      decode_varint
+    adrp    x0, dec_bytes
+    add     x0, x0, :lo12:dec_bytes
+    ldr     x0, [x0]
     mov     x1, #-1
     bl      assert_eq
 

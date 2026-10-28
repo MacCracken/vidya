@@ -78,7 +78,7 @@ state_get:
     test    rdi, rdi
     jz      .sg_neg
     cmp     rdi, SOCK_CAP
-    jge     .sg_neg
+    jae     .sg_neg              # unsigned: a negative id is huge, not small
     lea     rax, [rip + state]
     mov     rax, [rax + rdi * 8]
     ret
@@ -91,7 +91,13 @@ sock_bind:
     test    rdi, rdi
     jz      .sb_zero
     cmp     rdi, SOCK_CAP
-    jge     .sb_zero
+    jae     .sb_zero              # unsigned: a negative id is huge, not small
+    # port indexes port_to_sock[65536]: check it like the socket id, or a
+    # caller's -8 / 70000 writes outside the table. 0 means "unbound".
+    test    rsi, rsi
+    jz      .sb_zero
+    cmp     rsi, 65535
+    ja      .sb_zero                        # unsigned: also rejects negatives
     lea     rax, [rip + port_to_sock]
     mov     rdx, [rax + rsi * 8]
     test    rdx, rdx
@@ -114,7 +120,7 @@ sock_listen:
     test    rdi, rdi
     jz      .sl_zero
     cmp     rdi, SOCK_CAP
-    jge     .sl_zero
+    jae     .sl_zero              # unsigned: a negative id is huge, not small
     lea     rax, [rip + state]
     mov     rdx, [rax + rdi * 8]
     cmp     rdx, ST_CLOSED
@@ -135,7 +141,9 @@ sock_connect:
     test    rdi, rdi
     jz      .sc_z
     cmp     rdi, SOCK_CAP
-    jge     .sc_z
+    jae     .sc_z              # unsigned: a negative id is huge, not small
+    cmp     rsi, 65535
+    ja      .sc_z                           # port out of table range
     lea     rax, [rip + port_to_sock]
     mov     rdx, [rax + rsi * 8]            # server
     test    rdx, rdx
@@ -160,7 +168,7 @@ sock_send_byte:
     test    rdi, rdi
     jz      .ss_z
     cmp     rdi, SOCK_CAP
-    jge     .ss_z
+    jae     .ss_z              # unsigned: a negative id is huge, not small
     lea     rax, [rip + state]
     mov     rdx, [rax + rdi * 8]
     cmp     rdx, ST_ESTABLISHED
@@ -192,7 +200,7 @@ sock_recv_byte:
     test    rdi, rdi
     jz      .sr_neg
     cmp     rdi, SOCK_CAP
-    jge     .sr_neg
+    jae     .sr_neg              # unsigned: a negative id is huge, not small
     lea     rax, [rip + state]
     mov     rdx, [rax + rdi * 8]
     cmp     rdx, ST_ESTABLISHED
@@ -239,7 +247,7 @@ sock_close:
     test    rdi, rdi
     jz      .scl_z
     cmp     rdi, SOCK_CAP
-    jge     .scl_z
+    jae     .scl_z              # unsigned: a negative id is huge, not small
     lea     rax, [rip + state]
     mov     rdx, [rax + rdi * 8]
     cmp     rdx, ST_CLOSED
@@ -395,6 +403,36 @@ _start:
     call    sock_bind
     mov     rdi, rax
     mov     rsi, 1
+    call    assert_eq
+
+    # out-of-range ports are refused, not used as table indexes
+    call    sock_create
+    mov     r15, rax
+    mov     rdi, r15
+    mov     rsi, -8
+    call    sock_bind
+    mov     rdi, rax
+    mov     rsi, 0
+    call    assert_eq
+    mov     rdi, r15
+    mov     rsi, 65536
+    call    sock_bind
+    mov     rdi, rax
+    mov     rsi, 0
+    call    assert_eq
+
+    # negative socket ids are rejected: bind(-1) would write port_arr[-1],
+    # i.e. state[7]
+    mov     rdi, -1
+    mov     rsi, 80
+    call    sock_bind
+    mov     rdi, rax
+    mov     rsi, 0
+    call    assert_eq
+    mov     rdi, -1
+    call    state_get
+    mov     rdi, rax
+    mov     rsi, -1
     call    assert_eq
 
     mov     rax, 1

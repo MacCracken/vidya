@@ -19,8 +19,8 @@
 // The CNOT chain models the "you must parse the previous phase
 // before you can start the next" constraint that drives HTTP/1.1's
 // sequential design. Measuring all four collapses the parse state
-// to a deterministic outcome — the request was fully consumed and
-// a response can be built.
+// to 0000 or 1111, each half the time — all or nothing, never a
+// partial parse like 0011 (headers done, request line not).
 //
 // In real HTTP/2 / HTTP/3, the constraint is relaxed: streams are
 // multiplexed, and frames from different requests can interleave on
@@ -28,15 +28,15 @@
 // independent qubit registers, one per stream, with no entanglement
 // between them — exactly the structural shift HTTP/2 made.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
-qreg q[4];
-creg c[4];
+qubit[4] q;
+bit[4] c;
 
-// Request line consumed (Hadamard puts it in superposition;
-// measurement will collapse to "consumed" with certainty after the
-// CNOT chain propagates).
+// Request line consumed (Hadamard puts it in superposition:
+// consumed or not, each with probability ½. The CNOT chain cannot make
+// that certain — it only makes every later phase agree with it).
 h q[0];
 
 // Headers consumed only after request line
@@ -48,4 +48,5 @@ cx q[1], q[2];
 // Response built only after body
 cx q[2], q[3];
 
-measure q -> c;
+c = measure q;
+// @expect c in {0, 15}

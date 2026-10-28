@@ -10,7 +10,10 @@
 //   3. Strength Reduction: replace expensive operations with cheaper
 //      equivalents (x * 2 → x + x, x * 8 → x << 3)
 //
-// Passes compose: fold constants → eliminate dead code → reduce strength.
+// Values are 32-bit signed integers (like C's int): every operation wraps
+// to i32, so x * 8 and x << 3 really are the same function of x.
+//
+// Passes compose: fold constants → reduce strength → eliminate dead code.
 // The output of one feeds the next. Some passes enable others —
 // folding may create new dead code, strength reduction may create
 // new folding opportunities.
@@ -55,12 +58,13 @@ function constantFold(instrs: IRInstr[]): IRInstr[] {
         return op;
     }
 
+    // i32 semantics, matching what << and >> already do in JS
     function evalBinop(op: string, a: number, b: number): number {
         switch (op) {
-            case "+": return a + b;
-            case "-": return a - b;
-            case "*": return a * b;
-            case "/": return Math.trunc(a / b);
+            case "+": return (a + b) | 0;
+            case "-": return (a - b) | 0;
+            case "*": return Math.imul(a, b);
+            case "/": return (a / b) | 0;
             case "<<": return a << b;
             case ">>": return a >> b;
             default: throw new Error(`unknown op: ${op}`);
@@ -73,6 +77,8 @@ function constantFold(instrs: IRInstr[]): IRInstr[] {
                 const src = resolve(instr.src);
                 if (src.kind === "const") {
                     constants.set(instr.dst, src.value);
+                } else {
+                    constants.delete(instr.dst); // redefined to an unknown: forget the old constant
                 }
                 return { kind: "assign", dst: instr.dst, src };
             }
@@ -84,6 +90,7 @@ function constantFold(instrs: IRInstr[]): IRInstr[] {
                     constants.set(instr.dst, value);
                     return { kind: "assign", dst: instr.dst, src: { kind: "const", value } };
                 }
+                constants.delete(instr.dst); // redefined to an unknown: forget the old constant
                 return { kind: "binop", dst: instr.dst, op: instr.op, left, right };
             }
             case "return":
@@ -145,7 +152,9 @@ function deadCodeEliminate(instrs: IRInstr[]): IRInstr[] {
 //   x - 0   → x           (identity)
 
 function isPowerOfTwo(n: number): boolean {
-    return n > 0 && (n & (n - 1)) === 0;
+    // `&` truncates to int32, so reject non-integers and out-of-range values
+    // first — otherwise 4.5 & 3.5 === 0 and x * 4.5 would become x << 2.
+    return Number.isInteger(n) && n > 0 && n <= 2 ** 30 && (n & (n - 1)) === 0;
 }
 
 function log2(n: number): number {
@@ -357,6 +366,32 @@ function testPartialFolding(): void {
     ], "partial folding");
 }
 
+function testRedefinitionKillsConstant(): void {
+    // Not SSA: x is redefined. Folding must not keep using the stale x = 1.
+    const input: IRInstr[] = [
+        { kind: "assign", dst: "x", src: { kind: "const", value: 1 } },
+        { kind: "binop", dst: "x", op: "+",
+          left: { kind: "var", name: "y" }, right: { kind: "const", value: 1 } },
+        { kind: "return", value: { kind: "var", name: "x" } },
+    ];
+    assertIR(constantFold(input), [
+        "x = 1",
+        "x = y + 1",
+        "return x",
+    ], "redefinition kills constant");
+}
+
+function testStrengthReductionPreservesI32(): void {
+    // x * 8 and x << 3 fold to the same i32 value even where * would overflow
+    const at = (op: "*" | "<<", r: number): IRInstr[] => constantFold([
+        { kind: "assign", dst: "x", src: { kind: "const", value: 2 ** 30 } },
+        { kind: "binop", dst: "a", op, left: { kind: "var", name: "x" },
+          right: { kind: "const", value: r } },
+        { kind: "return", value: { kind: "var", name: "a" } },
+    ]);
+    assert(instrStr(at("*", 8)[2]) === instrStr(at("<<", 3)[2]), "x*8 == x<<3 under i32");
+}
+
 function testPowerOfTwoStrength(): void {
     assert(isPowerOfTwo(1), "1 is 2^0");
     assert(isPowerOfTwo(2), "2 is 2^1");
@@ -364,6 +399,7 @@ function testPowerOfTwoStrength(): void {
     assert(isPowerOfTwo(1024), "1024 is 2^10");
     assert(!isPowerOfTwo(3), "3 is not power of 2");
     assert(!isPowerOfTwo(0), "0 is not power of 2");
+    assert(!isPowerOfTwo(4.5), "4.5 is not power of 2 (4.5 & 3.5 === 0)");
     assert(log2(8) === 3, "log2(8) = 3");
     assert(log2(1024) === 10, "log2(1024) = 10");
 }
@@ -377,6 +413,8 @@ function main(): void {
     testStrengthReduction();
     testFullPipeline();
     testPartialFolding();
+    testRedefinitionKillsConstant();
+    testStrengthReductionPreservesI32();
     testPowerOfTwoStrength();
 
     console.log("All optimization passes tests passed.");

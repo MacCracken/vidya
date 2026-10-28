@@ -87,8 +87,10 @@ assert_eq "$AARCH64_SYSCALL_NUM" "x8" "AArch64 syscall number in x8"
 #
 # Permissions: r=read, w=write, x=execute, p=private, s=shared
 
-# Snapshot maps once — /proc/self resolves per-syscall, so redirections
-# can see a different process than the shell. cat reads it in one shot.
+# Snapshot maps once. "self" resolves to whichever process OPENS the path:
+# `awk ... /proc/self/maps` would read awk's own maps. $(<file) is read by
+# this shell itself — without forking since bash 5.2 (CHANGES 5.2-alpha y.);
+# on older bash the snapshot (and the Pid check below) would be a child's.
 maps_snapshot=$(</proc/self/maps)
 map_count=$(echo "$maps_snapshot" | wc -l)
 if (( map_count < 3 )); then

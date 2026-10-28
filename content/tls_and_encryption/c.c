@@ -136,10 +136,14 @@ int main(void) {
     int dlen = demo_open(ct, pt_len, 42, 7, tag, dec);
     assert(dlen == pt_len);
     assert(memcmp(dec, pt, pt_len) == 0);
+    // demo_open writes dec, so like the call above it runs outside
+    // assert(): under -DNDEBUG assert's expression is not evaluated.
     ct[5] ^= 1;
-    assert(demo_open(ct, pt_len, 42, 7, tag, dec) == -1);
+    dlen = demo_open(ct, pt_len, 42, 7, tag, dec);
+    assert(dlen == -1);
     ct[5] ^= 1;
-    assert(demo_open(ct, pt_len, 42, 7, tag ^ 1, dec) == -1);
+    dlen = demo_open(ct, pt_len, 42, 7, tag ^ 1, dec);
+    assert(dlen == -1);
 
     Handshake hs = {ST_INIT, 0};
     assert(hs.state == ST_INIT);

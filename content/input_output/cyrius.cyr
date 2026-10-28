@@ -10,14 +10,16 @@ include "lib/assert.cyr"
 fn test_write_read() {
     var path = "/tmp/cyr_io_test";
     var msg = "hello cyrius";
-    file_write_all(path, msg, 12);
+    # file_write_all returns len, or a negative errno (a short write is an error).
+    assert_eq(file_write_all(path, msg, 12), 12, "wrote 12 bytes");
 
-    # TRAP: file_read_all's third argument is the CAPACITY OF THE BUFFER,
-    # not a "read at most" hint — it loops until it has maxlen bytes. Passing
-    # a number larger than the buffer is an overflow waiting for a bigger
-    # file: `var rbuf[16]` is 16 bytes (array locals are byte-sized), so a
-    # 128 here silently smashes 112 bytes of neighbouring frame the moment
-    # the file grows past 16. Always pass the declared size.
+    # TRAP: file_read_all's third argument must be the CAPACITY OF THE BUFFER:
+    # it reads until EOF or until it has that many bytes, whichever comes
+    # first. Passing a number larger than the buffer is an overflow waiting
+    # for a bigger file: `var rbuf[16]` is 16 bytes (fn-local bare arrays are
+    # byte-sized), so a 128 here smashes 112 bytes of neighbouring frame the
+    # moment the file grows past 16. Always pass the declared size — and a
+    # return equal to it may mean the file was LONGER (truncated read).
     var rbuf[16];
     var n = file_read_all(path, &rbuf, 16);
     assert_eq(n, 12, "read len");
@@ -30,7 +32,7 @@ fn test_write_read() {
 
 fn test_file_exists() {
     var path2 = "/tmp/cyr_io_exist";
-    file_write_all(path2, "x", 1);
+    assert_eq(file_write_all(path2, "x", 1), 1, "wrote marker file");
     assert(file_exists(path2) == 1, "exists yes");
     syscall(87, path2);
     assert(file_exists(path2) == 0, "exists no");
@@ -45,12 +47,16 @@ fn test_open_flags() {
 }
 
 # === Network sockets (lib/net.cyr) ===
-# var sfd = result_unwrap(tcp_socket());
+# These return a Result (a tag, value PAIR since 6.6.0): bind both halves and
+# check the tag. `result_unwrap(tcp_socket())` is a compile error
+# ('result_unwrap' expects 2 arguments, got 1).
+# var st, sfd = tcp_socket();
+# if (is_err_result(st) == 1) { return 1; }
 # sock_reuse(sfd);
-# result_unwrap(sock_bind(sfd, INADDR_ANY(), 8080));
-# result_unwrap(sock_listen(sfd, 16));
-# var cfd = result_unwrap(sock_accept(sfd));
-# sock_send(cfd, "hello\n", 6);
+# var bt, bv = sock_bind(sfd, INADDR_ANY(), 8080);
+# var lt, lv = sock_listen(sfd, 16);
+# var at, cfd = sock_accept(sfd);
+# var wt, wn = sock_send(cfd, "hello\n", 6);
 # sock_close(cfd);
 # sock_close(sfd);
 
@@ -62,12 +68,12 @@ fn test_open_flags() {
 # var base = path_basename(str_from("/usr/bin/cc2")); — "cc2"
 # var dir = path_dirname(str_from("/usr/bin/cc2"));   — "/usr/bin"
 
-# === Process management (lib/process.cyr) ===
-# var r = run("/usr/bin/ls", "-la", 0);       — run + wait
-# var pid = result_unwrap(spawn("/usr/bin/sleep", "1", 0)); — background
-# var exit = wait_pid(pid);                    — wait for specific pid
+# === Process management (lib/process.cyr) — each returns a Result pair ===
+# var rt, status = run("/usr/bin/ls", "-la", 0);           — run + wait
+# var pt, pid = spawn("/usr/bin/sleep", "1", 0);           — background
+# var wt, code = wait_pid(pid);                            — wait for specific pid
 # var buf = alloc(4096);
-# var n = result_unwrap(run_capture("/usr/bin/uname", "-a", 0, buf, 4096));
+# var ct, n = run_capture("/usr/bin/uname", "-a", 0, buf, 4096);
 
 fn main() {
     alloc_init();

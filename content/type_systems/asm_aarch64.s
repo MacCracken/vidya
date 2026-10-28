@@ -71,7 +71,9 @@ _start:
     cmp     w0, #7
     b.ne    fail
 
-    // Signed multiply
+    // Multiply (low half): also sign-agnostic. MUL produces the same bits
+    // for signed and unsigned operands; only the widening and high-half
+    // forms (SMULL/UMULL, SMULH/UMULH) and division (SDIV/UDIV) differ.
     mov     w0, #-3
     mov     w1, #4
     mul     w0, w0, w1          // -3 * 4 = -12

@@ -4,14 +4,14 @@
 // and gate operations write data — like filesystem read/write.
 // Multiple registers partition the qubit space like directories.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── Partitioned storage (directories) ────────────────────────────
-qreg file_a[2];    // "file A" — 2 qubits of storage
-qreg file_b[2];    // "file B" — separate allocation
-creg read_a[2];
-creg read_b[2];
+qubit[2] file_a;    // "file A" — 2 qubits of storage
+qubit[2] file_b;    // "file B" — separate allocation
+bit[2] read_a;
+bit[2] read_b;
 
 // "Write" data to file A
 x file_a[0];
@@ -22,5 +22,9 @@ h file_b[0];
 cx file_b[0], file_b[1]; // file_b stores entangled state
 
 // "Read" — measurement extracts classical data
-measure file_a -> read_a;
-measure file_b -> read_b;
+read_a = measure file_a;
+read_b = measure file_b;
+// read_a = 11 on every shot; read_b is 00 or 11 (the entangled pair
+// always agrees), each half the time
+// @expect read_a == 3
+// @expect read_b in {0, 3}

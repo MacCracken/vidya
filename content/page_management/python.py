@@ -5,8 +5,8 @@
 # stack with `next` pointer at byte offset 8 of each freed page. Mirrors
 # the cyrius reference's test surface exactly.
 
-import os
 import struct
+import tempfile
 
 PAGE_SZ = 4096
 MAGIC = 0x50415452
@@ -72,13 +72,9 @@ def page_free(f, h, num):
 
 
 def main():
-    path = "/tmp/vidya_page_python.bin"
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
-
-    with open(path, "w+b") as f:
+    # An anonymous temp file (w+b, deleted on close): a fixed /tmp name can
+    # be pre-created or symlinked by another user, and open("w+b") follows it.
+    with tempfile.TemporaryFile() as f:
         h = hdr_init()
         f.write(hdr_to_bytes(h))
 
@@ -108,7 +104,6 @@ def main():
         p3 = page_alloc(f, h)
         assert p3 == 2, "reused freed page"
 
-    os.remove(path)
     print("page_management: 6/6 ok")
 
 

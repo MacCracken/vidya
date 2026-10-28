@@ -1,9 +1,12 @@
 // Vidya — Binary Formats in Zig
 //
 // Binary executable formats (ELF, PE, Mach-O) begin with magic numbers
-// that identify the format. Zig's packed structs map exactly to on-disk
-// headers — no padding, no surprises. comptime validates sizes and
-// builds tables at compile time.
+// that identify the format. Zig's `extern struct` uses the C ABI layout,
+// so it matches a header the spec defines as a C struct. That layout CAN
+// pad (extern { u8, u32 } is 8 bytes, b at offset 4); these headers just
+// happen to be naturally aligned, and a comptime size check proves it.
+// (`packed struct` is the wrong tool: it is bit-packed into one backing
+// integer and cannot hold an array field such as e_ident: [16]u8.)
 
 const std = @import("std");
 const expect = std.testing.expect;
@@ -50,7 +53,7 @@ fn testMagicNumbers() !void {
 }
 
 // ── ELF64 Header ─────────────────────────────────────────────────────
-// Packed struct maps exactly to the on-disk layout (64 bytes)
+// extern struct follows the C layout of Elf64_Ehdr (64 bytes, no padding)
 const Elf64Ehdr = extern struct {
     e_ident: [16]u8, // Magic + class + data + version + OS/ABI + padding
     e_type: u16, // ET_EXEC, ET_DYN, etc.
@@ -108,7 +111,7 @@ fn buildMinimalElf64Header() Elf64Ehdr {
 }
 
 fn testElf64Header() !void {
-    // Packed struct size must match the spec exactly
+    // extern struct size must match the spec exactly (fails the build if not)
     comptime {
         std.debug.assert(@sizeOf(Elf64Ehdr) == 64);
     }

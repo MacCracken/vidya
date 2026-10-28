@@ -82,8 +82,10 @@ class Lexer:
         if c in single:
             return Token(single[c], c, start)
 
-        if c.isdigit():
-            while self._peek() is not None and self._peek().isdigit():
+        # ASCII digits only: str.isdigit() also accepts "²", which int()
+        # rejects later with a ValueError instead of a positioned error.
+        if "0" <= c <= "9":
+            while self._peek() is not None and "0" <= self._peek() <= "9":
                 self._advance()
             return Token(TokenKind.NUMBER, self.source[start:self.pos], start)
 
@@ -178,6 +180,14 @@ class Parser:
             )
         self._advance()
 
+    def parse(self) -> Expr:
+        """Parse a whole input. parse_expr() stops at the first token it
+        cannot use, so without this EOF check "2 3" would quietly parse as
+        2 and "(2+3))" as 5, discarding the rest."""
+        expr = self.parse_expr(0)
+        self._expect(TokenKind.EOF)
+        return expr
+
     def parse_expr(self, min_bp: int = 0) -> Expr:
         # ── Prefix / atoms ────────────────────────────────────────
         kind = self._peek()
@@ -259,11 +269,20 @@ def main():
 
     for source, expected in tests:
         parser = Parser(source)
-        ast = parser.parse_expr()
+        ast = parser.parse()
         result = evaluate(ast)
         status = "ok" if result == expected else "FAIL"
         print(f"{source:<25} {str(ast):<30} {result:>6} {expected:>8} {status}")
         assert result == expected, f"failed on {source!r}: got {result}, expected {expected}"
+
+    # Trailing input must be an error, not silently dropped
+    for bad in ("2 3", "(2 + 3))"):
+        try:
+            Parser(bad).parse()
+        except SyntaxError as e:
+            print(f"{bad!r:<25} rejected: {e}")
+        else:
+            raise AssertionError(f"{bad!r} should be rejected")
 
     print(f"\nAll {len(tests)} tests passed.")
 

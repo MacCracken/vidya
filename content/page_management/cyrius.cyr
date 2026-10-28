@@ -24,13 +24,16 @@ fn hdr_verify(buf) {
 
 fn page_offset(num) { return PAGE_SZ + num * PAGE_SZ; }
 
+# Both return the byte count (PAGE_SZ on success) or a negative errno.
 fn page_read(fd, num, buf) {
-    syscall(SYS_LSEEK, fd, page_offset(num), 0);
+    var off = syscall(SYS_LSEEK, fd, page_offset(num), 0);
+    if (off < 0) { return off; }
     return syscall(SYS_READ, fd, buf, PAGE_SZ);
 }
 
 fn page_write(fd, num, buf) {
-    syscall(SYS_LSEEK, fd, page_offset(num), 0);
+    var off = syscall(SYS_LSEEK, fd, page_offset(num), 0);
+    if (off < 0) { return off; }
     return syscall(SYS_WRITE, fd, buf, PAGE_SZ);
 }
 
@@ -69,13 +72,18 @@ fn main() {
     syscall(SYS_UNLINK, path);
 
     # Create file with header
+    # 194 = O_RDWR | O_CREAT | O_EXCL, mode 0644. Every fallible call below is
+    # checked: a failed open would make every later read/write act on -errno.
     var fd = syscall(SYS_OPEN, path, 194, 420);
+    if (fd < 0) { return 1; }
     var hdr = fl_alloc(PAGE_SZ);
+    if (hdr == 0) { syscall(SYS_CLOSE, fd); return 1; }
     hdr_init(hdr);
-    syscall(SYS_LSEEK, fd, 0, 0);
-    syscall(SYS_WRITE, fd, hdr, PAGE_SZ);
 
     test_group("page management");
+
+    syscall(SYS_LSEEK, fd, 0, 0);
+    assert_eq(syscall(SYS_WRITE, fd, hdr, PAGE_SZ), PAGE_SZ, "header page written");
 
     assert(hdr_verify(hdr), "magic ok");
     assert_eq(load64(hdr + H_PGCOUNT), 1, "pgcount starts at 1");
@@ -90,9 +98,9 @@ fn main() {
     var buf = fl_alloc(PAGE_SZ);
     memset(buf, 0, PAGE_SZ);
     store64(buf, 42);
-    page_write(fd, p1, buf);
+    assert_eq(page_write(fd, p1, buf), PAGE_SZ, "page write");
     memset(buf, 0, PAGE_SZ);
-    page_read(fd, p1, buf);
+    assert_eq(page_read(fd, p1, buf), PAGE_SZ, "page read");
     assert_eq(load64(buf), 42, "read back 42");
 
     # Free and reuse

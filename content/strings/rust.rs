@@ -63,7 +63,7 @@ fn main() {
     assert_eq!(&*loud, "HELLO");
 
     // ── String comparison ──────────────────────────────────────────
-    assert_eq!("hello", "hello"); // case-sensitive by default
+    assert_ne!("Hello", "hello"); // case-sensitive by default
     assert!("Hello".eq_ignore_ascii_case("hello")); // ASCII only
     // For full Unicode case-insensitive comparison, use the `unicase` crate
 

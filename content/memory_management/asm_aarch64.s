@@ -3,7 +3,11 @@
 // AArch64 is a load/store architecture: all data manipulation happens
 // in registers, memory is accessed only via LDR/STR. Stack grows down
 // (SP must be 16-byte aligned). Heap is allocated via mmap syscall.
-// The architecture enforces stricter alignment than x86_64.
+// Ordinary LDR/STR to normal memory may be unaligned (Linux runs user
+// code with SCTLR_EL1.A=0). AArch64 is stricter than x86_64 only for SP
+// (16-byte aligned whenever it is the base of an access) and for
+// exclusive, atomic and acquire/release accesses, which must be
+// naturally aligned.
 
 .global _start
 

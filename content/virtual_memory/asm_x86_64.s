@@ -46,6 +46,8 @@ PAGE_SIZE       = 4096           # 4KB standard page
 HUGE_PAGE_SIZE  = 2 * 1024 * 1024  # 2MB huge page
 PAGE_SHIFT      = 12             # log2(4096) = 12
 PHYS_ADDR_MASK  = 0x000FFFFFFFFFF000  # bits [51:12] — physical frame
+HUGE_ADDR_MASK  = 0x000FFFFFFFE00000  # bits [51:21] — frame of a 2MB page
+PDE_PAT_2M      = 1 << 12             # PAT bit in a 2MB PDE (bit 7 in a PTE)
 
 # Common PTE flag combinations
 PTE_KERN_RW     = PTE_PRESENT | PTE_WRITABLE           # 0x003
@@ -69,7 +71,7 @@ sample_pte_huge:        .quad 0x0000000000600000 | PTE_PRESENT | PTE_WRITABLE | 
                         # 2MB huge page at 6MB
 
 # Virtual address decomposition test value
-# Address: 0x0000_0000_4020_3ABC
+# Address: 0x0000_0000_4000_3ABC
 #   PML4  [47:39]: 000000000 = 0
 #   PDPT  [38:30]: 000000001 = 1      (bit 30 set from 0x40000000)
 #   PD    [29:21]: 000000000 = 0
@@ -213,14 +215,31 @@ _start:
     test    rax, PTE_HUGE
     jz      fail                # should have huge bit set
 
-    # For huge pages, bits [20:12] are part of the physical address
-    # (no PT level), so the page is 2MB aligned
-    mov     rcx, PHYS_ADDR_MASK
-    and     rax, rcx
+    # A 2MB PDE (PS=1) holds physical address bits [51:21] only. Bit 12 is
+    # the PAT bit and bits [20:13] are reserved (must be 0) — Intel SDM
+    # vol. 3 table 4-17. The virtual address's low 21 bits are the offset.
+    # So use the 2MB mask: the 4KB PHYS_ADDR_MASK would read a set PAT bit
+    # as address bit 12.
     mov     rcx, rax
-    and     rcx, 0x1FFFFF       # 2MB - 1
+    and     rcx, 0x1FE000       # bits [20:13]
     test    rcx, rcx
-    jnz     fail                # physical address must be 2MB aligned
+    jnz     fail                # reserved bits must be clear
+    mov     rcx, HUGE_ADDR_MASK
+    and     rax, rcx
+    cmp     rax, 0x600000       # frame at 6MB
+    jne     fail
+    # With PAT set, the 2MB mask still yields the frame; the 4KB one does not
+    mov     rax, [sample_pte_huge]
+    or      rax, PDE_PAT_2M
+    mov     rdx, rax
+    mov     rcx, HUGE_ADDR_MASK
+    and     rax, rcx
+    cmp     rax, 0x600000
+    jne     fail
+    mov     rcx, PHYS_ADDR_MASK
+    and     rdx, rcx
+    cmp     rdx, 0x601000       # wrong "address": PAT leaked in as bit 12
+    jne     fail
 
     # ════════════════════════════════════════════════════════════════
     # 7. Test not-present page detection

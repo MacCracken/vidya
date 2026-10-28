@@ -3,8 +3,11 @@
 # Context save/restore: the fundamental operation behind process switching.
 # A context switch saves all general-purpose registers and RSP for the
 # current task, then loads the saved state of the next task. This file
-# demonstrates the pattern with two simulated process contexts, switching
-# between them and verifying register state is preserved.
+# demonstrates one half-cycle of that: it saves a task's registers, RSP and
+# RFLAGS into a context block, wipes them all (as another task would), and
+# restores them, verifying every value comes back. (ctx_b marks where the
+# second task's block would live; a real switch saves into one block and
+# loads from the other.)
 #
 # Build: as --64 asm_x86_64.s -o out.o && ld out.o -o out && ./out
 
@@ -18,7 +21,7 @@
 .equ STATE_ZOMBIE,   3
 
 # ── Context frame layout (offsets into saved context) ────────────────
-# We save 16 GP registers + RFLAGS = 17 quadwords = 136 bytes
+# We save 16 GP registers (rsp included) + RFLAGS = 17 quadwords = 136 bytes
 .equ CTX_RAX,  0
 .equ CTX_RBX,  8
 .equ CTX_RCX,  16
@@ -46,7 +49,7 @@ _start:
     mov     $0x3333, %rcx
     mov     $0x4444, %rdx
     mov     $0x5555, %rsi
-    # rdi will hold the context pointer
+    mov     $0x6666, %rdi
     mov     $0x7777, %rbp
     mov     $0x8888, %r8
     mov     $0x9999, %r9
@@ -57,9 +60,15 @@ _start:
     mov     $0xEEEE, %r14
     mov     $0xFFFF, %r15
 
+    stc                            # a known flag to carry across the switch
+
     # Save context (simulated — a real kernel would do this in the
-    # interrupt handler or syscall path)
+    # interrupt handler or syscall path). rdi is needed as the context
+    # pointer, so its own value is parked on the stack first — otherwise
+    # the switch would silently lose it.
+    push    %rdi
     lea     ctx_a(%rip), %rdi
+    popq    CTX_RDI(%rdi)
     mov     %rax, CTX_RAX(%rdi)
     mov     %rbx, CTX_RBX(%rdi)
     mov     %rcx, CTX_RCX(%rdi)
@@ -94,6 +103,9 @@ _start:
     xor     %r13, %r13
     xor     %r14, %r14
     xor     %r15, %r15
+    xor     %rdi, %rdi
+    xor     %rsp, %rsp                 # restore must not touch the stack before rsp
+    clc
 
     # ── Test 3: Restore context from process A's context block ───────
     lea     ctx_a(%rip), %rdi
@@ -115,8 +127,11 @@ _start:
     mov     CTX_R13(%rdi), %r13
     mov     CTX_R14(%rdi), %r14
     mov     CTX_R15(%rdi), %r15
+    mov     CTX_RDI(%rdi), %rdi    # the context pointer itself goes last
 
     # ── Test 4: Verify all registers were restored correctly ─────────
+    jnc     fail                   # CF came back through RFLAGS (check first:
+                                   # every cmp below overwrites it)
     cmp     $0x1111, %rax
     jne     fail
     cmp     $0x2222, %rbx
@@ -126,6 +141,8 @@ _start:
     cmp     $0x4444, %rdx
     jne     fail
     cmp     $0x5555, %rsi
+    jne     fail
+    cmp     $0x6666, %rdi
     jne     fail
     cmp     $0x7777, %rbp
     jne     fail

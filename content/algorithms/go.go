@@ -1,15 +1,17 @@
 // Vidya — Algorithms in Go
 //
-// Go has sort.Slice/sort.Search in the standard library but no
-// generics-based data structures (pre-1.21). Algorithms are typically
-// written with slices and maps. Go's map gives O(1) average lookup,
-// and slices are the standard container for sorting/searching.
+// Since Go 1.21 the generic slices package (slices.Sort,
+// slices.BinarySearch) is the standard way to sort and search; the older
+// sort.Ints/sort.Slice API now just forwards to it or is slower. There are
+// still no generic containers in the standard library, so algorithms are
+// typically written with slices and maps. Go's map gives O(1) average
+// lookup, and slices are the standard container for sorting/searching.
 
 package main
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 )
 
 func main() {
@@ -50,9 +52,12 @@ func testBinarySearch() {
 	assert(binarySearch(arr, 20) == -1, "miss 20")
 	assert(binarySearch([]int{}, 1) == -1, "empty")
 
-	// Stdlib: sort.SearchInts
-	idx := sort.SearchInts(arr, 7)
-	assert(idx < len(arr) && arr[idx] == 7, "stdlib search")
+	// Stdlib: slices.BinarySearch returns the insertion index and whether
+	// the target is present.
+	idx, found := slices.BinarySearch(arr, 7)
+	assert(found && idx == 3, "stdlib search")
+	idx, found = slices.BinarySearch(arr, 4)
+	assert(!found && idx == 2, "stdlib search miss gives insertion point")
 }
 
 // ── Sorting ───────────────────────────────────────────────────────────
@@ -75,7 +80,7 @@ func testSorting() {
 
 	// Stdlib: pdqsort (Go 1.19+)
 	arr2 := []int{5, 2, 8, 1, 9, 3}
-	sort.Ints(arr2)
+	slices.Sort(arr2)
 	assertSliceEq(arr2, []int{1, 2, 3, 5, 8, 9}, "stdlib sort")
 }
 

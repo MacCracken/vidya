@@ -4,8 +4,9 @@
 #   - zone_lookup with CNAME chain following + depth bound
 #   - cache_lookup / cache_insert / advance_time
 #   - resolve = cache_lookup → zone_lookup → cache_insert
-# Tests cover the 5 critical assertions: A hit, CNAME chain, loop
-# bounded, cache hit/miss across TTL expiry.
+# Tests cover the 6 critical assertions: A hit, CNAME chain, loop
+# bounded, cache hit/miss across TTL expiry, and a CNAME answer cached for
+# the shortest TTL on its chain (not a fallback).
 
 .intel_syntax noprefix
 .global _start
@@ -33,9 +34,10 @@ z_count:      .quad 0
 c_count:      .quad 0
 now_clock:    .quad 0
 last_status:  .quad 0
+last_ttl:     .quad 0               # min TTL over the last lookup's chain
 
 .section .rodata
-msg_pass:     .ascii "dns: 5/5 ok\n"
+msg_pass:     .ascii "dns: 6/6 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail:     .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
@@ -68,6 +70,8 @@ zone_lookup:
     mov     r12, rdi
     mov     r13, rsi
     xor     r14, r14
+    mov     rax, 0x7FFFFFFFFFFFFFFF
+    mov     [rip + last_ttl], rax
 .zl_outer:
     cmp     r14, CNAME_MAX_DEPTH
     jg      .zl_neg
@@ -85,6 +89,12 @@ zone_lookup:
     mov     r9, [r8 + rcx * 8]
     cmp     r9, r13
     jne     .zl_search_next
+    lea     r8, [rip + z_ttl]
+    mov     r9, [r8 + rcx * 8]
+    cmp     r9, [rip + last_ttl]
+    jge     .zl_ttl_kept
+    mov     [rip + last_ttl], r9    # the answer expires with its record...
+.zl_ttl_kept:
     lea     r8, [rip + z_value]
     mov     rax, [r8 + rcx * 8]
     pop     r14
@@ -112,6 +122,12 @@ zone_lookup:
     mov     r9, [r8 + rcx * 8]
     cmp     r9, RR_CNAME
     jne     .zl_cname_next
+    lea     r8, [rip + z_ttl]
+    mov     r9, [r8 + rcx * 8]
+    cmp     r9, [rip + last_ttl]
+    jge     .zl_cn_ttl_kept
+    mov     [rip + last_ttl], r9    # ...or with any CNAME on the way to it
+.zl_cn_ttl_kept:
     lea     r8, [rip + z_value]
     mov     r10, [r8 + rcx * 8]
     jmp     .zl_cname_done
@@ -233,35 +249,19 @@ resolve:
     mov     rax, -1
     jmp     .rs_done
 .rs_pos:
-    # find ttl in zone
+    # Cache for the shortest TTL on the chain zone_lookup walked. Looking
+    # up a record named (name, rtype) instead misses every CNAME answer —
+    # there is no such record — and would fall back to NEGATIVE_TTL.
     mov     r8, rax                 # save value
-    mov     r9, [rip + z_count]
-    xor     rcx, rcx
-    mov     r10, NEGATIVE_TTL       # default
-.rs_findttl:
-    cmp     rcx, r9
-    jge     .rs_insert
-    lea     r11, [rip + z_name]
-    mov     rdx, [r11 + rcx * 8]
-    cmp     rdx, r12
-    jne     .rs_findnext
-    lea     r11, [rip + z_type]
-    mov     rdx, [r11 + rcx * 8]
-    cmp     rdx, r13
-    jne     .rs_findnext
-    lea     r11, [rip + z_ttl]
-    mov     r10, [r11 + rcx * 8]
-    jmp     .rs_insert
-.rs_findnext:
-    inc     rcx
-    jmp     .rs_findttl
+    mov     r10, [rip + last_ttl]
 .rs_insert:
+    push    r8                      # cache_insert clobbers r8 (caller-saved)
     mov     rdi, r12
     mov     rsi, r13
     mov     rdx, r8
     mov     rcx, r10
     call    cache_insert
-    mov     rax, r8
+    pop     rax                     # the resolved value
 .rs_done:
     pop     r13
     pop     r12
@@ -283,10 +283,12 @@ fail_exit:
     syscall
 
 _start:
-    # Build zone (subset; enough for the 5 asm-side asserts)
+    # Build zone (subset; enough for the 5 asm-side asserts). The A
+    # record's TTL (120) differs from NEGATIVE_TTL (300), so test 5 can
+    # tell the record's own TTL from the fallback.
     mov     rdi, 1
     mov     rsi, RR_A
-    mov     rdx, 300
+    mov     rdx, 120
     mov     rcx, 0x7F000001
     call    zone_add
     mov     rdi, 2
@@ -329,28 +331,51 @@ _start:
     mov     rsi, -1
     call    assert_eq
 
-    # 4. Cache miss → hit on second resolve
+    # 4. Cache miss → hit on second resolve (and both return the address)
     mov     rdi, 1
     mov     rsi, RR_A
     call    resolve
+    mov     rdi, rax
+    mov     rsi, 0x7F000001
+    call    assert_eq
     mov     rdi, [rip + last_status]
     mov     rsi, 0
     call    assert_eq
     mov     rdi, 1
     mov     rsi, RR_A
     call    resolve
+    mov     rdi, rax
+    mov     rsi, 0x7F000001
+    call    assert_eq
     mov     rdi, [rip + last_status]
     mov     rsi, 1
     call    assert_eq
 
-    # 5. Advance time past TTL → cache miss
-    mov     rdi, 301
+    # 5. Advance time past the record's TTL (120) → cache miss
+    mov     rdi, 121
     call    advance_time
     mov     rdi, 1
     mov     rsi, RR_A
     call    resolve
     mov     rdi, [rip + last_status]
     mov     rsi, 0
+    call    assert_eq
+
+    # 6. CNAME answer expires with the A record behind it (TTL 120), not
+    # the CNAME's 600 or the 300 fallback
+    mov     rdi, 2
+    mov     rsi, RR_A
+    call    resolve                 # miss: cached until now + 120
+    mov     rdi, rax
+    mov     rsi, 0x7F000001
+    call    assert_eq
+    mov     rdi, 121
+    call    advance_time
+    mov     rdi, 2
+    mov     rsi, RR_A
+    call    resolve
+    mov     rdi, [rip + last_status]
+    mov     rsi, 0                  # expired → miss
     call    assert_eq
 
     mov     rax, 1

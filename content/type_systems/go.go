@@ -109,7 +109,10 @@ type Dog struct {
 	Breed  string
 }
 
-// Dog can override
+// Dog adds its own method. (Fetch is not an override. Declaring
+// Dog.Speak would SHADOW the promoted Animal.Speak for callers holding a
+// Dog, but it is not virtual dispatch: code inside Animal's methods still
+// calls Animal's versions.)
 func (d Dog) Fetch() string {
 	return d.Name + " fetches"
 }

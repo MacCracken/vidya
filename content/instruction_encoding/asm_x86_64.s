@@ -2,7 +2,8 @@
 #
 # x86_64 instructions are variable-length (1-15 bytes). Each instruction
 # may have: legacy prefixes, REX prefix, opcode (1-3 bytes), ModR/M byte,
-# SIB byte, displacement (1/2/4 bytes), immediate (1/2/4/8 bytes).
+# SIB byte, displacement (1/4 bytes — 64-bit mode has no 16-bit addressing,
+# so no 2-byte displacement), immediate (1/2/4/8 bytes).
 #
 # REX prefix (0x40-0x4F): extends registers to r8-r15, enables 64-bit
 # operand size. Bits: 0100 W R X B
@@ -127,9 +128,16 @@ _start:
     # mov rax, [rbx + 256]    → 48 8B 83 00 01 00 00
     # ModR/M: 83 = 10 000 011 (mod=10, reg=rax, r/m=rbx, +disp32)
     # (displacement > 127 requires disp32)
-    # We'll use a smaller disp32 that fits our array:
-    mov     rax, [rbx + 32]     # array[4] = 50
+    # A small offset like 32 fits disp8, so the assembler would pick mod=01
+    # (48 8B 43 20). The {disp32} pseudo-prefix forces the mod=10 form:
+.Ld32:
+    {disp32} mov rax, [rbx + 32]    # 48 8B 83 20 00 00 00 — array[4] = 50
+.Ld32_end:
+.equ D32_LEN, .Ld32_end - .Ld32
     cmp     rax, 50
+    jne     fail
+    mov     eax, D32_LEN
+    cmp     eax, 7              # REX + opcode + ModR/M + 4-byte displacement
     jne     fail
 
     # ════════════════════════════════════════════════════════════════

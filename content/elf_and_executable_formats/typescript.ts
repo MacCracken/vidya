@@ -3,10 +3,14 @@
 // ELF (Executable and Linkable Format) is the standard binary format
 // on Linux, BSD, and most Unix systems. This file models the three
 // core ELF64 structures — header, program header, section header —
-// using DataView for byte-accurate layout and verifies field offsets.
+// using DataView for byte-accurate layout and verifies field offsets
+// against a real ELF: the node binary running this file.
+
+import { closeSync, openSync, readSync } from "node:fs";
 
 function main(): void {
     testElf64Header();
+    testRealElfHeader();
     testProgramHeader();
     testSectionHeader();
     testElf64Serialization();
@@ -173,6 +177,28 @@ function testElf64Header(): void {
     assert(hdr.phoff === 64n, "phoff follows ehdr");
     // shoff should be after ehdr + phdrs
     assert(hdr.shoff === BigInt(64 + 56 * 2), "shoff follows phdrs");
+}
+
+// Round-tripping through our own setters cannot catch a wrong offset — the
+// getters share it. A header written by a real linker can: parse the first
+// 64 bytes of the node executable with the same class.
+function testRealElfHeader(): void {
+    const buf = new ArrayBuffer(EHDR_SIZE);
+    const fd = openSync(process.execPath, "r");
+    try {
+        readSync(fd, new Uint8Array(buf), 0, EHDR_SIZE, 0);
+    } finally {
+        closeSync(fd);
+    }
+    const hdr = new Elf64Ehdr(buf);
+    const magic = new Uint8Array(buf, 0, 4);
+    assert(magic[0] === 0x7F && magic[1] === 0x45 && magic[2] === 0x4C && magic[3] === 0x46,
+        "node binary starts with \\x7FELF");
+    assert(hdr.elfClass === 2, "real binary: ELFCLASS64");
+    assert(hdr.ehsize === 64, "real binary: e_ehsize at 0x34 reads 64");
+    assert(hdr.phentsize === 56, "real binary: e_phentsize at 0x36 reads 56");
+    assert(hdr.shentsize === 64, "real binary: e_shentsize at 0x3A reads 64");
+    assert(hdr.type === ET_EXEC || hdr.type === ET_DYN, "real binary: executable or PIE");
 }
 
 // ── Program Header (56 bytes) ───────────────────────────────────────
@@ -449,7 +475,8 @@ function testSectionTypes(): void {
 
 // ELF string tables are sequences of null-terminated strings.
 // Section names, symbol names — all stored this way.
-// An index into the table is just a byte offset.
+// An index into the table is just a byte offset — of UTF-8 bytes, not of
+// UTF-16 code units: `charCodeAt` would store "日" as 0x65E5 in one slot.
 
 class StringTable {
     private data: number[] = [0]; // starts with a null byte (index 0 = empty string)
@@ -457,9 +484,7 @@ class StringTable {
     /** Add a string, return its offset in the table. */
     add(s: string): number {
         const offset = this.data.length;
-        for (let i = 0; i < s.length; i++) {
-            this.data.push(s.charCodeAt(i));
-        }
+        this.data.push(...new TextEncoder().encode(s));
         this.data.push(0); // null terminator
         return offset;
     }
@@ -470,7 +495,7 @@ class StringTable {
         while (end < this.data.length && this.data[end] !== 0) {
             end++;
         }
-        return String.fromCharCode(...this.data.slice(offset, end));
+        return new TextDecoder().decode(new Uint8Array(this.data.slice(offset, end)));
     }
 
     get size(): number { return this.data.length; }
@@ -492,6 +517,12 @@ function testStringTable(): void {
     assert(textIdx === 1, ".text at offset 1");
     assert(dataIdx === 7, ".data at offset 7");
     assert(bssIdx === 13, ".bss at offset 13");
+
+    // Offsets count bytes: ".data.日本" is 6 + 2×3 UTF-8 bytes, not 8 code units
+    const utfIdx = strtab.add(".data.日本");
+    const afterIdx = strtab.add(".x");
+    assert(strtab.get(utfIdx) === ".data.日本", "non-ASCII name round-trips");
+    assert(afterIdx === utfIdx + 12 + 1, "offset advances by UTF-8 byte length + NUL");
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

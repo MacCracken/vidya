@@ -40,9 +40,6 @@ impl Complex {
     fn add(self, other: Self) -> Self {
         Self::new(self.re + other.re, self.im + other.im)
     }
-    fn sub(self, other: Self) -> Self {
-        Self::new(self.re - other.re, self.im - other.im)
-    }
     fn mul(self, other: Self) -> Self {
         Self::new(
             self.re * other.re - self.im * other.im,
@@ -254,7 +251,7 @@ fn test_quantum_phase() {
     assert_near(state_plus[1].re, FRAC_1_SQRT_2, "|+⟩[1]");
     assert_near(state_minus[1].re, -FRAC_1_SQRT_2, "|−⟩[1]");
 
-    // Phase gate: Rz(π/4) on |1⟩
+    // Phase gate P(π/4) = diag(1, e^{iπ/4}) on |1⟩ (Rz(π/4) differs by a global phase)
     let mut state = new_state(1);
     pauli_x(&mut state, 0, 1);
     phase_gate(&mut state, 0, 1, PI / 4.0);
@@ -284,38 +281,63 @@ fn test_measurement_probability() {
     assert_near(total, 1.0, "normalization");
 }
 
-fn test_noise_channel() {
-    // Depolarizing noise: with probability p, replace state with
-    // maximally mixed state (I/2). Models random errors on a qubit.
-    //
-    // ρ → (1-p)ρ + (p/3)(XρX + YρY + ZρZ)
-    // For a pure |0⟩ state, prob(0) goes from 1.0 to 1-2p/3
+// ── Noise channels on a 2x2 density matrix ρ ──────────────────────────
+type Rho = [[Complex; 2]; 2];
 
+fn rho_add(a: Rho, b: Rho) -> Rho {
+    [[a[0][0].add(b[0][0]), a[0][1].add(b[0][1])], [a[1][0].add(b[1][0]), a[1][1].add(b[1][1])]]
+}
+fn rho_scale(a: Rho, s: f64) -> Rho {
+    [[a[0][0].scale(s), a[0][1].scale(s)], [a[1][0].scale(s), a[1][1].scale(s)]]
+}
+
+/// Depolarizing channel, Pauli form: ρ → (1-p)ρ + (p/3)(XρX + YρY + ZρZ).
+fn depolarize(r: Rho, p: f64) -> Rho {
+    let neg = |c: Complex| c.scale(-1.0);
+    let x = [[r[1][1], r[1][0]], [r[0][1], r[0][0]]];           // XρX
+    let y = [[r[1][1], neg(r[1][0])], [neg(r[0][1]), r[0][0]]]; // YρY
+    let z = [[r[0][0], neg(r[0][1])], [neg(r[1][0]), r[1][1]]]; // ZρZ
+    rho_add(rho_scale(r, 1.0 - p), rho_scale(rho_add(rho_add(x, y), z), p / 3.0))
+}
+
+/// Amplitude damping (Kraus K0 = diag(1, √(1-γ)), K1 = √γ|0⟩⟨1|): |1⟩ decays to |0⟩.
+fn amplitude_damp(r: Rho, g: f64) -> Rho {
+    let k = (1.0 - g).sqrt();
+    [[r[0][0].add(r[1][1].scale(g)), r[0][1].scale(k)], [r[1][0].scale(k), r[1][1].scale(1.0 - g)]]
+}
+
+/// Dephasing (phase damping): off-diagonal coherences shrink by (1-λ).
+fn dephase(r: Rho, l: f64) -> Rho {
+    [[r[0][0], r[0][1].scale(1.0 - l)], [r[1][0].scale(1.0 - l), r[1][1]]]
+}
+
+fn test_noise_channel() {
+    let one = Complex::new(1.0, 0.0);
+    let zero = Complex::zero();
+    let half = Complex::new(0.5, 0.0);
+    let trace = |r: Rho| r[0][0].re + r[1][1].re;
+
+    // Depolarizing noise (Pauli form): with probability p a random X, Y or Z
+    // error hits the qubit. For |0⟩⟨0|, prob(0) goes from 1.0 to 1 - 2p/3.
+    // (Not the same p as "replace ρ with I/2 with probability p", which
+    // would give 1 - p/2.)
     let p = 0.1; // 10% depolarizing error
-    // After depolarizing noise on |0⟩:
-    // prob(0) = 1 - 2p/3
-    let noisy_prob_0 = 1.0 - 2.0 * p / 3.0;
-    let noisy_prob_1 = 2.0 * p / 3.0;
-    assert_near(noisy_prob_0, 1.0 - 2.0 / 30.0, "depolarize |0⟩");
-    assert_near(noisy_prob_0 + noisy_prob_1, 1.0, "noise preserves norm");
+    let r = depolarize([[one, zero], [zero, zero]], p);
+    assert_near(r[0][0].re, 1.0 - 2.0 * p / 3.0, "depolarize |0⟩");
+    assert_near(trace(r), 1.0, "noise preserves trace");
 
     // Amplitude damping: |1⟩ decays to |0⟩ with probability γ (energy loss)
     // Models T1 relaxation in superconducting qubits
     let gamma = 0.05; // 5% decay probability
-    // |1⟩ after amplitude damping: prob(0) = γ, prob(1) = 1-γ
-    let damped_prob_0 = gamma;
-    let damped_prob_1 = 1.0 - gamma;
-    assert_near(damped_prob_0 + damped_prob_1, 1.0, "damping preserves norm");
-    assert!(damped_prob_1 > damped_prob_0, "mostly stays |1⟩");
+    let r = amplitude_damp([[zero, zero], [zero, one]], gamma);
+    assert_near(r[0][0].re, gamma, "damped prob(0) = γ");
+    assert_near(r[1][1].re, 1.0 - gamma, "damped prob(1) = 1-γ");
 
     // Dephasing: |+⟩ loses coherence, approaches (|0⟩⟨0| + |1⟩⟨1|)/2
-    // Models T2 relaxation. Off-diagonal elements of density matrix decay.
-    // For |+⟩ = (|0⟩+|1⟩)/√2, the off-diagonal term is 1/2.
-    // After dephasing: off-diag → (1-λ)/2
+    // Models T2 relaxation. Off-diagonal elements of density matrix decay;
+    // the populations (diagonal) do not.
     let lambda = 0.2;
-    let rho_01_before = Complex::new(0.5, 0.0); // off-diagonal of |+⟩⟨+|
-    let rho_01_after = rho_01_before.scale(1.0 - lambda);
-    let coherence_loss = rho_01_before.sub(rho_01_after);
-    assert!(coherence_loss.re > 0.0, "coherence decreased");
-    assert_near(rho_01_after.re, 0.4, "dephased off-diagonal");
+    let r = dephase([[half, half], [half, half]], lambda); // |+⟩⟨+|
+    assert_near(r[0][1].re, 0.4, "dephased off-diagonal");
+    assert_near(r[0][0].re, 0.5, "dephasing keeps populations");
 }

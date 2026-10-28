@@ -3,9 +3,10 @@
 # In-memory WAL: append a 24-byte log record (op, key, val) BEFORE
 # mutating the data store, then replay the durable prefix on recovery.
 # x86_64's flat memory + base+offset addressing is a perfect fit for the
-# cyrius byte-buffer shape — each `mov [rip + log_buf + offset], rN`
-# stores an i64 at a fixed offset and `imul rN, 24` produces the
-# per-record stride. The 256-record cap and the OP_INVALID/SET/DEL
+# cyrius byte-buffer shape. RIP-relative operands cannot take an index
+# register, so the buffer base goes into a register first —
+# `lea r8, [rip + log_buf]`, then `mov [r8 + rax + 8], rN` — and
+# `imul rN, 24` produces the per-record stride. The 256-record cap and the OP_INVALID/SET/DEL
 # constants match the cyrius reference. No real fsync — log_committed
 # snapshots the durable prefix.
 
@@ -170,6 +171,9 @@ store_get:
     ret
 
 # replay -> rax = applied count
+# The log is input, not trusted state: a torn or corrupt record can hold
+# any key. Replay stops at the first record whose key is out of range
+# rather than writing data_vals[key] wherever that lands.
 replay:
     push    rbx
     call    store_clear
@@ -184,6 +188,8 @@ replay:
     mov     rax, [r8 + rcx]             # op
     mov     rdi, [r8 + rcx + 8]         # key
     mov     rsi, [r8 + rcx + 16]        # val
+    cmp     rdi, STORE_KEYS
+    jae     .Lrp_done                   # unsigned: catches negative keys too
     cmp     rax, OP_SET
     je      .Lrp_set
     cmp     rax, OP_DEL
@@ -402,8 +408,45 @@ _start:
     inc     r13
     jmp     .Lcap_loop
 .Lcap_done:
-    test    r14, r14
-    jz      fail
+    # 6144 / 24 = 256 records fit: exactly 300 - 256 = 44 writes refused...
+    mov     rdi, r14
+    mov     rsi, 300 - LOG_CAP_BYTES / REC_SZ
+    call    expect_eq
+    # ...and a refused write never touched the data (log BEFORE data):
+    # key 0 still holds the last value whose record made it into the log
+    mov     rdi, 0
+    call    store_get
+    mov     rdi, rax
+    mov     rsi, LOG_CAP_BYTES / REC_SZ - 1
+    call    expect_eq
+
+    # --- test_replay_rejects_corrupt_key ---
+    # A record appended straight to the log (as a torn write could leave
+    # it) with key -768: without the check, replay writes data_vals[-768],
+    # which is log_buf[0] — the log overwriting itself.
+    call    reset_all
+    mov     rdi, 3
+    mov     rsi, 33
+    call    store_set
+    mov     rdi, OP_SET
+    mov     rsi, -768
+    mov     rdx, 0x41
+    call    log_append
+    call    log_commit
+    call    replay
+    mov     rdi, rax
+    mov     rsi, 1                      # only the good record applied
+    call    expect_eq
+    mov     rdi, 0
+    call    load64_buf
+    mov     rdi, rax
+    mov     rsi, OP_SET                 # record 0 untouched
+    call    expect_eq
+    mov     rdi, 3
+    call    store_get
+    mov     rdi, rax
+    mov     rsi, 33
+    call    expect_eq
 
     # --- Done — write success and exit 0 ---
     mov     rax, 1

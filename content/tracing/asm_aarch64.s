@@ -174,6 +174,7 @@ print_u64:
     cbnz    x0, .Lconv_loop
     mov     w17, #'0'
     strb    w17, [x15]
+    sub     x15, x15, #1       // same invariant as the loop: x15 = one before first digit
     mov     x16, #1
     b       .Lconv_print
 
@@ -190,11 +191,10 @@ print_u64:
     b       .Lconv_loop
 
 .Lconv_print:
-    // x15+1 points to first digit if we decremented, or x15 if zero
-    // Adjust: after loop, x15 is one before first digit
-    add     x1, x15, #1        // start of digits (unless zero path)
-    // For zero case, x15 was not decremented, digit is at x15
-    // Check: if count==1 and we came from zero path, digit is at num_buf+19
+    // Both paths leave x15 one byte before the first digit. (Without the
+    // decrement on the zero path, x1 would be num_buf+20 — one past the
+    // buffer — and a zero would print as a NUL byte instead of '0'.)
+    add     x1, x15, #1        // start of digits
     mov     x8, #64
     mov     x0, #1              // stdout
     mov     x2, x16             // length

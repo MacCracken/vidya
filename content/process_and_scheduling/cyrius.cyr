@@ -35,7 +35,7 @@ fn sched_round_robin(current, count, states) {
     while (si < count) {
         var idx = start + si;
         if (idx >= count) { idx = idx - count; }
-        if (load64(states + idx * 8) == 1) { return idx; }
+        if (load64(states + idx * 8) == PROC_READY()) { return idx; }
         si = si + 1;
     }
     return current;
@@ -49,15 +49,17 @@ fn sched_round_robin(current, count, states) {
 # for local variables and will interleave stack operations between pushes.
 
 fn test_states() {
-    assert_eq(PROC_HALTED(), 0, "halted=0");
-    assert_eq(PROC_READY(), 1, "ready=1");
-    assert_eq(PROC_RUNNING(), 2, "running=2");
+    # The scheduler compares against PROC_READY, so the three states must be
+    # distinct codes (a RUNNING process must never look READY).
+    assert_neq(PROC_HALTED(), PROC_READY(), "halted != ready");
+    assert_neq(PROC_RUNNING(), PROC_READY(), "running != ready");
+    assert_neq(PROC_HALTED(), PROC_RUNNING(), "halted != running");
     return 0;
 }
 
 fn test_scheduler() {
     # Simulate 4 processes: 0=running, 1=halted, 2=ready, 3=ready
-    var states[4];
+    var states: i64[4];         # 4 i64 slots; a bare fn-local `var states[4]` is 4 BYTES
     store64(&states, 2);
     store64(&states + 8, 0);
     store64(&states + 16, 1);
@@ -72,8 +74,11 @@ fn test_scheduler() {
 }
 
 fn test_isr_offsets() {
-    assert_eq(isr_frame_rip_off(), 72, "rip at +72");
-    assert_eq(isr_frame_rsp_off(), 96, "rsp at +96");
+    # The CPU frame starts right above the 9 pushed registers, and its
+    # fields are RIP, CS, RFLAGS, RSP, SS at 8-byte steps.
+    assert_eq(isr_frame_rip_off(), 9 * 8, "rip just above 9 pushed regs");
+    assert_eq(isr_frame_rflags_off(), isr_frame_rip_off() + 2 * 8, "rflags = rip + 16 (after CS)");
+    assert_eq(isr_frame_rsp_off(), isr_frame_rip_off() + 3 * 8, "rsp = rip + 24");
     return 0;
 }
 

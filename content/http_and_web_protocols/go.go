@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 )
 
 type Request struct {
@@ -52,7 +53,19 @@ func parseRequest(buf []byte) *Request {
 		}
 		if buf[pos] == '\r' && buf[pos+1] == '\n' {
 			pos += 2
-			req.Body = append([]byte{}, buf[pos:]...)
+			// The body is exactly Content-Length bytes (RFC 9112 §6.3);
+			// bytes after it belong to the next pipelined request. A
+			// request with no Content-Length (and no chunked coding, which
+			// this parser does not handle) has no body at all.
+			n := 0
+			if cl := headerLookup(req, "content-length"); cl != nil {
+				v, err := strconv.Atoi(string(cl))
+				if err != nil || v < 0 || pos+v > len(buf) {
+					return nil // malformed length, or body not fully received
+				}
+				n = v
+			}
+			req.Body = append([]byte{}, buf[pos:pos+n]...)
 			return req
 		}
 		lineEnd := findCRLF(buf, pos)
@@ -88,66 +101,55 @@ func headerLookup(req *Request, name string) []byte {
 	return nil
 }
 
+// checks counts the assertions this file runs, for the final tally.
+var checks int
+
+func check(cond bool, label string) {
+	checks++
+	if !cond {
+		panic(label)
+	}
+}
+
 func main() {
 	req1 := []byte("GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	r1 := parseRequest(req1)
-	if r1 == nil {
-		panic("req1")
-	}
-	if !bytes.Equal(r1.Method, []byte("GET")) {
-		panic("method")
-	}
-	if !bytes.Equal(r1.Path, []byte("/index.html")) {
-		panic("path")
-	}
-	if !bytes.Equal(r1.Version, []byte("HTTP/1.1")) {
-		panic("version")
-	}
-	if len(r1.Headers) != 1 {
-		panic("hdr count")
-	}
+	check(r1 != nil, "req1")
+	check(bytes.Equal(r1.Method, []byte("GET")), "method")
+	check(bytes.Equal(r1.Path, []byte("/index.html")), "path")
+	check(bytes.Equal(r1.Version, []byte("HTTP/1.1")), "version")
+	check(len(r1.Headers) == 1, "hdr count")
 
 	for _, n := range []string{"host", "HOST", "Host"} {
-		if !bytes.Equal(headerLookup(r1, n), []byte("example.com")) {
-			panic(fmt.Sprintf("case %s", n))
-		}
+		check(bytes.Equal(headerLookup(r1, n), []byte("example.com")), fmt.Sprintf("case %s", n))
 	}
 
 	req3 := []byte("GET / HTTP/1.1\r\nHost: x\r\nUser-Agent: test/1.0\r\nAccept: */*\r\n\r\n")
 	r3 := parseRequest(req3)
-	if len(r3.Headers) != 3 {
-		panic("hdr3")
-	}
-	if !bytes.Equal(headerLookup(r3, "user-agent"), []byte("test/1.0")) {
-		panic("ua")
-	}
+	check(len(r3.Headers) == 3, "hdr3")
+	check(bytes.Equal(headerLookup(r3, "user-agent"), []byte("test/1.0")), "ua")
 
 	req4 := []byte("POST /api HTTP/1.1\r\nContent-Length: 11\r\n\r\nhello world")
 	r4 := parseRequest(req4)
-	if !bytes.Equal(r4.Method, []byte("POST")) {
-		panic("post")
-	}
-	if !bytes.Equal(r4.Body, []byte("hello world")) {
-		panic("body")
-	}
+	check(bytes.Equal(r4.Method, []byte("POST")), "post")
+	check(bytes.Equal(r4.Body, []byte("hello world")), "body")
 
 	req5 := []byte("POST /a HTTP/1.1\r\nContent-Length: 13\r\n\r\nline1\r\nline2!")
 	r5 := parseRequest(req5)
-	if len(r5.Body) != 13 {
-		panic("body5 len")
-	}
-	if !bytes.Equal(r5.Body, []byte("line1\r\nline2!")) {
-		panic("body5")
-	}
+	check(len(r5.Body) == 13, "body5 len")
+	check(bytes.Equal(r5.Body, []byte("line1\r\nline2!")), "body5")
+
+	// Content-Length frames the body: trailing bytes are not body.
+	req7 := []byte("POST /a HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET / HTTP/1.1\r\n")
+	r7 := parseRequest(req7)
+	check(r7 != nil && bytes.Equal(r7.Body, []byte("hello")), "body must stop at Content-Length")
 
 	req6 := []byte("GET / HTTP/1.1\r\nHost: x\r\n")
-	if parseRequest(req6) != nil {
-		panic("malformed accepted")
-	}
+	check(parseRequest(req6) == nil, "malformed accepted")
 
-	if headerLookup(r1, "authorization") != nil {
-		panic("absent")
-	}
+	check(headerLookup(r1, "authorization") == nil, "absent")
 
-	fmt.Println("http_and_web_protocols: 24/24 ok")
+	// Every check panics on failure, so reaching this line means all
+	// `checks` of them ran and passed; the count is not hard-coded.
+	fmt.Printf("http_and_web_protocols: %d/%d ok\n", checks, checks)
 }

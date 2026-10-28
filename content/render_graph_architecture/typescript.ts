@@ -1,6 +1,10 @@
 // Vidya — Render Graph Architecture in TypeScript
 //
 // Tiny DAG: reads/writes bitmasks → topo sort + barriers + cull.
+// Culling removes a pass whose outputs no live pass reads, repeated to a
+// fixed point (a producer whose only reader was culled is dead too), and
+// a culled pass is not scheduled. A pass that writes nothing is a sink
+// (e.g. present) and is always kept.
 
 const PASS_CAP = 16;
 
@@ -8,6 +12,7 @@ class Graph {
   passId = new Array<number>(PASS_CAP).fill(0);
   reads = new Array<number>(PASS_CAP).fill(0);
   writes = new Array<number>(PASS_CAP).fill(0);
+  culled = new Array<boolean>(PASS_CAP).fill(false);
   count = 0;
   topoOrder = new Array<number>(PASS_CAP).fill(0);
   topoLen = 0;
@@ -27,14 +32,17 @@ class Graph {
 
   topoSort(): number {
     const inDegree = new Array<number>(PASS_CAP).fill(0);
+    let live = 0;
     for (let i = 0; i < this.count; i++) {
+      if (this.culled[i]) { inDegree[i] = -1; continue; } // never scheduled
+      live++;
       for (let j = 0; j < this.count; j++) {
-        if (i !== j && this.hasEdge(j, i)) inDegree[i]++;
+        if (i !== j && !this.culled[j] && this.hasEdge(j, i)) inDegree[i]++;
       }
     }
     this.topoLen = 0;
     let emitted = 0;
-    while (emitted < this.count) {
+    while (emitted < live) {
       let picked = -1;
       for (let k = 0; k < this.count; k++) {
         if (inDegree[k] === 0) { picked = k; break; }
@@ -64,17 +72,24 @@ class Graph {
 
   cullDead(): number {
     let culled = 0;
-    for (let i = 0; i < this.count; i++) {
-      const w = this.writes[i];
-      if (w === 0) continue;
-      let anyReader = false;
-      for (let j = 0; j < this.count; j++) {
-        if (i !== j && (w & this.reads[j]) !== 0) { anyReader = true; break; }
-      }
-      if (!anyReader) {
-        this.writes[i] = 0;
-        this.reads[i] = 0;
-        culled++;
+    let changed = true;
+    while (changed) {            // fixed point: culling B can orphan A
+      changed = false;
+      for (let i = 0; i < this.count; i++) {
+        if (this.culled[i]) continue;
+        const w = this.writes[i];
+        if (w === 0) continue;   // sink pass: always live
+        let anyReader = false;
+        for (let j = 0; j < this.count; j++) {
+          if (i !== j && !this.culled[j] && (w & this.reads[j]) !== 0) { anyReader = true; break; }
+        }
+        if (!anyReader) {
+          this.culled[i] = true;
+          this.writes[i] = 0;
+          this.reads[i] = 0;
+          culled++;
+          changed = true;
+        }
       }
     }
     return culled;
@@ -102,15 +117,23 @@ function main(): void {
   eq(g.addPass(103, 0, 4), 3, "d");
   eq(g.cullDead(), 1, "cull");
   if (g.writes[3] !== 0) throw new Error("writes zeroed");
-  eq(g.topoSort(), 4, "topo4");
+  eq(g.topoSort(), 3, "culled pass not scheduled");
   eq(g.barrierCount(), 2, "barriers post-cull");
+
+  // Transitive cull: A → B → (nobody). Culling B leaves A without a reader.
+  const gt = new Graph();
+  gt.addPass(300, 0, 8);   // A
+  gt.addPass(301, 8, 16);  // B: its output 16 is never read
+  gt.addPass(302, 0, 0);   // sink (present)
+  eq(gt.cullDead(), 2, "transitive cull removes A and B");
+  eq(gt.topoSort(), 1, "only the sink is scheduled");
 
   const g2 = new Graph();
   g2.addPass(200, 1, 2);
   g2.addPass(201, 2, 1);
   eq(g2.topoSort(), 0, "cycle");
 
-  console.log("render_graph_architecture: 14/14 ok");
+  console.log("render_graph_architecture: 16/16 ok");
 }
 
 main();

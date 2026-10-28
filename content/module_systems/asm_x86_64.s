@@ -72,9 +72,11 @@ _start:
     jne     fail
 
     # ── Local labels: private to this scope ────────────────────────
-    # Labels starting with . are local — they don't pollute the global
-    # symbol table. The linker never sees them.
-    call    .local_helper
+    # Labels starting with .L are assembler-local: they never reach the
+    # object's symbol table, so the linker never sees them. (Only the .L
+    # prefix does this on ELF — a plain dot like `.foo` is an ordinary
+    # file-local symbol, listed by `readelf -s` just like private_add.)
+    call    .Llocal_helper
     cmp     eax, 77
     jne     fail
 
@@ -149,7 +151,7 @@ fail:
     syscall
 
 # ── Local label helper: only visible within this file ──────────────
-.local_helper:
+.Llocal_helper:
     mov     eax, 77
     ret
 

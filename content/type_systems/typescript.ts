@@ -90,6 +90,21 @@ type OnlyStrings = ExtractStrings<string | number | boolean>; // string
 type EventName = `on${Capitalize<"click" | "hover" | "focus">}`;
 // "onClick" | "onHover" | "onFocus"
 
+// The type-level tests above are only comments until something checks them.
+// Equal<A, B> is exact (not mere assignability); Expect<> fails to compile
+// on `false`, so `tsc` is the test runner. Change a claim and the gate fails.
+type Equal<A, B> =
+    (<X>() => X extends A ? 1 : 2) extends (<X>() => X extends B ? 1 : 2) ? true : false;
+type Expect<T extends true> = T;
+type TypeTests = [
+    Expect<Equal<Test1, "yes">>,
+    Expect<Equal<Test2, "no">>,
+    Expect<Equal<OnlyStrings, string>>,
+    Expect<Equal<EventName, "onClick" | "onHover" | "onFocus">>,
+    Expect<Equal<Required<{ host?: string }>, { host: string }>>,
+];
+const typeTests: TypeTests = [true, true, true, true, true];
+
 // ── Branded types (newtype pattern) ────────────────────────────────
 
 type Meters = number & { __brand: "meters" };
@@ -194,8 +209,12 @@ function main(): void {
         green: "#00ff00",
     } satisfies Record<string, string | number[]>;
 
-    // palette.red is still number[], not string | number[]
-    assert(Array.isArray(palette.red), "satisfies preserves type");
+    // palette.red is still number[], not string | number[] — so each key
+    // keeps its own methods. With `: Record<...>` instead, neither line compiles.
+    assert(palette.red.map((c) => c / 255)[0] === 1, "satisfies keeps number[]");
+    assert(palette.green.toUpperCase() === "#00FF00", "satisfies keeps string");
+
+    assert(typeTests.every((t) => t), "type-level tests compiled");
 
     console.log("All type system examples passed.");
 }

@@ -1,8 +1,11 @@
 // Vidya — Quantum Computing in Go
 //
-// Go lacks complex number support in the type system beyond complex128,
-// but that's exactly what we need. State vectors are []complex128,
-// gates are matrix operations, and measurement is |amplitude|^2.
+// Go has built-in complex types (complex64, complex128) with ordinary
+// arithmetic operators, plus math/cmplx — exactly what we need. State
+// vectors are []complex128, gates are matrix operations, and measurement
+// is |amplitude|^2. Noise needs a density matrix (a mixed state has no
+// single state vector), so the noise channels apply Kraus operators to a
+// 2x2 one.
 
 package main
 
@@ -188,18 +191,73 @@ func testGHZState() {
 	assertNear(total, 1.0, "normalization")
 }
 
+// ── Noise: Kraus channels on a one-qubit density matrix ──────────────
+type mat2 = [2][2]complex128
+
+func mul2(a, b mat2) mat2 {
+	var c mat2
+	for i := 0; i < 2; i++ {
+		for j := 0; j < 2; j++ {
+			c[i][j] = a[i][0]*b[0][j] + a[i][1]*b[1][j]
+		}
+	}
+	return c
+}
+
+func dagger(a mat2) mat2 {
+	return mat2{{cmplx.Conj(a[0][0]), cmplx.Conj(a[1][0])}, {cmplx.Conj(a[0][1]), cmplx.Conj(a[1][1])}}
+}
+
+// applyChannel returns Σ K ρ K† for the channel's Kraus operators.
+func applyChannel(rho mat2, kraus []mat2) mat2 {
+	var out mat2
+	for _, k := range kraus {
+		t := mul2(mul2(k, rho), dagger(k))
+		for i := range out {
+			for j := range out[i] {
+				out[i][j] += t[i][j]
+			}
+		}
+	}
+	return out
+}
+
+func scale(a mat2, f float64) mat2 {
+	c := complex(f, 0)
+	return mat2{{c * a[0][0], c * a[0][1]}, {c * a[1][0], c * a[1][1]}}
+}
+
 func testNoiseChannels() {
+	I := mat2{{1, 0}, {0, 1}}
+	X := mat2{{0, 1}, {1, 0}}
+	Y := mat2{{0, -1i}, {1i, 0}}
+	Z := mat2{{1, 0}, {0, -1}}
+	zero := mat2{{1, 0}, {0, 0}}         // |0⟩⟨0|
+	one := mat2{{0, 0}, {0, 1}}          // |1⟩⟨1|
+	plus := mat2{{0.5, 0.5}, {0.5, 0.5}} // |+⟩⟨+|
+	trace := func(r mat2) float64 { return real(r[0][0] + r[1][1]) }
+
+	// Depolarizing: with prob p apply X, Y or Z (p/3 each).
 	p := 0.1
-	noisyP0 := 1.0 - 2*p/3
-	noisyP1 := 2 * p / 3
-	assertNear(noisyP0+noisyP1, 1.0, "depolarize norm")
+	dep := []mat2{scale(I, math.Sqrt(1-p)), scale(X, math.Sqrt(p/3)), scale(Y, math.Sqrt(p/3)), scale(Z, math.Sqrt(p/3))}
+	r := applyChannel(zero, dep)
+	assertNear(real(r[0][0]), 1-2*p/3, "depolarized |0⟩ keeps P(0) = 1 - 2p/3")
+	assertNear(trace(r), 1.0, "depolarize preserves trace")
 
+	// Amplitude damping: |1⟩ decays to |0⟩ with probability gamma.
 	gamma := 0.05
-	assertNear(gamma+(1-gamma), 1.0, "damping norm")
+	damp := []mat2{{{1, 0}, {0, complex(math.Sqrt(1-gamma), 0)}}, {{0, complex(math.Sqrt(gamma), 0)}, {0, 0}}}
+	r = applyChannel(one, damp)
+	assertNear(real(r[1][1]), 1-gamma, "damped |1⟩: P(1) = 1 - gamma")
+	assertNear(real(r[0][0]), gamma, "damped |1⟩: P(0) = gamma")
 
+	// Dephasing: Z with prob lam/2 shrinks coherence by (1 - lam),
+	// populations untouched.
 	lam := 0.2
-	dephased := 0.5 * (1 - lam)
-	assertNear(dephased, 0.4, "dephased coherence")
+	deph := []mat2{scale(I, math.Sqrt(1-lam/2)), scale(Z, math.Sqrt(lam/2))}
+	r = applyChannel(plus, deph)
+	assertNear(real(r[0][1]), 0.5*(1-lam), "dephased coherence")
+	assertNear(real(r[0][0]), 0.5, "dephasing leaves populations alone")
 
 	nGates := 100
 	gateErr := 0.001

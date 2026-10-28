@@ -50,10 +50,12 @@ impl Adsr {
         }
     }
     fn set_params(&mut self, attack: i32, decay: i32, sustain: i32, release: i32) {
-        self.attack_samples = attack;
-        self.decay_samples = decay;
+        // Stage lengths are divisors in step(): clamp to >= 1 sample so an
+        // "instant" (0-sample) stage takes one step instead of dividing by zero.
+        self.attack_samples = attack.max(1);
+        self.decay_samples = decay.max(1);
         self.sustain_level = sustain;
-        self.release_samples = release;
+        self.release_samples = release.max(1);
     }
     fn gate_on(&mut self) {
         self.state = EnvelopeState::Attack;
@@ -206,6 +208,14 @@ fn main() {
         e.gate_off();
         assert_eq!(e.release_start, 8192);
     }
+    // instant (0-sample) stages: one step each, no divide-by-zero
+    {
+        let mut e = Adsr::new();
+        e.set_params(0, 0, 16384, 0);
+        e.gate_on();
+        assert_eq!(e.step(), ONE);   // attack done in one sample
+        assert_eq!(e.step(), 16384); // decay done in one sample
+    }
     // voice silent when idle
     {
         let mut e = Adsr::new();
@@ -223,5 +233,5 @@ fn main() {
         assert!(any_nonzero);
     }
 
-    println!("audio_synthesis: 11 tests, 25 assertions ok");
+    println!("audio_synthesis: 12 tests, 27 assertions ok");
 }

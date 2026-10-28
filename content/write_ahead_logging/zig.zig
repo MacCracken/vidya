@@ -108,6 +108,12 @@ fn replay() i64 {
         const op = load64(pos + 0);
         const key = load64(pos + 8);
         const val = load64(pos + 16);
+        // The log is input from disk: validate before indexing. A key out
+        // of range means a corrupt or torn record, so stop replaying there
+        // (a real WAL also checksums each record). Without this check a
+        // flipped key indexes past data_vals: a safety panic in Debug,
+        // a silent out-of-bounds write in ReleaseFast.
+        if (key < 0 or key >= @as(i64, @intCast(STORE_KEYS))) break;
         if (op == OP_SET) {
             const k: usize = @intCast(key);
             data_vals[k] = val;
@@ -201,6 +207,16 @@ pub fn main() !void {
         if (storeSet(0, j) == 0) failures += 1;
     }
     assert(failures > 0);
+
+    // test_corrupt_record_stops_replay
+    resetAll();
+    _ = storeSet(1, 11);
+    _ = storeSet(2, 22);
+    store64(REC_SZ + 8, 1000); // corrupt the second record's key
+    _ = logCommit();
+    assert(replay() == 1); // first record applied, replay stops at the bad one
+    assert(storeGet(1) == 11);
+    assert(storeGet(2) == -1);
 
     print("All write_ahead_logging examples passed.\n", .{});
 }

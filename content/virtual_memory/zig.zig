@@ -1,9 +1,9 @@
 // Vidya — Virtual Memory in Zig
 //
 // x86_64 uses 4-level page tables (PML4 → PDPT → PD → PT → Page).
-// Each level indexes 9 bits of the virtual address. Zig packed structs
-// model page table entries with exact bitfield layout. comptime builds
-// page tables and validates address arithmetic at compile time.
+// Each level indexes 9 bits of the virtual address. Page table entries
+// are modelled as a raw u64 plus bit masks (the layout the CPU reads);
+// u9/u12 fields give the address decomposition exact widths.
 
 const std = @import("std");
 const expect = std.testing.expect;
@@ -304,6 +304,7 @@ const Tlb = struct {
     entries: [TLB_SIZE]TlbEntry,
     hits: u64,
     misses: u64,
+    next_victim: usize = 0, // FIFO cursor once every slot is valid
 
     fn init() Tlb {
         return .{
@@ -330,14 +331,20 @@ const Tlb = struct {
     }
 
     fn insert(self: *Tlb, vpage: u64, ppage: u64, asid: u16) void {
-        // Simple FIFO replacement — real TLBs use pseudo-LRU
-        var slot: usize = 0;
+        // Simple FIFO replacement — real TLBs use pseudo-LRU. Fill an
+        // invalid slot first; once full, evict round-robin (the oldest
+        // fill). Defaulting to slot 0 instead would evict the newest entry
+        // on every later miss.
+        var slot: usize = self.next_victim;
+        var found_free = false;
         for (self.entries, 0..) |e, i| {
             if (!e.valid) {
                 slot = i;
+                found_free = true;
                 break;
             }
         }
+        if (!found_free) self.next_victim = (self.next_victim + 1) % TLB_SIZE;
         self.entries[slot] = .{
             .vaddr = vpage,
             .paddr = ppage,
@@ -398,6 +405,16 @@ fn testTlbSimulation() !void {
     tlb.flushAsid(0);
     try expect(tlb.lookup(0x1000, 0) == null); // flushed
     try expect(tlb.lookup(0x1000, 1) != null); // still valid
+
+    // FIFO eviction once full: two inserts past capacity evict the two
+    // oldest entries, not the same slot twice
+    var t2 = Tlb.init();
+    var page: u64 = 0;
+    while (page < TLB_SIZE + 2) : (page += 1) t2.insert(page << 12, page << 12, 0);
+    try expect(t2.lookup(0 << 12, 0) == null); // oldest: evicted
+    try expect(t2.lookup(1 << 12, 0) == null); // second oldest: evicted
+    try expect(t2.lookup(TLB_SIZE << 12, 0) != null); // 1st insert past full: kept
+    try expect(t2.lookup((TLB_SIZE + 1) << 12, 0) != null); // newest: kept
 }
 
 // ── Address Space Layout ─────────────────────────────────────────────
@@ -464,4 +481,5 @@ fn testPageFaultClassification() !void {
     // NX violation: instruction fetch from non-executable page
     const nx_error = PfError.PRESENT | PfError.IFETCH;
     try expect(nx_error & PfError.IFETCH != 0);
+    try expect(classifyPageFault(nx_error, false) == .protection); // present page, so not "not mapped"
 }

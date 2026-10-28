@@ -37,8 +37,8 @@ interface Symbol {
 type RelocationType =
     | "R_X86_64_64"      // absolute 64-bit address
     | "R_X86_64_PC32"    // PC-relative 32-bit offset
-    | "R_X86_64_GOT"     // GOT entry reference
-    | "R_X86_64_PLT"     // PLT entry reference
+    | "R_X86_64_GOTPCREL" // PC-relative 32-bit offset to the symbol's GOT entry
+    | "R_X86_64_PLT32"   // PC-relative 32-bit offset to the symbol's PLT entry
     ;
 
 interface Relocation {
@@ -99,9 +99,14 @@ class StaticLinker {
     private outputData: Map<string, Uint8Array> = new Map();
     private errors: string[] = [];
 
-    link(objects: ObjectFile[]): { symbols: Map<string, LinkedSymbol>; errors: string[] } {
+    link(objects: ObjectFile[]): {
+        symbols: Map<string, LinkedSymbol>;
+        sections: Map<string, Uint8Array>;
+        errors: string[];
+    } {
         this.globalSymbols.clear();
         this.sectionBases.clear();
+        this.outputData.clear();
         this.errors = [];
 
         // Phase 1: assign section base addresses
@@ -123,12 +128,24 @@ class StaticLinker {
             currentAddress = (currentAddress + 0xfff) & ~0xfff;
         }
 
-        // Phase 2: collect symbols with final addresses
-        const sectionOffsets: Map<string, number> = new Map(); // per-section cursor
+        // Phase 2: place each object's pieces, collect symbols with final addresses
+        const sectionCursor: Map<string, number> = new Map();   // bytes used so far in each merged section
+        const pieceStart: Map<string, number> = new Map();      // "obj:sec" → where that object's piece starts
 
         for (const obj of objects) {
+            // This object's sections go after every earlier object's piece
+            for (const [secName, section] of obj.sections) {
+                const start = sectionCursor.get(secName) ?? 0;
+                pieceStart.set(`${obj.name}:${secName}`, start);
+                this.outputData.get(secName)!.set(section.data, start);
+                sectionCursor.set(secName, start + section.size);
+            }
+
             for (const sym of obj.symbols) {
                 if (sym.symbolKind === "undefined") continue;
+                // Locals are visible only inside their own object file; they
+                // never enter (or override anything in) the global table.
+                if (sym.binding === "local") continue;
 
                 const secBase = this.sectionBases.get(sym.section);
                 if (secBase === undefined) {
@@ -136,7 +153,7 @@ class StaticLinker {
                     continue;
                 }
 
-                const secOff = sectionOffsets.get(`${obj.name}:${sym.section}`) ?? 0;
+                const secOff = pieceStart.get(`${obj.name}:${sym.section}`) ?? 0;
                 const address = secBase + secOff + sym.offset;
 
                 const existing = this.globalSymbols.get(sym.name);
@@ -152,12 +169,6 @@ class StaticLinker {
                     binding: sym.binding,
                 });
             }
-
-            // Advance section offsets for this object file
-            for (const [secName, section] of obj.sections) {
-                const key = `${obj.name}:${secName}`;
-                sectionOffsets.set(key, (sectionOffsets.get(key) ?? 0) + section.size);
-            }
         }
 
         // Phase 3: check for undefined symbols
@@ -169,19 +180,42 @@ class StaticLinker {
             }
         }
 
-        // Phase 4: apply relocations
+        // Phase 4: apply relocations — patch each placeholder in the output.
+        // S = symbol address, A = addend, P = address of the bytes being patched.
+        // (Every relocation here targets .text; a real object file keeps one
+        // .rela.<section> table per section it patches.)
+        const text = this.outputData.get(".text");
+        const textBase = this.sectionBases.get(".text");
         for (const obj of objects) {
+            const start = pieceStart.get(`${obj.name}:.text`);
+            if (!text || textBase === undefined || start === undefined) continue;
+            const view = new DataView(text.buffer, text.byteOffset, text.byteLength);
             for (const reloc of obj.relocations) {
                 const sym = this.globalSymbols.get(reloc.symbolName);
-                if (!sym) continue;
+                if (!sym) continue; // already reported as undefined in phase 3
 
-                const resolved = sym.address + reloc.addend;
-                // In a real linker, we'd write resolved into the output section.
-                // Here we just verify resolution succeeds.
+                const at = start + reloc.offset;
+                const S = sym.address, A = reloc.addend, P = textBase + at;
+                switch (reloc.type) {
+                    case "R_X86_64_64":
+                        view.setBigUint64(at, BigInt(S + A), true);
+                        break;
+                    case "R_X86_64_PC32":
+                    case "R_X86_64_PLT32": // static link: no PLT, so the PLT entry is S itself
+                        view.setInt32(at, S + A - P, true);
+                        break;
+                    case "R_X86_64_GOTPCREL":
+                        this.errors.push(`${reloc.type} against '${reloc.symbolName}': no GOT in this static model`);
+                        break;
+                }
             }
         }
 
-        return { symbols: new Map(this.globalSymbols), errors: [...this.errors] };
+        return {
+            symbols: new Map(this.globalSymbols),
+            sections: new Map(this.outputData),
+            errors: [...this.errors],
+        };
     }
 }
 
@@ -288,7 +322,7 @@ function testObjectFileCreation(): void {
         section: "", offset: 0, size: 0,
     });
     obj.addRelocation({
-        offset: 10, type: "R_X86_64_PLT", symbolName: "printf", addend: -4,
+        offset: 10, type: "R_X86_64_PLT32", symbolName: "printf", addend: -4,
     });
 
     assert(obj.sections.size === 2, "two sections");
@@ -323,8 +357,15 @@ function testStaticLinking(): void {
 
     const mainSym = result.symbols.get("main")!;
     const helperSym = result.symbols.get("helper")!;
-    assert(mainSym.address >= 0x400000, "main in expected range");
-    assert(helperSym.address >= 0x400000, "helper in expected range");
+    assert(mainSym.address === 0x400000, "main at the start of .text");
+    // helper.o's .text is placed AFTER main.o's 32 bytes, not on top of them
+    assert(helperSym.address === mainSym.address + 32, "helper follows main.o's .text");
+
+    // The PC32 placeholder at main+16 now holds S + A - P = helper - 4 - (main + 16)
+    const text = result.sections.get(".text")!;
+    const disp = new DataView(text.buffer, text.byteOffset, text.byteLength).getInt32(16, true);
+    assert(disp === helperSym.address - 4 - (mainSym.address + 16), "PC32 relocation patched");
+    assert(disp === 12, "call displacement = 12");
 }
 
 function testUndefinedSymbolError(): void {

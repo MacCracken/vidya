@@ -302,6 +302,7 @@ fn demonstrate_borrow_checker_simulation() {
         let l2 = checker.borrow("data", BorrowKind::Shared, "line 11");
         println!("    Active: {:?}", checker.active_loans().iter().map(|l| l.to_string()).collect::<Vec<_>>());
         println!("    Conflicts: {}", checker.has_conflicts());
+        assert!(!checker.has_conflicts(), "scenario 1 should pass");
 
         checker.release(l1);
         checker.release(l2);
@@ -319,6 +320,7 @@ fn demonstrate_borrow_checker_simulation() {
         for conflict in &checker.conflicts {
             println!("    {conflict}");
         }
+        assert_eq!(checker.conflicts.len(), 1, "scenario 2 should fail with one conflict");
 
         // With NLL: if the shared borrow is dead before the mutable one starts, no conflict.
         checker.release(l1);
@@ -341,6 +343,7 @@ fn demonstrate_borrow_checker_simulation() {
         let l2 = checker.borrow("data", BorrowKind::Mutable, "line 32: data.push(x)");
         println!("    Mutable borrow created: {}", checker.loans[&l2]);
         println!("    Conflicts: {}", checker.has_conflicts());
+        assert!(!checker.has_conflicts(), "scenario 3 should pass");
 
         checker.release(l2);
         println!();
@@ -356,6 +359,7 @@ fn demonstrate_borrow_checker_simulation() {
 
         println!("    Active: {:?}", checker.active_loans().iter().map(|l| l.to_string()).collect::<Vec<_>>());
         println!("    Conflicts: {} (different places don't alias)", checker.has_conflicts());
+        assert!(!checker.has_conflicts(), "scenario 4 should pass");
         println!();
     }
 

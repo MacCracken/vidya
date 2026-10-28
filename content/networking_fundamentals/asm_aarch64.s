@@ -1,6 +1,16 @@
 // Vidya — Networking Fundamentals in AArch64 Assembly
 //
 // In-memory simulation of TCP socket state machine + lifecycle.
+//
+// Simplified on purpose — it is NOT the full TCP state machine:
+// - connect() turns the LISTENING socket itself into the connection. A
+//   real listener stays in LISTEN and accept() returns a NEW socket.
+// - There is no handshake (SYN_SENT/SYN_RCVD) and no FIN_WAIT/CLOSE_WAIT
+//   sequence: close() is immediate. ST_FIN_WAIT is accepted by recv but
+//   never entered.
+// - close() does unlink the peer, so the other end cannot keep sending
+//   into a closed socket's buffer.
+// Ports are range-checked (0..65535): port_to_sock is indexed by port.
 
 .global _start
 
@@ -25,7 +35,7 @@ port_to_sock: .skip 8 * 65536
 next_free:    .quad 1
 
 .section .rodata
-msg_pass:     .ascii "networking_fundamentals: 19/19 ok\n"
+msg_pass:     .ascii "networking_fundamentals: 20/20 ok\n"
 .equ msg_pass_len, . - msg_pass
 msg_fail:     .ascii "FAIL\n"
 .equ msg_fail_len, . - msg_fail
@@ -99,6 +109,8 @@ sock_bind:
     cbz     x0, .sb_z
     cmp     x0, #SOCK_CAP
     b.ge    .sb_z
+    cmp     x1, #65536            // unsigned: also rejects negative ports
+    b.hs    .sb_z
     adrp    x2, port_to_sock
     add     x2, x2, :lo12:port_to_sock
     ldr     x3, [x2, x1, lsl #3]
@@ -142,6 +154,8 @@ sock_connect:
     cbz     x0, .scn_z
     cmp     x0, #SOCK_CAP
     b.ge    .scn_z
+    cmp     x1, #65536
+    b.hs    .scn_z
     adrp    x2, port_to_sock
     add     x2, x2, :lo12:port_to_sock
     ldr     x3, [x2, x1, lsl #3]      // server
@@ -266,6 +280,10 @@ sock_close:
     str     x3, [x2, x0, lsl #3]
     adrp    x2, peer_arr
     add     x2, x2, :lo12:peer_arr
+    ldr     x4, [x2, x0, lsl #3]      // peer
+    cbz     x4, .scl_no_peer
+    str     x3, [x2, x4, lsl #3]      // unlink the peer's side too
+.scl_no_peer:
     str     x3, [x2, x0, lsl #3]
     mov     x0, #1
     ret
@@ -367,6 +385,13 @@ _start:
     mov     x0, x20
     bl      state_get
     mov     x1, #ST_CLOSED
+    bl      assert_eq
+
+    // the server may not send into the closed client's buffer
+    mov     x0, x19
+    mov     x1, #68
+    bl      sock_send_byte
+    mov     x1, #0
     bl      assert_eq
 
     bl      sock_create

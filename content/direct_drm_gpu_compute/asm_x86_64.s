@@ -53,7 +53,7 @@ gem_destroy:
     test    rdi, rdi
     jz      .gd_zero
     cmp     rdi, BO_CAP
-    jge     .gd_zero
+    jae     .gd_zero              # unsigned: a negative id is huge, not small
     lea     rcx, [rip + bo_size]
     mov     rax, [rcx + rdi * 8]
     test    rax, rax
@@ -85,7 +85,7 @@ gem_va_map:
     test    rdi, rdi
     jz      .gv_zero
     cmp     rdi, BO_CAP
-    jge     .gv_zero
+    jae     .gv_zero              # unsigned: a negative id is huge, not small
     lea     rcx, [rip + bo_size]
     mov     rax, [rcx + rdi * 8]
     test    rax, rax
@@ -133,7 +133,7 @@ do_submit:
     test    rdi, rdi
     jz      .ds_zero
     cmp     rdi, BO_CAP
-    jge     .ds_zero
+    jae     .ds_zero              # unsigned: a negative id is huge, not small
     lea     rcx, [rip + bo_size]
     mov     rax, [rcx + rdi * 8]
     test    rax, rax
@@ -298,6 +298,22 @@ _start:
     call    do_submit
     mov     rdi, rax
     mov     rsi, 4
+    call    assert_eq
+
+    # 9. negative handles are rejected: -4 would index next_bo in .data
+    mov     rbx, [rip + next_bo]
+    mov     rdi, -4
+    call    gem_destroy
+    mov     rdi, rax
+    mov     rsi, 0
+    call    assert_eq
+    mov     rdi, [rip + next_bo]
+    mov     rsi, rbx
+    call    assert_eq
+    mov     rdi, -1
+    call    do_submit
+    mov     rdi, rax
+    mov     rsi, 0
     call    assert_eq
 
     mov     rax, 1

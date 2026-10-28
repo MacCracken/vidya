@@ -57,10 +57,12 @@ class Adsr:
         self.release_samples = 0
 
     def set_params(self, attack, decay, sustain, release):
-        self.attack_samples = attack
-        self.decay_samples = decay
+        # A zero-length stage ("instant attack") is a normal setting, but the
+        # per-sample step divides by the stage length: clamp to 1 sample.
+        self.attack_samples = max(1, attack)
+        self.decay_samples = max(1, decay)
         self.sustain_level = sustain
-        self.release_samples = release
+        self.release_samples = max(1, release)
 
     def reset(self):
         self.state = ENV_IDLE
@@ -229,6 +231,16 @@ def test_env_gate_off_during_attack_no_click():
     check(e.release_start == 8192, "release captures partial-attack level")
 
 
+def test_env_zero_length_stages():
+    e = Adsr()
+    e.set_params(0, 0, 16384, 0)   # instant attack/decay/release
+    e.gate_on()
+    check(e.step() == ONE, "instant attack reaches ONE in one sample")
+    check(e.step() == 16384, "instant decay lands on sustain")
+    e.gate_off()
+    check(e.step() == 0, "instant release reaches 0")
+
+
 def test_voice_silent_when_idle():
     e = Adsr()
     e.set_params(4, 4, 16384, 4)
@@ -255,6 +267,7 @@ if __name__ == "__main__":
     test_env_sustain_holds()
     test_env_release_to_idle()
     test_env_gate_off_during_attack_no_click()
+    test_env_zero_length_stages()
     test_voice_silent_when_idle()
     test_voice_audible_when_gated_on()
     print("=== audio_synthesis ===")

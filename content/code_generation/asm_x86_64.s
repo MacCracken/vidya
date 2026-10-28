@@ -76,9 +76,11 @@ _start:
     cmp     rax, 7
     jne     fail
 
-    # ── Test 6: Caller-saved register spill ─────────────────────────
-    # When a function needs more values than registers, the compiler
-    # spills to the stack. This function uses many intermediates.
+    # ── Test 6: Every intermediate in a stack slot ──────────────────
+    # Unoptimized codegen gives each intermediate its own stack slot and
+    # reloads it at every use. Five values fit easily in x86_64's 16 GPRs,
+    # so this is not register pressure: a register allocator would keep
+    # all of them in registers.
     mov     rdi, 3
     call    generated_polynomial    # 3^4 + 2*3^3 + 3*3^2 + 4*3 + 5
     # = 81 + 54 + 27 + 12 + 5 = 179
@@ -251,8 +253,8 @@ generated_manhattan:
 # ════════════════════════════════════════════════════════════════════
 # Generated function: polynomial(x: i64) -> i64
 # Computes: x^4 + 2*x^3 + 3*x^2 + 4*x + 5
-# Demonstrates: register spill to stack when intermediates exceed
-# available registers (unoptimized codegen pattern)
+# Demonstrates: unoptimized codegen keeping every intermediate in a
+# stack slot (not a register-pressure spill: no register runs out here)
 # Stack layout:
 #   [rbp - 8]  = x
 #   [rbp - 16] = x^2

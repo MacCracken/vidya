@@ -18,8 +18,15 @@ fn main() {
 
     // ── Laziness: nothing happens without consumption ──────────────
     // This builds a pipeline but does NOT execute it:
-    let _lazy = numbers.iter().map(|x| x * 2); // no side effects
+    let calls = std::cell::Cell::new(0);
+    let lazy = numbers.iter().map(|x| {
+        calls.set(calls.get() + 1);
+        x * 2
+    });
+    assert_eq!(calls.get(), 0); // the closure has not run yet
     // You must consume: collect(), sum(), for_each(), count(), etc.
+    let doubled: Vec<i32> = lazy.collect();
+    assert_eq!((calls.get(), doubled[9]), (10, 20)); // now it ran, once per element
 
     // ── fold: the universal accumulator ────────────────────────────
     let sum = numbers.iter().fold(0, |acc, &x| acc + x);
@@ -50,10 +57,8 @@ fn main() {
 
     // ── enumerate: index + value ───────────────────────────────────
     let words = ["hello", "world"];
-    for (i, word) in words.iter().enumerate() {
-        assert!(i < 2);
-        assert!(!word.is_empty());
-    }
+    let indexed: Vec<(usize, &&str)> = words.iter().enumerate().collect();
+    assert_eq!(indexed, vec![(0, &"hello"), (1, &"world")]);
 
     // ── windows and chunks ─────────────────────────────────────────
     let data = [1, 2, 3, 4, 5];

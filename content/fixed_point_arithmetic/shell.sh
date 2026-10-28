@@ -52,6 +52,11 @@ fx_div() {
 }
 
 # ── Sine table — generated once via awk into a bash array ─────────────
+# Quarter wave, 257 entries (0 .. π/2 INCLUSIVE). The mirror
+# sin(π - x) = sin(x) needs index 512 - a, which reaches 256, so the table
+# needs its π/2 endpoint. Mirroring with 511 - a instead (to fit a
+# 256-entry table) puts quadrants 2 and 4 one step out of phase:
+# sin(511) would read 0 where the true value is 402/65536.
 declare -a SIN_TABLE
 build_sin_table() {
     local line
@@ -59,7 +64,7 @@ build_sin_table() {
         SIN_TABLE+=("$line")
     done < <(awk -v one="$FX_ONE" 'BEGIN {
         pi = 3.14159265358979323846
-        for (i = 0; i < 256; i++) {
+        for (i = 0; i <= 256; i++) {
             printf "%d\n", int(sin(i * pi / 2 / 256) * one)
         }
     }')
@@ -68,9 +73,9 @@ build_sin_table() {
 sin_lookup() {
     local angle=$(( $1 & 1023 ))
     if   (( angle < 256 )); then echo "${SIN_TABLE[$angle]}"
-    elif (( angle < 512 )); then echo "${SIN_TABLE[$((511 - angle))]}"
+    elif (( angle < 512 )); then echo "${SIN_TABLE[$((512 - angle))]}"
     elif (( angle < 768 )); then echo $(( -${SIN_TABLE[$((angle - 512))]} ))
-    else                         echo $(( -${SIN_TABLE[$((1023 - angle))]} ))
+    else                         echo $(( -${SIN_TABLE[$((1024 - angle))]} ))
     fi
 }
 
@@ -88,7 +93,9 @@ assert_eq "$(fx_mul "$FX_HALF" "$FX_HALF")" "16384"  "0.5 * 0.5"
 
 big=$(fx_from_int 1000)
 safe=$(fx_mul_safe "$big" "$big")
-(( safe > 0 )) || { echo "FAIL: safe mul of 1000*1000" >&2; exit 1; }
+# Assert the value, not just its sign: 1000.0 * 1000.0 = 1000000.0 exactly
+# (both low bytes are zero, so the >>8 pre-shift loses nothing here).
+assert_eq "$safe" "$(fx_from_int 1000000)" "safe mul of 1000*1000"
 
 assert_eq "$(fx_div "$(fx_from_int 10)" "$(fx_from_int 4)")" "163840" "10/4"
 assert_eq "$(fx_div "$FX_ONE" 0)" "0" "div-by-zero"
@@ -102,9 +109,19 @@ assert_eq "$(fx_to_int_round "$neg_1_5")" "-2" "round(-1.5)"
 
 build_sin_table
 assert_eq "$(sin_lookup 0)"   "0" "sin(0)"
-peak=$(sin_lookup 256);  (( peak > 60000 ))    || { echo "FAIL: sin(π/2)"   >&2; exit 1; }
+assert_eq "$(sin_lookup 256)" "$FX_ONE" "sin(π/2) == 1.0"
 assert_eq "$(sin_lookup 512)" "0" "sin(π)"
-trough=$(sin_lookup 768); (( trough < -60000 )) || { echo "FAIL: sin(3π/2)" >&2; exit 1; }
+assert_eq "$(sin_lookup 768)" "$(( -FX_ONE ))" "sin(3π/2) == -1.0"
+assert_eq "$(sin_lookup 511)"  "$(sin_lookup 1)"        "sin(π - x) == sin(x)"
+assert_eq "$(sin_lookup 1023)" "$(( -$(sin_lookup 1) ))" "sin(2π - x) == -sin(x)"
+# Every one of the 1024 angles against awk's sin(): within one table step
+# (int() truncates, so |error| < 1/65536). One subshell for the whole sweep.
+sweep=$(for (( a = 0; a < 1024; a++ )); do sin_lookup "$a"; done | awk -v one="$FX_ONE" '
+    { d = $1 - sin((NR - 1) * 3.14159265358979323846 / 512) * one
+      if (d < 0) d = -d
+      if (d > w) w = d }
+    END { print (NR == 1024 && w < 1) ? "ok" : "worst " w }')
+assert_eq "$sweep" "ok" "all 1024 angles within table precision"
 
 for i in $(seq 0 99); do
     assert_eq "$(fx_to_int "$(fx_from_int "$i")")" "$i" "roundtrip $i"

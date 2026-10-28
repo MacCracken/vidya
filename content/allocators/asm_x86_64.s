@@ -135,14 +135,33 @@ _start:
     inc     r15
     jmp     .alloc_loop
 .alloc_done:
+    cmp     qword ptr [r14], 0xAA   # the aligned block was not handed out again
+    jne     fail
 
     # Verify total allocated: 8 + 16 + padding + 32 + (100 * 8)
     # The bump pointer should have advanced substantially
     mov     rax, [heap_current]
     mov     rcx, [heap_start]
     sub     rax, rcx            # bytes used
-    cmp     rax, 800            # at minimum 8+16+32+800 = 856 bytes
+    cmp     rax, 856            # at minimum 8+16+32+800 = 856 bytes
     jl      fail
+
+    # ════════════════════════════════════════════════════════════════
+    # Grow on demand: 8 KiB does not fit in the page reserved above, so
+    # bump_alloc must move the break itself. Every allocation so far fit
+    # in that first page, so without this the brk path never runs.
+    # ════════════════════════════════════════════════════════════════
+    mov     rbx, [heap_end]     # break before growth
+    mov     rdi, 8192
+    call    bump_alloc
+    test    rax, rax
+    jz      fail
+    cmp     [heap_end], rbx
+    jbe     fail                # the break must have moved
+    lea     rcx, [rax + 8192]
+    cmp     [heap_end], rcx
+    jb      fail                # and must cover the whole block
+    mov     qword ptr [rax + 8184], 0x33    # last qword: faults if it does not
 
     # ════════════════════════════════════════════════════════════════
     # Reset allocator (bulk free — the bump allocator's strength)
@@ -245,10 +264,11 @@ bump_alloc_aligned:
     # Update heap_current to aligned position
     mov     [heap_current], rax
 
-    # Now do a normal bump allocation
+    # Now do a normal bump allocation. Read the size out of rbx BEFORE
+    # restoring it: after `pop rbx` it holds the caller's value again.
+    mov     rdi, rbx
     pop     r12
     pop     rbx
-    mov     rdi, rbx
     jmp     bump_alloc          # tail call
 
 # ════════════════════════════════════════════════════════════════════

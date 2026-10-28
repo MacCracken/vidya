@@ -201,8 +201,10 @@ mean_absolute:
     str     x20, [sp, #24]
     mov     x19, x0
     mov     x20, x1
-    mov     x21, #0                 // sum (held on stack to avoid call clobber issues)
-    str     x21, [sp, #-16]!
+    // sum lives on the stack, so no register is needed for it — and x21
+    // must not be used as scratch here: it is callee-saved (AAPCS64
+    // x19-x28) and this frame only saves x19/x20.
+    str     xzr, [sp, #-16]!        // sum = 0 (held on stack across bl abs_i)
     mov     x3, #0
 .ma_loop:
     cmp     x3, x20

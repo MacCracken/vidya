@@ -2,7 +2,8 @@
 #
 # Python is the primary language for quantum computing: Qiskit,
 # Cirq, PennyLane all use it. Here we simulate from scratch using
-# only math/cmath — state vectors, gates, measurement, and noise.
+# only math/cmath — state vectors, gates, measurement probabilities
+# (Born rule), and noise channels applied as Kraus-operator branches.
 
 import cmath
 import math
@@ -51,9 +52,9 @@ def apply_gate(state: list[complex], target: int, n_qubits: int, gate: list[list
 
 
 H_VAL = 1 / math.sqrt(2)
-H_GATE = [[H_VAL, H_VAL], [-H_VAL + 2 * H_VAL, -H_VAL]]  # avoid float issues
 H_GATE = [[complex(H_VAL), complex(H_VAL)], [complex(H_VAL), complex(-H_VAL)]]
 X_GATE = [[0j, 1 + 0j], [1 + 0j, 0j]]
+Y_GATE = [[0j, -1j], [1j, 0j]]
 Z_GATE = [[1 + 0j, 0j], [0j, -1 + 0j]]
 
 
@@ -186,23 +187,60 @@ def test_ghz_state():
     assert_near(total, 1.0, "normalization")
 
 
+def apply_channel(state, kraus):
+    """Apply a single-qubit channel as Kraus branches K_k|psi>.
+
+    Returns [(weight, normalized_state)]: the mixture a density matrix
+    would hold. Weights are ||K_k|psi>||^2 and sum to 1 for a valid channel.
+    """
+    branches = []
+    for k in kraus:
+        branch = list(state)
+        apply_gate(branch, 0, 1, k)
+        w = sum(abs(a) ** 2 for a in branch)
+        if w > 1e-15:
+            branches.append((w, [a / math.sqrt(w) for a in branch]))
+    return branches
+
+
+def mixed_prob(branches, index):
+    return sum(w * probability(st, index) for w, st in branches)
+
+
 def test_noise_channels():
-    # Depolarizing noise on |0⟩: prob(0) = 1 - 2p/3
+    # Every number below comes out of the simulator, not out of the formula
+    # being checked: the channel is applied to a real state vector.
+
+    # Depolarizing(p) on |0⟩: with prob p/3 each, X, Y or Z hits the qubit.
+    # Theory: prob(0) = 1 - 2p/3 (X and Y flip it, Z does not).
     p = 0.1
-    noisy_p0 = 1.0 - 2 * p / 3
-    noisy_p1 = 2 * p / 3
-    assert_near(noisy_p0 + noisy_p1, 1.0, "depolarize normalization")
-    assert noisy_p0 > 0.9, "mostly |0⟩"
+    s = math.sqrt
+    depol = [[[s(1 - p), 0j], [0j, s(1 - p)]]] + \
+            [[[g * s(p / 3) for g in row] for row in G] for G in (X_GATE, Y_GATE, Z_GATE)]
+    br = apply_channel(new_state(1), depol)
+    assert_near(sum(w for w, _ in br), 1.0, "depolarize normalization")
+    assert_near(mixed_prob(br, 0), 1 - 2 * p / 3, "depolarized prob(0)")
 
-    # Amplitude damping: |1⟩ → |0⟩ with probability γ
+    # Amplitude damping(γ) on |1⟩: decays to |0⟩ with probability γ.
     gamma = 0.05
-    assert_near(gamma + (1 - gamma), 1.0, "damping normalization")
+    damp = [[[1 + 0j, 0j], [0j, complex(s(1 - gamma))]],
+            [[0j, complex(s(gamma))], [0j, 0j]]]
+    one = new_state(1)
+    pauli_x(one, 0, 1)
+    br = apply_channel(one, damp)
+    assert_near(mixed_prob(br, 0), gamma, "damped |1⟩ -> |0⟩ with prob γ")
 
-    # Dephasing: off-diagonal decays by (1-λ)
+    # Dephasing(λ) on |+⟩ (Z with prob λ/2): populations untouched, the
+    # off-diagonal ρ01 = Σ w·a0·conj(a1) decays from 0.5 to 0.5·(1-λ).
     lam = 0.2
-    rho_01 = 0.5  # off-diagonal of |+⟩⟨+|
-    dephased = rho_01 * (1 - lam)
-    assert_near(dephased, 0.4, "dephased coherence")
+    deph = [[[complex(s(1 - lam / 2)), 0j], [0j, complex(s(1 - lam / 2))]],
+            [[g * s(lam / 2) for g in row] for row in Z_GATE]]
+    plus = new_state(1)
+    hadamard(plus, 0, 1)
+    br = apply_channel(plus, deph)
+    rho_01 = sum(w * st[0] * st[1].conjugate() for w, st in br)
+    assert_near(mixed_prob(br, 0), 0.5, "dephasing keeps populations")
+    assert_near(rho_01.real, 0.5 * (1 - lam), "dephased coherence")
 
     # Gate fidelity: F = (1-p)^n for n gates with error rate p
     n_gates = 100

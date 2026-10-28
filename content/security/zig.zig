@@ -1,13 +1,18 @@
 // Vidya — Security Practices in Zig
 //
-// Zig's safety features — bounds checking, no undefined behavior in
-// safe mode, explicit error handling — prevent many C-style bugs.
+// Zig's safety features — bounds checking, overflow / null / bad-cast
+// traps in safe modes, explicit error handling — prevent many C-style
+// bugs. Safe mode is not "no undefined behavior": use-after-free (a read
+// after free goes unnoticed), data races, and slices into a stack frame
+// that has returned (only a direct `return &local` is a compile error)
+// are still not caught.
 // Security still requires: constant-time comparison, secret zeroing,
 // input validation, and safe integer arithmetic.
 
 const std = @import("std");
 const expect = std.testing.expect;
 const mem = std.mem;
+const linux = std.os.linux;
 
 pub fn main() !void {
     // Zig 0.16 moved randomness behind the std.Io interface — construct a
@@ -21,7 +26,7 @@ pub fn main() !void {
     try testSecureZeroing();
     try testBoundsChecking();
     try testIntegerOverflow();
-    try testPathTraversalPrevention();
+    try testPathTraversalPrevention(io);
     try testSecureRandom(io);
     try testAllowlistValidation();
 
@@ -148,21 +153,80 @@ fn testIntegerOverflow() !void {
 }
 
 // ── Path traversal prevention ─────────────────────────────────────────
+// A string check is a first filter, not containment. "escape/passwd" has
+// no ".." and is not absolute, yet when base/escape is a symlink to /etc,
+// opening base/escape/passwd reads /etc/passwd. What counts is what the
+// filesystem resolves.
 fn pathIsSafe(user_input: []const u8) bool {
-    // Reject ".." components
-    if (mem.find(u8, user_input, "..") != null) return false;
     // Reject absolute paths
     if (user_input.len > 0 and user_input[0] == '/') return false;
+    // Reject ".." components ("photo..jpg" is a name, not traversal)
+    var it = mem.splitScalar(u8, user_input, '/');
+    while (it.next()) |part| {
+        if (mem.eql(u8, part, "..")) return false;
+    }
     return true;
 }
 
-fn testPathTraversalPrevention() !void {
+// openat2(2) with RESOLVE_BENEATH (Linux 5.6+) makes the kernel refuse,
+// during the open itself, any resolution that leaves `base`, whether
+// through "..", an absolute path or a symlink: it fails with EXDEV.
+// There is no gap between a check and the open for a swapped symlink to
+// use. std.Io.Dir's `resolve_beneath` option does not help here: it maps
+// to O_RESOLVE_BENEATH, which Linux lacks, and "if unsupported, this
+// option is ignored", so the escape above still reads /etc/passwd.
+const OpenHow = extern struct { flags: u64, mode: u64, resolve: u64 };
+const RESOLVE_BENEATH: u64 = 0x08; // <linux/openat2.h>
+
+fn openBeneath(base: std.Io.Dir, sub_path: [*:0]const u8) !linux.fd_t {
+    var how: OpenHow = .{
+        .flags = @as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY, .CLOEXEC = true })),
+        .mode = 0,
+        .resolve = RESOLVE_BENEATH,
+    };
+    const rc = linux.syscall4(
+        .openat2,
+        @as(usize, @bitCast(@as(isize, base.handle))),
+        @intFromPtr(sub_path),
+        @intFromPtr(&how),
+        @sizeOf(OpenHow),
+    );
+    return switch (linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .XDEV => error.PathEscapesBase,
+        else => error.OpenFailed,
+    };
+}
+
+fn testPathTraversalPrevention(io: std.Io) !void {
     try expect(pathIsSafe("photo.jpg"));
     try expect(pathIsSafe("subdir/file.txt"));
+    try expect(pathIsSafe("photo..jpg"));
     try expect(!pathIsSafe("../../etc/passwd"));
     try expect(!pathIsSafe("../secret"));
     try expect(!pathIsSafe("/etc/passwd"));
     try expect(!pathIsSafe("normal/../../escape"));
+
+    // A scratch base with a symlink inside it that points outside it.
+    var tmp = try std.Io.Dir.openDirAbsolute(io, "/tmp", .{});
+    defer tmp.close(io);
+    var name_buf: [32]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "vidya-sec-{d}", .{linux.getpid()});
+    try tmp.createDir(io, name, .default_dir);
+    defer tmp.deleteTree(io, name) catch {};
+    var base = try tmp.openDir(io, name, .{});
+    defer base.close(io);
+    try base.symLink(io, "/etc", "escape", .{});
+    try base.createDir(io, "subdir", .default_dir);
+    (try base.createFile(io, "subdir/file.txt", .{})).close(io);
+
+    // The string filter is fooled; the kernel is not.
+    try expect(pathIsSafe("escape/passwd"));
+    try expect(openBeneath(base, "escape/passwd") == error.PathEscapesBase);
+    try expect(openBeneath(base, "../secret") == error.PathEscapesBase);
+    try expect(openBeneath(base, "/etc/passwd") == error.PathEscapesBase);
+    const fd = try openBeneath(base, "subdir/file.txt");
+    _ = linux.close(fd);
 }
 
 // ── Secure random generation ──────────────────────────────────────────

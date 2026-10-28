@@ -1,6 +1,7 @@
 // Vidya — Design Patterns in Rust
 //
-// Rust patterns lean on the type system: builders with typestate,
+// Rust patterns lean on the type system: builders (runtime-checked
+// here; a typestate builder moves the check to compile time),
 // strategy via closures/trait objects, RAII through Drop, state
 // machines as enums, and newtypes for domain validation. No
 // inheritance — composition and traits instead.
@@ -20,7 +21,8 @@ fn main() {
 
 // ── Builder pattern ───────────────────────────────────────────────────
 // Readable construction for structs with many fields.
-// Returns Result to enforce required fields at build time.
+// Returns Result so a missing required field is an Err from build() at
+// run time (a typestate builder would make it a compile error instead).
 
 #[derive(Debug)]
 struct Server {
@@ -165,7 +167,10 @@ fn test_observer_pattern() {
 }
 
 // ── State machine as enum ─────────────────────────────────────────────
-// Each state is an enum variant. Invalid transitions are compile errors.
+// Each state is an enum variant. Invalid transitions are RUNTIME errors
+// here (`DoorState::Locked.open()` compiles and returns Err). To make them
+// compile errors, use typestate: one type per state, e.g.
+// `struct Locked; impl Locked { fn unlock(self) -> Closed { Closed } }`.
 
 #[derive(Debug, PartialEq)]
 enum DoorState {

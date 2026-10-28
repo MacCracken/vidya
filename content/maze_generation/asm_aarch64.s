@@ -6,8 +6,10 @@
 // neighbour cell.
 //
 // AArch64 has no implicit overflow trap on `MUL`/`ADD` — multiplying
-// two x-registers gives the low 64 bits, exactly the mod-2^64 wrap PCG
-// requires. Constants larger than a 16-bit immediate (PCG_MULT,
+// two x-registers gives the low 64 bits, exactly the mod-2^64 wrap the
+// RNG needs. The RNG is an LCG using PCG's constants with a plain
+// top-bits output (state >> 33), not PCG's output permutation.
+// Constants larger than a 16-bit immediate (PCG_MULT,
 // PCG_INC, GN-related literals beyond 4096) are loaded via the
 // assembler literal pool: `ldr xN, =literal`. Functions calling `bl`
 // MUST save x29 (FP) and x30 (LR) — the inner branch-link clobbers LR.

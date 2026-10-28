@@ -20,16 +20,19 @@ static size_t line_count = 0;
 static uint8_t esc_buf[256];
 static uint8_t unesc_buf[256];
 
-static void append_record(const uint8_t *rec, size_t rec_len) {
+/* Returns 0, or -1 if the record (+ its newline) does not fit. */
+static int append_record(const uint8_t *rec, size_t rec_len) {
+    if (rec_len >= BUF_CAP - jsonl_len) return -1;
     memcpy(jsonl_buf + jsonl_len, rec, rec_len);
     jsonl_len += rec_len;
     jsonl_buf[jsonl_len++] = '\n';
+    return 0;
 }
 
 static void build_index(void) {
     line_count = 0;
     size_t start = 0;
-    for (size_t i = 0; i < jsonl_len; i++) {
+    for (size_t i = 0; i < jsonl_len && line_count < IDX_CAP; i++) {
         if (jsonl_buf[i] == '\n') {
             line_offsets[line_count] = start;
             line_lengths[line_count] = i - start;
@@ -37,13 +40,16 @@ static void build_index(void) {
             start = i + 1;
         }
     }
-    if (start < jsonl_len) {
+    if (start < jsonl_len && line_count < IDX_CAP) {
         line_offsets[line_count] = start;
         line_lengths[line_count] = jsonl_len - start;
         line_count++;
     }
 }
 
+/* Escapes the five common specials. RFC 8259 §7 requires EVERY control
+ * byte U+0000..U+001F to be escaped; this minimal encoder has no \uXXXX
+ * form, so it refuses the rest (-1) rather than emit invalid JSON. */
 static int json_escape(uint8_t *dst, size_t dst_cap, const uint8_t *src, size_t src_len) {
     if (src_len * 2 > dst_cap) return -1;
     size_t w = 0;
@@ -54,11 +60,13 @@ static int json_escape(uint8_t *dst, size_t dst_cap, const uint8_t *src, size_t 
         else if (c == '\n'){ dst[w++] = '\\'; dst[w++] = 'n'; }
         else if (c == '\t'){ dst[w++] = '\\'; dst[w++] = 't'; }
         else if (c == '\r'){ dst[w++] = '\\'; dst[w++] = 'r'; }
+        else if (c < 0x20) { return -1; }
         else               { dst[w++] = c; }
     }
     return (int)w;
 }
 
+/* dst must hold src_len bytes: unescaping never lengthens the input. */
 static size_t json_unescape(uint8_t *dst, const uint8_t *src, size_t src_len) {
     size_t w = 0;
     for (size_t i = 0; i < src_len; ) {
@@ -79,9 +87,9 @@ static size_t json_unescape(uint8_t *dst, const uint8_t *src, size_t src_len) {
 
 int main(void) {
     /* Test 1: build, index, extract */
-    append_record((const uint8_t *)"{\"id\":1}", 8);
-    append_record((const uint8_t *)"{\"id\":2}", 8);
-    append_record((const uint8_t *)"{\"id\":3}", 8);
+    if (append_record((const uint8_t *)"{\"id\":1}", 8) != 0 ||
+        append_record((const uint8_t *)"{\"id\":2}", 8) != 0 ||
+        append_record((const uint8_t *)"{\"id\":3}", 8) != 0) return 1;
     build_index();
     assert(line_count == 3 && "3 records indexed");
     assert(line_lengths[2] == 8 && "third record length 8");
@@ -99,7 +107,8 @@ int main(void) {
 
     /* Test 4: bounds check */
     uint8_t s4[4] = { '"','"','"','"' };
-    assert(json_escape(esc_buf, 4, s4, 4) == -1 && "escape refuses tight cap");
+    int e4 = json_escape(esc_buf, 4, s4, 4);   /* call outside assert() */
+    assert(e4 == -1 && "escape refuses tight cap");
 
     /* Test 5: roundtrip */
     size_t un = json_unescape(unesc_buf, esc_buf, (size_t)en);

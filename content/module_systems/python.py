@@ -25,8 +25,9 @@ def main():
     #   1. Checks sys.modules (cache) — return if already loaded
     #   2. Finds the file on sys.path
     #   3. Creates a new module object
-    #   4. Executes the file's code in the module's namespace
-    #   5. Stores it in sys.modules
+    #   4. Stores it in sys.modules — BEFORE running it, which is why a
+    #      circular import sees a partially initialized module
+    #   5. Executes the file's code in the module's namespace
     #   6. Binds the name in the importer's namespace
 
     import math
@@ -65,10 +66,22 @@ def main():
     fake_module.also_public = lambda: "also public"
     fake_module.__all__ = ["public_func"]  # only this is exported by *
 
-    # __all__ controls wildcard imports
-    assert "public_func" in fake_module.__all__
-    assert "also_public" not in fake_module.__all__
-    assert "_private_func" not in fake_module.__all__
+    # __all__ controls wildcard imports — run a real `import *` against it
+    sys.modules["fake_module"] = fake_module
+    try:
+        star = {}
+        exec("from fake_module import *", star)
+        assert "public_func" in star
+        assert "also_public" not in star     # public name, but not in __all__
+        assert "_private_func" not in star
+
+        del fake_module.__all__              # without __all__: every non-_ name
+        star = {}
+        exec("from fake_module import *", star)
+        assert "public_func" in star and "also_public" in star
+        assert "_private_func" not in star
+    finally:
+        del sys.modules["fake_module"]
 
     # ── Package structure ──────────────────────────────────────────
     # A package is a directory with __init__.py:
@@ -139,15 +152,17 @@ def main():
     # ── Module attributes and introspection ────────────────────────
     # Every module has metadata attributes:
     #   __name__   — module name (or "__main__" for the entry point)
-    #   __file__   — path to the .py file (absent for built-in / frozen
-    #                C-extension modules like `math`, `sys`, `_thread`)
+    #   __file__   — path to the .py or .so file; absent for modules
+    #                compiled INTO the interpreter (sys.builtin_module_names:
+    #                `sys`, `_thread`, and `math` on some builds — distro
+    #                builds often ship math as a .so, which has __file__)
     #   __doc__    — module docstring
     #   __package__— package name for relative imports
 
     assert math.__name__ == "math"
-    # `types` is pure-Python and carries __file__; built-in C
-    # extensions like `math` don't. Assert on the pure-Python module
-    # rather than tripping on the built-in case.
+    # `types` is pure-Python and carries __file__; whether `math` does
+    # depends on how the interpreter was built. Assert on the pure-Python
+    # module rather than tripping on the build-dependent case.
     assert hasattr(types, "__file__")
 
     # __name__ == "__main__" identifies the entry point script
@@ -159,7 +174,9 @@ def main():
     #
     # At import time, module_a is partially initialized when module_b
     # tries to use it. Solutions:
-    #   1. Import at function level (lazy import)
+    #   1. Defer the import: `lazy import module_b` at module level
+    #      (3.15+, PEP 810) binds a proxy and imports on first use; before
+    #      3.15, move the import inside the function that needs it
     #   2. Restructure to remove the cycle
     #   3. Use TYPE_CHECKING guard for type hints only
     #

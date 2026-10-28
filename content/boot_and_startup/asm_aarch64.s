@@ -124,7 +124,9 @@ _start:
     b.ne    fail
 
     // ── Verify SCTLR bit positions ────────────────────────────────
-    // Boot sequence: enable caches first, then MMU
+    // Boot code normally sets M, C and I in ONE SCTLR_EL1 write (see the
+    // sketch below): with the MMU off, data accesses are treated as
+    // Device memory whatever C says, so "caches first" buys nothing.
     adr     x4, sctlr_m
     ldr     x0, [x4]
     cmp     x0, #1              // bit 0 — MMU enable
@@ -169,13 +171,16 @@ _start:
     b.ne    fail
 
     // ── Verify VBAR alignment requirement ─────────────────────────
-    mov     x0, VBAR_ALIGNMENT
-    mov     x1, #0x800
-    cmp     x0, x1
-    b.ne    fail
-    // Alignment check: VBAR & (0x800 - 1) must be 0
+    // Check a REAL table's address, not the constant against itself
+    // (0x800 & 0x7FF is 0 whatever the code does).
+    adr     x0, vector_table
+    mov     x1, VBAR_ALIGNMENT
     sub     x2, x1, #1          // mask = 0x7FF
-    tst     x0, x2              // aligned VBAR & mask should be 0
+    tst     x0, x2              // vector_table & mask must be 0
+    b.ne    fail
+    adr     x1, vector_table_end
+    sub     x1, x1, x0
+    cmp     x1, #16 * 128       // 4 groups x 4 entries x 128 bytes
     b.ne    fail
 
     // ── Verify SPSR values ────────────────────────────────────────
@@ -222,3 +227,12 @@ fail:
     mov     x8, #93
     mov     x0, #1
     svc     #0
+
+// ── Exception vector table stub ───────────────────────────────────
+// What VBAR_EL1 would point at: 16 entries of 128 bytes, 2 KB aligned.
+// A kernel puts a branch to each handler in its entry; this stub is
+// never executed and only shows the layout the alignment rule applies to.
+.balign VBAR_ALIGNMENT
+vector_table:
+    .skip 16 * 128
+vector_table_end:

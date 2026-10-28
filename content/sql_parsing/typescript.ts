@@ -25,13 +25,15 @@ interface Token {
     text: string;
 }
 
-const KEYWORDS: Record<string, TokenKind> = {
+// Partial: a lookup of a non-keyword is undefined, and the type says so
+// (a plain Record<string, TokenKind> would claim every string is a keyword).
+const KEYWORDS: Partial<Record<string, TokenKind>> = {
     SELECT: "select",
     FROM: "from",
     WHERE: "where",
 };
 
-const SINGLE: Record<string, TokenKind> = {
+const SINGLE: Partial<Record<string, TokenKind>> = {
     "*": "star",
     "=": "eq",
     "(": "lparen",
@@ -78,8 +80,9 @@ function tokenize(sql: string): Token[] {
             pos++;
             continue;
         }
-        // Unknown char — skip
-        pos++;
+        // Unknown char — reject. Skipping it would silently change the
+        // query: "id != 1" would lex as "id = 1", 'x' as the identifier x.
+        throw new Error(`unexpected character ${JSON.stringify(c)} at ${pos}`);
     }
     out.push({ kind: "eof", text: "" });
     return out;
@@ -91,7 +94,11 @@ function isValidSelect(toks: Token[]): boolean {
     if (fromIdx < 0) return false;
     if (fromIdx === 1) return false; // no columns
     if (fromIdx + 1 >= toks.length || toks[fromIdx + 1].kind !== "ident") return false;
-    return true;
+    // ...then end of input, or exactly WHERE <ident> = <int|ident>. Checking
+    // only the next token let anything after WHERE through
+    // ("FROM t WHERE DROP TABLE t").
+    const tail = toks.slice(fromIdx + 2).map(t => t.kind).join(",");
+    return tail === "eof" || tail === "where,ident,eq,int,eof" || tail === "where,ident,eq,ident,eof";
 }
 
 function assertKinds(toks: Token[], expected: TokenKind[], msg: string): void {
@@ -152,7 +159,21 @@ function main(): void {
     assert(!isValidSelect(tokenize("SELECT FROM t")), "empty cols rejected");
     assert(!isValidSelect(tokenize("SELECT * FROM")), "missing table rejected");
 
-    // Test 7: whitespace tolerance
+    // Nothing may follow the table except one WHERE <ident> = <value>
+    for (const q of ["SELECT * FROM t u", "SELECT * FROM t DROP TABLE t",
+                     "SELECT * FROM t WHERE DROP TABLE t",
+                     "SELECT * FROM t WHERE id = 1 DROP TABLE t"]) {
+        assert(!isValidSelect(tokenize(q)), `trailing tokens rejected: ${q}`);
+    }
+
+    // Test 7: characters the lexer does not know are errors, not skipped
+    for (const bad of ["SELECT * FROM t WHERE id != 1", "SELECT * FROM t; DROP TABLE t"]) {
+        let threw = false;
+        try { tokenize(bad); } catch { threw = true; }
+        assert(threw, `unknown character rejected: ${bad}`);
+    }
+
+    // Test 8: whitespace tolerance
     toks = tokenize("  SELECT\t*\nFROM\tt  ");
     assertKinds(toks, ["select", "star", "from", "ident", "eof"], "whitespace");
 

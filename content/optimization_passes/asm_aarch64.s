@@ -68,16 +68,16 @@ _start:
     b.ne    fail
 
     // ── Test 5: dead code elimination ───────────────────────────────
-    // An optimizer removes code after unconditional branches and
-    // stores to variables that are never read. Here we show the
-    // OPTIMIZED version — the dead code is simply absent.
+    // An optimizer removes stores that are overwritten before any read,
+    // and code after an unconditional branch (unreachable). Run the
+    // unoptimized form and check it agrees with the optimized one.
+    mov     w0, #99                 // dead store: overwritten before use
     mov     w0, #42
     b       .Lskip_dead
-    // Dead: these would be here in unoptimized code
-    // mov w0, #99       // dead store (overwritten before use)
-    // add w0, w0, #1    // dead computation
+    add     w0, w0, #1              // unreachable: must never execute
 .Lskip_dead:
-    cmp     w0, #42                 // w0 is still 42
+    mov     w1, #42                 // optimized form: just the live store
+    cmp     w0, w1
     b.ne    fail
 
     // ── Test 6: common subexpression elimination ────────────────────
@@ -150,9 +150,12 @@ _start:
     // ── Test 11: algebraic simplification ───────────────────────────
     // x * 1 = x (identity); x + 0 = x; x - x = 0
     mov     w0, #42
-    // x * 1 optimizes to just x — no MUL emitted
-    mov     w1, w0                  // "x * 1" -> MOV
-    cmp     w1, #42
+    // x * 1 optimizes to just x — no MUL emitted. As with x - x below,
+    // compute the unoptimized form and check the rewrite agrees with it.
+    mov     w1, w0                  // "x * 1" -> MOV (optimized)
+    mov     w3, #1
+    mul     w4, w0, w3              // x * 1 (unoptimized)
+    cmp     w1, w4
     b.ne    fail
 
     // x - x optimizes to MOV Xd, #0.

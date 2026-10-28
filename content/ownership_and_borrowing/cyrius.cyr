@@ -59,19 +59,18 @@ fn test_aliasing() {
 # ================================================================
 # Stack pointer lifetime: &local is only valid in its scope
 # ================================================================
-# Taking the address of a local and letting it escape is a bug, but not
-# the C one. Cyrius gives every local a FIXED address (static storage),
-# so the pointer never faults — it goes wrong silently instead: repeated
-# calls alias the same address, and the compiler overlays frames, so an
-# unrelated function's local can overwrite the data. Measured: a helper
-# returning &local read back 4242, then 999888 after one unrelated call.
+# Taking the address of a local and letting it escape is the C bug: a
+# local lives in its function's stack frame, and the frame dies on
+# return. The pointer still "works" until the next call reuses that
+# stack and overwrites it — silently. Measured at 6.7.18: a helper
+# returning &local read back 4242, then 0 after one unrelated call.
 # Cyrius has no lifetime analysis — keeping the pointer from escaping is
 # the programmer's job.
 
 fn get_stack_value() {
     var x = 42;
-    # Returning &x would hand back a fixed address that later calls
-    # alias and overwrite. Instead, return the VALUE, not a pointer.
+    # Returning &x would hand back a dangling stack address that the next
+    # call overwrites. Instead, return the VALUE, not a pointer.
     return x;
 }
 
@@ -116,7 +115,8 @@ fn test_ownership_transfer() {
 # ================================================================
 # Struct pattern: fields are raw memory offsets
 # ================================================================
-# Cyrius structs are laid out as contiguous 8-byte slots.
+# An untyped struct field is one 8-byte slot (a typed field — i8..i32,
+# f32 — is stored at its own width; cyrius-guide "Field types").
 # The programmer must track field offsets manually when using
 # raw pointers, or use struct syntax for named access.
 
@@ -159,6 +159,11 @@ fn test_struct_resource() {
 #   2. Do work
 #   3. Clean up before returning (especially on error paths)
 #
+# `defer { ... }` (v3.8.0) does step 3 for you: the block runs on EVERY
+# return path of the function, LIFO, once the defer has been reached —
+# so one line next to the allocation covers the early error returns
+# too (test_defer_cleanup below).
+#
 # alloc_reset() is the nuclear option: free everything at once.
 
 fn test_scope_cleanup() {
@@ -187,12 +192,30 @@ fn test_scope_cleanup() {
 # ================================================================
 #   - No move semantics: assignment copies the pointer, not ownership
 #   - No borrow checker: aliased mutable pointers are unrestricted
-#   - No lifetime annotations: escaped &local aliases/overwrites silently
-#   - No Drop trait: no automatic cleanup at scope exit
+#   - No lifetime annotations: an escaped &local dangles, as in C
+#   - No Drop trait: `defer` runs cleanup at FUNCTION exit, not per scope
 #   - No RefCell/Rc: no runtime borrow checking or reference counting
 #
 # The tradeoff: simpler compiler, faster compilation, but the
 # programmer bears full responsibility for memory safety.
+
+var _cleanups = 0;
+
+fn with_cleanup(fail) {
+    var buf = alloc(16);
+    defer { _cleanups = _cleanups + 1; }   # stands in for free(buf) / close(fd)
+    if (fail == 1) { return 0 - 1; }      # early error return: the defer still runs
+    store64(buf, 7);
+    return load64(buf);
+}
+
+fn test_defer_cleanup() {
+    _cleanups = 0;
+    assert_eq(with_cleanup(0), 7, "normal path result");
+    assert_eq(with_cleanup(1), 0 - 1, "error path result");
+    assert_eq(_cleanups, 2, "defer ran on both return paths");
+    return 0;
+}
 
 fn main() {
     alloc_init();
@@ -202,6 +225,7 @@ fn main() {
     test_ownership_transfer();
     test_struct_resource();
     test_scope_cleanup();
+    test_defer_cleanup();
     return assert_summary();
 }
 var exit_code = main();

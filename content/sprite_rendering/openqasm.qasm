@@ -11,13 +11,13 @@
 // Images): position qubits index pixels, an intensity qubit's
 // rotation angle encodes brightness, and a single measurement
 // samples one pixel per shot — full image read-out costs many
-// shots, but transformations on the entire image cost one gate.
+// shots, but some transformations on the entire image cost one gate
+// (inverting every pixel's intensity is one X on the intensity qubit).
 //
-// Note: qiskit's qasm2.load does not define `swap`; we expand any
-// swap as 3 CNOTs. We stick to qelib1.inc gates only.
+// Gates used: h, x, cx, ccx.
 
-OPENQASM 2.0;
-include "qelib1.inc";
+OPENQASM 3.1;
+include "stdgates.inc";
 
 // ── 4-pixel row: 2 position qubits + 1 intensity qubit ──────────────
 // Pixel layout (matches the test sprite's top row 0,1,1,0):
@@ -29,10 +29,10 @@ include "qelib1.inc";
 // Equal-superposition position register: each pixel address
 // occurs with amplitude 1/2.
 
-qreg pos[2];        // pixel address
-qreg intens[1];     // intensity / "color level"
-creg pos_c[2];
-creg int_c[1];
+qubit[2] pos;        // pixel address
+qubit[1] intens;     // intensity / "color level"
+bit[2] pos_c;
+bit[1] int_c;
 
 // Place the position register in superposition over all 4 pixels.
 h pos[0];
@@ -40,7 +40,7 @@ h pos[1];
 
 // Conditional intensity rotation: only pixels (01) and (10) are lit.
 // Encode "intensity bit = 1 when pos == 01 OR pos == 10" using two
-// Toffoli-style controls. We use ccx (Toffoli) from qelib1.
+// Toffoli-style controls. We use ccx (Toffoli) from stdgates.inc.
 
 // pos == 01 → set intensity = 1
 // We need control = (pos[1]=0, pos[0]=1). Bit-flip pos[1] around the
@@ -56,8 +56,11 @@ x pos[0];
 
 // Measure both registers. Each shot samples one pixel address with
 // uniform probability 1/4 and reads its intensity.
-measure pos -> pos_c;
-measure intens -> int_c;
+pos_c = measure pos;
+int_c = measure intens;
+// int_c = 1 exactly when pos_c is 01 or 10: half the shots
+// @expect pos_c in {0, 1, 2, 3}
+// @expect int_c in {0, 1}
 
 // ── Color-key transparency analog ──────────────────────────────────
 // Classical color-key skips writes when pixel == COLOR_KEY (0).
@@ -66,15 +69,17 @@ measure intens -> int_c;
 // demonstrate the conditional flip: "if intensity != 0, flip an
 // alpha qubit to mark the pixel as drawn."
 
-qreg alpha[1];
-creg alpha_c[1];
+qubit[1] alpha;
+bit[1] alpha_c;
 
 // alpha = intensity (CNOT from intensity → alpha) — in a real FRQI
 // pipeline this would gate a write into a destination register,
 // matching the classical "if pixel != COLOR_KEY then write" branch.
 cx intens[0], alpha[0];
 
-measure alpha -> alpha_c;
+alpha_c = measure alpha;
+// alpha_c always equals int_c
+// @expect alpha_c in {0, 1}
 
 // ── Scaled blit / fixed-point stepping analog ──────────────────────
 // Classical scaled blit advances a fixed-point accumulator
@@ -82,13 +87,13 @@ measure alpha -> alpha_c;
 // via right-shift. The quantum analog is a discrete-time quantum
 // walk on the position register: a coin qubit decides "stay /
 // step" and a controlled-shift on the position register advances.
-// Below: a single coin-flipped quantum walk step on a 2-pixel
-// position register, illustrating the structure without committing
+// Below: a single coin-flipped quantum walk step on a 2-qubit
+// (4-position) register, illustrating the structure without committing
 // to a specific scaling factor.
 
-qreg coin[1];
-qreg walk_pos[2];
-creg walk_c[2];
+qubit[1] coin;
+qubit[2] walk_pos;
+bit[2] walk_c;
 
 // Coin in equal superposition.
 h coin[0];
@@ -100,7 +105,9 @@ h coin[0];
 ccx coin[0], walk_pos[0], walk_pos[1];
 cx  coin[0], walk_pos[0];
 
-measure walk_pos -> walk_c;
+walk_c = measure walk_pos;
+// From 00, the walker stays (coin 0) or steps to 01 (coin 1)
+// @expect walk_c in {0, 1}
 
 // ── Notes — classical raster vs quantum image encoding ─────────────
 //
@@ -110,7 +117,7 @@ measure walk_pos -> walk_c;
 //   - Memory-bandwidth bound on the framebuffer
 //
 // Quantum image (FRQI / NEQR):
-//   - Whole-image transformations cost O(1) gate depth
+//   - Some whole-image transformations cost O(1) gate depth
 //   - Encoding cost: O(2^n) state preparation for 2^n pixels
 //   - Measurement is the bottleneck — many shots to reconstruct
 //   - Useful for image-processing kernels that benefit from

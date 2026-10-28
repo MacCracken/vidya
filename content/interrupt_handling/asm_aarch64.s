@@ -104,7 +104,9 @@ exception_frame:
 
 // Simulated ESR values for testing
 mock_esr_svc:    .quad (EC_SVC_AA64 << 26) | (1 << 25) | 0x42
-                 // EC=SVC, IL=1 (32-bit), ISS=0x42 (syscall number)
+                 // EC=SVC, IL=1 (32-bit), ISS[15:0]=0x42: the imm16 of
+                 // `svc #0x42`, NOT the syscall number (Linux passes that
+                 // in x8 and always uses `svc #0`)
 mock_esr_dabt:   .quad (EC_DABT_LOW << 26) | (1 << 25) | 0x07
                  // EC=data abort lower, IL=1, ISS=translation fault L3
 
@@ -180,7 +182,7 @@ _start:
     // Extract ISS (bits [24:0])
     mov     x1, #0x1FFFFFF       // 25-bit mask
     and     x1, x0, x1
-    cmp     x1, #0x42            // syscall number
+    cmp     x1, #0x42            // SVC immediate (imm16)
     b.ne    fail
 
     // ── Test 4: Parse data abort ESR ──────────────────────────────
@@ -229,15 +231,15 @@ _start:
     b.ne    fail
 
     // ── Test 7: Verify VBAR alignment requirement ─────────────────
-    // VBAR must be 2KB (0x800) aligned
-    // Test: any address with low 11 bits zero is valid
-    mov     x0, #0x800
-    mov     x1, #0x7FF           // alignment mask
-    tst     x0, x1
-    b.ne    fail                 // 0x800 should be aligned
-
-    mov     x0, #0x1000          // 4KB — also aligned
-    tst     x0, x1
+    // VBAR_ELx bits [10:0] are RES0, so the table must be 2KB (0x800)
+    // aligned. Check a real table laid out with .balign, not literals.
+    adr     x0, vector_table
+    tst     x0, #0x7FF           // low 11 bits must be zero
+    b.ne    fail
+    adr     x1, vector_table_end
+    sub     x1, x1, x0
+    mov     x2, VBAR_TABLE_SIZE
+    cmp     x1, x2               // 16 entries x 128 bytes
     b.ne    fail
 
     // ── All passed ────────────────────────────────────────────────
@@ -255,3 +257,13 @@ fail:
     mov     x8, #93
     mov     x0, #1
     svc     #0
+
+// ── Layout-only vector table (never installed: VBAR_EL1 is EL1-only) ──
+// .balign N is N bytes; the equivalent `.align 11` means 2^11 on AArch64.
+.balign 2048
+vector_table:
+    .rept 16
+    b       .                    // placeholder handler
+    .balign VBAR_ENTRY_SIZE
+    .endr
+vector_table_end:

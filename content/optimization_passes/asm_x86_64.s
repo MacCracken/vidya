@@ -174,7 +174,9 @@ t5_alive:
     # Unoptimized: unsigned x / 4
     #   xor %rdx, %rdx
     #   mov $4, %rcx
-    #   div %rcx                   # ~35 cycles on modern CPUs
+    #   div %rcx                   # 64-bit DIV: ~35-88 cycles on Skylake-era
+    #                              # cores; Ice Lake / Zen 3 and later cut it
+    #                              # to roughly 10-20 — still 10x a shift
     #
     # Optimized: x >> 2            # 1 cycle
 

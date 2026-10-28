@@ -3,7 +3,7 @@
 # Three primitives, all integer arithmetic:
 #
 #   1. Greedy decoding: argmax over next-token logits
-#   2. Top-k filter:    keep only the K highest logits, others → 0
+#   2. Top-k filter:    keep only the K highest logits, others → NEG_INF
 #   3. Autoregressive loop: starting token + bigram table →
 #                           generated sequence; terminates on EOS
 #                           or when max_length reached
@@ -11,8 +11,9 @@
 # Skipping temperature / softmax / random sampling — those need
 # either exp() or a portable PRNG. Both belong in concept.toml as
 # best practices and gotchas; the runnable code stays integer-only
-# so all 11 ports (including asm + shell) produce bit-identical
-# output.
+# so every port (including asm + shell) can produce bit-identical
+# output. (vidya 2.9.4: this port masks filtered logits with NEG_INF,
+# not 0 — see topk_filter.)
 #
 # Vocabulary (8 tokens):
 #   0 = UNK   (unknown / out-of-vocabulary)
@@ -36,6 +37,12 @@ include "lib/assert.cyr"
 var VOCAB_SIZE = 8;
 var TOK_UNK = 0;
 var TOK_EOS = 1;
+
+# Mask value for filtered logits. NOT 0: a zeroed logit still wins argmax
+# whenever every kept logit is negative, and softmax gives it exp(0) = 1
+# worth of weight. The most negative i64 + 1 (so negating it cannot
+# overflow) loses every comparison, standing in for -inf.
+var NEG_INF = 0 - 0x7FFFFFFFFFFFFFFF;
 
 # === Bigram table: 8 prev × 8 next = 64 i64 cells ===
 var bigram[512];     # 64 × 8 bytes
@@ -83,7 +90,7 @@ fn argmax_logits(logits, n_vocab) {
     return best_idx;
 }
 
-# === Top-k filter: zero out everything below the k-th-highest logit ===
+# === Top-k filter: mask everything below the k-th-highest logit ===
 # In-place modification of logits buffer. Naive O(N*K) implementation
 # (loop K times, find max, mark it as "kept", set to a sentinel). For
 # educational corpus example; production uses a min-heap for O(N log K).
@@ -126,11 +133,11 @@ fn topk_filter(logits, n_vocab, k) {
         picked = picked + 1;
     }
 
-    # Zero out unmarked logits (keep only top-k).
+    # Mask unmarked logits to NEG_INF (keep only top-k).
     var m = 0;
     while (m < n_vocab) {
         if (load64(&marks + m * 8) == 0) {
-            store64(logits + m * 8, 0);
+            store64(logits + m * 8, NEG_INF);
         }
         m = m + 1;
     }
@@ -217,12 +224,23 @@ fn test_topk_keeps_top3() {
     assert_eq(load64(&test_logits + 48), 60, "idx 6 (top) kept");
     assert_eq(load64(&test_logits + 8), 50,  "idx 1 kept");
     assert_eq(load64(&test_logits + 32), 40, "idx 4 kept");
-    # Others zeroed.
-    assert_eq(load64(&test_logits + 0), 0,   "idx 0 zeroed");
-    assert_eq(load64(&test_logits + 16), 0,  "idx 2 zeroed");
-    assert_eq(load64(&test_logits + 24), 0,  "idx 3 zeroed");
-    assert_eq(load64(&test_logits + 40), 0,  "idx 5 zeroed");
-    assert_eq(load64(&test_logits + 56), 0,  "idx 7 zeroed");
+    # Others masked to NEG_INF.
+    assert_eq(load64(&test_logits + 0), NEG_INF,   "idx 0 masked");
+    assert_eq(load64(&test_logits + 16), NEG_INF,  "idx 2 masked");
+    assert_eq(load64(&test_logits + 24), NEG_INF,  "idx 3 masked");
+    assert_eq(load64(&test_logits + 40), NEG_INF,  "idx 5 masked");
+    assert_eq(load64(&test_logits + 56), NEG_INF,  "idx 7 masked");
+    return 0;
+}
+
+fn test_topk_mask_beats_negative_survivors() {
+    # All-negative logits: with a 0 mask the filtered idx 0 would read 0 and
+    # win argmax over the kept -3. NEG_INF keeps the survivor on top.
+    store64(&test_logits + 0,  0 - 5);
+    store64(&test_logits + 8,  0 - 3);
+    store64(&test_logits + 16, 0 - 10);
+    topk_filter(&test_logits, 3, 1);
+    assert_eq(argmax_logits(&test_logits, 3), 1, "top-1 survivor (-3) still wins argmax");
     return 0;
 }
 
@@ -303,6 +321,7 @@ fn main() {
     test_argmax_negative_logits();
     test_topk_keeps_top3();
     test_topk_k_equals_n_keeps_all();
+    test_topk_mask_beats_negative_survivors();
     test_bigram_lookup();
     test_decode_hello_to_eos();
     test_decode_terminates_on_eos_in_short_chain();

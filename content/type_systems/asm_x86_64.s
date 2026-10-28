@@ -67,11 +67,26 @@ _start:
     cmp     eax, 7
     jne     fail
 
-    # Multiplication differs: imul (signed) vs mul (unsigned)
+    # Multiplication: the LOW half is identical for signed and unsigned
+    # (two's complement), which is why compilers use `imul r, r/m` for
+    # both. Only the HIGH half — edx after one-operand mul/imul — differs.
     mov     eax, -3
     mov     ecx, 4
-    imul    eax, ecx            # signed: -3 * 4 = -12
+    imul    eax, ecx            # truncated product: -3 * 4 = -12
     cmp     eax, -12
+    jne     fail
+
+    mov     eax, -3
+    imul    ecx                 # signed: edx:eax = -12 → edx = 0xFFFFFFFF
+    cmp     eax, -12
+    jne     fail
+    cmp     edx, -1
+    jne     fail
+    mov     eax, -3
+    mul     ecx                 # unsigned: 0xFFFFFFFD * 4 = 0x3_FFFFFFF4
+    cmp     eax, -12            # same low half...
+    jne     fail
+    cmp     edx, 3              # ...different high half
     jne     fail
 
     # ── Floating point (SSE2) ───────────────────────────────────────
@@ -86,14 +101,20 @@ _start:
     mov     rax, 0x4000000000000000  # IEEE 754 encoding of 2.0
     movq    xmm1, rax
 
-    # Add: 3.14 + 2.0 = 5.14
+    # Add: 3.14 + 2.0 — which is NOT the double nearest 5.14
     addsd   xmm0, xmm1
 
-    # Compare with 5.14
-    mov     rax, 0x4014666666666666  # IEEE 754 encoding of 5.1 (approx)
+    # The sum rounds to 0x40148F5C28F5C290, one ulp above 5.14's encoding
+    # (0x40148F5C28F5C28F): 3.14 was already rounded, and the error carries.
+    mov     rax, 0x40148F5C28F5C290  # exact IEEE 754 result of the add
     movq    xmm1, rax
     ucomisd xmm0, xmm1
-    jb      fail                # xmm0 should be >= 5.1
+    jne     fail
+    jp      fail                # unordered (NaN) also fails
+    mov     rax, 0x40148F5C28F5C28F  # the literal 5.14
+    movq    xmm1, rax
+    ucomisd xmm0, xmm1
+    je      fail                # so `sum == 5.14` is false
 
     # ── Pointer "types": just addresses ─────────────────────────────
     # A pointer is a 64-bit integer holding a memory address

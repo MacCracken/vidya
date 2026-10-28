@@ -94,7 +94,8 @@ _start:
     mov     x1, sp
     str     x1, [x0, #CTX_SP]
 
-    // ── Test 2: Clobber all registers (simulate running process B)
+    // ── Test 2: Clobber the saved registers (simulate running process B)
+    // Only x19-x28 are clobbered, so only their restore is verified below.
     mov     x19, #0
     mov     x20, #0
     mov     x21, #0
@@ -172,16 +173,25 @@ _start:
     cmp     x0, #3
     b.ne    fail
 
-    // ── Test 6: Context size sanity ───────────────────────────────
-    mov     x0, CTX_SIZE
-    mov     x1, #256
-    cmp     x0, x1
+    // ── Test 6: Context layout sanity ─────────────────────────────
+    // The frame must be contiguous: SP sits right after x30 and the
+    // block ends right after SP. Checked at assemble time, because
+    // comparing two constants at run time can never fail.
+.if (CTX_X30 + 8 != CTX_SP) || (CTX_SP + 8 != CTX_SIZE) || (CTX_SIZE != 32 * 8)
+    .error "context frame layout is inconsistent"
+.endif
+    // At run time: the two context blocks are CTX_SIZE apart in .bss.
+    adr     x0, ctx_a
+    adr     x1, ctx_b
+    sub     x0, x1, x0
+    cmp     x0, #CTX_SIZE
     b.ne    fail
 
     // ── Test 7: STP/LDP pair efficiency ───────────────────────────
     // AArch64's STP/LDP stores/loads two 64-bit registers in one
-    // instruction, making context save/restore twice as fast as
-    // x86_64's individual push/pop per register.
+    // instruction, halving the instruction count of a context
+    // save/restore compared with x86_64's one push/pop per register
+    // (wall-clock speed depends on the core's store bandwidth).
     // Demonstrate with a mini save/restore cycle:
     sub     sp, sp, #32
     mov     x0, #0xBBBB

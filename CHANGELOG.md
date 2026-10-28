@@ -7,6 +7,176 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.4] — 2026-10-28
+
+The roadmap's content review, on the latest version of every content
+language. **OpenQASM 2.0 → 3.1** (all 77 circuits, each proven equivalent to
+its original) and **Python 3.15** are the two language moves. CI's content
+gate now runs the same current toolchains as the dev host, in an Arch Linux
+container. The full-corpus review findings are listed below.
+
+### Changed — content languages on their latest versions
+
+| Language | Was | Now |
+|---|---|---|
+| OpenQASM | 2.0 (`qelib1.inc`, qiskit `qasm2`) | **3.1** (`stdgates.inc`, qiskit `qasm3`) |
+| Python | 3.14 (host) / 3.12 (CI's Ubuntu image) | **3.15** (3.15.2) |
+| Rust | 1.97.1 | **1.99.1**, edition 2024 |
+| tsx, `@types/node` | 4.22.4, 26.2.0 | **4.23.15, 26.6.5** (TypeScript 7.0.2 was already current) |
+| qiskit / qiskit-aer | 2.4.1 / 0.17.2 | **2.6.1 / 0.18.2**, plus qiskit-qasm3-import 0.6.0 |
+
+Already current, checked against each project's release index: Go 1.27.3,
+GCC 16.2, Node 26.12.1, TypeScript 7.0.2 (whose newest named target is
+ES2025, so `--target es2025` stays), Bash 5.3, Zig 0.17.0, binutils 2.47,
+QEMU 11.1.2, Cyrius 6.7.18. The C standard stays C23, the newest published;
+the Rust edition stays 2024. The strict gate passed 847/847 on the new Rust,
+Python, tsx and qiskit before any content changed.
+
+- **OpenQASM 3.1.** The circuits were converted mechanically
+  (`qreg`/`creg` → `qubit[n]`/`bit[n]`, `measure a -> b` → `b = measure a`,
+  `cu1` → `cp`, `cu3` → `cu(θ, φ, λ, 0)`, `u1` → `p`, `u3` → `U`, `if (c==n)`
+  with braces). The review later replaced every `cu` with `cry`, because
+  `cu`'s phase convention differs between qiskit and the reference
+  `stdgates.inc`. Every circuit was **proven to be the same circuit** as its
+  2.0 original. The proof checked three things: the same registers; equal
+  unitaries, compared per group of qubits that gates connect, in the 72
+  circuits with nothing non-unitary before their final measurements; and
+  identical per-register outcome distributions from seeded aer runs at 8,192
+  shots (worst gap 0.0000). Five registers had names that OpenQASM 3
+  reserves or that `stdgates.inc` defines, so they were renamed:
+  `input` (×2), `in`, `inv`, `phase`. `content/qelib1.inc` is gone, because
+  OpenQASM 3's `stdgates.inc` is built into the importer. vyakarana's grammar
+  already colours 3.x (`qubit`, `bit`).
+- **The OpenQASM gate now simulates.** `scripts/qasm_check.py` loads each
+  circuit with qiskit's OpenQASM 3 importer, then runs every `// @expect`
+  line in a seeded qiskit-aer simulation. `@expect <reg> == <int>` means
+  every shot reads that value; `@expect <reg> in {…}` means every shot is in
+  the set and each value occurs. Through 2.9.3 a circuit's prose ("result
+  will always be 101") was never checked, which was one of the blind spots
+  CLAUDE.md names. Both validators call the script.
+- **Python 3.15.** `VIDYA_PYTHON` picks the interpreter in both validators
+  (default `python3`). The gate prints the version it used, and under
+  `VIDYA_STRICT=1` it refuses an interpreter older than 3.15. On the dev
+  host, 3.15 is uv-managed (`~/.local/bin/python3.15`), because Arch still
+  packages 3.14.
+- **CI's content job runs in `archlinux:latest`.** ubuntu-latest is Ubuntu
+  24.04, whose stock GCC 13 and Python 3.12 are far behind, and GCC 16 has
+  no apt build for it. pacman now provides GCC, Go, Node, Zig, binutils and
+  QEMU at the dev host's versions. Rust comes from rustup stable, Python
+  3.15 from uv, and qiskit with its OpenQASM 3 importer and aer from a
+  venv. A new step prints every toolchain's version, so a break caused by a
+  new upstream release can be attributed. Zig moved from the
+  sha256-checked tarball to Arch's signed package.
+- **The authoring rules for OpenQASM changed.** `content-format.md` used to
+  say "Use OPENQASM 2.0 (not 3.0)" and "do not use `swap` or `cp`". The
+  second rule was a limitation of qiskit's 2.0 parser, not of the language.
+  The notes now cover 3.1, reserved names, and `@expect`.
+
+### Fixed — the full-corpus review: 1,134 findings behind a green gate
+
+Eleven reviewers ran in parallel, one per language, over all 77 examples and
+the `concept.toml` entries for their language. Every finding had to be
+verified by a probe, a mutant or a spec citation before it was fixed: 1,126
+were CONFIRMED and 8 PLAUSIBLE. Afterwards each language's 77 examples were
+re-run against that language's gate (plus ASan/UBSan and a `-DNDEBUG` build
+for C, `-race` for Go, and the simulator for OpenQASM). Before any of it, the
+gate read 847/847. The last review, at 2.8.3, found 80.
+
+| Language | Findings | High | Files changed |
+|---|---|---|---|
+| Cyrius | 136 | 15 | 69 |
+| TypeScript | 130 | 5 | 67 |
+| C | 127 | 5 | 67 |
+| Go | 118 | 5 | 66 |
+| x86_64 | 109 | 10 | 58 |
+| Rust | 108 | 4 | 59 |
+| Zig | 90 | 4 | 57 |
+| AArch64 | 87 | 8 | 63 |
+| Python | 84 | 2 | 55 |
+| Shell | 79 | 1 | 52 |
+| OpenQASM | 66 | 4 | 77 |
+| **Total** | **1,134** | **63** | **716 files under `content/`** |
+
+Bugs one reviewer found were often in other ports too. So a cross-port
+sweep then checked 87 more ports for 20 such bugs, and fixed 30 of them. A
+closeout pass fixed 5 more in 12 files. One owner applied the `concept.toml`
+findings: 40 proposals, each checked against the fixed code and a probe,
+across 26 files. Five of them were partly wrong as proposed and were
+corrected. The worst, by kind:
+
+- **Untrusted-input decoders that read or write out of bounds.** The
+  compression decoder never checked a back-reference offset (C, Zig, Rust,
+  both assembly ports, Cyrius). serialization's `decode_frame` checked the
+  1024-byte limit but not the 64-byte destination. The SQL tokenizers had no
+  bound, and the HTTP parsers ignored `Content-Length`, so a pipelined
+  request was swallowed into the body (Python, Shell, Zig, x86_64). The
+  assembly ports bounds-checked with signed compares, so `dispatch(-1)` jumped
+  ~32 GB away and `gem_destroy(-31)` zeroed a `.data` global.
+- **Security examples that did not secure.** "Safe path" helpers passed a
+  symlink escape (Shell, C, Zig, TypeScript), Rust's passed an absolute path
+  through `Path::join`, and Go's lexical check lost to a symlink (it now uses
+  `os.Root`). A permission check could never match, so mode 777 passed. A
+  TLS example handed back unverified plaintext.
+- **Algorithms that were wrong in every port**, because they were ported
+  from one another:
+  - `reproducible_builds` stamped `min(now, SOURCE_DATE_EPOCH)`, so a slow
+    clock leaked into the build (all ten classical ports).
+  - top-k masked dropped logits to 0 instead of −∞ (every port).
+  - render-graph culling left culled passes in the schedule.
+  - a "PCG" generator was an LCG.
+  - `^0.2.3` accepted `0.9.0`.
+  - transactions past the read-set cap committed stale reads.
+  - DNS answered NXDOMAIN for NODATA, and ignored the CNAME chain's minimum
+    TTL.
+  - the CFS model collapsed task weights, so a high-priority task got 100 %
+    of the CPU.
+  - the sine table was out of phase over half the circle.
+- **Optimizers and linkers that never worked.** Constant propagation
+  reported changes it never made, so the pass loop never terminated (C,
+  Python, Rust). Strength reduction turned `7*8` into `7<<8` (Go). Every
+  object's `.text` sat at 0x400000, and PC32 subtracted 4 twice (Go, TS).
+  Rust's generated ELF printed garbage, and the TS code generator emitted
+  the topic's own misaligned-call bad example.
+- **Quantum circuits whose prose the simulator contradicted.** The QPE
+  inverse QFT read a phase of 1/4 as 50/25/25. The "Shor oracle" was two
+  CNOTs, so its output was noise. The "Ψ±" Bell states were Φ∓. "Completes
+  only when both are ready" was an XOR, and "2-of-3 majority" was one
+  Toffoli on two voters. All 66 OpenQASM findings came from reading the
+  circuits against their own words, which `@expect` now checks: 205 lines on
+  205 of the 213 classical registers.
+- **Cyrius memory taught wrong.** A fn-local `var x[N]` is N **bytes**, and
+  five lessons wrote 8-byte slots past it; in `security` that defeated the
+  bounds-check lesson. Five lessons taught that every local has a fixed
+  static address. Three files said traits, modules and macros do not exist.
+- **Tests that could not fail**, in every language: an assert on the literal
+  just written, a "PASS: scaled blit 2x" for a 1:1 blit, an HTTP test
+  comparing the test data with itself, AI decision code never called. C put
+  the operation under test inside `assert()` 134 times in 23 files, so
+  `-DNDEBUG` compiled it away (ipc still printed 18/18 ok). Those calls now
+  happen first, and the assert checks the saved result. Printed "N/N ok"
+  tallies were often wrong; Go and C now count their checks at run time.
+- **Outdated for the target version.** On Python 3.15, an unguarded `Pool`
+  now hangs instead of raising. Zig 0.17 deprecates `@intFromEnum`
+  (`@backingInt`; 26 lines). Linux's scheduler has been EEVDF, not CFS, since
+  6.6. Go 1.24–1.27 brought `errors.AsType`, `wg.Go` and `os.Root`. C's GNU
+  `__int128` became C23's `_BitInt(128)`, and small-int caching on Python 3.15
+  is −5..1024.
+
+### Verified
+
+Strict content gate **847/847**, zero skips, on Python 3.15 and OpenQASM 3.1
+(76 circuits run their `@expect` lines). `cyrius test` 158/0. `vidya stats`:
+77 topics, 77 complete, 847 examples, 0 gaps. The vidya source changed only
+in `validate_command`'s Python and OpenQASM strings, so the benchmarks
+measure content. `load_concept` reads ~19 % slower (59.3 µs) because
+`content/strings/concept.toml`, the file it parses, grew 34 % in the review.
+The 2.9.3 bench binary reads the same 59.3 µs on the new content. The other
+rows are flat.
+
+Also: literal U+FFFD bytes, committed in March, were repaired in the
+comment dividers of nine files (4 `.qasm`, 2 `rust.rs`, 3 `shell.sh`). And six
+`concept.toml` sentences were reworded to say concretely what they meant.
+
 ## [2.9.3] — 2026-10-28
 
 `serve` longevity, the roadmap's next 2.9.x item. A long-running `serve`

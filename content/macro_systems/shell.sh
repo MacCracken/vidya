@@ -166,7 +166,7 @@ assert_eq "$gen_var_5" "50" "declare generated var 2"
 # Like C's #include — the sourced code runs in our scope.
 
 tmplib=$(mktemp)
-trap "rm -f '$tmplib'" EXIT
+trap 'rm -f "$tmplib"' EXIT   # single-quoted: expands at EXIT, stays one word
 
 cat > "$tmplib" <<'LIBEOF'
 sourced_greet() {

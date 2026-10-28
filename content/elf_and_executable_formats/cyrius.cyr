@@ -1,21 +1,33 @@
 # Vidya — ELF and Executable Formats in Cyrius
 #
-# PATTERN-FOCUSED: documents how cc2 emits ELF binaries.
-# cc2 generates the simplest valid ELF — just ehdr + phdr + code + data.
-# No section headers. No symbol tables. No dynamic linking.
-# The kernel needs only program headers to load and run.
-#
-# Key patterns:
-#   - ELF magic: 0x7f454C46 (\x7fELF)
-#   - 64-byte ELF header + 56-byte program header = 120 bytes overhead
-#   - Single PT_LOAD segment (all code + data in one segment)
-#   - Entry point = BASE_ADDR + 120 (immediately after headers)
-#   - Segment alignment: 0x1000 (4KB page)
+# The ELF64 layout, checked against a real binary: this program reads
+# the first 176 bytes of its own executable (/proc/self/exe) and asserts
+# the fields. cycc (Cyrius 6.7.18) emits a static, W^X ET_EXEC:
+#   - ELF magic: 0x7f 'E' 'L' 'F'
+#   - 64-byte ELF header, then two 56-byte program headers
+#   - two PT_LOADs: code R+X at 0x400000, data R+W (since v6.3.12;
+#     CYRIUS_WX=0 opts back into one RWX segment)
+#   - entry point = BASE_ADDR + 64 + 2 * 56 = 0x4000B0, right after the
+#     program headers
+#   - a section header table (5 sections) — the kernel ignores it
+#   - segment alignment: 0x1000 (4KB page)
+# The historical cc2 / seed shape — ONE RWX PT_LOAD, entry 0x400078,
+# no section headers, a 120-byte constant template — is noted below as
+# the minimal ELF; it is not what the compiler emits today.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
 include "lib/alloc.cyr"
 include "lib/assert.cyr"
+include "lib/io.cyr"
+
+# The running binary's ELF header + both program headers (64 + 2 * 56).
+var elf_hdr: u8[176];
+var elf_hdr_len = 0;
+fn hdr_u8(off)  { return load8(&elf_hdr + off); }
+fn hdr_u16(off) { return load16(&elf_hdr + off); }
+fn hdr_u32(off) { return load32(&elf_hdr + off); }
+fn hdr_u64(off) { return load64(&elf_hdr + off); }
 
 # ================================================================
 # ELF Magic — the first 4 bytes of every ELF binary
@@ -24,39 +36,30 @@ include "lib/assert.cyr"
 # The kernel checks these 4 bytes before doing anything else.
 
 fn test_elf_magic() {
-    # ELF magic as individual bytes
-    var magic_0 = 0x7F;
-    var magic_1 = 0x45;  # 'E'
-    var magic_2 = 0x4C;  # 'L'
-    var magic_3 = 0x46;  # 'F'
-
-    assert_eq(magic_0, 127, "0x7F = 127");
-    assert_eq(magic_1, 69, "0x45 = 'E' = 69");
-    assert_eq(magic_2, 76, "0x4C = 'L' = 76");
-    assert_eq(magic_3, 70, "0x46 = 'F' = 70");
-
-    # As a 32-bit value (little-endian): 0x464C457F
-    var magic_le = 0x46 * 16777216 + 0x4C * 65536 + 0x45 * 256 + 0x7F;
-    assert_eq(magic_le, 1179403647, "ELF magic as LE u32");
+    # file_read_all returns a negative errno on failure — check it before
+    # trusting a single byte of the buffer.
+    elf_hdr_len = file_read_all("/proc/self/exe", &elf_hdr, 176);
+    assert_eq(elf_hdr_len, 176, "read 176 header bytes of /proc/self/exe");
+    assert_eq(hdr_u8(0), 0x7F, "magic[0] = 0x7F");
+    assert_eq(hdr_u8(1), 0x45, "magic[1] = 'E'");
+    assert_eq(hdr_u8(2), 0x4C, "magic[2] = 'L'");
+    assert_eq(hdr_u8(3), 0x46, "magic[3] = 'F'");
+    # As a 32-bit little-endian load: 0x464C457F
+    assert_eq(hdr_u32(0), 0x464C457F, "ELF magic as LE u32");
     return 0;
 }
 
 # ================================================================
 # ELF Header Layout — 64 bytes
 # ================================================================
-# cc2 emits the ELF header as a fixed template.
-# Only e_entry, e_phoff need to be correct.
-# e_shoff = 0 (no section headers for minimal binaries).
+# Field offsets are fixed by the ELF64 spec; each assert below loads the
+# field at its offset from this program's own header.
 
 fn test_elf_header_layout() {
     # Total ELF64 header size
-    var ehdr_size = 64;
-    assert_eq(ehdr_size, 64, "ELF64 header is 64 bytes");
+    assert_eq(hdr_u16(52), 64, "e_ehsize (offset 52) = 64: ELF64 header is 64 bytes");
 
     # e_ident: 16 bytes at offset 0
-    var ident_size = 16;
-    var ident_offset = 0;
-    assert_eq(ident_size, 16, "e_ident is 16 bytes");
 
     # Within e_ident:
     # [0:4]  = magic (\x7fELF)
@@ -65,97 +68,66 @@ fn test_elf_header_layout() {
     # [6]    = version (1 = current)
     # [7]    = OS/ABI (0 = SYSV)
     # [8:16] = padding (zeros)
-    var ei_class = 2;       # ELFCLASS64
-    var ei_data = 1;        # ELFDATA2LSB (little-endian)
-    var ei_version = 1;     # EV_CURRENT
-    assert_eq(ei_class, 2, "ELFCLASS64 = 2");
-    assert_eq(ei_data, 1, "ELFDATA2LSB = 1");
+    assert_eq(hdr_u8(4), 2, "EI_CLASS = ELFCLASS64 (2)");
+    assert_eq(hdr_u8(5), 1, "EI_DATA = ELFDATA2LSB (1, little-endian)");
+    assert_eq(hdr_u8(6), 1, "EI_VERSION = EV_CURRENT (1)");
 
-    # Field offsets (byte position within the 64-byte header)
-    var off_type = 16;       # e_type: u16
-    var off_machine = 18;    # e_machine: u16
-    var off_version = 20;    # e_version: u32
-    var off_entry = 24;      # e_entry: u64
-    var off_phoff = 32;      # e_phoff: u64
-    var off_shoff = 40;      # e_shoff: u64
-    var off_flags = 48;      # e_flags: u32
-    var off_ehsize = 52;     # e_ehsize: u16
-    var off_phentsize = 54;  # e_phentsize: u16
-    var off_phnum = 56;      # e_phnum: u16
-    var off_shentsize = 58;  # e_shentsize: u16
-    var off_shnum = 60;      # e_shnum: u16
-    var off_shstrndx = 62;   # e_shstrndx: u16
-
-    assert_eq(off_entry, 24, "e_entry at offset 24");
-    assert_eq(off_phoff, 32, "e_phoff at offset 32");
-    assert_eq(off_shoff, 40, "e_shoff at offset 40");
-    assert_eq(off_shstrndx, 62, "last field ends at 62 + 2 = 64");
-
-    # cc2's values:
-    var et_exec = 2;       # executable (not shared object)
-    var em_x86_64 = 62;    # 0x3E
-    assert_eq(et_exec, 2, "ET_EXEC = 2");
-    assert_eq(em_x86_64, 62, "EM_X86_64 = 62 (0x3E)");
+    # Field offsets (byte position within the 64-byte header):
+    #   e_type 16 (u16)  e_machine 18 (u16)  e_version 20 (u32)
+    #   e_entry 24 (u64) e_phoff 32 (u64)    e_shoff 40 (u64)
+    #   e_flags 48 (u32) e_ehsize 52         e_phentsize 54   e_phnum 56
+    #   e_shentsize 58   e_shnum 60          e_shstrndx 62 (each u16)
+    assert_eq(hdr_u16(16), 2, "e_type = ET_EXEC (2)");
+    assert_eq(hdr_u16(18), 62, "e_machine = EM_X86_64 (62 = 0x3E)");
+    assert_eq(hdr_u32(20), 1, "e_version = 1");
+    assert_eq(hdr_u64(32), 64, "e_phoff = 64: program headers follow the ELF header");
     return 0;
 }
 
 # ================================================================
 # Program Header Layout — 56 bytes
 # ================================================================
-# cc2 emits exactly one program header: PT_LOAD.
-# The entire binary (headers + code + data) is one loadable segment.
+# cycc emits two PT_LOADs (W^X): code R+X, then data R+W. (cc2 and the
+# seed emitted one R+W+X segment for the whole file.)
 
 fn test_program_header_layout() {
-    var phdr_size = 56;
-    assert_eq(phdr_size, 56, "ELF64 program header is 56 bytes");
+    assert_eq(hdr_u16(54), 56, "e_phentsize = 56: ELF64 program header is 56 bytes");
+    assert_eq(hdr_u16(56), 2, "e_phnum = 2 (code + data, W^X)");
 
-    # Field offsets within the 56-byte program header
-    var off_type = 0;      # p_type: u32
-    var off_flags = 4;     # p_flags: u32
-    var off_offset = 8;    # p_offset: u64
-    var off_vaddr = 16;    # p_vaddr: u64
-    var off_paddr = 24;    # p_paddr: u64
-    var off_filesz = 32;   # p_filesz: u64
-    var off_memsz = 40;    # p_memsz: u64
-    var off_align = 48;    # p_align: u64
-
-    assert_eq(off_type, 0, "p_type at offset 0");
-    assert_eq(off_flags, 4, "p_flags at offset 4");
-    assert_eq(off_filesz, 32, "p_filesz at offset 32");
-    assert_eq(off_align, 48, "p_align at offset 48");
-
-    # cc2's values:
-    var pt_load = 1;
-    var pf_r = 4;
-    var pf_w = 2;
-    var pf_x = 1;
-    assert_eq(pt_load, 1, "PT_LOAD = 1");
-    assert_eq(pf_r + pf_x, 5, "R+X = 5 (code segment)");
-    assert_eq(pf_r + pf_w + pf_x, 7, "R+W+X = 7 (bootstrap segment)");
+    # Field offsets within each 56-byte program header:
+    #   p_type 0 (u32)  p_flags 4 (u32)  p_offset 8   p_vaddr 16
+    #   p_paddr 24      p_filesz 32      p_memsz 40   p_align 48 (u64)
+    # Flags: PF_R = 4, PF_W = 2, PF_X = 1.
+    var ph0 = 64;
+    var ph1 = 64 + 56;
+    assert_eq(hdr_u32(ph0), 1, "phdr[0].p_type = PT_LOAD (1)");
+    assert_eq(hdr_u32(ph0 + 4), 4 + 1, "phdr[0].p_flags = R+X (5): code");
+    assert_eq(hdr_u32(ph1), 1, "phdr[1].p_type = PT_LOAD (1)");
+    assert_eq(hdr_u32(ph1 + 4), 4 + 2, "phdr[1].p_flags = R+W (6): data");
+    assert(hdr_u64(ph0 + 40) >= hdr_u64(ph0 + 32), "p_memsz >= p_filesz");
     return 0;
 }
 
 # ================================================================
 # Entry Point Calculation
 # ================================================================
-# Entry point = base_addr + ehdr_size + phdr_size
+# Entry point = base_addr + ehdr_size + e_phnum * phdr_size
 # Code starts immediately after the headers (no alignment gap).
-# For cc2: base_addr = 0x400000, so entry = 0x400078 (120 decimal).
+# cycc: 0x400000 + 64 + 2 * 56 = 0x4000B0. (cc2's one-phdr layout gave
+# 0x400000 + 120 = 0x400078.)
 
 fn test_entry_point() {
-    var base_addr = 0x400000;
-    var ehdr_size = 64;
-    var phdr_size = 56;
-    var header_total = ehdr_size + phdr_size;
-    assert_eq(header_total, 120, "total header overhead = 120 bytes");
+    var base_addr = hdr_u64(64 + 16);          # phdr[0].p_vaddr
+    assert_eq(base_addr, 0x400000, "code segment loads at 0x400000");
+    var header_total = hdr_u16(52) + hdr_u16(56) * hdr_u16(54);
+    assert_eq(header_total, 176, "ehdr + 2 phdrs = 176 bytes");
 
-    var entry = base_addr + header_total;
-    assert_eq(entry, 0x400078, "entry point = 0x400078");
+    var entry = hdr_u64(24);
+    assert_eq(entry, base_addr + header_total, "e_entry = base + 176 (code right after the headers)");
+    assert_eq(entry, 0x4000B0, "entry point = 0x4000B0");
 
-    # The entry point must be within the PT_LOAD segment.
-    # Since p_vaddr = base_addr and p_memsz >= total binary size,
-    # entry is always within bounds.
-    assert(entry >= base_addr, "entry >= base address");
+    # The entry point must be inside the code PT_LOAD.
+    assert(entry < base_addr + hdr_u64(64 + 40), "entry < code segment end");
     return 0;
 }
 
@@ -164,33 +136,30 @@ fn test_entry_point() {
 # ================================================================
 # p_align must be a power of 2. The kernel requires:
 #   p_vaddr % p_align == p_offset % p_align
-# For cc2: p_vaddr = 0x400000, p_offset = 0, p_align = 0x1000
-# 0x400000 % 0x1000 = 0, 0 % 0x1000 = 0. Satisfied.
+# Checked below for both of this binary's PT_LOADs.
 
 fn test_segment_alignment() {
-    var page_size = 0x1000;  # 4KB
-    assert_eq(page_size, 4096, "page size = 4096 bytes");
-
-    var base_addr = 0x400000;
-    var p_offset = 0;
-
-    # Alignment check: vaddr % align == offset % align
-    var vaddr_mod = base_addr % page_size;
-    var offset_mod = p_offset % page_size;
-    assert_eq(vaddr_mod, 0, "base addr is page-aligned");
-    assert_eq(offset_mod, 0, "offset is page-aligned");
-    assert_eq(vaddr_mod, offset_mod, "alignment constraint satisfied");
-
+    var ph = 64;
+    var k = 0;
+    while (k < 2) {
+        var align = hdr_u64(ph + 48);
+        assert_eq(align, 0x1000, "p_align = 4096 (one page)");
+        # Alignment check: vaddr % align == offset % align
+        assert_eq(hdr_u64(ph + 16) % align, hdr_u64(ph + 8) % align,
+                  "p_vaddr % p_align == p_offset % p_align");
+        ph = ph + 56;
+        k = k + 1;
+    }
     # 0x400000 = 4194304 = 1024 * 4096 (exactly 1024 pages)
-    var pages = base_addr / page_size;
-    assert_eq(pages, 1024, "base addr = 1024 pages");
+    assert_eq(hdr_u64(64 + 16) / 0x1000, 1024, "base addr = 1024 pages");
     return 0;
 }
 
 # ================================================================
-# Minimal Binary Size — cc2's output
+# Minimal Binary Size — the historical cc2 / seed shape
 # ================================================================
-# cc2 emits the simplest valid ELF:
+# The smallest valid ELF (what cc2 and the seed emitted; cycc adds a
+# second PT_LOAD and section headers):
 #   64 bytes: ELF header
 #   56 bytes: 1 program header (PT_LOAD)
 #   N  bytes: machine code
@@ -227,38 +196,27 @@ fn test_minimal_binary() {
 }
 
 # ================================================================
-# Section Headers — what cc2 omits
+# Section Headers — optional to the loader
 # ================================================================
-# Section headers are 64 bytes each. A typical binary has ~20 sections.
-# That's 1280 bytes of section headers alone, plus string tables.
-# cc2 sets e_shoff = 0, e_shnum = 0, e_shstrndx = 0 — no sections.
-# The kernel ignores section headers entirely.
+# Section headers are 64 bytes each. A typical gcc binary has ~20.
+# The kernel ignores them entirely; cc2 omitted them (e_shoff =
+# e_shnum = 0). cycc emits a small table (5 sections) for tools.
 
 fn test_no_section_headers() {
-    var shdr_size = 64;
-    assert_eq(shdr_size, 64, "section header is 64 bytes");
-
-    # Typical section count in a simple binary
-    var typical_sections = 20;
-    var section_overhead = typical_sections * shdr_size;
-    assert_eq(section_overhead, 1280, "20 sections = 1280 bytes");
-
-    # cc2's savings: zero section overhead
-    var cc2_section_overhead = 0;
-    assert_eq(cc2_section_overhead, 0, "cc2 emits no section headers");
-
-    # e_shoff = 0 means no section header table
-    # e_shnum = 0 means zero sections
-    # e_shstrndx = 0 is irrelevant (no sections to name)
+    assert_eq(hdr_u16(58), 64, "e_shentsize = 64: section header is 64 bytes");
+    assert(hdr_u16(60) > 0, "cycc emits a section header table (e_shnum > 0)");
+    assert(hdr_u64(40) > 0, "e_shoff points past the segments");
+    assert(hdr_u16(62) < hdr_u16(60), "e_shstrndx names one of the sections");
+    # 20 sections would cost 20 * 64 = 1280 bytes; the loader needs none.
     return 0;
 }
 
 # ================================================================
-# ELF Template — cc2's constant header
+# ELF Template — the historical cc2 constant header
 # ================================================================
-# cc2 stores the 120-byte header as a constant template.
-# Only p_filesz and p_memsz need patching per binary.
-# e_entry is constant because code always starts at offset 120.
+# cc2 stored its 120-byte header (ehdr + ONE phdr) as a constant
+# template and patched only p_filesz / p_memsz per binary; e_entry was
+# constant because code always started at offset 120.
 
 fn test_elf_template() {
     # The template is 120 bytes = 15 qwords
@@ -266,7 +224,7 @@ fn test_elf_template() {
     var qwords = template_size / 8;
     assert_eq(qwords, 15, "template = 15 qwords");
 
-    # Fields that change per binary:
+    # Fields cc2 patched per binary:
     # p_filesz (at phdr offset 32 = absolute offset 64+32 = 96): total file size
     # p_memsz  (at phdr offset 40 = absolute offset 64+40 = 104): total memory size
     var filesz_offset = 64 + 32;
@@ -274,7 +232,7 @@ fn test_elf_template() {
     assert_eq(filesz_offset, 96, "p_filesz at byte 96");
     assert_eq(memsz_offset, 104, "p_memsz at byte 104");
 
-    # Fields that DON'T change:
+    # Fields cc2's template never changed:
     # e_entry = 0x400078 (always code at offset 120)
     # e_phoff = 64 (always after ELF header)
     # p_type = PT_LOAD (always)
@@ -282,8 +240,10 @@ fn test_elf_template() {
     # p_vaddr = 0x400000 (always)
     # p_align = 0x1000 (always)
 
-    var entry_offset = 24;
-    assert_eq(entry_offset, 24, "e_entry at byte 24 in template");
+    # In this binary the first phdr sits at the same place (byte 64), so
+    # its p_filesz / p_memsz are at those same absolute offsets.
+    assert(hdr_u64(filesz_offset) > 0, "p_filesz (byte 96) is the code segment's size");
+    assert_eq(hdr_u64(memsz_offset), hdr_u64(filesz_offset), "code segment: p_memsz == p_filesz");
     return 0;
 }
 

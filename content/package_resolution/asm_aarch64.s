@@ -9,7 +9,11 @@
 // A semver major.minor.patch is encoded as one integer
 //   enc = major*1_000_000 + minor*1_000 + patch
 // so version comparison IS integer comparison. A constraint is a
-// half-open range [lo, hi). A caret ^X.Y.Z = [X.Y.Z, (X+1).0.0).
+// half-open range [lo, hi). A caret bumps the leftmost NON-ZERO field:
+// ^X.Y.Z = [X.Y.Z, (X+1).0.0) for X > 0, ^0.Y.Z = [0.Y.Z, 0.(Y+1).0)
+// for Y > 0, and ^0.0.Z = [0.0.Z, 0.0.(Z+1)) — below 1.0 the minor (or
+// patch) is the breaking axis, as in npm and cargo. The integer encoding
+// holds only while minor and patch stay below 1000.
 // Resolving a shared ("diamond") dependency intersects the ranges every
 // requirer imposes and picks the highest version that survives —
 // backtracking on an earlier choice when the highest pick paints a
@@ -64,19 +68,32 @@ sv_major:
     ret
 
 // ---------------------------------------------------------------------
-// Caret range [lo, hi): ^X.Y.Z = [X.Y.Z, (X+1).0.0)
+// Caret range [lo, hi): bump the leftmost non-zero field (see header)
 // ---------------------------------------------------------------------
 
 // caret_lo(x0 = v) -> x0 = v
 caret_lo:
     ret
 
-// caret_hi(x0 = v) -> x0 = (sv_major(v) + 1) * VMAJ
+// caret_hi(x0 = v) -> x0 = exclusive upper bound of ^v
+//   major > 0: (major+1).0.0 ; major == 0, minor > 0: 0.(minor+1).0 ;
+//   else 0.0.(patch+1). Clobbers x9, x10 only.
 caret_hi:
     ldr     x9, =VMAJ
     udiv    x10, x0, x9              // sv_major(v)
+    cbz     x10, .Lch_major0
     add     x10, x10, #1
-    mul     x0, x10, x9
+    mul     x0, x10, x9              // ^1.2.3 -> 2.0.0
+    ret
+.Lch_major0:
+    mov     x9, #VMIN
+    udiv    x10, x0, x9              // minor (major is 0)
+    cbz     x10, .Lch_minor0
+    add     x10, x10, #1
+    mul     x0, x10, x9              // ^0.2.3 -> 0.3.0
+    ret
+.Lch_minor0:
+    add     x0, x0, #1               // ^0.0.3 -> 0.0.4
     ret
 
 // ---------------------------------------------------------------------
@@ -219,14 +236,17 @@ resolve_shared:
 //   Writes chosen C into g_chosen_c.
 // ---------------------------------------------------------------------
 // Callee-saved: x19=a_vers, x20=a_creq, x21=an, x22=b_base,
-//               x23=bestA, x24=bestC, x25=i.
+//               x23=bestA, x24=bestC, x25=i, x26=aver, x27=creq, x28=lo.
+// All ten are saved: AAPCS64 requires every x19-x28 a function writes
+// to be restored before it returns.
 resolve_backtrack:
-    stp     x29, x30, [sp, #-80]!
+    stp     x29, x30, [sp, #-96]!
     mov     x29, sp
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     stp     x23, x24, [sp, #48]
-    str     x25, [sp, #64]
+    stp     x25, x26, [sp, #64]
+    stp     x27, x28, [sp, #80]
 
     mov     x19, x0                  // a_vers
     mov     x20, x1                  // a_creq
@@ -288,11 +308,12 @@ resolve_backtrack:
     str     x24, [x9]
     mov     x0, x23                  // return bestA
 
-    ldr     x25, [sp, #64]
+    ldp     x27, x28, [sp, #80]
+    ldp     x25, x26, [sp, #64]
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #80
+    ldp     x29, x30, [sp], #96
     ret
 
 // ---------------------------------------------------------------------
@@ -473,6 +494,27 @@ _start:
     bl      caret_hi
     ldr     x9, =2000000
     cmp     x0, x9
+    b.ne    fail
+
+    // caret on 0.x: minor is the breaking axis.
+    // caret_hi(sv(0,2,3)) == sv(0,3,0) = 3000
+    mov     x0, #0
+    mov     x1, #2
+    mov     x2, #3
+    bl      sv
+    bl      caret_hi
+    cmp     x0, #3000
+    b.ne    fail
+    // so 0.9.0 is NOT in ^0.2.3 (the "next major" rule would admit it)
+    mov     x0, #9000                // sv(0,9,0)
+    mov     x1, #2003                // lo = sv(0,2,3)
+    mov     x2, #3000                // hi = caret_hi(sv(0,2,3))
+    bl      satisfies
+    cbnz    x0, fail
+    // caret_hi(sv(0,0,3)) == sv(0,0,4) = 4
+    mov     x0, #3
+    bl      caret_hi
+    cmp     x0, #4
     b.ne    fail
 
     // satisfies(sv(1,4,0), caret_lo(sv(1,2,0)), caret_hi(sv(1,2,0))) == 1

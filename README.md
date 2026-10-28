@@ -51,16 +51,16 @@ build/vidya serve 8080                     # HTTP service: GET /stats, /code/{to
 | Language | Extension | Notes |
 |----------|-----------|-------|
 | Cyrius | `.cyr` | **Primary**. Vidya itself is written in Cyrius; the corpus is the live reference for Cyrius/AGNOS patterns. |
-| Rust | `.rs` | Full coverage, edition 2024. |
-| Python | `.py` | Full coverage, stdlib only. |
-| C | `.c` | C23 with `_GNU_SOURCE`. |
-| Go | `.go` | Full coverage. |
-| TypeScript | `.ts` | Node.js runtime via `tsx`. |
-| Shell | `.sh` | Bash with `set -euo pipefail`. |
+| Rust | `.rs` | Edition 2024, latest stable toolchain. |
+| Python | `.py` | Python 3.15, stdlib only. |
+| C | `.c` | C23 with `_GNU_SOURCE` (GCC 16). |
+| Go | `.go` | Go 1.27. |
+| TypeScript | `.ts` | TypeScript 7, type-checked with `tsc --strict`, run on Node 26 via `tsx`. |
+| Shell | `.sh` | Bash 5.3 with `set -euo pipefail`. |
 | Zig | `.zig` | Zig 0.17. |
 | x86_64 ASM | `.s` | Intel syntax, Linux syscalls. |
 | AArch64 ASM | `.s` | ARM64, Linux syscalls via `svc`. |
-| OpenQASM | `.qasm` | Quantum assembly (QASM 2.0). |
+| OpenQASM | `.qasm` | OpenQASM 3.1, simulated against its `@expect` lines. |
 
 ## Validation
 

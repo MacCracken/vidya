@@ -47,7 +47,8 @@ _start:
 
     # ── Mutable aliasing: the thing Rust forbids ───────────────────
     # Two "mutable references" to overlapping memory — perfectly legal
-    # in assembly, undefined behavior in safe Rust.
+    # in assembly. Safe Rust rejects it at compile time (E0499); only
+    # unsafe code can create it, and there it is undefined behavior.
     lea     rsi, [heap_block]       # points to byte 0
     lea     rdi, [heap_block + 2]   # points to byte 2 (overlapping!)
 

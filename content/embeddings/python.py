@@ -130,8 +130,10 @@ def test_top_k_returns_all_when_k_exceeds_corpus():
 
 
 def test_nearest_deterministic():
-    q = [29490, 0, 0, 0]
-    check(nearest(q) == nearest(q), "deterministic")
+    # nearest() is a pure function, so nearest(q) == nearest(q) cannot
+    # fail. The determinism that matters is the TIE rule: strict `>` keeps
+    # the first best, so an all-zero query (every sim == 0) picks index 0.
+    check(nearest([0, 0, 0, 0]) == 0, "ties resolve to the lowest index")
 
 
 if __name__ == "__main__":

@@ -104,5 +104,5 @@ pub fn main() !void {
     if (d.submit(b1) != 0) return error.SubmitDestroyed;
     if (d.submit(b2) != 4) return error.NextValid;
 
-    std.debug.print("direct_drm_gpu_compute: 20/20 ok\n", .{});
+    std.debug.print("direct_drm_gpu_compute: 18/18 ok\n", .{});
 }

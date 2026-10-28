@@ -209,12 +209,15 @@ assert_eq "$(inst_length "48b80100000000000000")" "10" "MOV rax,imm64 = 10 bytes
 
 # ── MOV reg, imm32 encoding ─────────────────────────────────────────
 # MOV r32, imm32: opcode (0xB8+r) + imm32
-# Zero-extends to 64 bits, no REX.W needed.
+# Zero-extends to 64 bits, no REX.W needed. r8d-r15d still need REX.B
+# (0x41): without it, 0xB8+0 encodes eax, not r8d.
 
 encode_mov_reg_imm32() {
     local reg=$1 imm=$2
+    local prefix=""
+    if reg_needs_rex_ext "$reg"; then prefix=41; fi
     local opcode=$(( 0xB8 + REG[$reg] ))
-    printf '%02x%s' "$opcode" "$(imm32_le "$imm")"
+    printf '%s%02x%s' "$prefix" "$opcode" "$(imm32_le "$imm")"
 }
 
 result=$(encode_mov_reg_imm32 rax 42)
@@ -225,6 +228,9 @@ assert_eq "$result" "b9ff000000" "MOV ecx, 255"
 
 result=$(encode_mov_reg_imm32 rdi 1)
 assert_eq "$result" "bf01000000" "MOV edi, 1 (for syscall arg)"
+
+result=$(encode_mov_reg_imm32 r8 1)
+assert_eq "$result" "41b801000000" "MOV r8d, 1 (REX.B)"
 
 echo "$PASS tests passed"
 exit 0

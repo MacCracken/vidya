@@ -91,20 +91,27 @@ fn testIdtGateDescriptor() !void {
     try expect(syscall_gate.gate_type == GateType.TRAP);
     try expect(syscall_gate.dpl == 3); // user-accessible
 
-    // Not-present gate — CPU generates #GP if invoked
+    // Not-present gate — CPU raises #NP (vector 11, Segment Not Present)
+    // if invoked, with the gate's IDT index in the error code
     var absent = makeIdtGate(0, 0x08, 0, GateType.INTERRUPT, 0);
     absent.present = 0;
     try expect(absent.present == 0);
 }
 
 // ── IDTR (IDT Register) ─────────────────────────────────────────────
-// IDTR is 10 bytes on hardware (2-byte limit + 8-byte base).
-// Neither packed nor extern struct gives exactly 10 bytes in Zig,
-// so we model it as a plain struct with an encode method.
-const IdtDescriptor = struct {
-    limit: u16, // Size of IDT - 1
-    base: u64, // Linear address of IDT
+// IDTR is 10 bytes on hardware (2-byte limit + 8-byte base), unaligned.
+// A `packed struct` will not do (its u80 backing integer makes @sizeOf
+// 16), but an `extern struct` with `align(1)` fields is exactly 10 bytes
+// — the in-memory operand LIDT reads.
+const IdtDescriptor = extern struct {
+    limit: u16 align(1), // Size of IDT - 1
+    base: u64 align(1), // Linear address of IDT
 };
+
+comptime {
+    std.debug.assert(@sizeOf(IdtDescriptor) == 10);
+    std.debug.assert(@offsetOf(IdtDescriptor, "base") == 2);
+}
 
 // ── Exception Table ──────────────────────────────────────────────────
 // x86_64 reserves vectors 0-31 for CPU exceptions
@@ -244,25 +251,31 @@ fn testPic8259A() !void {
 }
 
 // ── Interrupt Priority ───────────────────────────────────────────────
+// What the CPU services first when several events are pending at one
+// instruction boundary (Intel SDM Vol. 3A, Table 6-2 "Priority Among
+// Concurrent Events"; lower value = serviced first). Faults raised by
+// the instruction itself (#PF, #GP) rank BELOW external interrupts.
+// INT n is not on the list: it is an instruction, not a concurrent event.
+// Among maskable interrupts the local APIC orders by vector (vector >> 4
+// is the priority class), not by device type.
 const InterruptPriority = enum(u8) {
-    nmi = 0, // Non-maskable — highest priority
-    machine_check = 1,
-    double_fault = 2,
-    exception = 3, // CPU exceptions (#PF, #GP, etc.)
-    hardware_high = 4, // Timer, IPI
-    hardware_low = 5, // Disk, network
-    software = 6, // Syscalls, INT instruction
+    machine_check = 0, // SDM 1: hardware reset and machine checks
+    debug_trap = 1, // SDM 4: traps on the previous instruction (#DB: single-step, data and I/O breakpoints)
+    nmi = 2, // SDM 5: non-maskable interrupt
+    hardware = 3, // SDM 6: maskable hardware interrupts (timer, disk, IPI)
+    fault = 4, // SDM 7-10: faults on fetch/decode/execute (#UD, #PF, #GP)
 };
 
 fn testInterruptPriority() !void {
-    // NMI cannot be masked — always handled
-    try expect(@intFromEnum(InterruptPriority.nmi) < @intFromEnum(InterruptPriority.exception));
+    // Machine check outranks even NMI
+    try expect(@backingInt(InterruptPriority.machine_check) < @backingInt(InterruptPriority.nmi));
 
-    // Hardware interrupts have higher priority than software
-    try expect(@intFromEnum(InterruptPriority.hardware_high) < @intFromEnum(InterruptPriority.software));
+    // NMI outranks every maskable interrupt
+    try expect(@backingInt(InterruptPriority.nmi) < @backingInt(InterruptPriority.hardware));
 
-    // Exceptions are between NMI and hardware IRQs
-    try expect(@intFromEnum(InterruptPriority.exception) < @intFromEnum(InterruptPriority.hardware_high));
+    // A pending external interrupt is taken before the next instruction's
+    // own faults: those are re-detected when the instruction runs again
+    try expect(@backingInt(InterruptPriority.hardware) < @backingInt(InterruptPriority.fault));
 }
 
 // ── Interrupt Stack Table (IST) ──────────────────────────────────────

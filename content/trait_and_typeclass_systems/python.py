@@ -1,17 +1,18 @@
 # Vidya — Trait and Typeclass Systems in Python
 #
 # Python has no traits or typeclasses. Instead it achieves polymorphism
-# through three mechanisms:
+# through four mechanisms:
 #   1. Duck typing — if it has the method, call it (no declaration needed)
 #   2. Abstract Base Classes (ABC) — nominal "trait" with enforcement
-#   3. Protocols (PEP 544) — structural typing, like Rust traits
+#   3. Protocols (PEP 544) — structural typing, like Go interfaces (Rust
+#      traits are nominal: only an explicit `impl` satisfies one)
 #   4. Dunder methods — implicit "trait impls" for operators/builtins
 #
 # This maps to Rust concepts:
 #   ABC       ≈ trait with required methods (nominal, must inherit)
 #   Protocol  ≈ trait bounds checked structurally (no inheritance needed)
-#   __len__   ≈ impl Len for T
-#   __iter__  ≈ impl Iterator for T
+#   __len__   ≈ a .len() method (no std Rust trait; ExactSizeIterator::len)
+#   __iter__  ≈ impl IntoIterator for T (__next__ ≈ impl Iterator)
 #   __add__   ≈ impl Add for T
 
 from abc import ABC, abstractmethod
@@ -127,8 +128,10 @@ def main():
     assert isinstance(shapes[1], Drawable)
 
     # ── Protocol: structural trait (no inheritance) ─────────────────
-    # Protocols are like Rust traits checked structurally: any type
-    # with the right methods satisfies the protocol, without inheriting.
+    # Protocols are structural: any type with the right methods satisfies
+    # the protocol, without inheriting or declaring anything — like a Go
+    # interface. A Rust trait is the opposite (nominal): a type only
+    # satisfies it through an explicit `impl Trait for Type`.
 
     @runtime_checkable
     class Serializable(Protocol):
@@ -167,7 +170,7 @@ def main():
 
     # ── Dunder methods: implicit trait implementations ──────────────
     # Python's dunder methods are like Rust's standard traits:
-    #   __len__     → len(x)     ≈ impl Len
+    #   __len__     → len(x)     ≈ .len() (no std trait)
     #   __iter__    → iter(x)    ≈ impl IntoIterator
     #   __add__     → x + y      ≈ impl Add
     #   __eq__      → x == y     ≈ impl PartialEq
@@ -207,7 +210,7 @@ def main():
         def __mul__(self, scalar):
             return Vec2(self.x * scalar, self.y * scalar)
 
-        # impl Len (for abs/magnitude as integer)
+        # abs(v): magnitude, a float (no std Rust trait; a .length() method)
         def __abs__(self):
             return (self.x ** 2 + self.y ** 2) ** 0.5
 

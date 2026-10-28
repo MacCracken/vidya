@@ -1,14 +1,19 @@
 # Module Systems — Cyrius reference (runnable)
 #
-# Cyrius has no module system. Code organization is textual:
-#   1. include — paste file contents at the inclusion point
-#   2. No module boundaries — all symbols are global
-#   3. No visibility control — everything is public
-#   4. Vendored lib/ pattern — standard library as included files
-#   5. Name collision avoidance — _ prefixes by convention
+# Cyrius's module system is small and mostly textual:
+#   1. include — paste file contents at the inclusion point, include-once
+#      by spelling (a repeated include of the same path is skipped)
+#   2. `private` / `public` — a file that declares `private` exposes only
+#      its `public` items; calling a private fn from another file is a
+#      compile error ("'helper' is private to its file")
+#   3. `mod m;` + `use m.f;` — fns after `mod m;` are named m_f, and
+#      `use m.f;` binds the bare name f to it
+#   4. cyrius deps — [deps.NAME] git tags in cyrius.cyml, resolved into
+#      lib/ and pinned by SHA in cyrius.lock
+#   5. Name collision avoidance — Module_ / _ prefixes by convention
 #
-# This is simpler than Rust's module system but offers no
-# encapsulation. The programmer must use naming discipline.
+# There is no namespace per file: without `private`, every name is
+# global, so naming discipline still matters.
 
 include "lib/string.cyr"
 include "lib/fmt.cyr"
@@ -21,34 +26,41 @@ include "lib/assert.cyr"
 # include: textual inclusion (no module boundary)
 # ================================================================
 # `include "path"` reads the file and inserts its contents.
-# There is no:
-#   - Import caching (include twice = define twice = error)
-#   - Namespace isolation (all names are global)
-#   - Selective import (you get everything in the file)
-#   - Relative import syntax (paths are relative to project root)
+# What it does and does not do:
+#   - Include-once: a second `include` of the same spelling is skipped
+#     (this file includes lib/str.cyr twice; "./a.cyr" and "a.cyr" are
+#     two spellings)
+#   - No namespace isolation (all names are global unless `private`)
+#   - No selective import (you get everything in the file)
+#   - Paths resolve against the build's working directory; `cyrius build`
+#     adds the entry file's directory (#@incdir, v6.5.7)
 #
 # Compare to Rust:
 #   include "lib/string.cyr"   ≈  use crate::string::*;
-#   (but textual, not semantic — no privacy, no namespacing)
+#   (textual, not semantic; privacy is per file, opt-in)
 #
-# Include order matters: a file can only use names defined
-# ABOVE it in the inclusion chain (single-pass compilation).
+# Order does NOT limit calls: a fn may call one defined later in the
+# file or in a later include (test_forward_call below).
+
+include "lib/str.cyr"              # repeated spelling: skipped
 
 # ================================================================
 # Vendored lib/ pattern
 # ================================================================
 # The standard "library" is a set of .cyr files in lib/:
-#   lib/string.cyr  — string operations (str_len, str_eq, str_copy)
-#   lib/fmt.cyr     — formatted output (print, println)
+#   lib/string.cyr  — C-string + memory ops (strlen, streq, memcpy, memset)
+#   lib/str.cyr     — the Str type (str_from, str_len, str_eq, ...)
+#   lib/fmt.cyr     — formatted output (fmt_int, fmt_hex, fmt_sprintf)
 #   lib/alloc.cyr   — bump allocator (alloc, alloc_reset)
 #   lib/assert.cyr  — test assertions (assert, assert_eq)
 #   lib/vec.cyr     — dynamic array (vec_new, vec_push, vec_get)
 #   lib/tagged.cyr  — tagged unions (Ok, Err, Some, None)
 #
-# Each project copies (vendors) these files. There is no package
-# manager, no shared library path, no version resolution.
-# This is intentional: Cyrius prioritizes simplicity and
-# self-contained builds over dependency management.
+# Each project vendors these files into its own lib/: `cyrius lib sync`
+# copies the [deps] stdlib subset from the pinned toolchain, and
+# `cyrius deps` resolves [deps.NAME] git dependencies at their tags.
+# cyrius.lock pins every vendored file by hash, so a build is
+# self-contained and reproducible.
 
 fn test_lib_available() {
     # Verify standard lib functions are available via include
@@ -64,9 +76,9 @@ fn test_lib_available() {
 # ================================================================
 # Name collision avoidance: _ prefix convention
 # ================================================================
-# Since all names are global, collisions are the programmer's
-# responsibility. Convention:
-#   _helper      — internal/private (by convention only)
+# In a file without `private`, all names are global, so collisions are
+# the programmer's responsibility. Convention:
+#   _helper      — internal (by convention; `private` enforces it)
 #   ModuleName_func — namespaced to a logical module
 #   LIB_CONSTANT — library-level constant
 #
@@ -152,6 +164,13 @@ fn logger_count() {
     return _log_count;
 }
 
+# A call to a fn defined further down the file compiles: fns are known
+# before bodies are compiled, so definition order is not call order.
+fn test_forward_call() {
+    assert_eq(defined_below(4), 40, "forward call to a later fn");
+    return 0;
+}
+
 fn test_multi_module() {
     # Math module
     assert_eq(math_abs(0 - 42), 42, "abs negative");
@@ -173,22 +192,40 @@ fn test_multi_module() {
 # ================================================================
 # What Cyrius does NOT have (vs Rust)
 # ================================================================
-#   - No pub/pub(crate)/pub(super) — everything is visible
-#   - No mod keyword — no declaring submodules
-#   - No use/pub use — no selective or re-export imports
-#   - No separate compilation — single translation unit
-#   - No crate boundary — no concept of "external crate"
-#   - No import caching — include is always textual
+#   - Visibility is per FILE (`private` / `public`), not pub(crate) /
+#     pub(super) per item path
+#   - `mod m;` prefixes names; it does not nest or open a scope
+#   - `use m.f;` aliases one fn; there is no glob import or re-export
+#   - No crate boundary — a dependency is a vendored file in lib/
 #
-# The tradeoff: zero module system complexity.
-# The cost: naming discipline is the only encapsulation tool.
+# The tradeoff: a tiny module system.
+# The cost: outside `private` files, naming discipline is the
+# encapsulation tool.
+
+var MOD_USE_RESULT = 0;
+
+fn test_mod_use() {
+    assert_eq(geo_area(3, 4), 12, "fn after `mod geo;` is geo_area");
+    assert_eq(MOD_USE_RESULT, 12, "`use geo.area;` binds the bare name");
+    return 0;
+}
 
 fn main() {
     alloc_init();
     test_lib_available();
     test_namespace_convention();
+    test_forward_call();
     test_multi_module();
+    test_mod_use();
     return assert_summary();
 }
+
+fn defined_below(x) { return x * 10; }
+
+# `mod geo;` names every fn after it geo_*; keep it last.
+mod geo;
+fn area(w, h) { return w * h; }
+use geo.area;
+MOD_USE_RESULT = area(3, 4);
 var exit_code = main();
 syscall(60, exit_code);
