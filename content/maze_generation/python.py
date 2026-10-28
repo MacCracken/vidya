@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Vidya — Maze Generation in Python
-
-Recursive backtracker (iterative DFS) on an 8x8 grid. Walls per cell
-are stored as a bitmask (N=1, S=2, E=4, W=8). Generation carves
-passages by clearing the wall bit on both the current and neighbour
-cell.
-
-Python's `int` is arbitrary precision, which means the LCG step (PCG's
-multiplier and increment, without PCG's output permutation) would not
-wrap on its own, so we mask explicitly to 64 bits. No signed conversion
-is needed to match cyrius's signed-i64 arithmetic: `(state >> 33) &
-0x7FFFFFFF` keeps bits 33-63, which are identical whether the shift is
-arithmetic (signed) or logical (unsigned), and the result is never
-negative, so the modulo matches too.
-"""
+# Vidya — Maze Generation in Python
+#
+# Recursive backtracker (iterative DFS) on an 8x8 grid. Walls per cell
+# are stored as a bitmask (N=1, S=2, E=4, W=8). Generation carves
+# passages by clearing the wall bit on both the current and neighbour
+# cell.
+#
+# Python's `int` is arbitrary precision, which means the LCG step (PCG's
+# multiplier and increment, without PCG's output permutation) would not
+# wrap on its own, so we mask explicitly to 64 bits. No signed conversion
+# is needed to match cyrius's signed-i64 arithmetic: `(state >> 33) &
+# 0x7FFFFFFF` keeps bits 33-63, which are identical whether the shift is
+# arithmetic (signed) or logical (unsigned), and the result is never
+# negative, so the modulo matches too.
 
 GW = 8
 GH = 8

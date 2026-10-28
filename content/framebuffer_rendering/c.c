@@ -1,7 +1,6 @@
-/* Vidya — Framebuffer Rendering in C
- *
- * 16x16 BGRA8888 framebuffer mirroring cyrius.cyr.
- */
+// Vidya — Framebuffer Rendering in C
+//
+// 16x16 BGRA8888 framebuffer mirroring cyrius.cyr.
 
 #include <assert.h>
 #include <stdint.h>

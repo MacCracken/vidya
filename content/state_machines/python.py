@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Vidya — State Machines in Python
-
-Finite state machines with enum dispatch, committed states, timers, and
-transition validation. Python's `enum.IntEnum` gives readable names with
-integer round-trip for parity with the other-language ports. Dataclasses
-keep the Player struct compact and mutable.
-"""
+# Vidya — State Machines in Python
+#
+# Finite state machines with enum dispatch, committed states, timers, and
+# transition validation. Python's `enum.IntEnum` gives readable names with
+# integer round-trip for parity with the other-language ports. Dataclasses
+# keep the Player struct compact and mutable.
 
 from dataclasses import dataclass
 from enum import IntEnum

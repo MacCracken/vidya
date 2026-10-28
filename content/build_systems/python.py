@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Vidya — Build Systems — Python port.
-
-A minimal build-system core: a DAG of targets, topological build order,
-content-signature dirty-tracking, and ninja-style incremental rebuild
-(only dirty targets run), plus cycle detection. Mirrors the Cyrius
-reference: same data model, same algorithms, same tests.
-
-No real files or compilers: each target carries a source "content
-signature" (an integer). A target's INPUT signature mixes its own source
-with the OUTPUT signatures of its dependencies; if that differs from the
-signature it was last built against, the target is dirty and rebuilds.
-Editing a source changes its signature, which transitively re-dirties
-everything downstream — exactly how mtime/hash-based tools (make, ninja,
-bazel) decide what to redo.
-"""
+# Vidya — Build Systems — Python port.
+#
+# A minimal build-system core: a DAG of targets, topological build order,
+# content-signature dirty-tracking, and ninja-style incremental rebuild
+# (only dirty targets run), plus cycle detection. Mirrors the Cyrius
+# reference: same data model, same algorithms, same tests.
+#
+# No real files or compilers: each target carries a source "content
+# signature" (an integer). A target's INPUT signature mixes its own source
+# with the OUTPUT signatures of its dependencies; if that differs from the
+# signature it was last built against, the target is dirty and rebuilds.
+# Editing a source changes its signature, which transitively re-dirties
+# everything downstream — exactly how mtime/hash-based tools (make, ninja,
+# bazel) decide what to redo.
 
 HB = 131        # signature polynomial base
 HM = 1000003    # signature modulus (prime; keeps values < 2^53)

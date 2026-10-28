@@ -30,16 +30,16 @@ Expected output:
 
 ```
 === Vidya Corpus Stats ===
-  Topics:     74
-  Complete:   74 (all 11 languages)
-  Examples:   847
+  Topics:     80
+  Complete:   80 (all 11 languages)
+  Examples:   880
   Languages:  11
 ```
 
 ## Common Tasks
 
 ```bash
-./build/vidya list                              # browse all 77 topics
+./build/vidya list                              # browse all 80 topics
 ./build/vidya search "memory"                   # text search across the corpus
 ./build/vidya info strings                      # full record for a topic
 ./build/vidya code quantum_computing rust       # ANSI-colored source via vyakarana

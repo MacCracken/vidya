@@ -1,10 +1,10 @@
-#define _GNU_SOURCE
 // Vidya — Instruction Encoding in C
 //
 // Encode x86_64 instructions to machine code bytes in a buffer.
 // REX prefixes, ModR/M bytes, SIB bytes, immediate encoding.
 // Each encoder function emits to a uint8_t buffer and returns
 // the number of bytes written. Verified with assert.
+#define _GNU_SOURCE
 
 #include <assert.h>
 #include <stdint.h>

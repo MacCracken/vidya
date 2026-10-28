@@ -1,12 +1,11 @@
-/* Vidya — Sprite Rendering in C
- *
- * Software sprite blitting against a flat 8-bit palette framebuffer.
- * The framebuffer is a `uint8_t*` heap allocation (matching the Cyrius
- * port's `_fb = alloc(FB_SIZE)`); we index it as `fb[y*SCREEN_W + x]`.
- * Every pixel op is a byte read or byte write — no struct overhead, no
- * RGB packing, no atomics. malloc/free; assert from <assert.h> drives
- * the test harness.
- */
+// Vidya — Sprite Rendering in C
+//
+// Software sprite blitting against a flat 8-bit palette framebuffer.
+// The framebuffer is a `uint8_t*` heap allocation (matching the Cyrius
+// port's `_fb = alloc(FB_SIZE)`); we index it as `fb[y*SCREEN_W + x]`.
+// Every pixel op is a byte read or byte write — no struct overhead, no
+// RGB packing, no atomics. malloc/free; assert from <assert.h> drives
+// the test harness.
 
 #include <assert.h>
 #include <stdint.h>

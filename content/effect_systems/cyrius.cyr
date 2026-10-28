@@ -1,0 +1,535 @@
+# Effect Systems — Cyrius reference (runnable)
+#
+# Side effects made explicit: a program that yields effect requests
+# (Ask, Log, Fail) instead of doing I/O, handlers that decide what each
+# request means (resume with an answer, or stop), state threaded through
+# step(state, input), capabilities passed as parameters, and a pure core
+# behind a thin imperative shell.
+#
+# OCaml 5, Koka, Unison and Eff have native effect handlers; Cyrius does
+# not, so the program is an explicit step function (a state machine) and
+# a handler loop feeds each answer back in. A request is a `: stack`
+# enum value: a (tag, payload) register pair that allocates nothing.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/str.cyr"
+include "lib/fnptr.cyr"
+include "lib/assert.cyr"
+
+# --- Shared helpers: messages and a log buffer ---
+# "rate=" + 3 -> "rate=3" (a NUL-terminated heap string)
+fn msg_kv(prefix, n) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, n);
+    return str_data(str_builder_build(sb));
+}
+
+# A log buffer on the heap: [count, then up to LOG_CAP string pointers].
+var LOG_CAP = 8;
+fn log_new() {
+    var b = alloc(8 + LOG_CAP * 8);
+    store64(b, 0);
+    return b;
+}
+fn log_push(b, msg) {
+    var n = load64(b);
+    if (n < LOG_CAP) {
+        store64(b + 8 + n * 8, msg);
+        store64(b, n + 1);
+    }
+    return 0;
+}
+fn log_count(b) { return load64(b); }
+fn log_line(b, i) { return load64(b + 8 + i * 8); }
+
+# Null-safe comparisons for the checks: a missing line or reason is a
+# failed check, not a crash.
+fn str_is(p, s) {
+    if (p == 0) { return 0; }
+    return streq(p, s);
+}
+fn log_line_is(b, i, s) {
+    if (i >= log_count(b)) { return 0; }
+    return str_is(log_line(b, i), s);
+}
+
+# The one real output channel, used only by the production handlers.
+var g_stdout_lines = 0;
+fn stdout_line(msg) {
+    syscall(1, 1, "  [prod] ", 9);
+    syscall(1, 1, msg, strlen(msg));
+    syscall(1, 1, "\n", 1);
+    g_stdout_lines = g_stdout_lines + 1;
+    return 0;
+}
+
+# --- 1. Effects as data, and an interpreter ---
+# A request names an effect and carries its payload; the program never
+# performs it. Done is not an effect: it is how the program returns.
+enum Eff: stack { Ask(key); Log(msg); Fail(reason); Done(value); }
+
+# What running a program under a handler gives back.
+enum Outcome: stack { Finished(value); Stopped(reason); }
+
+# The program, as it would read with native handlers (OCaml 5, Koka):
+#   rate = perform Ask("rate")
+#   perform Log("rate=" ^ rate)
+#   if qty <= 0 then perform Fail("empty order")
+#   perform Log("total=" ^ qty * rate)
+#   return qty * rate
+# Cyrius has no `perform` that suspends a fn, so checkout_step is that
+# program cut at each effect: it returns the next request, and the next
+# call resumes it with the answer. Its state record is the suspended
+# rest of the program: [pc, qty, rate, steps]. `steps` counts how many
+# times it ran, so a check can see what a handler cut short.
+var P_PC = 0;
+var P_QTY = 8;
+var P_RATE = 16;
+var P_STEPS = 24;
+
+fn checkout_new(qty) {
+    var st = alloc(32);
+    store64(st + P_PC, 0);
+    store64(st + P_QTY, qty);
+    store64(st + P_RATE, 0);
+    store64(st + P_STEPS, 0);
+    return st;
+}
+
+fn checkout_step(st, answer) {
+    store64(st + P_STEPS, load64(st + P_STEPS) + 1);
+    var pc = load64(st + P_PC);
+    var qty = load64(st + P_QTY);
+    if (pc == 0) {
+        store64(st + P_PC, 1);
+        return Ask("rate");
+    }
+    if (pc == 1) {
+        store64(st + P_RATE, answer);          # resumed with Ask's answer
+        store64(st + P_PC, 2);
+        return Log(msg_kv("rate=", answer));
+    }
+    var total = qty * load64(st + P_RATE);
+    if (pc == 2) {
+        store64(st + P_PC, 3);
+        if (qty <= 0) { return Fail("empty order"); }
+        return Log(msg_kv("total=", total));
+    }
+    store64(st + P_PC, 4);
+    return Done(total);
+}
+
+# The interpreter: run any step-function program under any handler. A
+# handler is fn(tag, payload) -> (resume, value). resume = 1 feeds value
+# back to the program; resume = 0 stops it, and value is the reason.
+# The interpreter does not know what Ask, Log or Fail mean: the handler
+# decides.
+fn handle_with(handler, step, st) {
+    var answer = 0;
+    loop {
+        var tag, payload = fncall2(step, st, answer);
+        if (tag == Done) { return Finished(payload); }
+        var resume, value = fncall2(handler, tag, payload);
+        if (resume == 0) { return Stopped(value); }
+        answer = value;
+    }
+    return Stopped(0);
+}
+
+# Production handler: Ask reads the process configuration, Log writes to
+# stdout, Fail is reported and stops the program.
+var g_config_rate = 4;
+fn prod_handler(tag, payload) {
+    match tag {
+        Ask => {
+            if (streq(payload, "rate") == 1) { return (1, g_config_rate); }
+            return (0, "unknown key");
+        }
+        Log => {
+            stdout_line(payload);
+            return (1, 0);
+        }
+        Fail => {
+            stdout_line(payload);
+            return (0, payload);
+        }
+        _ => { return (0, 0); }
+    }
+    return (0, 0);
+}
+
+# Test handler: a fixed environment (the rate it answers) and a log
+# buffer it records into. No I/O, nothing global.
+fn test_handler(rate, log) {
+    var h = |tag, payload| {
+        match tag {
+            Ask => {
+                if (streq(payload, "rate") == 1) { return (1, rate); }
+                return (0, "unknown key");
+            }
+            Log => {
+                log_push(log, payload);
+                return (1, 0);
+            }
+            Fail => { return (0, payload); }   # do not resume: the failure is the result
+            _ => { return (0, 0); }
+        }
+        return (0, 0);
+    };
+    return h;
+}
+
+# --- 2. Resumable handlers ---
+# Ask is answered and the program RESUMES with the answer: the
+# interpreter passes the handler's value to the next checkout_step
+# call. Two handlers that answer differently get different results from
+# the same program. (A native handler resumes a captured continuation;
+# OCaml 5's continuations are one-shot: a second `continue` raises
+# Effect.Continuation_already_resumed.)
+
+# --- 3. A non-resuming effect is an early exit ---
+# The test handler answers Fail by NOT resuming, so the rest of the
+# program never runs: no "total=" line, and no further steps. That is
+# an exception built from a handler. The same mechanism is the gotcha
+# when it is an accident: a handler that forgets to resume after Log
+# stops the program just as silently.
+fn forgetful_handler(rate, log) {
+    var h = |tag, payload| {
+        match tag {
+            Ask => { return (1, rate); }
+            Log => {
+                log_push(log, payload);
+                return (0, 0);                 # BUG: should be (1, 0)
+            }
+            _ => { return (0, payload); }
+        }
+        return (0, 0);
+    };
+    return h;
+}
+
+# --- 4. State as an effect ---
+# step(state, input) -> (output, new_state). The state is a value the
+# caller threads through, not a hidden variable: tally_step builds a new
+# record and never writes the one it was given, so every earlier state
+# is still readable. A State effect (Get / Put) interpreted by a handler
+# comes down to exactly this threading. Tally = [count, total]; the
+# output is the running mean, total / count (integer division).
+fn tally_new(count, total) {
+    var t = alloc(16);
+    store64(t, count);
+    store64(t + 8, total);
+    return t;
+}
+fn tally_count(t) { return load64(t); }
+fn tally_total(t) { return load64(t + 8); }
+
+fn tally_step(st, x) {
+    var next = tally_new(tally_count(st) + 1, tally_total(st) + x);
+    return (tally_total(next) / tally_count(next), next);
+}
+
+# --- 5. Capability passing ---
+# session_check needs the time and a logger. It takes them as a
+# capability record [now_fn, log_fn] instead of reaching for globals, so
+# a test can pass a fake clock and a recording logger.
+fn caps_new(now_fn, log_fn) {
+    var c = alloc(16);
+    store64(c, now_fn);
+    store64(c + 8, log_fn);
+    return c;
+}
+
+fn session_check(caps, expires_at) {
+    var now = fncall0(load64(caps));
+    if (now < expires_at) {
+        fncall1(load64(caps + 8), msg_kv("valid at ", now));
+        return 1;
+    }
+    fncall1(load64(caps + 8), msg_kv("expired at ", now));
+    return 0;
+}
+
+# Production capabilities. A real program would pass clock_now_ms from
+# lib/chrono.cyr; this file stays deterministic, so the "system clock"
+# is a global that moves forward on every read. That global is exactly
+# the hidden state the capability keeps out of session_check.
+var g_sys_time = 1000;
+var g_clock_reads = 0;
+fn sys_clock() {
+    g_clock_reads = g_clock_reads + 1;
+    var t = g_sys_time;
+    g_sys_time = g_sys_time + 1;
+    return t;
+}
+fn sys_log(msg) { return stdout_line(msg); }
+
+# Test capabilities: a clock stopped at t, and a logger into a buffer.
+fn fake_clock(t) {
+    var c = || t;
+    return c;
+}
+fn fake_logger(log) {
+    var l = |msg| log_push(log, msg);
+    return l;
+}
+
+# --- 6. Functional core, imperative shell ---
+# A thermostat. The core, decide(heater, temp) -> (new_heater, commands),
+# is pure: it reads only its arguments and returns the commands as data.
+# Hysteresis: heat on below 19, off above 21; an alarm at 15 or below.
+# The shell is the only code that touches the device.
+enum Cmd { HEAT_ON = 1; HEAT_OFF = 2; ALARM = 3; }
+
+# A command list on the heap: [count, then (tag, value) pairs].
+fn cmds_new(cap) {
+    var c = alloc(8 + cap * 16);
+    store64(c, 0);
+    return c;
+}
+fn cmds_push(c, tag, value) {
+    var n = load64(c);
+    store64(c + 8 + n * 16, tag);
+    store64(c + 16 + n * 16, value);
+    store64(c, n + 1);
+    return 0;
+}
+fn cmds_count(c) { return load64(c); }
+fn cmd_is(c, i, tag, value) {
+    if (i >= load64(c)) { return 0; }
+    if (load64(c + 8 + i * 16) != tag) { return 0; }
+    if (load64(c + 16 + i * 16) != value) { return 0; }
+    return 1;
+}
+
+fn decide(heater, temp) {
+    var out = cmds_new(2);
+    var next = heater;
+    if (heater == 0 && temp < 19) {
+        next = 1;
+        cmds_push(out, HEAT_ON, temp);
+    }
+    if (heater == 1 && temp > 21) {
+        next = 0;
+        cmds_push(out, HEAT_OFF, temp);
+    }
+    if (temp <= 15) { cmds_push(out, ALARM, temp); }
+    return (next, out);
+}
+
+# The core over a run of events: still pure (it only calls decide).
+fn core_run(events, n) {
+    var heater = 0;
+    var all = cmds_new(2 * n);
+    var i = 0;
+    while (i < n) {
+        var next, cmds = decide(heater, load64(events + i * 8));
+        var k = 0;
+        while (k < cmds_count(cmds)) {
+            cmds_push(all, load64(cmds + 8 + k * 16), load64(cmds + 16 + k * 16));
+            k = k + 1;
+        }
+        heater = next;
+        i = i + 1;
+    }
+    return (heater, all);
+}
+
+# The shell: the device registers it drives, and the loop that executes
+# each command the core returns.
+var g_heater_pin = 0;
+var g_alarms_raised = 0;
+fn shell_execute(cmds) {
+    var k = 0;
+    while (k < cmds_count(cmds)) {
+        var tag = load64(cmds + 8 + k * 16);
+        if (tag == HEAT_ON) { g_heater_pin = 1; }
+        if (tag == HEAT_OFF) { g_heater_pin = 0; }
+        if (tag == ALARM) { g_alarms_raised = g_alarms_raised + 1; }
+        k = k + 1;
+    }
+    return 0;
+}
+fn shell_run(events, n) {
+    var heater = 0;
+    var i = 0;
+    while (i < n) {
+        var next, cmds = decide(heater, load64(events + i * 8));
+        shell_execute(cmds);
+        heater = next;
+        i = i + 1;
+    }
+    return heater;
+}
+
+# === Tests ===
+
+fn test_effects_as_data() {
+    var log = log_new();
+    var st = checkout_new(10);
+    var tag, value = handle_with(test_handler(3, log), &checkout_step, st);
+    assert_eq(tag, Finished, "test handler: checkout(10) finished");
+    assert_eq(value, 30, "test handler: checkout(10) at rate 3 = 30");
+    assert_eq(log_count(log), 2, "test handler captured 2 log lines");
+    assert_eq(log_line_is(log, 0, "rate=3"), 1, "log line 0 is \"rate=3\"");
+    assert_eq(log_line_is(log, 1, "total=30"), 1, "log line 1 is \"total=30\"");
+
+    # The same program under the production handler: real output.
+    var before = g_stdout_lines;
+    var ptag, pvalue = handle_with(&prod_handler, &checkout_step, checkout_new(10));
+    assert_eq(ptag, Finished, "production handler: checkout(10) finished");
+    assert_eq(pvalue, 40, "production handler: config rate 4 gives 40");
+    assert_eq(g_stdout_lines - before, 2, "production handler wrote its 2 log lines to stdout");
+    return 0;
+}
+
+fn test_resumable() {
+    var log3 = log_new();
+    var log5 = log_new();
+    var t3, v3 = handle_with(test_handler(3, log3), &checkout_step, checkout_new(10));
+    var t5, v5 = handle_with(test_handler(5, log5), &checkout_step, checkout_new(10));
+    assert_eq(v3, 30, "resumed with 3: 10 * 3 = 30");
+    assert_eq(v5, 50, "resumed with 5: 10 * 5 = 50");
+    assert_eq(v3 != v5, 1, "the answer the handler supplies decides the result");
+    assert_eq(log_line_is(log5, 0, "rate=5"), 1, "the resumed program logged the answer it got");
+    return 0;
+}
+
+fn test_early_exit() {
+    var log = log_new();
+    var st = checkout_new(0);
+    var tag, reason = handle_with(test_handler(3, log), &checkout_step, st);
+    assert_eq(tag, Stopped, "Fail is not resumed: the run stops");
+    assert_eq(str_is(reason, "empty order"), 1, "the handler returns the failure, \"empty order\"");
+    assert_eq(log_count(log), 1, "only \"rate=3\" was logged: the \"total=\" step never ran");
+    assert_eq(load64(st + P_STEPS), 3, "the program ran 3 steps (Ask, Log, Fail), not 4");
+
+    # The gotcha: a handler that forgets to resume after Log.
+    var flog = log_new();
+    var fst = checkout_new(10);
+    var ftag, freason = handle_with(forgetful_handler(3, flog), &checkout_step, fst);
+    assert_eq(ftag, Stopped, "forgetful handler: the run stopped after the first Log");
+    assert_eq(freason, 0, "forgetful handler: and the stop carries no reason at all");
+    assert_eq(load64(fst + P_STEPS), 2, "forgetful handler: 2 steps ran (Ask, Log), not 4");
+    return 0;
+}
+
+fn test_state_threading() {
+    var inputs: i64[3];
+    store64(&inputs + 0 * 8, 5);
+    store64(&inputs + 1 * 8, 10);
+    store64(&inputs + 2 * 8, 20);
+    var outs: i64[3];
+
+    var s0 = tally_new(0, 0);
+    var st = s0;
+    var i = 0;
+    while (i < 3) {
+        var out, next = tally_step(st, load64(&inputs + i * 8));
+        store64(&outs + i * 8, out);
+        st = next;
+        i = i + 1;
+    }
+    assert_eq(load64(&outs + 0 * 8), 5, "running mean after 5: 5 / 1 = 5");
+    assert_eq(load64(&outs + 1 * 8), 7, "running mean after 10: 15 / 2 = 7");
+    assert_eq(load64(&outs + 2 * 8), 11, "running mean after 20: 35 / 3 = 11");
+    assert_eq(tally_count(st), 3, "final state: count 3");
+    assert_eq(tally_total(st), 35, "final state: total 35");
+    assert_eq(tally_count(s0), 0, "initial state unchanged: count still 0");
+    assert_eq(tally_total(s0), 0, "initial state unchanged: total still 0");
+
+    # Replaying from s0 gives the same final state: nothing hidden moved.
+    var again = s0;
+    i = 0;
+    while (i < 3) {
+        var out2, next2 = tally_step(again, load64(&inputs + i * 8));
+        again = next2;
+        i = i + 1;
+    }
+    assert_eq(tally_total(again), tally_total(st), "replaying from s0 reaches the same total");
+    return 0;
+}
+
+fn test_capabilities() {
+    var reads0 = g_clock_reads;
+    var lines0 = g_stdout_lines;
+
+    var log_a = log_new();
+    var at100 = caps_new(fake_clock(100), fake_logger(log_a));
+    assert_eq(session_check(at100, 150), 1, "fake clock at 100, expiry 150: valid");
+    assert_eq(log_line_is(log_a, 0, "valid at 100"), 1, "fake logger recorded \"valid at 100\"");
+
+    var log_b = log_new();
+    var at200 = caps_new(fake_clock(200), fake_logger(log_b));
+    assert_eq(session_check(at200, 150), 0, "fake clock at 200, expiry 150: expired");
+    assert_eq(log_line_is(log_b, 0, "expired at 200"), 1, "fake logger recorded \"expired at 200\"");
+
+    assert_eq(g_clock_reads - reads0, 0, "the fakes never read the system clock");
+    assert_eq(g_stdout_lines - lines0, 0, "the fakes never wrote to stdout");
+
+    # The same function with the production capabilities.
+    var prod = caps_new(&sys_clock, &sys_log);
+    assert_eq(session_check(prod, 150), 0, "production clock at 1000, expiry 150: expired");
+    assert_eq(g_clock_reads - reads0, 1, "production read the system clock once");
+    return 0;
+}
+
+fn test_functional_core() {
+    # Every threshold is hit exactly, so an off-by-one comparison fails:
+    # 19 while off and 21 while on emit nothing (not below 19, not above
+    # 21), 15 alarms and 16 does not. 17 arrives while the heater is on
+    # and 23 while it is off, so a decide that ignores its state fails
+    # too, and 14 alarms with the heater already on.
+    var events: i64[9];
+    store64(&events + 0 * 8, 19);
+    store64(&events + 1 * 8, 18);
+    store64(&events + 2 * 8, 17);
+    store64(&events + 3 * 8, 21);
+    store64(&events + 4 * 8, 22);
+    store64(&events + 5 * 8, 23);
+    store64(&events + 6 * 8, 15);
+    store64(&events + 7 * 8, 16);
+    store64(&events + 8 * 8, 14);
+
+    # The pure core alone: no device, just the commands it returns.
+    var heater, cmds = core_run(&events, 9);
+    assert_eq(cmds_count(cmds), 5, "core emitted 5 commands for 9 events");
+    assert_eq(cmd_is(cmds, 0, HEAT_ON, 18), 1, "command 0 is HEAT_ON(18)");
+    assert_eq(cmd_is(cmds, 1, HEAT_OFF, 22), 1, "command 1 is HEAT_OFF(22)");
+    assert_eq(cmd_is(cmds, 2, HEAT_ON, 15), 1, "command 2 is HEAT_ON(15)");
+    assert_eq(cmd_is(cmds, 3, ALARM, 15), 1, "command 3 is ALARM(15)");
+    assert_eq(cmd_is(cmds, 4, ALARM, 14), 1, "command 4 is ALARM(14)");
+    assert_eq(heater, 1, "core's final state: heater on");
+
+    var still_on, none = decide(1, 20);
+    assert_eq(cmds_count(none), 0, "decide(on, 20): inside the band, no commands");
+    assert_eq(still_on, 1, "decide(on, 20): the heater stays on");
+    assert_eq(g_heater_pin + g_alarms_raised, 0, "the core never touched the device");
+
+    # The shell runs the same core and executes what it returns. The
+    # first 6 events end just after HEAT_OFF(22): the pin must be off
+    # there, which the final pin (on again) cannot show.
+    shell_run(&events, 6);
+    assert_eq(g_heater_pin, 0, "shell, first 6 events: HEAT_OFF(22) drove the pin off");
+    assert_eq(shell_run(&events, 9), 1, "shell: final state heater on");
+    assert_eq(g_heater_pin, 1, "shell drove the heater pin on");
+    assert_eq(g_alarms_raised, 2, "shell raised the alarm twice");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_effects_as_data();
+    test_resumable();
+    test_early_exit();
+    test_state_threading();
+    test_capabilities();
+    test_functional_core();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

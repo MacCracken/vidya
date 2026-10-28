@@ -1,15 +1,14 @@
-/* Virtual Memory — C Implementation
- *
- * Demonstrates virtual memory concepts:
- *   1. Page table entry (PTE) encoding and bit manipulation
- *   2. 4-level x86_64 address decomposition
- *   3. Page table walk simulation
- *   4. TLB cache simulation with hit/miss tracking
- *   5. Demand paging page fault detection
- *
- * In a real kernel, page tables live in physical memory and the MMU
- * walks them in hardware. Here we simulate the data structure layout.
- */
+// Virtual Memory — C Implementation
+//
+// Demonstrates virtual memory concepts:
+//   1. Page table entry (PTE) encoding and bit manipulation
+//   2. 4-level x86_64 address decomposition
+//   3. Page table walk simulation
+//   4. TLB cache simulation with hit/miss tracking
+//   5. Demand paging page fault detection
+//
+// In a real kernel, page tables live in physical memory and the MMU
+// walks them in hardware. Here we simulate the data structure layout.
 
 #include <assert.h>
 #include <stdint.h>

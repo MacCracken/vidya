@@ -1,15 +1,14 @@
-/* Process and Scheduling — C Implementation
- *
- * Demonstrates operating system scheduling concepts:
- *   1. Task struct with saved register state
- *   2. Round-robin scheduler with time quantum
- *   3. CFS-like fair scheduler with virtual runtime and weighted priorities
- *   4. Process state machine transitions
- *   5. Context switch data layout
- *
- * In a real kernel, context_switch is assembly that saves/restores
- * callee-saved registers. Here we simulate scheduling decisions.
- */
+// Process and Scheduling — C Implementation
+//
+// Demonstrates operating system scheduling concepts:
+//   1. Task struct with saved register state
+//   2. Round-robin scheduler with time quantum
+//   3. CFS-like fair scheduler with virtual runtime and weighted priorities
+//   4. Process state machine transitions
+//   5. Context switch data layout
+//
+// In a real kernel, context_switch is assembly that saves/restores
+// callee-saved registers. Here we simulate scheduling decisions.
 
 #include <assert.h>
 #include <stdint.h>

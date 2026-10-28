@@ -32,19 +32,19 @@ cyrius build src/main.cyr build/vidya
 Use it:
 
 ```bash
-build/vidya stats                          # 77 topics, 847 examples, 11 langs
+build/vidya stats                          # 80 topics, 880 examples, 11 langs
 build/vidya list                           # browse all topics
 build/vidya search "quantum"               # text search across the corpus
 build/vidya info quantum_computing         # full record: practices, gotchas, perf notes
 build/vidya code quantum_computing rust    # ANSI-colored source via vyakarana
 build/vidya compare strings rust python    # side-by-side cross-language view
-build/vidya gaps                           # coverage gaps (currently none — 847/847)
+build/vidya gaps                           # coverage gaps (currently none — 880/880)
 build/vidya serve 8080                     # HTTP service: GET /stats, /code/{topic}/{lang}, ...
 ```
 
 ## Content Topics
 
-77 topics, complete across all 11 languages (847 examples). Browse `content/` directly or run `vidya list` to see the index. Planned work lives in [`docs/development/roadmap.md`](docs/development/roadmap.md).
+80 topics, complete across all 11 languages (880 examples). Browse `content/` directly or run `vidya list` to see the index. Planned work lives in [`docs/development/roadmap.md`](docs/development/roadmap.md).
 
 ## Languages
 

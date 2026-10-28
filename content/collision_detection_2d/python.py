@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Vidya — 2D Collision Detection in Python
-
-All coordinates in 16.16 fixed-point. Python ints are arbitrary
-precision, so squared distances never overflow — we still keep the
->>4 pre-shift pattern from the Cyrius reference because the rest of
-this corpus relies on it (matching results across languages with
-fixed-width integers). Squared-distance comparisons avoid sqrt on
-every collision test, which is the central performance trick.
-"""
+# Vidya — 2D Collision Detection in Python
+#
+# All coordinates in 16.16 fixed-point. Python ints are arbitrary
+# precision, so squared distances never overflow — we still keep the
+# >>4 pre-shift pattern from the Cyrius reference because the rest of
+# this corpus relies on it (matching results across languages with
+# fixed-width integers). Squared-distance comparisons avoid sqrt on
+# every collision test, which is the central performance trick.
 
 FX_SHIFT = 16
 FX_ONE = 1 << FX_SHIFT

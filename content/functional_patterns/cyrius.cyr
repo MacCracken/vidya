@@ -1,0 +1,431 @@
+# Functional Patterns — Cyrius reference (runnable)
+#
+# Pure functions and memoization, higher-order functions (compose and
+# pipe), closures and partial application, what a closure captures, a
+# persistent cons list that shares structure instead of copying, folds
+# as its recursion scheme, and tail calls.
+#
+# Cyrius closures `|x| ..` capture BY VALUE when they are built, into a
+# heap environment (so lib/alloc.cyr and alloc_init()), and are called
+# like fn pointers (`&f`) through fncallN / callptr. A `const fn` is the
+# compiler-checked pure subset. No heap memory is read-only: a list stays
+# persistent only because no code writes a node once others can see it.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/fnptr.cyr"
+include "lib/assert.cyr"
+
+# --- 1. Purity ---
+# A pure fn's result depends only on its arguments, and calling it
+# changes nothing. `const fn` makes the compiler check that: the body may
+# assign only its own locals, so the #assert below runs it at compile
+# time. Written as a `const fn`, impure_next is refused at its
+# definition: "'g_counter' is not a local of this const fn - a const fn
+# assigns only its own locals".
+const fn pure_add(a, b) { return a + b; }
+#assert pure_add(2, 3) == 5, "pure_add runs at compile time";
+
+var g_counter = 0;                 # hidden state impure_next reads and bumps
+fn impure_next() {
+    g_counter = g_counter + 1;
+    return g_counter;
+}
+
+# Memoization: cache results by argument. Sound only for a pure fn,
+# since a cached result must be what a fresh call would return.
+# counted_add is pure_add plus a call counter, so a check can see
+# whether the underlying fn ran (the counter is the test's probe; the
+# value is still pure_add's).
+var g_add_calls = 0;
+fn counted_add(a, b) {
+    g_add_calls = g_add_calls + 1;
+    return pure_add(a, b);
+}
+
+# A memo table on the heap: [count, then CAP entries of (a, b, value)].
+# The key is BOTH arguments; a key of `a` alone would hand (2, 4) the
+# result cached for (2, 3).
+var MEMO_CAP = 8;
+fn memo_call(t, f, a, b) {
+    var n = load64(t);
+    var i = 0;
+    while (i < n) {
+        var e = t + 8 + i * 24;
+        if (load64(e) == a && load64(e + 8) == b) { return load64(e + 16); }
+        i = i + 1;
+    }
+    var v = fncall2(f, a, b);
+    if (n < MEMO_CAP) {
+        var slot = t + 8 + n * 24;
+        store64(slot, a);
+        store64(slot + 8, b);
+        store64(slot + 16, v);
+        store64(t, n + 1);
+    }
+    return v;
+}
+
+# memoize2(f) returns a closure with f's call shape that owns its table.
+fn memoize2(f) {
+    var t = alloc(8 + MEMO_CAP * 24);
+    store64(t, 0);
+    var m = |a, b| memo_call(t, f, a, b);
+    return m;
+}
+
+# --- 2. Higher-order functions and composition ---
+# compose(f, g)(x) = f(g(x))   (right to left, as in maths: f . g)
+# pipe(f, g)(x)    = g(f(x))   (left to right, reading order)
+fn add_three(x) { return x + 3; }
+fn times_two(x) { return x * 2; }
+
+fn compose(f, g) {
+    var h = |x| fncall1(f, fncall1(g, x));
+    return h;
+}
+
+fn pipe(f, g) {
+    var h = |x| fncall1(g, fncall1(f, x));
+    return h;
+}
+
+# --- 3. Closures and partial application ---
+# make_adder(n) returns a fn that remembers n: the closure copied it.
+fn make_adder(n) {
+    var f = |x| x + n;
+    return f;
+}
+
+# A closure cannot assign to a variable it captured (it holds a copy),
+# so private mutable state lives in a heap cell and the closure captures
+# the cell's ADDRESS. Each make_counter() call allocates a new cell, so
+# two counters never share a count. (Rust's `move || { n += 1; n }`
+# owns its n outright; Python rebinds it with `nonlocal`; OCaml uses a ref.)
+fn make_counter() {
+    var cell = alloc(8);
+    store64(cell, 0);
+    var c = || {
+        var v = load64(cell) + 1;
+        store64(cell, v);
+        return v;
+    };
+    return c;
+}
+
+# partial(f, a, b) fixes the first two arguments of a 3-argument fn
+# and returns a 1-argument fn. Cyrius closures are untyped words called
+# by arity (fncall1 / fncall3), so this helper is for 3-argument fns;
+# another arity needs its own helper.
+fn add3(a, b, c) { return a + b + c; }
+
+fn partial(f, a, b) {
+    var p = |c| fncall3(f, a, b, c);
+    return p;
+}
+
+# --- 4. The capture gotcha (what a closure sees of a loop variable) ---
+# Calling each of Python's `[lambda: i for i in range(3)]` gives [2, 2, 2],
+# and a JS `for (var i = 0; i < 3; i++)` gives [3, 3, 3]: those closures look the
+# variable up when CALLED (late binding), when the loop is over. Cyrius
+# copies the value when the closure is BUILT (early binding), so the
+# loop below gives [0, 1, 2] with no fix needed. Late binding can only be
+# had on purpose, by capturing the variable's address, and then it bites
+# the same way: see test_capture.
+
+# --- 5. Persistent (immutable) list with structural sharing ---
+# A cons cell is 16 bytes: [head, tail]; NIL (0) is the empty list.
+# cons never copies its tail, so prepending is O(1) and the old list is
+# still a complete, unchanged list. Nodes come from the bump allocator
+# and are never freed, so no version can free a node another one shares
+# (C would need a refcount or an arena per generation; Rust uses Rc).
+var NIL = 0;
+var g_cons_allocs = 0;             # nodes allocated, so checks can count copying
+
+fn cons(h, t) {
+    var c = alloc(16);
+    store64(c, h);
+    store64(c + 8, t);
+    g_cons_allocs = g_cons_allocs + 1;
+    return c;
+}
+
+fn head(xs) { return load64(xs); }
+fn tail(xs) { return load64(xs + 8); }
+
+fn list3(a, b, c) { return cons(a, cons(b, cons(c, NIL))); }
+
+fn nth(xs, i) {
+    var p = xs;
+    var k = i;
+    while (k > 0) {
+        p = tail(p);
+        k = k - 1;
+    }
+    return head(p);
+}
+
+# Structural equality: same values in the same order (not the same nodes).
+fn list_eq(a, b) {
+    var p = a;
+    var q = b;
+    while (p != NIL && q != NIL) {
+        if (head(p) != head(q)) { return 0; }
+        p = tail(p);
+        q = tail(q);
+    }
+    if (p == NIL && q == NIL) { return 1; }
+    return 0;
+}
+
+# Functional update: a new list with element i replaced. It copies the
+# i cells in front of i plus the replaced cell (i + 1 allocations) and
+# shares everything after it. The original list is not touched.
+fn update_at(xs, i, v) {
+    if (xs == NIL) { return NIL; }
+    if (i == 0) { return cons(v, tail(xs)); }
+    return cons(head(xs), update_at(tail(xs), i - 1, v));
+}
+
+# --- 6. Fold as the recursion scheme ---
+# foldr(f, z, [a, b, c]) = f(a, f(b, f(c, z)))   (recursion: O(n) stack)
+# foldl(f, z, [a, b, c]) = f(f(f(z, a), b), c)   (a loop: O(1) stack)
+fn foldr(f, z, xs) {
+    if (xs == NIL) { return z; }
+    return fncall2(f, head(xs), foldr(f, z, tail(xs)));
+}
+
+fn foldl(f, z, xs) {
+    var acc = z;
+    var p = xs;
+    while (p != NIL) {
+        acc = fncall2(f, acc, head(p));
+        p = tail(p);
+    }
+    return acc;
+}
+
+# The list operations, each one fold. Non-capturing closures are bare
+# fn pointers (no allocation); list_map's closure captures g.
+fn list_length(xs) {
+    var f = |acc, x| acc + 1;
+    return foldl(f, 0, xs);
+}
+
+fn list_sum(xs) {
+    var f = |acc, x| acc + x;
+    return foldl(f, 0, xs);
+}
+
+fn list_reverse(xs) {
+    var f = |acc, x| cons(x, acc);
+    return foldl(f, NIL, xs);
+}
+
+fn list_map(g, xs) {
+    var f = |x, acc| cons(fncall1(g, x), acc);
+    return foldr(f, NIL, xs);
+}
+
+# --- 7. Tail recursion and stack depth ---
+# Cyrius compiles a `return f(..)` that passes every argument by
+# position to a jump (cyrius guide, "Tail calls"), so sum_to_tail runs
+# in constant stack. That depends on the call's shape, not on a language
+# promise like Scheme's: a `defer` or `secret var` in the fn, a named or
+# defaulted argument, a call inside an if-expression's branch, or a
+# by-value struct argument copied ahead of a later argument that writes
+# memory each make it an ordinary call again. The accumulator loop
+# needs none of that reasoning.
+#
+# Naive recursion, `return n + sum(n - 1)`, must keep every frame to do
+# the `+` after the call returns. Measured here at about 80 bytes a
+# frame: 104,687 levels fit the default 8 MiB stack (`ulimit -s` 8192)
+# and 105,468 died with SIGSEGV, so 100,000 is within 5% of the edge.
+fn sum_to_loop(n) {
+    var acc = 0;
+    var i = 1;
+    while (i <= n) {
+        acc = acc + i;
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn sum_to_tail(n, acc) {
+    if (n == 0) { return acc; }
+    return sum_to_tail(n - 1, acc + n);
+}
+
+# === Tests ===
+
+fn test_purity() {
+    var r1 = pure_add(2, 3);
+    var r2 = pure_add(2, 3);
+    assert_eq(r1, r2, "pure_add: same arguments, same result");
+    assert_eq(r1, 5, "pure_add(2, 3) = 5");
+
+    g_counter = 0;
+    var n1 = impure_next();
+    var n2 = impure_next();
+    assert_eq(n1 == n2, 0, "impure_next: same call, different results (1, then 2)");
+    assert_eq(g_counter, 2, "impure_next left a trace: hidden state bumped twice");
+    return 0;
+}
+
+fn test_memoize() {
+    g_add_calls = 0;
+    var madd = memoize2(&counted_add);
+    var m1 = fncall2(madd, 2, 3);
+    var m2 = fncall2(madd, 2, 3);
+    assert_eq(m1, 5, "memo: first call computes 2 + 3 = 5");
+    assert_eq(m2, 5, "memo: second call returns the cached 5");
+    assert_eq(g_add_calls, 1, "memo: second call is a cache hit (1 call, not 2)");
+    assert_eq(fncall2(madd, 2, 4), 6, "memo: (2, 4) is a miss, the key is both arguments");
+    assert_eq(g_add_calls, 2, "memo: the miss ran the underlying fn once more");
+    return 0;
+}
+
+fn test_composition() {
+    var c = compose(&add_three, &times_two);
+    var p = pipe(&add_three, &times_two);
+    assert_eq(fncall1(c, 1), 5, "compose(f, g)(1) = f(g(1)) = 2 + 3 = 5");
+    assert_eq(fncall1(p, 1), 8, "pipe(f, g)(1) = g(f(1)) = 4 * 2 = 8");
+    assert_eq(fncall1(c, 1) != fncall1(p, 1), 1, "order matters: compose != pipe at x = 1");
+
+    # The laws, over a range of x: compose applies g first, and pipe is
+    # compose with its arguments swapped.
+    var cgf = compose(&times_two, &add_three);
+    var ok_c = 1;
+    var ok_p = 1;
+    var x = 0 - 2;
+    while (x <= 2) {
+        if (fncall1(c, x) != add_three(times_two(x))) { ok_c = 0; }
+        if (fncall1(p, x) != fncall1(cgf, x)) { ok_p = 0; }
+        x = x + 1;
+    }
+    assert_eq(ok_c, 1, "compose(f, g)(x) == f(g(x)) for x in -2..2");
+    assert_eq(ok_p, 1, "pipe(f, g)(x) == compose(g, f)(x) for x in -2..2");
+    return 0;
+}
+
+fn test_closures() {
+    var add5 = make_adder(5);
+    var add10 = make_adder(10);
+    assert_eq(fncall1(add5, 1), 6, "make_adder(5)(1) = 6");
+    assert_eq(fncall1(add10, 1), 11, "make_adder(10)(1) = 11: each adder keeps its own n");
+
+    var c1 = make_counter();
+    var c2 = make_counter();
+    fncall0(c1);
+    fncall0(c1);
+    assert_eq(fncall0(c1), 3, "counter 1 counted 1, 2, 3");
+    assert_eq(fncall0(c2), 1, "counter 2 starts at 1: its state is its own");
+    assert_eq(fncall0(c1), 4, "counter 1 carries on at 4, untouched by counter 2");
+
+    var add_1_2 = partial(&add3, 1, 2);
+    assert_eq(fncall1(add_1_2, 3), 6, "partial(add3, 1, 2)(3) = 1 + 2 + 3 = 6");
+    return 0;
+}
+
+fn test_capture() {
+    # By value: each closure copies i as it was when the closure was built.
+    var fs: i64[3];
+    for (var i = 0; i < 3; i = i + 1) {
+        var f = || i;
+        store64(&fs + i * 8, f);
+    }
+    assert_eq(fncall0(load64(&fs + 0 * 8)), 0, "by value: closure 0 returns 0");
+    assert_eq(fncall0(load64(&fs + 1 * 8)), 1, "by value: closure 1 returns 1");
+    assert_eq(fncall0(load64(&fs + 2 * 8)), 2, "by value: closure 2 returns 2");
+
+    # Early binding: a later assignment is not seen.
+    var base = 1;
+    var g = || base;
+    base = 99;
+    assert_eq(fncall0(g), 1, "by value: captured 1, the later base = 99 is not seen");
+
+    # Late binding on purpose: capture the loop variable's ADDRESS. Every
+    # closure now reads the one j when called, after the loop left it at
+    # 3: the JS `var` result, [3, 3, 3]. (Python's range loop stops with
+    # i at 2, hence its [2, 2, 2].) The fix is to capture the value.
+    var refs: i64[3];
+    var j = 0;
+    var pj = &j;
+    while (j < 3) {
+        var r = || load64(pj);
+        store64(&refs + j * 8, r);
+        j = j + 1;
+    }
+    assert_eq(fncall0(load64(&refs + 0 * 8)), 3, "by address: closure 0 sees j's final 3");
+    assert_eq(fncall0(load64(&refs + 1 * 8)), 3, "by address: closure 1 sees j's final 3");
+    assert_eq(fncall0(load64(&refs + 2 * 8)), 3, "by address: closure 2 sees j's final 3");
+    return 0;
+}
+
+fn test_persistent_list() {
+    var xs = list3(1, 2, 3);
+    var ys = cons(0, xs);
+    assert_eq(tail(ys) == xs, 1, "cons shares: tail(ys) IS xs, the same node");
+    assert_eq(list_eq(ys, cons(0, list3(1, 2, 3))), 1, "ys reads [0, 1, 2, 3]");
+    assert_eq(list_eq(xs, list3(1, 2, 3)), 1, "xs still reads [1, 2, 3] after the cons");
+
+    var before = g_cons_allocs;
+    var zs = update_at(xs, 1, 20);
+    assert_eq(g_cons_allocs - before, 2, "update at index 1 allocates i + 1 = 2 nodes, not 3");
+    assert_eq(list_eq(zs, list3(1, 20, 3)), 1, "zs reads [1, 20, 3]");
+    assert_eq(tail(tail(zs)) == tail(tail(xs)), 1, "the suffix after the updated cell is shared");
+    assert_eq(tail(zs) == tail(xs), 0, "the updated cell is new, not xs's");
+    assert_eq(list_eq(xs, list3(1, 2, 3)), 1, "xs still reads [1, 2, 3] after the update");
+
+    # The gotcha: write through a node two versions share and both change.
+    # Nothing stops this store64; persistence is a rule the code keeps.
+    var vs = list3(1, 2, 3);
+    var ws = update_at(vs, 0, 7);           # ws = [7, 2, 3], shares vs's [2, 3]
+    store64(tail(vs), 99);                  # in-place write to the shared cell
+    assert_eq(nth(ws, 1), 99, "a write through a shared node changes the other version too");
+    return 0;
+}
+
+fn test_folds() {
+    var xs = list3(1, 2, 3);
+    assert_eq(list_length(xs), 3, "length via foldl = 3");
+    assert_eq(list_length(NIL), 0, "length of the empty list = 0");
+    assert_eq(list_sum(xs), 6, "sum via foldl = 1 + 2 + 3 = 6");
+    assert_eq(list_eq(list_reverse(xs), list3(3, 2, 1)), 1, "reverse via foldl = [3, 2, 1]");
+    var tens = |x| x * 10;
+    assert_eq(list_eq(list_map(tens, xs), list3(10, 20, 30)), 1, "map via foldr keeps order: [10, 20, 30]");
+    assert_eq(list_eq(xs, list3(1, 2, 3)), 1, "the folds left xs as [1, 2, 3]");
+
+    # Subtraction is not associative, so the fold's direction shows.
+    var sub = |a, b| a - b;
+    assert_eq(foldl(sub, 0, xs), 0 - 6, "foldl(-, 0, [1, 2, 3]) = ((0 - 1) - 2) - 3 = -6");
+    assert_eq(foldr(sub, 0, xs), 2, "foldr(-, 0, [1, 2, 3]) = 1 - (2 - (3 - 0)) = 2");
+    return 0;
+}
+
+fn test_tail_calls() {
+    assert_eq(sum_to_loop(100000), 5000050000, "accumulator loop: sum 1..100000 = 5000050000");
+    assert_eq(sum_to_tail(100000, 0), 5000050000, "tail call: sum 1..100000 = 5000050000");
+    # 10,000,000 levels as real calls would need ~800 MB of stack (80 B
+    # a frame), about 95 times the 8 MiB there is, so finishing at all
+    # shows each level was a jump. The result is n(n + 1) / 2.
+    assert_eq(sum_to_tail(10000000, 0), 50000005000000, "tail call 10,000,000 deep runs in constant stack");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_purity();
+    test_memoize();
+    test_composition();
+    test_closures();
+    test_capture();
+    test_persistent_list();
+    test_folds();
+    test_tail_calls();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

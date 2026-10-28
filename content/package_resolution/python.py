@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Vidya — Package Resolution — Python port.
-
-Dependency-resolver core: semantic versioning, caret constraint
-matching, range intersection for diamond dependencies, highest-version
-selection, bounded backtracking, and dependency-cycle detection — the
-heart of an npm/cargo/cyrius.cyml resolver.
-
-A semver major.minor.patch is encoded as one integer
-    enc = major*1_000_000 + minor*1_000 + patch
-so version comparison IS integer comparison. A constraint is a
-half-open range [lo, hi). A caret ^X.Y.Z allows everything from X.Y.Z
-up to (but not including) the next bump of its leftmost NON-ZERO part,
-as in Cargo and npm: ^1.2.3 = [1.2.3, 2.0.0), ^0.2.3 = [0.2.3, 0.3.0),
-^0.0.3 = [0.0.3, 0.0.4). Pre-1.0, a minor bump is a breaking change.
-"""
+# Vidya — Package Resolution — Python port.
+#
+# Dependency-resolver core: semantic versioning, caret constraint
+# matching, range intersection for diamond dependencies, highest-version
+# selection, bounded backtracking, and dependency-cycle detection — the
+# heart of an npm/cargo/cyrius.cyml resolver.
+#
+# A semver major.minor.patch is encoded as one integer
+#     enc = major*1_000_000 + minor*1_000 + patch
+# so version comparison IS integer comparison. A constraint is a
+# half-open range [lo, hi). A caret ^X.Y.Z allows everything from X.Y.Z
+# up to (but not including) the next bump of its leftmost NON-ZERO part,
+# as in Cargo and npm: ^1.2.3 = [1.2.3, 2.0.0), ^0.2.3 = [0.2.3, 0.3.0),
+# ^0.0.3 = [0.0.3, 0.0.4). Pre-1.0, a minor bump is a breaking change.
 
 VMAJ = 1_000_000
 VMIN = 1_000

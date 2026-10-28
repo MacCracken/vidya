@@ -1,7 +1,6 @@
-/* Vidya — HTTP and Web Protocols in C
- *
- * HTTP/1.1 request parser. Sequential parse: request line → headers → body.
- */
+// Vidya — HTTP and Web Protocols in C
+//
+// HTTP/1.1 request parser. Sequential parse: request line → headers → body.
 
 #include <assert.h>
 #include <ctype.h>

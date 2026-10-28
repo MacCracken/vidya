@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Vidya — Write-Ahead Logging in Python
-
-In-memory WAL: append a 24-byte log record (op, key, val) BEFORE
-mutating the data store, then replay the durable prefix on recovery.
-Python's `bytearray` is the natural cousin of cyrius's flat byte buffer
-— mutable, indexable, and fits cleanly with `int.to_bytes` /
-`int.from_bytes` for the 64-bit fields. The 256-record cap and the
-OP_INVALID/SET/DEL constants match the cyrius reference byte-for-byte.
-No real fsync — `log_committed` snapshots the durable prefix.
-"""
+# Vidya — Write-Ahead Logging in Python
+#
+# In-memory WAL: append a 24-byte log record (op, key, val) BEFORE
+# mutating the data store, then replay the durable prefix on recovery.
+# Python's `bytearray` is the natural cousin of cyrius's flat byte buffer
+# — mutable, indexable, and fits cleanly with `int.to_bytes` /
+# `int.from_bytes` for the 64-bit fields. The 256-record cap and the
+# OP_INVALID/SET/DEL constants match the cyrius reference byte-for-byte.
+# No real fsync — `log_committed` snapshots the durable prefix.
 
 REC_SZ = 24
 LOG_CAP_BYTES = 6144

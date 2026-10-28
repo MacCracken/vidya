@@ -1,14 +1,14 @@
-/* Vidya — Build Systems — C port. A minimal build-system core: a DAG of
- * targets, topological build order, content-signature dirty-tracking, and
- * ninja-style incremental rebuild (only dirty targets run), plus cycle
- * detection. Fixed parallel arrays mirror the Cyrius reference.
- *
- * No real files or compilers: each target carries a source "content
- * signature" (an integer). A target's INPUT signature mixes its own source
- * with the OUTPUT signatures of its dependencies; if that differs from the
- * signature it was last built against, the target is dirty and rebuilds.
- * Editing a source re-dirties everything downstream — exactly how
- * mtime/hash-based tools (make, ninja, bazel) decide what to redo. */
+// Vidya — Build Systems — C port. A minimal build-system core: a DAG of
+// targets, topological build order, content-signature dirty-tracking, and
+// ninja-style incremental rebuild (only dirty targets run), plus cycle
+// detection. Fixed parallel arrays mirror the Cyrius reference.
+//
+// No real files or compilers: each target carries a source "content
+// signature" (an integer). A target's INPUT signature mixes its own source
+// with the OUTPUT signatures of its dependencies; if that differs from the
+// signature it was last built against, the target is dirty and rebuilds.
+// Editing a source re-dirties everything downstream — exactly how
+// mtime/hash-based tools (make, ninja, bazel) decide what to redo.
 
 #include <stdio.h>
 #include <assert.h>

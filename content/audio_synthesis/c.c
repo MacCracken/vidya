@@ -1,4 +1,4 @@
-/* Vidya — Audio Synthesis — C port. Q15 fixed-point. */
+// Vidya — Audio Synthesis — C port. Q15 fixed-point.
 
 #include <stdio.h>
 

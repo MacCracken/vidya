@@ -1,15 +1,15 @@
-/* Vidya — Package Resolution — C port (C23). Mirrors the Cyrius
- * reference: semver-as-integer, caret ranges, range intersection for
- * diamond dependencies, highest-version selection, bounded backtracking,
- * and Kahn-scan dependency-cycle detection.
- *
- * A semver major.minor.patch is encoded as one integer
- *   enc = major*1000000 + minor*1000 + patch
- * so version comparison IS integer comparison (valid while minor and
- * patch stay < 1000). A constraint is a half-open range [lo, hi).
- * A caret ^X.Y.Z = [X.Y.Z, (X+1).0.0) for X >= 1; below 1.0 the leftmost
- * non-zero field is the breaking one (npm/cargo): ^0.Y.Z = [0.Y.Z,
- * 0.(Y+1).0) and ^0.0.Z = [0.0.Z, 0.0.(Z+1)). */
+// Vidya — Package Resolution — C port (C23). Mirrors the Cyrius
+// reference: semver-as-integer, caret ranges, range intersection for
+// diamond dependencies, highest-version selection, bounded backtracking,
+// and Kahn-scan dependency-cycle detection.
+//
+// A semver major.minor.patch is encoded as one integer
+//   enc = major*1000000 + minor*1000 + patch
+// so version comparison IS integer comparison (valid while minor and
+// patch stay < 1000). A constraint is a half-open range [lo, hi).
+// A caret ^X.Y.Z = [X.Y.Z, (X+1).0.0) for X >= 1; below 1.0 the leftmost
+// non-zero field is the breaking one (npm/cargo): ^0.Y.Z = [0.Y.Z,
+// 0.(Y+1).0) and ^0.0.Z = [0.0.Z, 0.0.(Z+1)).
 
 #include <assert.h>
 #include <stdio.h>

@@ -1,7 +1,6 @@
-/* Vidya — GPU Memory Pooling in C
- *
- * Bump allocator over a 1024-byte pool.
- */
+// Vidya — GPU Memory Pooling in C
+//
+// Bump allocator over a 1024-byte pool.
 
 #include <assert.h>
 #include <stdint.h>

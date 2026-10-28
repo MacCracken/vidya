@@ -7,7 +7,7 @@ Cyrius language reference, and shared toolchain resources:
 
 ```
 content/
-├── {topic}/                  # 77× topic directories (see below)
+├── {topic}/                  # 80× topic directories (see below)
 ├── cyrius/                   # Cyrius language reference + field notes
 │   ├── language/             #   index, stdlib_modules, syntax notes
 │   └── field_notes/          #   recurring-pain notes (cyim, compiler, …)
@@ -98,7 +98,7 @@ Named by language (`rust.rs`, `python.py`, `asm_x86_64.s`, `openqasm.qasm`, etc.
 
 Requirements:
 - Must compile/run successfully with the validation command
-- Leading comments are extracted as the `explanation` field
+- Leading line comments are extracted as the `explanation` field (see "Explanation Extraction")
 - Should demonstrate all concepts described in `concept.toml`
 - Must be self-contained (no external dependencies beyond stdlib)
 - Must end by printing "All {topic} examples passed." (except OpenQASM)
@@ -128,14 +128,19 @@ Requirements:
 
 ### Explanation Extraction
 
-The loader reads consecutive comment lines from the top of the file as the explanation. Shebangs are skipped.
+The loader reads consecutive **line comments** from the top of the file as the explanation. Shebangs are skipped. The marker is `//` for Rust, C, Go, TypeScript, Zig, AArch64 assembly and OpenQASM, and `#` for Python, Shell, x86_64 assembly and Cyrius.
+
+The first blank line or non-comment line ends the header. Separate paragraphs with an empty comment line (`//` alone), not a blank line. Through 2.9.5 the loader read on through blank lines, so 27 explanations ran into the first section's banner and comments.
+
+These yield an empty explanation: a C `/* … */` block, a Python module docstring, and a line such as `#define _GNU_SOURCE` above the comments (put it after them). Through 2.9.5, 64 C and Python examples and every AArch64 example had no explanation. The loader looked for `#` in AArch64 files, but the corpus writes them with `//`, the comment GNU `as` uses there. Since 2.9.6, `cyrius test` fails on any example whose explanation is empty, and its `explanation` group pins these rules.
 
 ```rust
 // Vidya — Strings in Rust        ← extracted
-//                                 ← blank line preserved
+//                                 ← kept as a paragraph break
 // Rust has two string types.      ← extracted
 
-fn main() { }                     ← stops here
+// ── Section banner ──            ← not extracted: the blank line above ended the header
+fn main() { }
 ```
 
 ### OpenQASM Notes

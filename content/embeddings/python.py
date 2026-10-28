@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Vidya — Embeddings and Vector Search — Python port. Q15 fixed-point.
-
-Cosine similarity (= dot product on pre-normalized vectors) +
-brute-force nearest-neighbour + top-k. Small fixed corpus.
-"""
+# Vidya — Embeddings and Vector Search — Python port. Q15 fixed-point.
+#
+# Cosine similarity (= dot product on pre-normalized vectors) +
+# brute-force nearest-neighbour + top-k. Small fixed corpus.
 
 SCALE = 15
 ONE = 32768

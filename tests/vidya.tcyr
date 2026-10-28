@@ -322,6 +322,14 @@ fn main() {
     test_group("missing_id");
     assert_eq(load_concept(str_from("tests/fixtures/missing_id")), 0, "concept.toml without an id is refused, not a crash");
 
+    # The explanation is the run of line comments at the top. A blank line
+    # ends it (through 2.9.5 it ran on into the first section's banner),
+    # a shebang adds nothing, and a block comment is not a line comment.
+    test_group("explanation");
+    assert_streq(to_cstr(extract_explanation(str_from("// a\n//\n// b\n\n// -- section --\ncode\n"), "//")), "a\n\nb\n", "a blank line ends the header");
+    assert_streq(to_cstr(extract_explanation(str_from("#!/bin/sh\n# a\n# b\ncode\n"), "#")), "a\nb", "a shebang adds no leading newline");
+    assert_eq(str_len(extract_explanation(str_from("/* a */\nint x;\n"), "//")), 0, "a block comment yields no explanation");
+
     # Each read is sized to its file. Through 2.9.2 the loader took a fixed
     # 256 KiB per concept.toml and 64 KiB per example, so this 1.9 KB topic
     # cost ~330 KB of heap that is never freed, again on every hot reload.
@@ -620,6 +628,29 @@ fn main() {
         }
         ci = ci + 1;
     }
+    # Every example's header must reach the loader as its explanation.
+    # Through 2.9.5 none of the AArch64 examples did (the loader looked for
+    # `#`, the files use `//`), nor did 64 C and Python examples whose
+    # header was a block comment or a docstring.
+    var no_expl = 0;
+    var n_examples = 0;
+    ci = 0;
+    while (ci < vec_len(entries)) {
+        var exs = concept_examples(vec_get(entries, ci));
+        var ei = 0;
+        while (ei < vec_len(exs)) {
+            var ex = vec_get(exs, ei);
+            n_examples = n_examples + 1;
+            if (str_len(example_explanation(ex)) == 0) {
+                no_expl = no_expl + 1;
+                println(to_cstr(example_path(ex)));
+            }
+            ei = ei + 1;
+        }
+        ci = ci + 1;
+    }
+    assert(n_examples > loaded, "corpus examples loaded (else the explanation check is vacuous)");
+    assert_eq(no_expl, 0, "every example has a header explanation");
     assert_eq(bad_shape, 0, "every /info body is structurally sound");
     assert_eq(bad_counts, 0, "every /info body reports real section counts");
     assert(multi > 1, "corpus has multi-item topics (else the count check is vacuous)");

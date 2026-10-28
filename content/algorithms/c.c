@@ -1,9 +1,9 @@
-#define _GNU_SOURCE
 // Vidya — Algorithms in C
 //
 // C gives you full control over memory and data layout — crucial for
 // cache-friendly algorithms. No built-in dynamic arrays or hash maps;
 // you build (or use) your own. qsort and bsearch are in stdlib.h.
+#define _GNU_SOURCE
 
 #include <assert.h>
 #include <stdbool.h>

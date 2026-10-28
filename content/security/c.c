@@ -1,10 +1,10 @@
-#define _GNU_SOURCE
 // Vidya — Security Practices in C
 //
 // C trusts the programmer completely — no bounds checking, no type
 // safety at runtime, no garbage collector. Security in C means:
 // validate every buffer size, use safe string functions, check every
 // return value, and assume all input is hostile.
+#define _GNU_SOURCE
 
 #include <assert.h>
 #include <errno.h>

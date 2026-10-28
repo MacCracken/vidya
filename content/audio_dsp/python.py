@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vidya — Audio DSP — Python port. Q15 fixed-point throughout."""
+# Vidya — Audio DSP — Python port. Q15 fixed-point throughout.
 
 SCALE = 15
 ONE = 32768

@@ -7,6 +7,157 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.6] — 2026-10-28
+
+P5, the roadmap's last 2.9.x item: three topics on functional programming
+and type theory, so the corpus is **80 topics / 880 examples**, all 11/11.
+Also two loader fixes: 141 existing examples had no explanation, and 27
+had one that ran into their first section.
+
+### Added — P5: `functional_patterns`, `effect_systems`, `dependent_types`
+
+The Cyrius reference for each topic was written first. The other ten ports
+mirror its checks with the same expected values. Every port was
+mutation-tested: one behaviour per section was broken in a copy, and the
+file had to fail. Each topic was then reviewed after its gate went green.
+The three reviews found 32 defects, all fixed. Most were false or
+overstated claims in comments, and headers over 12 lines. Four were
+checks that could not fail:
+- the thermostat thresholds (below);
+- TypeScript's empty `vecHead`;
+- a forged-Percent check in both assembly ports.
+
+- **`functional_patterns`.** Covers:
+  - pure functions and memoization keyed on every argument;
+  - compose and pipe on a pair that does not commute;
+  - closures and partial application;
+  - what a closure captures;
+  - a persistent cons list that shares structure (cons is O(1);
+    update-at-i copies i + 1 nodes, and the check counts them);
+  - folds (`foldl(-)` is −6 and `foldr(-)` is 2 over `[1, 2, 3]`);
+  - tail calls.
+
+  The capture section checks each language's real behaviour: Python
+  lambdas give `[2, 2, 2]`, a JavaScript `var` gives `[3, 3, 3]`, `let`
+  and Go ≥ 1.22 give `[0, 1, 2]`, Rust shows late binding only through
+  a shared `Cell`, and Cyrius copies the value. Tail calls also differ by
+  language:
+  - Cyrius compiles a `return f(..)` to a jump, and runs 10,000,000 deep.
+  - Zig guarantees `@call(.always_tail)`, but 0.17's self-hosted x86_64
+    backend refuses it, so the gate runs that check only under LLVM.
+  - Python raises `RecursionError` at depth 999.
+  - Go's goroutine stacks grow to 1 GB, so its naive 100,000-deep
+    recursion works.
+
+  OpenQASM has no functions, so its port treats gates as reversible
+  functions: composition order, `inv @`, and uncomputing a scratch
+  register.
+- **`effect_systems`.** Effects as data, interpreted by handlers. One
+  `checkout` program asks for a rate, logs, and may fail. A test handler
+  and a production handler give it different meanings. The topic covers:
+  - resuming with an answer;
+  - `Fail` as a handler that does not resume (the rest provably never
+    runs);
+  - state threaded through `step(state, input)`;
+  - capability passing with a fake clock;
+  - a pure thermostat core behind a thin shell.
+
+  Python and TypeScript use generators. The other languages use a step
+  function and a handler loop, and each header names the languages with
+  native handlers (OCaml 5, Koka, Unison, Eff). The OCaml figures are the
+  PLDI 2021 paper's §6.3: 5 ns to perform, 11 ns to resume, and 23 ns to
+  allocate and switch fibers. OpenQASM's port is the deferred-measurement
+  principle, pinned by `@expect`. The review found that the thermostat's
+  events never landed on a threshold, so an off-by-one comparison passed
+  every check. The events are now `[19, 18, 17, 21, 22, 23, 15, 16, 14]`,
+  and all eight comparison and shell mutants fail in all ten ports that
+  have the thermostat.
+- **`dependent_types`.** The roadmap asked for its scope to be settled
+  first. It teaches what dependent types are (`Vec n a`, `Fin n`, Σ),
+  the nearest honest encoding at each language's real strength, and
+  refinement at the boundary ("parse, don't validate"). None of the 11
+  languages has full dependent types. Each header places its language:
+  - **Zig** is strongest: `Vec(n + m)` is a real type.
+  - **Rust** has const generics, but `N + M` is unstable on stable.
+  - **Cyrius** has one struct type per length, with
+    `#assert sizeof(Vec5) == sizeof(Vec2) + sizeof(Vec3)`.
+  - **C** has `static_assert` and `[static N]`.
+  - **TypeScript** has tuple lengths and brands, erased at run time.
+  - **Python, Go, Shell and assembly** check at run time.
+
+  Every "does not compile" comment quotes an error the toolchain on this
+  host produced. Each file names its escape hatch and what keeps it
+  honest: TypeScript `as`, a C cast, Rust `transmute`, a Zig or Go struct
+  literal. Two claims were corrected by measurement before they shipped:
+  - rustc 1.99 `-O` **keeps** the bounds check for a plain `Fin<N>`;
+  - qiskit's importer rejects `const`, so OpenQASM register sizes are
+    literal expressions.
+
+### Fixed — 141 examples had no explanation
+
+The loader takes an example's explanation from its leading line comments.
+For AArch64 it looked for `#`, but every AArch64 example is written with
+`//`, the comment GNU `as` uses there. So **all 77 AArch64 examples**
+had an empty explanation, and `vidya compare` showed nothing for them.
+The marker is now `//`.
+
+The same was true of 64 more examples whose header the loader cannot read:
+- 22 Python files with a module docstring;
+- 36 C files with a `/* … */` block;
+- 6 C files with a `#define _GNU_SOURCE` above the comment.
+
+Each header is now a run of line comments, with the `#define` moved below
+it. The text of every header is unchanged, and all 64 files pass the gate.
+
+`cyrius test` now fails if any example's explanation is empty. That test
+found the same defect in two new P5 files before they shipped.
+`content-format.md` spells out the rule and each language's marker.
+
+### Fixed — 27 explanations ran into the first section
+
+The loader read on through blank lines. So when a header was followed by
+a blank line and the first section's banner comment, the explanation took
+in the banner and the comments under it. For example,
+`instruction_encoding/typescript.ts` ended its explanation with
+"── Register encoding ──" and the next line. Now the first blank line ends
+the header, which is the "consecutive comment lines" rule
+`content-format.md` always stated.
+
+- Across all 880 examples, `compare` output changes only by removing
+  lines: 54 swallowed banner and comment lines in the 27 examples, and
+  the blank line every shebang file (shell, some Python) printed ahead of
+  its explanation.
+- Two of the 27 lost a second paragraph rather than a banner: the
+  armv8.1-a LSE note in `concurrency/asm_aarch64.s` and the
+  `_GNU_SOURCE` note in `syscalls_and_abi/c.c`. Both sit next to the code
+  they describe.
+- A new `explanation` test group pins the rules: a blank line ends the
+  header, a shebang adds nothing, and a block comment yields nothing.
+
+### Changed
+
+- `build_systems/cyrius.cyr`: the array comment no longer describes the
+  bare `var x[N]` that 2.9.5 replaced.
+- `learning-paths.md` puts every topic on a path, 80 of 80. Ten topics
+  had no path since 2.7.1. The new paths are Language Fundamentals,
+  Build & Release, and Functional Programming & Type Theory.
+- The `stats` blocks in `usage.md` and `getting-started.md` still showed
+  74 topics from 2.7.1.
+
+### Gates and numbers
+
+- `cyrius test` **163/0** (158 + 5: the corpus explanation check, its
+  non-vacuity guard, and the three `explanation` rules). Content gate **880/880** under `VIDYA_STRICT=1`.
+  The binary is 2,945,472 B.
+- Benchmarks (`target/bench-history/20261028-065631-675ee61.txt`
+  against `20261028-033533-f1ed86a.txt`) move only with corpus size:
+  - `load_all`: 7.97 → 8.25 ms for 77 → 80 topics, which is 103.5 →
+    103.1 µs per topic;
+  - `json_search_response`: +4.5 %;
+  - `json_list_response`: +2.0 %.
+
+  No code path got faster or slower, and none is claimed.
+
 ## [2.9.5] — 2026-10-28
 
 The three follow-ups the 2.9.4 review left on the roadmap. No vidya source

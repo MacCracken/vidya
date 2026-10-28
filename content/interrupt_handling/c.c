@@ -1,15 +1,14 @@
-/* Interrupt Handling — C Implementation
- *
- * Demonstrates x86_64 interrupt handling concepts:
- *   1. IDT entry (gate descriptor) bit layout and encoding
- *   2. Interrupt stack frame structure
- *   3. Exception table with error code tracking
- *   4. PIC 8259A cascade configuration
- *   5. Page fault error code decoding
- *
- * In a real kernel, the IDT is loaded via LIDT and entries point to
- * assembly stubs. Here we show the exact data structure layouts.
- */
+// Interrupt Handling — C Implementation
+//
+// Demonstrates x86_64 interrupt handling concepts:
+//   1. IDT entry (gate descriptor) bit layout and encoding
+//   2. Interrupt stack frame structure
+//   3. Exception table with error code tracking
+//   4. PIC 8259A cascade configuration
+//   5. Page fault error code decoding
+//
+// In a real kernel, the IDT is loaded via LIDT and entries point to
+// assembly stubs. Here we show the exact data structure layouts.
 
 #include <assert.h>
 #include <stdint.h>

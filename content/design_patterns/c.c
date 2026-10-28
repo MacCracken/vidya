@@ -1,9 +1,9 @@
-#define _GNU_SOURCE
 // Vidya — Design Patterns in C
 //
 // C patterns: function pointers for strategy/observer, tagged unions
 // for state machines, struct-with-vtable for polymorphism, and
 // cleanup via goto or wrapper functions (C's manual RAII).
+#define _GNU_SOURCE
 
 #include <assert.h>
 #include <math.h>

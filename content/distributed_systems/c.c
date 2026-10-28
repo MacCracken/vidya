@@ -1,4 +1,4 @@
-/* Vidya — Distributed Systems Foundations — C port. */
+// Vidya — Distributed Systems Foundations — C port.
 
 #include <stdio.h>
 #include <string.h>

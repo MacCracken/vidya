@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Vidya — Game Loop Architecture in Python
-
-Fixed-timestep accumulator loop with spiral-of-death cap. The driver
-`loop_step` takes an elapsed-microsecond delta and returns the number
-of fixed-step updates fired this frame. Python's `int` is arbitrary
-precision, so monotonic-time math never overflows — even a 100-year
-uptime stays exact. Tests use deterministic per-frame deltas (no real
-clock) so behavior is reproducible across machines and CI.
-"""
+# Vidya — Game Loop Architecture in Python
+#
+# Fixed-timestep accumulator loop with spiral-of-death cap. The driver
+# `loop_step` takes an elapsed-microsecond delta and returns the number
+# of fixed-step updates fired this frame. Python's `int` is arbitrary
+# precision, so monotonic-time math never overflows — even a 100-year
+# uptime stays exact. Tests use deterministic per-frame deltas (no real
+# clock) so behavior is reproducible across machines and CI.
 
 from dataclasses import dataclass
 

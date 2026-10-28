@@ -1,14 +1,13 @@
-/* Vidya — Write-Ahead Logging in C
- *
- * In-memory WAL: append a 24-byte log record (op, key, val) BEFORE
- * mutating the data store, then replay the durable prefix on recovery.
- * The log buffer is a flat `uint8_t[6144]` — exactly the cyrius
- * reference shape — and we use memcpy for the load64/store64 primitives
- * so the byte ordering is platform-defined but consistent within the
- * binary. The 256-record cap and the OP_INVALID/SET/DEL constants match
- * the cyrius reference. No real fsync — `log_committed` snapshots the
- * durable prefix.
- */
+// Vidya — Write-Ahead Logging in C
+//
+// In-memory WAL: append a 24-byte log record (op, key, val) BEFORE
+// mutating the data store, then replay the durable prefix on recovery.
+// The log buffer is a flat `uint8_t[6144]` — exactly the cyrius
+// reference shape — and we use memcpy for the load64/store64 primitives
+// so the byte ordering is platform-defined but consistent within the
+// binary. The 256-record cap and the OP_INVALID/SET/DEL constants match
+// the cyrius reference. No real fsync — `log_committed` snapshots the
+// durable prefix.
 
 #include <stdint.h>
 #include <stdio.h>

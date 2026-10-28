@@ -1,12 +1,11 @@
-/* Vidya — Bindless Resources in C
- *
- * In-memory descriptor table — "one global table per frame" pattern.
- * A handle is (generation << 8) | slot index. Freeing a slot bumps its
- * generation, so a handle kept past free_handle stops resolving instead of
- * silently reading whatever descriptor reuses the slot, and a second free
- * of the same handle is rejected instead of corrupting the free list.
- * (Real engines also defer the reuse by frames-in-flight; not modelled.)
- */
+// Vidya — Bindless Resources in C
+//
+// In-memory descriptor table — "one global table per frame" pattern.
+// A handle is (generation << 8) | slot index. Freeing a slot bumps its
+// generation, so a handle kept past free_handle stops resolving instead of
+// silently reading whatever descriptor reuses the slot, and a second free
+// of the same handle is rejected instead of corrupting the free list.
+// (Real engines also defer the reuse by frames-in-flight; not modelled.)
 
 #include <assert.h>
 #include <stdint.h>

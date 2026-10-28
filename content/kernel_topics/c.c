@@ -1,10 +1,10 @@
-#define _GNU_SOURCE
 // Vidya — Kernel Topics in C
 //
 // C is THE kernel language. Linux, Windows NT, macOS XNU, FreeBSD —
 // all written in C. These examples show the actual data structures
 // kernels use: page table entries, MMIO via volatile pointers,
 // interrupt descriptor layout, and ABI struct packing.
+#define _GNU_SOURCE
 
 #include <arpa/inet.h>
 #include <assert.h>

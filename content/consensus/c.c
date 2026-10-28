@@ -1,5 +1,5 @@
-/* Vidya — Consensus and Raft — C port. Fixed arrays mirror the
- * Cyrius reference. */
+// Vidya — Consensus and Raft — C port. Fixed arrays mirror the
+// Cyrius reference.
 
 #include <stdio.h>
 #include <string.h>

@@ -1,6 +1,6 @@
 # Source Citations
 
-> **Last Updated**: 2026-05-16
+> **Last Updated**: 2026-10-28 (2.9.6: the P5 topics' references)
 
 References for language specifications, algorithms, and standards used across vidya content.
 
@@ -28,6 +28,20 @@ References for language specifications, algorithms, and standards used across vi
 | Hash tables | Knuth, *The Art of Computer Programming*, Vol. 3 |
 | Graph algorithms | Sedgewick & Wayne, *Algorithms*, 4th ed. |
 | Quantum circuits | Nielsen & Chuang, *Quantum Computation and Quantum Information*, 10th anniversary ed. |
+
+## Functional Programming & Type Theory
+
+Cited by `functional_patterns`, `effect_systems` and `dependent_types` (2.9.6).
+
+| Topic | Source |
+|-------|--------|
+| Persistent data, structural sharing | Okasaki, *Purely Functional Data Structures*, Cambridge University Press, 1998 |
+| 32-way tries (Clojure / Scala vectors) | Bagwell, "Ideal Hash Trees", EPFL technical report, 2001 |
+| Explicit tail calls in Rust (`become`) | [Rust RFC 3407](https://github.com/rust-lang/rfcs/pull/3407), unstable as of rustc 1.99 |
+| Effect handler costs (OCaml 5) | Sivaramakrishnan, Dolan, White, Kelly, Jaffer and Madhavapeddy, "Retrofitting Effect Handlers onto OCaml", PLDI 2021, §6.3 |
+| OCaml 5 effects API (`Effect.Unhandled`, `Effect.Continuation_already_resumed`) | [OCaml manual, "Effect handlers"](https://ocaml.org/manual/effects.html) |
+| Deferred measurement principle | Nielsen & Chuang, *Quantum Computation and Quantum Information*, §4.4 |
+| Parse, don't validate | King, ["Parse, don't validate"](https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/), 2019 |
 
 ## Standards & Specifications
 

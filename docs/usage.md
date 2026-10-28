@@ -27,7 +27,7 @@ Shows all topics with their category and language count:
   allocators [Allocators] (11 languages)
   audio_dsp [Audio] (11 languages)
   ...
-77 topics
+80 topics
 ```
 
 ### Search
@@ -131,7 +131,7 @@ For full CI-grade validation across the 11-language toolchain matrix, run `./scr
 vidya gaps
 ```
 
-Reports missing language implementations per topic. Currently zero (all 77 topics complete across all 11 languages — 847/847).
+Reports missing language implementations per topic. Currently zero (all 80 topics complete across all 11 languages — 880/880).
 
 ### Languages
 
@@ -151,9 +151,9 @@ Corpus summary:
 
 ```
 === Vidya Corpus Stats ===
-  Topics:     74
-  Complete:   74 (all 11 languages)
-  Examples:   847
+  Topics:     80
+  Complete:   80 (all 11 languages)
+  Examples:   880
   Languages:  11
 ```
 

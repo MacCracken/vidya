@@ -1,7 +1,6 @@
-/* Vidya — Bloom and Glow in C
- *
- * 1-pixel additive bloom on a 16x16 single-channel intensity buffer.
- */
+// Vidya — Bloom and Glow in C
+//
+// 1-pixel additive bloom on a 16x16 single-channel intensity buffer.
 
 #include <assert.h>
 #include <stdint.h>

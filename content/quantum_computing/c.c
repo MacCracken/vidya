@@ -1,9 +1,9 @@
-#define _GNU_SOURCE
 // Vidya — Quantum Computing in C
 //
 // C quantum simulation: complex numbers from <complex.h>, state
 // vectors as arrays, gate application via direct pointer arithmetic.
 // This is how high-performance simulators work at the lowest level.
+#define _GNU_SOURCE
 
 #include <assert.h>
 #include <complex.h>

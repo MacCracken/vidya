@@ -1,10 +1,9 @@
-/* Vidya — Page Management in C
- *
- * Fixed-size 4KB pages, single file. Header at offset 0; page 0 reserved
- * as null sentinel; data pages at PAGE_SZ + num * PAGE_SZ. Free list is
- * a stack with `next` pointer at byte offset 8 of each freed page.
- * Mirrors the cyrius reference's test surface exactly.
- */
+// Vidya — Page Management in C
+//
+// Fixed-size 4KB pages, single file. Header at offset 0; page 0 reserved
+// as null sentinel; data pages at PAGE_SZ + num * PAGE_SZ. Free list is
+// a stack with `next` pointer at byte offset 8 of each freed page.
+// Mirrors the cyrius reference's test surface exactly.
 
 #define _POSIX_C_SOURCE 200809L  /* mkstemp */
 

@@ -1,14 +1,13 @@
-/* Vidya — Compression (LZ77-shaped) in C
- *
- * Two-byte token stream matching cyrius.cyr:
- *   {0, BYTE}      literal
- *   {OFFSET, LEN}  match: copy LEN bytes from out[pos - OFFSET..]
- * Greedy O(n^2) match-finder over a 255-byte window. Decoder enforces
- * an output-cap AND rejects back-references that reach before the start
- * of the output — token bytes are untrusted input. Match copy is
- * byte-by-byte so offset=1 replicates the trailing byte (RLE) —
- * `memcpy` would be wrong because src and dst overlap.
- */
+// Vidya — Compression (LZ77-shaped) in C
+//
+// Two-byte token stream matching cyrius.cyr:
+//   {0, BYTE}      literal
+//   {OFFSET, LEN}  match: copy LEN bytes from out[pos - OFFSET..]
+// Greedy O(n^2) match-finder over a 255-byte window. Decoder enforces
+// an output-cap AND rejects back-references that reach before the start
+// of the output — token bytes are untrusted input. Match copy is
+// byte-by-byte so offset=1 replicates the trailing byte (RLE) —
+// `memcpy` would be wrong because src and dst overlap.
 
 #include <assert.h>
 #include <stdint.h>

@@ -11,7 +11,7 @@
 ```
 ┌─────────────────────────────────────────────────┐
 │  Content Layer (content/)                       │
-│  847 source files across 77 topics × 11 langs   │
+│  880 source files across 80 topics × 11 langs   │
 │  Human-readable, AI-trainable, CI-tested        │
 └─────────────┬───────────────────────────────────┘
               │ load_all() at startup (one-shot)

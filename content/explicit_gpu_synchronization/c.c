@@ -1,7 +1,6 @@
-/* Vidya — Explicit GPU Synchronization in C
- *
- * Timeline semaphores — monotonic counters with signal/wait/wait_all.
- */
+// Vidya — Explicit GPU Synchronization in C
+//
+// Timeline semaphores — monotonic counters with signal/wait/wait_all.
 
 #include <assert.h>
 #include <stdint.h>

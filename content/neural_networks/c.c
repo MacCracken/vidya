@@ -1,4 +1,4 @@
-/* Vidya — Neural Network Forward Pass — C port. Q15 fixed-point. */
+// Vidya — Neural Network Forward Pass — C port. Q15 fixed-point.
 
 #include <stdio.h>
 

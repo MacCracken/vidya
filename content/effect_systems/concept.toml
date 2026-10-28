@@ -1,0 +1,63 @@
+id = "effect_systems"
+title = "Effect Systems"
+topic = "EffectSystems"
+description = "Making side effects explicit and controllable — effects as values interpreted by handlers, capability passing, and the pure-core / effectful-shell split that algebraic effects (OCaml 5, Koka, Unison) build into the language."
+tags = ["effects", "algebraic-effects", "effect-handlers", "side-effects", "handler", "resume", "continuation", "one-shot-continuation", "perform", "free-monad", "interpreter", "effects-as-data", "capability", "capability-passing", "dependency-injection", "functional-core", "imperative-shell", "state-monad", "deferred-measurement", "ocaml5", "koka", "unison", "eff"]
+related_topics = ["functional_patterns", "error_handling", "concurrency", "testing"]
+
+[[best_practices]]
+title = "Make effects visible in signatures"
+explanation = "A caller should be able to tell from a function's signature what it may do besides compute. Languages with effect types say it directly: a Koka function's type lists its effects (`<console, exn>`), Unison calls them abilities (`{IO, Exception}`), and Haskell puts effects in the return type (IO a, or a monad stack). OCaml 5's handlers are not tracked in types, so an unhandled effect is found at run time (Effect.Unhandled). In any language, capability parameters give the same visibility: a function that takes a clock and a logger can read the time and log, and one that takes neither cannot. The signature then documents the effects and the compiler checks that every caller supplies them."
+
+[[best_practices]]
+title = "Interpret effects at the edge so the core stays pure and testable"
+explanation = "Write the logic as a program that describes its effects (a request to ask for a value, to log, to fail) and let a handler at the outer edge decide what they do. The core then has no I/O to mock: a test runs it under a handler with a fixed environment and a log buffer and checks the result and the exact log lines, deterministically. The same split appears as 'functional core, imperative shell': a pure decide(state, event) returns new state plus a list of commands, and a thin shell executes them. Most bugs live in the decisions, and those can now be tested with plain values in and plain values out."
+
+[[best_practices]]
+title = "Swap handlers instead of patching globals"
+explanation = "When the effect goes through a handler or a capability, production and test differ only in what is passed in: the production handler reads configuration and writes to stdout, the test handler answers from a table and records into a buffer. Monkeypatching a module global (time.time, a logger singleton, a config dict) does the same job by mutating shared state: it leaks between tests when a teardown is missed, cannot give two concurrent tests different answers, and breaks whenever the code under test imports the name differently. A handler passed in has none of those problems, because nothing global changes."
+
+[[best_practices]]
+title = "Keep effect order explicit when it matters"
+explanation = "Pure code can be reordered freely; effects cannot. 'Log, then write' and 'write, then log' leave different evidence after a crash, and 'charge the card, then send the receipt' must not become the other order. In direct style the order is the statement order, which a refactor can quietly change, for example by turning a loop into a lazy map that runs after the log line. Effects as data make the order a value you can check: a test asserts the exact sequence of requests or commands, so a reordering fails a test instead of reaching production."
+
+[[gotchas]]
+title = "Hidden effects in pure-looking functions break caching and tests"
+explanation = "A function that reads the clock, a random generator, an environment variable or a global counter looks pure at the call site but is not: two calls with the same arguments can return different results. Memoizing it serves stale answers, a test of it passes or fails depending on when it runs, and a refactor that calls it once instead of twice changes behaviour. Pass the hidden input in as an argument or a capability, so the function depends only on what it is given and a test can pin it."
+bad_example = "fn is_expired(expires_at) {\n    return clock_now_ms() >= expires_at;   # reads the wall clock: the result depends on when it runs\n}"
+good_example = "fn is_expired(expires_at, now) {\n    return now >= expires_at;              # the caller passes the time: a test pins it at 100 and at 200\n}"
+
+[[gotchas]]
+title = "A handler that forgets to resume silently aborts the computation"
+explanation = "Resuming is how a handler hands control back to the program. A handler that returns without resuming has ended the program at that point, which is exactly how Fail is meant to work, but when it happens by accident nothing reports it: there is no exception, no error value, just a computation that stopped after its first log line and a caller holding an incomplete result. In OCaml 5 the same mistake is a handler arm that never calls `continue k` (the continuation is dropped, and the code after `perform` never runs). Make every handler arm end in an explicit resume or an explicit, reasoned stop, and test that a full run reaches the end."
+bad_example = "Log => {\n    log_push(log, payload);\n    return (0, 0);    # forgot to resume: the program stops after its first Log, and nothing says so\n}"
+good_example = "Log => {\n    log_push(log, payload);\n    return (1, 0);    # resume the program; only Fail answers with a stop\n}"
+
+[[gotchas]]
+title = "A capability captured by a closure and used after its scope ended"
+explanation = "A capability or handler is valid for a scope: an open file, a database transaction, an effect handler's dynamic extent. A closure that captures it can outlive that scope, and calling the closure later uses a capability that no longer works. Python raises ValueError for the closed file below; OCaml 5 raises Effect.Unhandled when a closure performs an effect after leaving the handler that was meant to answer it; in C or Cyrius the closure holds a stale pointer and nothing stops the call. Pass capabilities in for the duration of a call instead of storing them, and keep closures that hold one inside the scope that owns it."
+bad_example = "with open(\"app.log\", \"w\") as f:\n    log = f.write\nlog(\"late\")   # ValueError: I/O operation on closed file"
+good_example = "def run(log):\n    log(\"inside\")\n\nwith open(\"app.log\", \"w\") as f:\n    run(log=f.write)   # the capability is used only while the file is open"
+language = "Python"
+
+[[gotchas]]
+title = "Refactoring to a lazy pipeline reorders the effects"
+explanation = "In direct style the effects happen in statement order. Replacing a list comprehension with map(), a generator expression or an iterator chain makes the work lazy: it runs when the result is consumed, which may be after code that used to follow it. Below, the log line claiming the rows were saved now runs before any row is saved, so a crash in between leaves a log that lies. Keep effectful steps eager (a list, or a plain loop), or consume the iterator before the next effect, and check the order in a test by recording the effects as data."
+bad_example = "saved = map(save, rows)            # lazy: nothing is saved yet\nlog(f\"saved {len(rows)} rows\")     # runs first\ncommit(list(saved))                # the saves happen here, after the log"
+good_example = "saved = [save(r) for r in rows]    # eager: every row is saved now\nlog(f\"saved {len(rows)} rows\")     # then logged\ncommit(saved)"
+language = "Python"
+
+[[performance_notes]]
+title = "OCaml 5 effect operations cost 5-23 ns: one-shot continuations, stack switching, no copying"
+explanation = "OCaml 5 runs each handled computation on its own small heap-allocated stack (a fiber). Performing an effect switches to the handler's stack, and the continuation it receives is that suspended fiber, captured without copying any frames. Continuations are one-shot: resuming one a second time raises Effect.Continuation_already_resumed. That is what lets the runtime avoid copying, and it covers generators, async I/O and lightweight threads, which all resume once. Handling an effect walks the handler stack until one matches, so its cost grows with the number of handlers in scope, which the authors observed to be shallow in real programs."
+evidence = "Sivaramakrishnan, Dolan, White, Kelly, Jaffer and Madhavapeddy, 'Retrofitting Effect Handlers onto OCaml', PLDI 2021, section 6.3, measured on Multicore OCaml (the implementation merged as OCaml 5.0) with cycle-accurate perf tracing on Intel: allocating a fiber and switching to it took 23 ns, performing and handling an effect 5 ns, resuming the continuation 11 ns, returning and freeing the fiber 7 ns. On their 54-program macro benchmark suite, which uses no effects, the implementation was on average (geometric mean) less than 1% slower than stock OCaml. A generator over a depth-25 binary tree built on effects was 2.76x slower than a hand-specialised CPS version, against 8.69x for a concurrency-monad version."
+
+[[performance_notes]]
+title = "Effects-as-data interpreters pay one value per effect request"
+explanation = "When effects are data (a free monad, or a step function that returns requests, as here), every request is a value the program builds and the interpreter takes apart, and the program's paused state must be kept somewhere between requests. In Haskell or Scala that is typically a heap allocation per request plus a closure for the continuation, which is why native handlers, which keep the continuation on a stack, are faster. In Cyrius a one-payload request can be a `: stack` enum, a (tag, payload) pair returned in two registers, so the request itself allocates nothing; the boxed enum form allocates for each one."
+evidence = "Measured on cyrius 6.7.18 with alloc_used(): a boxed `enum Eff { Ask(key); Log(msg); }` request allocates 16 B (tag + payload) each time it is built, so the checkout program's 4 values per run (3 effect requests and Done) would cost 64 B; the `enum Eff: stack { ... }` request used in cyrius.cyr allocates 0 B. The per-run state record is 32 B (pc, qty, rate, steps), allocated once."
+
+[[performance_notes]]
+title = "Capability passing is a parameter"
+explanation = "A capability is an ordinary argument: one register for a record of function pointers, and an indirect call each time it is used. Where the compiler knows the concrete capability at the call site, the indirection can disappear: Rust generics (fn f<C: Clock>(c: &C)) and C++ templates are monomorphized, so the call is direct and can be inlined, while a trait object (&dyn Clock) or a Go interface keeps the indirect call unless the optimizer sees the concrete type and devirtualizes it. Either way it is far cheaper than the alternatives it replaces, such as reading a global through a lock or patching a module at test time."
+evidence = "Measured on cyrius 6.7.18 (AMD Ryzen 7 5800H, 50,000,000 iterations, 3 rounds) for a session-check-shaped loop: about 5.1-5.3 ns per iteration calling the clock directly, 6.4 ns through a fn-pointer capability and 5.4-5.6 ns through a closure capability. The capability costs about 1 ns or less per call here."

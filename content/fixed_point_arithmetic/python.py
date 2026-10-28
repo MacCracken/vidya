@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Vidya — Fixed-Point Arithmetic in Python
-
-16.16 fixed-point: integer carries fractional value in lower 16 bits.
-Python ints are arbitrary precision (no overflow), so the "safe mul"
-guard is illustrative rather than necessary. Right-shift on negative
-ints in Python is arithmetic and rounds toward -infinity, so the
-`asr` helper in Cyrius isn't needed here either, but `fx_to_int`
-must still handle truncation explicitly to match the Cyrius semantics.
-"""
+# Vidya — Fixed-Point Arithmetic in Python
+#
+# 16.16 fixed-point: integer carries fractional value in lower 16 bits.
+# Python ints are arbitrary precision (no overflow), so the "safe mul"
+# guard is illustrative rather than necessary. Right-shift on negative
+# ints in Python is arithmetic and rounds toward -infinity, so the
+# `asr` helper in Cyrius isn't needed here either, but `fx_to_int`
+# must still handle truncation explicitly to match the Cyrius semantics.
 
 import math
 

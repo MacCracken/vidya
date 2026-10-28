@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Vidya — LLM Inference (Decoding) — Python port.
-
-Three primitives: greedy decoding (argmax) + top-k filter +
-autoregressive bigram decode loop with EOS termination and
-max_length cap. All integer logits.
-"""
+# Vidya — LLM Inference (Decoding) — Python port.
+#
+# Three primitives: greedy decoding (argmax) + top-k filter +
+# autoregressive bigram decode loop with EOS termination and
+# max_length cap. All integer logits.
 
 VOCAB_SIZE = 8
 TOK_UNK = 0

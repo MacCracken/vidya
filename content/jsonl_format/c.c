@@ -1,7 +1,6 @@
-/* Vidya — JSON Lines (JSONL) in C
- *
- * In-memory JSONL primitives mirroring cyrius.cyr.
- */
+// Vidya — JSON Lines (JSONL) in C
+//
+// In-memory JSONL primitives mirroring cyrius.cyr.
 
 #include <assert.h>
 #include <stddef.h>

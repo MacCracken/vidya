@@ -1,7 +1,6 @@
-/* Vidya — Direct DRM GPU Compute in C
- *
- * In-memory simulation of GEM BO + VA-map + submit + syncobj-wait flow.
- */
+// Vidya — Direct DRM GPU Compute in C
+//
+// In-memory simulation of GEM BO + VA-map + submit + syncobj-wait flow.
 
 #include <assert.h>
 #include <stdint.h>

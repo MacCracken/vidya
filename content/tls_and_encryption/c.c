@@ -1,11 +1,10 @@
-/* Vidya — TLS and Encryption in C
- *
- * Simulation of TLS 1.3 handshake state machine + cipher negotiation
- * + cert chain verification + a demo seal/open pair.
- *
- * The seal/open pair below is NOT authenticated encryption. See the
- * disclaimer above weak_checksum().
- */
+// Vidya — TLS and Encryption in C
+//
+// Simulation of TLS 1.3 handshake state machine + cipher negotiation
+// + cert chain verification + a demo seal/open pair.
+//
+// The seal/open pair below is NOT authenticated encryption. See the
+// disclaimer above weak_checksum().
 
 #include <assert.h>
 #include <stdint.h>

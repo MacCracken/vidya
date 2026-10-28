@@ -1,14 +1,13 @@
-/* Vidya — Networking Fundamentals in C
- *
- * In-memory simulation of TCP socket state machine + lifecycle.
- *
- * Simplified on purpose: there is no handshake (SYN_RCVD and FIN_WAIT
- * are never entered) and no accept() — connect() turns the listening
- * socket itself into the connection, so a listener serves one client.
- * A real listener stays in LISTEN and accept() returns a NEW socket per
- * connection. Closing one end only unlinks its peer; real TCP would move
- * the peer to CLOSE_WAIT.
- */
+// Vidya — Networking Fundamentals in C
+//
+// In-memory simulation of TCP socket state machine + lifecycle.
+//
+// Simplified on purpose: there is no handshake (SYN_RCVD and FIN_WAIT
+// are never entered) and no accept() — connect() turns the listening
+// socket itself into the connection, so a listener serves one client.
+// A real listener stays in LISTEN and accept() returns a NEW socket per
+// connection. Closing one end only unlinks its peer; real TCP would move
+// the peer to CLOSE_WAIT.
 
 #include <assert.h>
 #include <stdint.h>

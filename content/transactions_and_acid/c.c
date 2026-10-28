@@ -1,6 +1,6 @@
-/* Vidya — Transactions and ACID — C port.
- * OCC store with read-set version snapshots. Fixed-capacity arrays
- * mirror the Cyrius reference. */
+// Vidya — Transactions and ACID — C port.
+// OCC store with read-set version snapshots. Fixed-capacity arrays
+// mirror the Cyrius reference.
 
 #include <assert.h>
 #include <stdio.h>

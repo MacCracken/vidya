@@ -1,4 +1,4 @@
-/* Vidya — Audio DSP — C port. Q15 fixed-point throughout. */
+// Vidya — Audio DSP — C port. Q15 fixed-point throughout.
 
 #include <stdio.h>
 

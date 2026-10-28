@@ -1,7 +1,6 @@
-/* Vidya — Serialization in C
- *
- * Varint (LEB128) + length-prefix framing + stream parser + DoS guards.
- */
+// Vidya — Serialization in C
+//
+// Varint (LEB128) + length-prefix framing + stream parser + DoS guards.
 
 #include <assert.h>
 #include <stdint.h>

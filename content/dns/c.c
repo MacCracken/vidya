@@ -1,7 +1,6 @@
-/* Vidya — DNS in C
- *
- * In-memory resolver: zone, CNAME chains, TTL cache, negative cache.
- */
+// Vidya — DNS in C
+//
+// In-memory resolver: zone, CNAME chains, TTL cache, negative cache.
 
 #include <assert.h>
 #include <stdint.h>

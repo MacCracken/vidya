@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Vidya — Grid Pathfinding in Python.
-
-BFS + A* on an 8x8 4-connected grid (0=walkable, 1=blocked).
-Python uses a list-of-int as the flat grid, ``collections.deque`` as
-the BFS frontier (O(1) popleft), and ``heapq`` as A*'s open set —
-a binary min-heap over (f_score, counter, cell_index). The counter
-breaks ties stably to avoid comparing un-orderable payloads.
-Manhattan distance is the heuristic.
-"""
+# Vidya — Grid Pathfinding in Python.
+#
+# BFS + A* on an 8x8 4-connected grid (0=walkable, 1=blocked).
+# Python uses a list-of-int as the flat grid, ``collections.deque`` as
+# the BFS frontier (O(1) popleft), and ``heapq`` as A*'s open set —
+# a binary min-heap over (f_score, counter, cell_index). The counter
+# breaks ties stably to avoid comparing un-orderable payloads.
+# Manhattan distance is the heuristic.
 
 from __future__ import annotations
 

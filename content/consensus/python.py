@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Vidya — Consensus and Raft — Python port.
-
-3-node Raft cluster as in-memory state machines. Mirrors the Cyrius
-reference: same node API, same tests, same expected outcomes.
-"""
+# Vidya — Consensus and Raft — Python port.
+#
+# 3-node Raft cluster as in-memory state machines. Mirrors the Cyrius
+# reference: same node API, same tests, same expected outcomes.
 
 N_NODES = 3
 MAX_LOG = 8

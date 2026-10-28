@@ -1,7 +1,6 @@
-/* Vidya — Render Graph Architecture in C
- *
- * Tiny DAG: reads/writes bitmasks → topo sort + barriers + cull.
- */
+// Vidya — Render Graph Architecture in C
+//
+// Tiny DAG: reads/writes bitmasks → topo sort + barriers + cull.
 
 #include <assert.h>
 #include <stdint.h>

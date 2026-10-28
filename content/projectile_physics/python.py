@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Vidya — Projectile Physics in Python
-
-Semi-implicit Euler integration in 16.16 fixed-point. Python ints are
-arbitrary precision, so the bounce-restitution intermediate (vy *
-RESTITUTION ≈ 3.6e10 worst case) can't overflow — no __int128 dance
-required. Right-shift on negative ints is arithmetic (floors toward
--infinity), so we use the same explicit-sign asr() helper Cyrius does
-to match truncate-toward-zero semantics across languages.
-"""
+# Vidya — Projectile Physics in Python
+#
+# Semi-implicit Euler integration in 16.16 fixed-point. Python ints are
+# arbitrary precision, so the bounce-restitution intermediate (vy *
+# RESTITUTION ≈ 3.6e10 worst case) can't overflow — no __int128 dance
+# required. Right-shift on negative ints is arithmetic (floors toward
+# -infinity), so we use the same explicit-sign asr() helper Cyrius does
+# to match truncate-toward-zero semantics across languages.
 
 FX_SHIFT = 16
 GRAVITY = 6554           # 0.1 per frame

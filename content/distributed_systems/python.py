@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Vidya — Distributed Systems Foundations — Python port.
-
-Vector clocks + quorum reads/writes + partition handling.
-"""
+# Vidya — Distributed Systems Foundations — Python port.
+#
+# Vector clocks + quorum reads/writes + partition handling.
 
 N_NODES = 3
 W = 2

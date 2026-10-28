@@ -1,0 +1,63 @@
+id = "functional_patterns"
+title = "Functional Patterns"
+topic = "FunctionalPatterns"
+description = "Building programs from pure functions and immutable values — closures, composition, partial application and persistent data that shares structure instead of copying."
+tags = ["functional", "pure-function", "referential-transparency", "side-effects", "memoization", "higher-order-function", "compose", "pipe", "closure", "partial-application", "currying", "late-binding", "persistent-data-structure", "structural-sharing", "immutability", "cons-list", "fold", "foldl", "foldr", "tail-call", "tco", "stack-overflow"]
+related_topics = ["iterators", "pattern_matching", "ownership_and_borrowing", "type_systems"]
+
+[[best_practices]]
+title = "Keep functions pure and push effects to the edges"
+explanation = "A pure function's result depends only on its arguments, and calling it changes nothing. That buys three things at once: it can be tested with a table of inputs and outputs and no setup, its result can be cached by argument, and calls can be reordered, skipped or run in parallel without changing the program. Effects (I/O, the clock, randomness, global counters) do not go away; they move to a thin outer layer that gathers inputs, calls the pure core and acts on what it returns. When a function must read hidden state, take that state as a parameter instead, so the dependency is visible at every call site. Some compilers can check the pure part: a Cyrius `const fn` may assign only its own locals, so a body that bumps a global is refused at its definition."
+
+[[best_practices]]
+title = "Prefer persistent data with structural sharing over defensive copies"
+explanation = "A defensive copy (cloning a list before handing it out so the receiver cannot disturb yours) costs O(n) on every handoff and still leaves both copies mutable. A persistent structure never changes once built: an 'update' builds a new version that reuses the unchanged parts of the old one. Prepending to a cons list allocates one node and shares the whole tail; replacing element i copies the i + 1 cells up to it and shares the rest. Every old version stays valid, which makes undo, snapshots and lock-free reads trivial, because nobody can observe a half-made change. For indexed access, use a wide tree rather than a list: Clojure's and Scala's vectors are 32-way tries, so an update copies one path of at most 4 nodes for 1,048,576 elements (Okasaki, Purely Functional Data Structures, 1998; Bagwell, Ideal Hash Trees, 2001)."
+
+[[best_practices]]
+title = "Build pipelines from small functions with composition and partial application"
+explanation = "Composition turns two functions into one: compose(f, g)(x) = f(g(x)) reads right to left like mathematics' f . g, and pipe(f, g)(x) = g(f(x)) reads left to right in the order the steps run. Pick one convention per codebase and name it, because the two give different answers whenever the steps do not commute (add 3 then double is not double then add 3). Partial application fixes some arguments now and leaves the rest for later, which is how configuration enters a pipeline: partial(scale, factor) is a one-argument step that slots into compose. Each small function is tested on its own, and the pipeline is correct by construction once its parts are."
+
+[[best_practices]]
+title = "Make closure capture explicit: copy what you mean to capture"
+explanation = "Languages disagree about what a closure captures. Python closures look the variable up when called (late binding), a JavaScript `var` is one variable for the whole function, Go before 1.22 had one loop variable shared by every iteration, C++ chooses per capture with [=] or [&], Rust borrows a variable the body only reads unless the closure is `move` (and refuses to compile a borrowing closure that outlives the variable), and Cyrius copies the value when the closure is built. The safe habit is the same everywhere: bind the value you mean at the point you build the closure (a default argument or a factory function in Python, `let` in JavaScript, `move` in Rust), and share a mutable cell only when sharing is the point, as a counter's private state is. Then the closure's behaviour does not depend on what happens to the enclosing variable later."
+
+[[gotchas]]
+title = "Closures built in a loop all see the loop variable's last value"
+explanation = "A Python closure does not store the value of a free variable; it stores where to find the variable, and looks it up when called. Every lambda built in the loop below refers to the same `i`, and by the time any of them is called the loop has finished with `i` at 2. The comprehension having its own scope does not help, because all three lambdas share that one scope. The fix binds the current value when each lambda is built: a default argument is evaluated at definition time. JavaScript has the same trap with `var` (one variable for the whole function, and the loop has bumped it to 3 before it exits, so the result is [3, 3, 3]), and `let` fixes it by creating a fresh binding for each iteration. Go fixed it in the language in 1.22 by making the loop variable per iteration."
+bad_example = "fs = [lambda: i for i in range(3)]\nprint([f() for f in fs])  # [2, 2, 2]: every lambda reads the same i, after the loop"
+good_example = "fs = [lambda i=i: i for i in range(3)]\nprint([f() for f in fs])  # [0, 1, 2]: the default binds each i when its lambda is built"
+language = "Python"
+
+[[gotchas]]
+title = "Memoizing an impure function serves stale results"
+explanation = "A memo cache maps arguments to results, which is correct only if the arguments are everything the result depends on. A function that also reads a global, the clock, a file or a database has inputs the cache key does not see: after the hidden input changes, the cache keeps returning the answer computed from the old one, with no error to say so. The bug survives testing because each test usually starts from a fresh cache. Make every dependency an argument, so it becomes part of the key, or do not cache the function at all. The same holds for a key that leaves out one of the arguments: memoizing add(a, b) keyed only on `a` returns 5 for add(2, 4) once add(2, 3) has been cached."
+bad_example = "var RATE = 2;   # a global, read at each call (a closure copies only locals)\nvar price = memoize(|qty| qty * RATE);\nfncall1(price, 10);   # 20\nRATE = 3;\nfncall1(price, 10);   # still 20: served from the cache, RATE is not in the key"
+good_example = "var price = memoize2(|qty, rate| qty * rate);\nfncall2(price, 10, 2);   # 20\nfncall2(price, 10, 3);   # 30: a different key, so a fresh call"
+
+[[gotchas]]
+title = "Writing through a shared node corrupts every version that shares it"
+explanation = "Structural sharing is safe only while nothing writes to a node once another version can see it. In a language that does not enforce immutability (C, Cyrius, Go, Python, JavaScript without Object.freeze), nothing stops code from doing exactly that: after ys = cons(0, xs), the tail of ys IS xs, so an in-place write to it changes xs as well, and every other list that shares those nodes. The result looks like spooky action at a distance: a list nobody touched now reads differently. Treat published nodes as read-only and change things only through functions that return a new version. Rust enforces this: an Rc<Node> gives only shared references, and Rc::make_mut clones the node when anyone else still holds it. Clojure and Haskell enforce it by having no mutable list cells at all."
+bad_example = "var xs = list3(1, 2, 3);\nvar ys = cons(0, xs);\nstore64(tail(ys), 99);   # writes xs's first cell in place: xs now reads [99, 2, 3]"
+good_example = "var xs = list3(1, 2, 3);\nvar ys = cons(0, xs);\nvar ys2 = update_at(ys, 1, 99);   # [0, 99, 2, 3]: copies 2 cells and shares [2, 3]; xs and ys unchanged"
+
+[[gotchas]]
+title = "Deep non-tail recursion overflows the stack in languages without TCO"
+explanation = "A recursive call that still has work to do after it returns (the `n +` below) keeps its stack frame alive, so recursing n deep needs n frames. CPython does no tail-call elimination at all (it keeps every frame for tracebacks) and caps the depth at sys.getrecursionlimit(), which is 1000 by default: on Python 3.15.2 the function below works for n = 998 and raises RecursionError at n = 999, the module's own frame counting against the limit. Raising the limit only moves the cliff. JavaScript (only JavaScriptCore implements ES2015's proper tail calls), Go, Rust and C (an optimizer may, but nothing promises it) do not guarantee tail calls either: Rust and C run into the thread's fixed stack size instead, Node into V8's stack limit of about 1 MB, and Go, whose goroutine stacks grow by copying, into a 1 GB ceiling. Write the recursion as an accumulator loop, which runs in constant stack in every language; Zig's @call(.always_tail, ...) and Scheme guarantee the tail-call form."
+bad_example = "def total(n):\n    return 0 if n == 0 else n + total(n - 1)\n\ntotal(100_000)  # RecursionError: maximum recursion depth exceeded"
+good_example = "def total(n):\n    acc = 0\n    for i in range(1, n + 1):\n        acc += i\n    return acc\n\ntotal(100_000)  # 5000050000, in constant stack"
+language = "Python"
+
+[[performance_notes]]
+title = "Structural sharing makes cons O(1) and update-at-i O(i), not an O(n) copy"
+explanation = "Prepending to a persistent list allocates one node and reuses the old list as its tail; replacing element i copies the i cells in front of it plus the replaced cell and shares everything after. A copy-on-write approach without sharing pays for the whole list on every change. The cost to watch is the index: a cons list is O(i) to reach element i, so updating near the end costs nearly a full copy, which is why persistent vectors use wide trees instead."
+evidence = "Computed for a 1,000,000-element list of 16-byte cells (head + tail, the cyrius.cyr layout): prepend allocates 1 node (16 B) against 1,000,001 nodes (16,000,016 B) for copy-then-prepend; updating index 10 allocates 11 nodes (176 B); updating the last index allocates all 1,000,000, and the mean over uniform i is about 500,000. The cyrius.cyr example counts allocations: update at index 1 of [1, 2, 3] makes exactly 2 nodes. A 32-way trie (Clojure, Scala) copies one root-to-leaf path: 4 nodes for 1,048,576 = 32^4 elements."
+
+[[performance_notes]]
+title = "Closures may allocate their environment"
+explanation = "A closure that captures nothing is just a code pointer. One that captures variables needs somewhere to keep them, and where that is depends on the language: on the heap whenever the closure can outlive the frame that built it (Cyrius, Go when escape analysis says it escapes, Python, JavaScript), or inline in a value the compiler sizes statically (Rust closures are anonymous structs on the stack, and reach the heap only when boxed as Box<dyn Fn>). Building closures in a hot loop can therefore mean one allocation per iteration; hoist a closure out of the loop, or pass the captured values as arguments, when that matters."
+evidence = "Measured with lib/alloc.cyr's alloc_used() on cyrius 6.7.18: a capturing closure's environment is 8 + 8 × captures bytes on the heap ([fn_ptr, cap0, ...], per the cyrius guide): make_adder's |x| x + n is 16 B and compose's |x| f(g(x)) is 24 B. A non-capturing |x| x + 1 is a bare fn pointer: 0 B."
+
+[[performance_notes]]
+title = "A fold is a loop: no per-element allocation when the accumulator is a value"
+explanation = "foldl threads an accumulator through a loop: n calls of the combining function, O(1) extra space, and nothing allocated when the accumulator is a number. foldr is defined by recursion (combine the head with the fold of the tail), so a direct implementation uses O(n) stack and overflows on long lists. Guaranteed tail calls would not save it: the recursive call is an argument to the combining function, not a tail call. Reverse the list and foldl, or use an explicit stack, when the list can be long. What the accumulator is decides the allocation: summing allocates nothing, while building a list (reverse, map) allocates a node per element."
+evidence = "Measured on cyrius 6.7.18 over a 1,000,000-element cons list: foldl with a non-capturing add allocated 0 bytes; foldl building the reverse allocated 16,000,000 bytes (1,000,000 nodes × 16 B). A recursive foldr took about 112 B of stack per element: 74,458 elements ran and 74,847 crashed with SIGSEGV under the default 8 MiB stack (ulimit -s 8192)."

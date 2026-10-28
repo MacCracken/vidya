@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Vidya — Transactions and ACID — Python port.
-
-OCC store with read-set version snapshots. Mirrors the Cyrius
-reference: same accounts, same tests, same expected outcomes.
-"""
+# Vidya — Transactions and ACID — Python port.
+#
+# OCC store with read-set version snapshots. Mirrors the Cyrius
+# reference: same accounts, same tests, same expected outcomes.
 
 N_ACCOUNTS = 8
 N_TX = 2

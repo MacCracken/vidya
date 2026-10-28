@@ -1,19 +1,18 @@
-/* Vidya — Maze Generation in C
- *
- * Recursive backtracker (iterative DFS) on an 8x8 grid. Each cell holds
- * a bitmask of present walls (N=1, S=2, E=4, W=8). Generation carves
- * passages by clearing the wall bit on both the current and neighbour
- * cell.
- *
- * The RNG is a 64-bit LCG with PCG's constants and a plain top-bits
- * output (no PCG output permutation). Its state update needs mod-2^64
- * wrap. Signed overflow is undefined behaviour in C, and gcc/clang do
- * NOT wrap it by default: they optimise on the assumption it never
- * happens (`x + 1 > x` folds to 1 even for INT_MAX) unless built with
- * -fwrapv. Unsigned arithmetic is defined to wrap, so the state is
- * uint64_t, cast to int64_t only after masking the top bits down to a
- * non-negative 31-bit value.
- */
+// Vidya — Maze Generation in C
+//
+// Recursive backtracker (iterative DFS) on an 8x8 grid. Each cell holds
+// a bitmask of present walls (N=1, S=2, E=4, W=8). Generation carves
+// passages by clearing the wall bit on both the current and neighbour
+// cell.
+//
+// The RNG is a 64-bit LCG with PCG's constants and a plain top-bits
+// output (no PCG output permutation). Its state update needs mod-2^64
+// wrap. Signed overflow is undefined behaviour in C, and gcc/clang do
+// NOT wrap it by default: they optimise on the assumption it never
+// happens (`x + 1 > x` folds to 1 even for INT_MAX) unless built with
+// -fwrapv. Unsigned arithmetic is defined to wrap, so the state is
+// uint64_t, cast to int64_t only after masking the top bits down to a
+// non-negative 31-bit value.
 
 #include <stdint.h>
 #include <stdio.h>

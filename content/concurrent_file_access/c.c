@@ -1,14 +1,13 @@
-/* Vidya — Concurrent File Access (flock) in C
- *
- * Single-process exercise of the file-lock state machine via two
- * distinct OPENs of the same path. flock is per-OPEN; the two fds
- * have independent lock state. flock(LOCK_NB) returns -1 with
- * errno = EWOULDBLOCK on conflict.
- *
- * Every lock/IO call is made OUTSIDE assert(): assert compiles to nothing
- * under -DNDEBUG, and a lock taken inside one silently disappears from
- * release builds.
- */
+// Vidya — Concurrent File Access (flock) in C
+//
+// Single-process exercise of the file-lock state machine via two
+// distinct OPENs of the same path. flock is per-OPEN; the two fds
+// have independent lock state. flock(LOCK_NB) returns -1 with
+// errno = EWOULDBLOCK on conflict.
+//
+// Every lock/IO call is made OUTSIDE assert(): assert compiles to nothing
+// under -DNDEBUG, and a lock taken inside one silently disappears from
+// release builds.
 
 #define _POSIX_C_SOURCE 200809L   /* mkstemp */
 #include <assert.h>

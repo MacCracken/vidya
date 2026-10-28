@@ -1,0 +1,300 @@
+# Dependent Types — Cyrius reference (runnable)
+#
+# A dependent type depends on a VALUE: Vec n a is a vector whose length n
+# is part of its type, Fin n an index proven < n, and a Σ pair (n, v) ties
+# v's length to n. Agda, Idris, Lean and Rocq check these at compile time
+# even for values computed at run time; none of vidya's 11 languages can.
+#
+# Cyrius sits with Zig, Rust and C (compile-time values in types), at the
+# weaker end: no value parameters in types, so each length is its own
+# struct type (Vec2, Vec3) whose length the compiler knows (sizeof) and
+# refuses to mix; #assert checks length arithmetic at compile time; and a
+# value known only at run time is refined by a checked constructor.
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/assert.cyr"
+
+# Element i of any vector, through an untyped address. (Arithmetic on a
+# `*Vec3` scales by sizeof(Vec3), so `v + i * 8` would skip whole vectors.)
+fn word_at(p, i) { return load64(p + i * 8); }
+fn set_word(p, i, x) {
+    store64(p + i * 8, x);
+    return 0;
+}
+
+# --- 1. Length-indexed vector ---
+# What Cyrius cannot say: a generic takes TYPE parameters only (at most
+# two), never a number, so there is no `Vec<N>` and no `Vec<N + M>`
+# (`struct VecN<const N> { .. }` is refused: "a type parameter is a name,
+# got reserved keyword 'const'"). What it can say: one struct type per
+# length. The compiler knows each one's length (sizeof / 8) and will not
+# pass one where another is expected.
+struct Vec0 { }
+struct Vec2 { e0; e1; }
+struct Vec3 { e0; e1; e2; }
+struct Vec5 { e0; e1; e2; e3; e4; }
+
+const VEC2_LEN = sizeof(Vec2) / 8;
+const VEC3_LEN = sizeof(Vec3) / 8;
+
+# The length, read from the TYPE of the argument, for any vector type.
+fn vlen<T>(v: *T) { return sizeof(T) / 8; }
+
+# head exists only for non-empty vector types; Vec0 has none. Handing the
+# empty vector to one does not compile:
+#   var empty: Vec0;
+#   head3(&empty);
+#   error: cannot pass 'empty' to a parameter of a different struct type in a call to 'head3'
+fn head2(v: *Vec2) { return v.e0; }
+fn head3(v: *Vec3) { return v.e0; }
+
+# One generic head for every length, as Rust's const assertion gives: an
+# #assert in a generic body is checked for each instance, so
+# `head(&empty)` stops the build ("#assert failed: head of an empty
+# vector"). It is also checked once for the generic itself, where
+# sizeof(T) reads 8 whatever T will be, so it can state only what a
+# one-word T satisfies too (`sizeof(T) > 8` fails with no caller at all).
+# T is any struct type, vector or not.
+fn head<T>(v: *T) {
+    #assert sizeof(T) > 0, "head of an empty vector";
+    return load64(v);
+}
+
+# append's lengths are in its signature: `append23(&a, &b, &b)` is
+# "cannot pass 'b' to a parameter of a different struct type in a call
+# to 'append23'". The compiler cannot compute the type Vec(2 + 3), so
+# Vec5 is written by hand and this #assert proves its length is 2 + 3 at
+# compile time. With Vec3 in its place the build stops:
+#   #assert failed: append(Vec2, Vec3) needs a vector of length 2 + 3
+#assert sizeof(Vec5) == sizeof(Vec2) + sizeof(Vec3), "append(Vec2, Vec3) needs a vector of length 2 + 3";
+
+fn append23(a: *Vec2, b: *Vec3, out: *Vec5) {
+    var i = 0;
+    while (i < VEC2_LEN) {
+        set_word(out, i, word_at(a, i));
+        i = i + 1;
+    }
+    var j = 0;
+    while (j < VEC3_LEN) {
+        set_word(out, VEC2_LEN + j, word_at(b, j));
+        j = j + 1;
+    }
+    return 0;
+}
+
+# A length known only at run time cannot be in a Cyrius type. A vec
+# carries its length as a value, so head checks it at run time and
+# returns (ok, value).
+fn vec_head(v) {
+    if (vec_len(v) == 0) { return (0, 0); }
+    return (1, vec_get(v, 0));
+}
+
+# --- 2. Fin n: an index proven in range ---
+# A Fin3 is made only by fin3(), which refuses anything outside 0..2, so
+# index3 reads without a bounds check: k.i < 3 was proved when k was
+# built. Its bound is VEC3_LEN, the same constant as Vec3's length. A
+# Fin2 is a different type, and using one on a Vec3 does not compile:
+#   index3(&b, fin2(1));
+#   error: cannot pass 'fin2(1)' to a parameter of a different struct type in a call to 'index3'
+struct Fin2 { i; }
+struct Fin3 { i; }
+
+fn fin2(i): *Fin2 {
+    if (i < 0 || i >= VEC2_LEN) { return 0; }
+    var k = alloc(8);
+    store64(k, i);
+    return k;
+}
+
+fn fin3(i): *Fin3 {
+    if (i < 0 || i >= VEC3_LEN) { return 0; }
+    var k = alloc(8);
+    store64(k, i);
+    return k;
+}
+
+fn index2(v: *Vec2, k: *Fin2) { return word_at(v, k.i); }
+fn index3(v: *Vec3, k: *Fin3) { return word_at(v, k.i); }
+
+# --- 3. Refinement at the boundary (parse, don't validate) ---
+# percent() is the one place the range is checked. Everything downstream
+# takes a *Percent and trusts it: discount never looks at the range.
+# g_percent_checks counts validations, so a check can see that.
+struct Percent { v; }
+var g_percent_checks = 0;
+
+fn percent(x): *Percent {
+    g_percent_checks = g_percent_checks + 1;
+    if (x < 0 || x > 100) { return 0; }
+    var p = alloc(8);
+    store64(p, x);
+    return p;
+}
+
+fn discount(price, p: *Percent) { return price - price * p.v / 100; }
+
+# --- 4. Σ type (dependent pair) ---
+# Σ (n : Nat). Vec n: the TYPE of the second part depends on the VALUE
+# of the first. A Cyrius type cannot depend on a value, so `data` is a
+# vec of any length and sized() checks the dependency once: it builds a
+# pair only when the vec really holds n elements. sized_sum then takes
+# its loop bound from n alone. (vec_get still checks each index itself;
+# the constructor's proof is why it never fails here.)
+struct Sized { n; data; }
+
+fn sized(n, data): *Sized {
+    if (vec_len(data) != n) { return 0; }
+    var s = alloc(16);
+    store64(s, n);
+    store64(s + 8, data);
+    return s;
+}
+
+fn sized_sum(s: *Sized) {
+    var total = 0;
+    var i = 0;
+    while (i < s.n) {
+        total = total + vec_get(s.data, i);
+        i = i + 1;
+    }
+    return total;
+}
+
+# --- 5. The escape hatch ---
+# Cyrius has no private struct fields, and a file's `private` marker
+# hides its fns and globals but not its struct types. Built against a
+# separate `private` file that defines Percent and percent(), reading
+# its counter from another file is refused ("'g_percent_checks' is
+# private to its file"), but all of these compile and run:
+# `var forged = Percent { 150 };`, `forged.v = 160;`, and
+# `store64(q, 170);` on a q that percent() made.
+# Untyped words pass for typed pointers too: `index3(&b, 7);` compiles
+# without a warning, takes 7 as the address of a Fin3, and the run dies
+# with SIGSEGV. Nothing in the language stops a forged Percent. What
+# keeps the refinement honest is a rule that only percent() makes one,
+# enforced by review (or a CI grep for `Percent {`).
+
+# === Tests ===
+
+fn test_length_indexed() {
+    var empty: Vec0;
+    var a = Vec2 { 1, 2 };
+    var b = Vec3 { 3, 4, 5 };
+    assert_eq(vlen(&empty), 0, "Vec0's type says length 0");
+    assert_eq(vlen(&a), 2, "Vec2's type says length 2");
+    assert_eq(vlen(&b), 3, "Vec3's type says length 3");
+    assert_eq(head2(&a), 1, "head2([1, 2]) = 1");
+    assert_eq(head3(&b), 3, "head3([3, 4, 5]) = 3");
+    assert_eq(head(&a), 1, "generic head of a Vec2 = 1");
+    assert_eq(head(&b), 3, "generic head of a Vec3 = 3");
+
+    var c: Vec5;
+    append23(&a, &b, &c);
+    assert_eq(vlen(&c), 5, "append(Vec2, Vec3) has length 2 + 3 = 5");
+    var ok = 1;
+    var i = 0;
+    while (i < 5) {
+        if (word_at(&c, i) != i + 1) { ok = 0; }
+        i = i + 1;
+    }
+    assert_eq(ok, 1, "append(Vec2, Vec3) reads [1, 2, 3, 4, 5]");
+
+    # The runtime-length vector: the empty case is refused when it happens.
+    var none = vec_new();
+    var seven = vec_new();
+    vec_push(seven, 7);
+    var ok0, h0 = vec_head(none);
+    var ok1, h1 = vec_head(seven);
+    assert_eq(ok0, 0, "runtime head of an empty vec is refused");
+    assert_eq(ok1, 1, "runtime head of [7] is allowed");
+    assert_eq(h1, 7, "runtime head of [7] = 7");
+    return 0;
+}
+
+fn test_fin() {
+    var a = Vec2 { 1, 2 };
+    var b = Vec3 { 3, 4, 5 };
+    assert_eq(fin3(0 - 1) == 0, 1, "fin3(-1) is refused");
+    assert_eq(fin3(3) == 0, 1, "fin3(3) is refused: 3 is not < 3");
+
+    var accepted = 0;
+    var ok = 1;
+    var i = 0 - 1;
+    while (i <= 3) {
+        var k: *Fin3 = fin3(i);
+        if (k != 0) {
+            accepted = accepted + 1;
+            if (index3(&b, k) != 3 + i) { ok = 0; }
+        }
+        i = i + 1;
+    }
+    assert_eq(accepted, 3, "fin3 accepts exactly 0, 1, 2 out of -1..3");
+    assert_eq(ok, 1, "index3 with each Fin3 reads [3, 4, 5] in order");
+
+    assert_eq(fin2(2) == 0, 1, "fin2(2) is refused: 2 is not < 2");
+    assert_eq(index2(&a, fin2(1)), 2, "index2([1, 2], fin2(1)) = 2");
+    return 0;
+}
+
+fn test_refinement() {
+    g_percent_checks = 0;
+    assert_eq(percent(0 - 1) == 0, 1, "percent(-1) is refused");
+    assert_eq(percent(101) == 0, 1, "percent(101) is refused");
+    var p0 = percent(0);
+    var p100 = percent(100);
+    var p25 = percent(25);
+    assert_eq(p0 != 0 && p100 != 0 && p25 != 0, 1, "percent accepts 0, 100 and 25");
+    assert_eq(g_percent_checks, 5, "5 constructions, 5 validations");
+
+    assert_eq(discount(200, p25), 150, "discount(200, 25%) = 150");
+    assert_eq(discount(200, p0), 200, "discount(200, 0%) = 200");
+    assert_eq(discount(200, p100), 0, "discount(200, 100%) = 0");
+    assert_eq(g_percent_checks, 5, "discount never re-validated: still 5 checks after 3 calls");
+    return 0;
+}
+
+fn test_sigma() {
+    var two = vec_new();
+    vec_push(two, 1);
+    vec_push(two, 2);
+    var three = vec_new();
+    vec_push(three, 1);
+    vec_push(three, 2);
+    vec_push(three, 3);
+    assert_eq(sized(3, two) == 0, 1, "(3, [1, 2]) is refused: the length is 2");
+    assert_eq(sized(2, three) == 0, 1, "(2, [1, 2, 3]) is refused: the length is 3");
+    var s: *Sized = sized(3, three);
+    assert_eq(s != 0, 1, "(3, [1, 2, 3]) is built");
+    assert_eq(s.n, 3, "the pair's n is 3");
+    assert_eq(sized_sum(s), 6, "sized_sum reads n = 3 elements: 1 + 2 + 3 = 6");
+    return 0;
+}
+
+fn test_escape_hatch() {
+    assert_eq(percent(150) == 0, 1, "the API refuses 150");
+    var forged = Percent { 150 };          # the struct literal skips percent()
+    assert_eq(forged.v, 150, "a struct literal makes a Percent of 150 anyway");
+    assert_eq(discount(200, &forged), 0 - 100, "and discount trusts it: 200 - 300 = -100");
+
+    var p = percent(30);
+    store64(p, 250);                       # rewrites a validated Percent in place
+    assert_eq(discount(100, p), 0 - 150, "a store64 into a checked Percent breaks it too: -150");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_length_indexed();
+    test_fin();
+    test_refinement();
+    test_sigma();
+    test_escape_hatch();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

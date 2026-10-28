@@ -1,7 +1,6 @@
-/* Vidya — Line Rasterization (Bresenham) in C
- *
- * All-octant integer Bresenham on a 16x16 byte framebuffer.
- */
+// Vidya — Line Rasterization (Bresenham) in C
+//
+// All-octant integer Bresenham on a 16x16 byte framebuffer.
 
 #include <assert.h>
 #include <stdint.h>

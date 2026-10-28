@@ -1,7 +1,6 @@
-/* Vidya — IPC in C
- *
- * In-memory simulation: shared memory, pipe, named channel.
- */
+// Vidya — IPC in C
+//
+// In-memory simulation: shared memory, pipe, named channel.
 
 #include <assert.h>
 #include <stdint.h>

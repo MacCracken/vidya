@@ -1,16 +1,15 @@
-/* Filesystems — C Implementation
- *
- * Demonstrates filesystem concepts with an in-memory filesystem:
- *   1. Inode struct layout with direct block pointers
- *   2. Block device with bitmap allocator
- *   3. Directory entries mapping names to inode numbers
- *   4. VFS-like operations: create, write, read, unlink, stat
- *   5. File descriptor table
- *
- * This mirrors the classic Unix inode layout (ext2/ext3 direct blocks),
- * simplified to the essentials. ext4 replaces the block map with extents
- * by default.
- */
+// Filesystems — C Implementation
+//
+// Demonstrates filesystem concepts with an in-memory filesystem:
+//   1. Inode struct layout with direct block pointers
+//   2. Block device with bitmap allocator
+//   3. Directory entries mapping names to inode numbers
+//   4. VFS-like operations: create, write, read, unlink, stat
+//   5. File descriptor table
+//
+// This mirrors the classic Unix inode layout (ext2/ext3 direct blocks),
+// simplified to the essentials. ext4 replaces the block map with extents
+// by default.
 
 #include <assert.h>
 #include <stdint.h>

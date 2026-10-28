@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Vidya — B+ Tree Indexing in Python.
-
-Simplified in-memory B+ tree (order 8, max 7 keys per node) — exactly the
-shape declared by cyrius.cyr. Python uses two small classes (``Leaf`` and
-``Internal``) instead of a tagged union: each leaf holds parallel ``keys``
-and ``vals`` lists, each internal holds ``keys`` plus a ``children`` list.
-Tests cover insert + sorted-order, hit/miss search, split when a leaf
-exceeds MAX entries, and descending-input inserts (which exercise the
-shift-right loop most heavily).
-"""
+# Vidya — B+ Tree Indexing in Python.
+#
+# Simplified in-memory B+ tree (order 8, max 7 keys per node) — exactly the
+# shape declared by cyrius.cyr. Python uses two small classes (``Leaf`` and
+# ``Internal``) instead of a tagged union: each leaf holds parallel ``keys``
+# and ``vals`` lists, each internal holds ``keys`` plus a ``children`` list.
+# Tests cover insert + sorted-order, hit/miss search, split when a leaf
+# exceeds MAX entries, and descending-input inserts (which exercise the
+# shift-right loop most heavily).
 
 MAX = 7
 

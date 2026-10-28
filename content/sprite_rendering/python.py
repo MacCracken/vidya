@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Vidya — Sprite Rendering in Python.
-
-Software sprite blitting onto a flat 8-bit palette framebuffer.
-Python's ``bytearray`` is the right primitive for this: it's a mutable
-contiguous byte sequence with O(1) index assignment and slice assignment
-that maps cleanly to the C/Cyrius ``uint8_t*`` layout. We index it as
-``fb[y * SCREEN_W + x]`` so the byte-level layout matches every other
-port — clipping/depth tests check the same offsets in every language.
-"""
+# Vidya — Sprite Rendering in Python.
+#
+# Software sprite blitting onto a flat 8-bit palette framebuffer.
+# Python's ``bytearray`` is the right primitive for this: it's a mutable
+# contiguous byte sequence with O(1) index assignment and slice assignment
+# that maps cleanly to the C/Cyrius ``uint8_t*`` layout. We index it as
+# ``fb[y * SCREEN_W + x]`` so the byte-level layout matches every other
+# port — clipping/depth tests check the same offsets in every language.
 
 SCREEN_W = 320
 SCREEN_H = 240

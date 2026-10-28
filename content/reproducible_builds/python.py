@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
-"""Vidya — Reproducible Builds — Python port.
-
-A reproducible build is a pure function of its inputs: the same sources
-produce a byte-identical artifact, on any machine, at any time. Three
-classic sources of non-determinism, and their fixes:
-
-  1. Embedded wall-clock timestamps  -> the build stamps
-     SOURCE_DATE_EPOCH (a fixed build time taken from the sources, e.g.
-     the last commit date) instead of "now", so the clock never reaches
-     the output, fast or slow. Clamping (min(t, SDE)) is for FILE mtimes:
-     a fresh checkout's newer mtimes are pinned down to SDE. Clamping the
-     clock itself would still leak any clock that runs behind SDE.
-  2. Filesystem iteration order      -> readdir() returns entries in
-     inode/hash order, which varies; SORT filenames before processing
-     so the output doesn't depend on directory layout.
-  3. Non-deterministic artifact names -> name artifacts by the HASH of
-     their content (content-addressing), so identical inputs map to
-     identical paths -- the build becomes idempotent.
-
-The verification is simple: build twice and compare digests. This models
-that pipeline over an in-memory set of files (name key + content
-signature) and shows a deterministic build staying identical across runs
-that differ in input order AND wall-clock time, while a naive build drifts.
-
-Mirrors the Cyrius reference: same constants, same functions, same tests.
-"""
+# Vidya — Reproducible Builds — Python port.
+#
+# A reproducible build is a pure function of its inputs: the same sources
+# produce a byte-identical artifact, on any machine, at any time. Three
+# classic sources of non-determinism, and their fixes:
+#
+#   1. Embedded wall-clock timestamps  -> the build stamps
+#      SOURCE_DATE_EPOCH (a fixed build time taken from the sources, e.g.
+#      the last commit date) instead of "now", so the clock never reaches
+#      the output, fast or slow. Clamping (min(t, SDE)) is for FILE mtimes:
+#      a fresh checkout's newer mtimes are pinned down to SDE. Clamping the
+#      clock itself would still leak any clock that runs behind SDE.
+#   2. Filesystem iteration order      -> readdir() returns entries in
+#      inode/hash order, which varies; SORT filenames before processing
+#      so the output doesn't depend on directory layout.
+#   3. Non-deterministic artifact names -> name artifacts by the HASH of
+#      their content (content-addressing), so identical inputs map to
+#      identical paths -- the build becomes idempotent.
+#
+# The verification is simple: build twice and compare digests. This models
+# that pipeline over an in-memory set of files (name key + content
+# signature) and shows a deterministic build staying identical across runs
+# that differ in input order AND wall-clock time, while a naive build drifts.
+#
+# Mirrors the Cyrius reference: same constants, same functions, same tests.
 
 HB = 131
 HM = 1000003

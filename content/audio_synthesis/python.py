@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Vidya — Audio Synthesis — Python port. Q15 fixed-point.
-
-Mirrors naad's API surface (Adsr, EnvelopeState, gate_on/off,
-Voice). naad uses f32 + PolyBLEP; this port uses Q15 + naive
-waveforms for cross-port portability.
-"""
+# Vidya — Audio Synthesis — Python port. Q15 fixed-point.
+#
+# Mirrors naad's API surface (Adsr, EnvelopeState, gate_on/off,
+# Voice). naad uses f32 + PolyBLEP; this port uses Q15 + naive
+# waveforms for cross-port portability.
 
 SCALE = 15
 ONE = 32768

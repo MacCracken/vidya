@@ -1,8 +1,23 @@
 # Learning Paths
 
-> **Last Updated**: 2026-05-16 (v2.7.1 — post-P3). ⚠ **Coverage is 67 of 77 topics, not "all".** The claim was already wrong when written (7 then-existing topics had no path) and P4 widened the gap to 10. A Build & Release path plus the missing entries are queued for the next content cycle.
+> **Last Updated**: 2026-10-28 (v2.9.6 — P5). Every topic is on at least one path (80 of 80): 2.9.6 added the Language Fundamentals, Build & Release and Functional Programming & Type Theory paths and placed the ten topics that had none.
 
 Ordered topic sequences for structured learning. Each path builds on the previous topic. Run `vidya list` for the full topic index.
+
+## Language Fundamentals
+
+The everyday material every other path assumes.
+
+```
+strings                      — encodings, slicing, interning, the hidden complexity
+  → iterators                    — lazy sequences, adapters, fusion
+    → input_output                 — files, streams, buffering, composable readers/writers
+      → binary_formats               — headers, segments, how a program reaches the loader
+        → design_patterns              — builder, strategy, observer, RAII, dependency injection
+```
+
+**Prerequisite knowledge**: one programming language
+**Capstone**: read an unfamiliar codebase and name the patterns it uses
 
 ## Build a Compiler
 
@@ -72,6 +87,20 @@ type_systems                 — static vs dynamic, generics, inference
 **Prerequisite knowledge**: experience in 2+ languages
 **Capstone**: understand why languages make different tradeoffs
 
+## Functional Programming & Type Theory (P5)
+
+From pure functions to types that carry proofs.
+
+```
+type_systems                 — static vs dynamic, generics, inference
+  → functional_patterns          — purity, closures, composition, persistent data, folds
+    → effect_systems               — effects as data, handlers, capabilities, pure core
+      → dependent_types              — length-indexed vectors, Fin, refinements, parse don't validate
+```
+
+**Prerequisite knowledge**: Language Design, or experience with closures in 2+ languages
+**Capstone**: move a program's effects to its edge and its invariants into its types
+
 ## Quantum Computing
 
 From classical bits to quantum algorithms.
@@ -106,11 +135,13 @@ How storage engines work under the hood.
 ```
 serialization                — wire formats, varints, encoding choices
   → jsonl_format                 — line-delimited streams, recovery, append semantics
-    → btree_indexing               — leaf vs internal nodes, splits, range queries
-      → sql_parsing                  — tokenizer, AST, plan basics
-        → transactions_and_acid        — isolation levels, MVCC, snapshot reads
-          → write_ahead_logging          — WAL records, recovery, checkpoints
-            → compression                  — LZ4, DEFLATE, dictionary methods
+    → page_management              — fixed-size pages, free lists, the unit of I/O
+      → btree_indexing               — leaf vs internal nodes, splits, range queries
+        → sql_parsing                  — tokenizer, AST, plan basics
+          → transactions_and_acid        — isolation levels, MVCC, snapshot reads
+            → write_ahead_logging          — WAL records, recovery, checkpoints
+              → concurrent_file_access       — flock, shared readers, exclusive writers
+                → compression                  — LZ4, DEFLATE, dictionary methods
 ```
 
 **Prerequisite knowledge**: data structures, basic SQL
@@ -191,6 +222,19 @@ game_loop_architecture       — fixed timestep, interpolation, decoupled update
 
 **Prerequisite knowledge**: data structures, recursion
 **Capstone**: ship a game loop with an NPC that feels intentional, not scripted
+
+## Build & Release (P4)
+
+From sources to an artifact anyone can rebuild and check.
+
+```
+build_systems                — target DAGs, topological order, incremental rebuilds
+  → package_resolution           — semver constraints, solving, lockfiles
+    → reproducible_builds          — bit-for-bit artifacts, pinned inputs, independent rebuilds
+```
+
+**Prerequisite knowledge**: graphs, one build tool used in anger
+**Capstone**: rebuild a release on a second machine and get the same hash
 
 ## Observability (cross-cutting)
 

@@ -1,4 +1,4 @@
-/* Vidya — Embeddings and Vector Search — C port. Q15 fixed-point. */
+// Vidya — Embeddings and Vector Search — C port. Q15 fixed-point.
 
 #include <stdio.h>
 

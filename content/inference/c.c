@@ -1,4 +1,4 @@
-/* Vidya — LLM Inference (Decoding) — C port. */
+// Vidya — LLM Inference (Decoding) — C port.
 
 #include <limits.h>
 #include <stdio.h>

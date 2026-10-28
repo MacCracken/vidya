@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Vidya — Neural Network Forward Pass — Python port. Q15 fixed-point.
-
-Tiny 2 → 3 → 2 MLP. Hand-designed weights classify by which input
-is larger. Skips softmax (argmax preserves order; production
-inference does the same).
-"""
+# Vidya — Neural Network Forward Pass — Python port. Q15 fixed-point.
+#
+# Tiny 2 → 3 → 2 MLP. Hand-designed weights classify by which input
+# is larger. Skips softmax (argmax preserves order; production
+# inference does the same).
 
 SCALE = 15
 ONE = 32768
